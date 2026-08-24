@@ -15,8 +15,27 @@ use std::{
     time::Duration,
 };
 
-// numeric-bound: ceiling - protects against an unbounded paid provider loop
-const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 32;
+// With the runtime's ten-minute exchange deadline, 256 rounds can already hold
+// one progressing turn in provider work for 42 hours 40 minutes and repeat a
+// full-context spend 256 times. Further work is a latency and spend runaway.
+// numeric-bound: ceiling - protects against multi-day latency and repeated provider spend
+const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 256;
+
+// The round ceiling alone does not bound memory: it multiplies against the
+// 32-request batch bound and the 1 MiB argument and result bounds, so 256
+// rounds would admit 16 GiB of retained argument and result text where 32
+// rounds admitted 2 GiB. Retained content is therefore bounded on its own
+// terms, independently of the round ceiling. One maximal round retains 32
+// requests times 1 MiB of arguments plus 1 MiB of results, so this admits four
+// maximal rounds while leaving the round ceiling operative for the
+// kilobyte-scale results real executors return. It bounds every kind of content
+// a render clones, not tool evidence alone: assistant text carries no length
+// bound of its own beyond the transport cap on a single response, so a ceiling
+// blind to it would be multiplied by the same round count it is meant to
+// contain. It also sits far above any provider context window, so it cannot
+// refuse a turn a provider would accept.
+// numeric-bound: ceiling - protects daemon memory against multiplicative retained frontier content
+const MAX_RETAINED_FRONTIER_CONTENT_BYTES: usize = 256 * 1024 * 1024;
 
 use signalbox_domain::{
     AcceptedInputId, AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
@@ -477,6 +496,127 @@ fn render_frontier_messages<'a>(
     Ok(messages.into_boxed_slice())
 }
 
+/// Sums the model-visible content one render would clone into messages.
+///
+/// Every term mirrors exactly what `render_frontier_messages` clones for that
+/// entry shape, across both content sources it draws from: the projected
+/// payloads themselves and the resolved tool evidence they name. Payloads
+/// contribute attested imported text, origin and steering user content,
+/// delegated task and peer-message content, delivered delegation-outcome
+/// content, context-summary text, and assistant text; evidence contributes a
+/// proposal's request arguments, a result's result text or error detail, and a
+/// denial's reason. Counting only the tool evidence would leave assistant text
+/// — which carries no length bound of its own — outside a ceiling that clones
+/// it, so the sum has to span every kind the renderer clones or the bound is
+/// not the bound it names.
+///
+/// A shape the renderer skips or refuses contributes nothing, because it clones
+/// nothing: unattested or non-text imported content, a delegation result whose
+/// wait mode contradicts its delivery position, and turn markers all render no
+/// content. A result entry contributes no arguments because its message carries
+/// only the request identity, so a request's arguments are counted once through
+/// its proposal. Fixed-width identities and the separately bounded tool name a
+/// proposal carries are outside the sum: they do not scale with admitted
+/// content, and the ceiling exists to bound what does.
+///
+/// Reading the lengths of already-resident durable facts allocates nothing,
+/// which is what lets the ceiling be enforced before the clone rather than
+/// after it.
+fn projected_frontier_content_bytes<'a>(
+    entries: impl IntoIterator<
+        Item = (
+            SemanticTranscriptEntryRef,
+            &'a SemanticTranscriptEntryPayload,
+        ),
+    >,
+    mut origin_content: impl FnMut(AcceptedInputId) -> Option<&'a UserContent>,
+    tool_entries: impl IntoIterator<Item = &'a ResolvedToolConversationEntry>,
+) -> usize {
+    let payload_bytes = entries.into_iter().fold(0_usize, |total, (_, payload)| {
+        let bytes = match payload {
+            SemanticTranscriptEntryPayload::Imported {
+                source_speaker:
+                    ImportedSourceAttestation::Attested(
+                        ImportedSpeaker::User | ImportedSpeaker::Assistant,
+                    ),
+                content:
+                    ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(content)),
+                ..
+            } => content.as_str().len(),
+            // Every other imported shape renders no message at all.
+            SemanticTranscriptEntryPayload::Imported { .. } => 0,
+            SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
+            | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
+                // Absent origin content refuses the render instead of cloning.
+                origin_content(*accepted_input).map_or(0, |content| content.text().as_str().len())
+            }
+            SemanticTranscriptEntryPayload::DelegatedTask { content, .. }
+            | SemanticTranscriptEntryPayload::DelegationMessage { content, .. } => {
+                content.as_str().len()
+            }
+            SemanticTranscriptEntryPayload::DelegationResult {
+                mode,
+                delivery_sequence,
+                outcome,
+                ..
+            } => match (mode, delivery_sequence) {
+                (DelegationWaitMode::Foreground, None)
+                | (DelegationWaitMode::Background, Some(_)) => outcome
+                    .content()
+                    .map_or(0, |content| content.as_str().len()),
+                // Contradictory delivery is refused, so nothing is cloned.
+                (DelegationWaitMode::Foreground, Some(_))
+                | (DelegationWaitMode::Background, None) => 0,
+            },
+            SemanticTranscriptEntryPayload::ContextSummary { value, .. }
+            | SemanticTranscriptEntryPayload::AssistantText { value, .. } => value.as_str().len(),
+            // Identity-only payloads carry no content of their own. Tool
+            // payloads name evidence rather than carrying it, and that
+            // evidence is summed below.
+            SemanticTranscriptEntryPayload::ModelIdentityChanged { .. }
+            | SemanticTranscriptEntryPayload::AssistantToolUse { .. }
+            | SemanticTranscriptEntryPayload::ToolExecutionResult { .. }
+            | SemanticTranscriptEntryPayload::ToolDenied { .. }
+            | SemanticTranscriptEntryPayload::ToolClosed { .. }
+            | SemanticTranscriptEntryPayload::TurnFailed { .. }
+            | SemanticTranscriptEntryPayload::TurnCancelled { .. }
+            | SemanticTranscriptEntryPayload::TurnCompleted { .. } => 0,
+        };
+        total.saturating_add(bytes)
+    });
+    tool_entries
+        .into_iter()
+        .fold(payload_bytes, |total, entry| {
+            let bytes = match entry {
+                ResolvedToolConversationEntry::AssistantToolUse { request, .. } => {
+                    request.arguments().as_str().len()
+                }
+                ResolvedToolConversationEntry::ExecutionResult { attempt, .. } => {
+                    match attempt.end() {
+                        ToolAttemptEnd::Completed { result } => match result {
+                            ToolResultContent::Text(text) => text.as_str().len(),
+                        },
+                        ToolAttemptEnd::KnownFailed { error } => {
+                            error.detail().map_or(0, |detail| detail.as_str().len())
+                        }
+                        // Neither shape renders, so neither retains content.
+                        ToolAttemptEnd::AwaitingChild { .. } | ToolAttemptEnd::Ambiguous => 0,
+                    }
+                }
+                ResolvedToolConversationEntry::Denied { approval, .. } => match approval.decision()
+                {
+                    ToolApprovalDecision::Deny { reason } => {
+                        reason.as_ref().map_or(0, |reason| reason.as_str().len())
+                    }
+                    ToolApprovalDecision::Approve => 0,
+                },
+                // A closed request renders a fixed marker carrying no content.
+                ResolvedToolConversationEntry::Closed { .. } => 0,
+            };
+            total.saturating_add(bytes)
+        })
+}
+
 /// A checked prepared call plus its provider-neutral ordered messages.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PreparedModelOperation {
@@ -489,6 +629,9 @@ pub struct PreparedModelOperation {
 
 impl PreparedModelOperation {
     /// Renders one checked call request through the canonical frontier projection.
+    ///
+    /// Retained frontier content is bounded by
+    /// `MAX_RETAINED_FRONTIER_CONTENT_BYTES`.
     pub fn render(
         request: PreparedModelCallRequest,
         credential_reference: ModelCallCredentialReference,
@@ -496,8 +639,38 @@ impl PreparedModelOperation {
         tools: Box<[ToolDefinition]>,
         tool_entries: &[ResolvedToolConversationEntry],
     ) -> Result<Self, ModelFrontierRenderingError> {
-        let complete_entries = request.frontier_entries().cloned().collect::<Vec<_>>();
-        let projection = ContextFrontierProjection::from_complete_entries(&complete_entries)
+        Self::render_within(
+            request,
+            credential_reference,
+            system_prompt,
+            tools,
+            tool_entries,
+            MAX_RETAINED_FRONTIER_CONTENT_BYTES,
+        )
+    }
+
+    /// Renders under an explicit retained-frontier-content ceiling.
+    ///
+    /// The ceiling is checked once the projection names its entries and before
+    /// any of their content is cloned, so an over-bound frontier is refused
+    /// without first materializing the messages that would exhaust memory. The
+    /// projection reads the durable frontier by reference for exactly that
+    /// reason: naming the entries must not duplicate them.
+    /// Taking the ceiling as an argument lets the bound be exercised without
+    /// materializing hundreds of megabytes of content.
+    fn render_within(
+        request: PreparedModelCallRequest,
+        credential_reference: ModelCallCredentialReference,
+        system_prompt: Option<SessionSystemPrompt>,
+        tools: Box<[ToolDefinition]>,
+        tool_entries: &[ResolvedToolConversationEntry],
+        retained_frontier_content_limit: usize,
+    ) -> Result<Self, ModelFrontierRenderingError> {
+        // Borrowed, not copied: an owning collection of the frontier would
+        // duplicate every payload's content before the ceiling below could
+        // refuse it, which is the allocation the ceiling exists to prevent.
+        let complete_entries = request.frontier_entry_slice();
+        let projection = ContextFrontierProjection::from_complete_entries(complete_entries)
             .map_err(ModelFrontierRenderingError::InvalidContextProjection)?;
         let entries_by_reference = complete_entries
             .iter()
@@ -513,12 +686,30 @@ impl PreparedModelOperation {
             };
             projected_entries.push((reference, entry.payload()));
         }
+        let projected_tool_entries = tool_entries
+            .iter()
+            .filter(|entry| projected_references.contains(&entry.source()));
+        // Enforced here, between naming the projection and cloning it: the
+        // rendered messages are what would exhaust memory, so the refusal has
+        // to precede their construction rather than follow it. Everything read
+        // to reach this point is a borrow of already-resident durable facts.
+        let observed_bytes = projected_frontier_content_bytes(
+            projected_entries.iter().copied(),
+            |accepted_input| request.origin_content(accepted_input),
+            projected_tool_entries.clone(),
+        );
+        if observed_bytes > retained_frontier_content_limit {
+            return Err(
+                ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded {
+                    observed_bytes,
+                    limit_bytes: retained_frontier_content_limit,
+                },
+            );
+        }
         let messages = render_frontier_messages(
             projected_entries,
             |accepted_input| request.origin_content(accepted_input).cloned(),
-            tool_entries
-                .iter()
-                .filter(|entry| projected_references.contains(&entry.source())),
+            projected_tool_entries,
         )?;
         Ok(Self {
             request,
@@ -596,6 +787,16 @@ pub enum ModelFrontierRenderingError {
         /// Source-qualified delegation-result entry.
         entry: SemanticTranscriptEntryRef,
     },
+    /// The projected frontier content exceeded its retained-content ceiling.
+    ///
+    /// Raised before any projected content is cloned, so the refusal bounds the
+    /// memory the rendered messages would have held.
+    RetainedFrontierContentLimitExceeded {
+        /// Cumulative projected content bytes the render would have cloned.
+        observed_bytes: usize,
+        /// The ceiling in force for this render.
+        limit_bytes: usize,
+    },
     /// The complete durable frontier carries malformed summary provenance.
     InvalidContextProjection(ContextFrontierProjectionFailure),
 }
@@ -623,6 +824,9 @@ impl fmt::Display for ModelFrontierRenderingError {
             }
             Self::InvalidDelegationDelivery { .. } => {
                 formatter.write_str("model frontier delegation delivery is inconsistent")
+            }
+            Self::RetainedFrontierContentLimitExceeded { .. } => {
+                formatter.write_str("model frontier retained content exceeds its ceiling")
             }
             Self::InvalidContextProjection(_) => {
                 formatter.write_str("invalid context-compaction projection")
@@ -1295,6 +1499,7 @@ pub struct ModelCallExecutionService<
     gate: Gate,
     catalog: Arc<dyn ToolCatalog>,
     retained_state: Option<RetainedModelCallExecutionState>,
+    retained_frontier_content_limit: usize,
 }
 
 impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
@@ -1320,12 +1525,23 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             gate,
             catalog: Arc::new(NoToolCatalog),
             retained_state: None,
+            retained_frontier_content_limit: MAX_RETAINED_FRONTIER_CONTENT_BYTES,
         }
     }
 
     /// Replaces the empty compatibility catalog with one tool-capable port.
     pub fn with_tool_catalog(mut self, catalog: impl ToolCatalog + 'static) -> Self {
         self.catalog = Arc::new(catalog);
+        self
+    }
+
+    /// Narrows the retained-tool-content ceiling for one service.
+    ///
+    /// Deployments run the module ceiling; this exists so the bound can be
+    /// exercised end to end without materializing hundreds of megabytes.
+    #[cfg(test)]
+    const fn with_retained_frontier_content_limit(mut self, limit: usize) -> Self {
+        self.retained_frontier_content_limit = limit;
         self
     }
 
@@ -1352,6 +1568,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             gate,
             catalog,
             retained_state,
+            retained_frontier_content_limit: MAX_RETAINED_FRONTIER_CONTENT_BYTES,
         }
     }
 
@@ -1659,14 +1876,43 @@ where
         let turn = prepared.turn();
         let prepared_request = (*prepared).clone();
         let advertised_tools = self.catalog.definitions();
-        let operation = PreparedModelOperation::render(
+        let operation = match PreparedModelOperation::render_within(
             *prepared,
             credential_reference,
             system_prompt,
             advertised_tools.clone(),
             &tool_entries,
-        )
-        .map_err(ModelCallExecutionError::Render)?;
+            self.retained_frontier_content_limit,
+        ) {
+            Ok(operation) => operation,
+            // The retained-content ceiling is a safety bound on the same
+            // automatic tool loop the round ceiling bounds, so it closes the
+            // checkpoint through the same terminal contract rather than
+            // surfacing as an operator failure. Refusing here, before the
+            // messages exist, is what keeps the closure reachable at all.
+            Err(ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded {
+                observed_bytes,
+                limit_bytes,
+            }) => {
+                tracing::warn!(
+                    session_id = %session.as_uuid(),
+                    turn_id = %turn.as_uuid(),
+                    model_call_id = %call.into_uuid(),
+                    retained_frontier_content_limit = limit_bytes,
+                    observed_retained_frontier_content_bytes = observed_bytes,
+                    "retained frontier content limit reached"
+                );
+                return self
+                    .commit_prepared_failure(
+                        session,
+                        turn,
+                        call,
+                        PreparedModelCallFailureCause::ToolRoundLimitReached,
+                    )
+                    .await;
+            }
+            Err(error) => return Err(ModelCallExecutionError::Render(error)),
+        };
         let observed_tool_rounds = automatic_tool_round_count(turn, operation.messages());
         if observed_tool_rounds >= MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN {
             tracing::warn!(
@@ -2252,7 +2498,7 @@ fn report_turn_parked_for_reconciliation(session: SessionId, turn: TurnId) {
     tracing::warn!(
         session_id = %session.into_uuid(),
         turn_id = %turn.into_uuid(),
-        "turn parked awaiting user reconciliation"
+        "turn parked awaiting bounded reconciliation"
     );
 }
 
@@ -3056,6 +3302,24 @@ mod tests {
         Box<[ResolvedToolConversationEntry]>,
         FailedModelCallTurn,
     ) {
+        tool_round_saturated_fixture_with_assistant_text(rounds, None)
+    }
+
+    /// The same saturated turn, optionally carrying one assistant-text entry
+    /// alongside the last round's proposal.
+    ///
+    /// Assistant text is durable frontier content the renderer clones but no
+    /// tool evidence names, which is what lets a test separate the retained
+    /// content a tool-only accounting sees from the content a render actually
+    /// holds.
+    fn tool_round_saturated_fixture_with_assistant_text(
+        rounds: usize,
+        assistant_text: Option<&str>,
+    ) -> (
+        PreparedModelCallRequest,
+        Box<[ResolvedToolConversationEntry]>,
+        FailedModelCallTurn,
+    ) {
         let session_id = identity(200, SessionId::from_uuid);
         let direct = identity(201, DirectModelSelection::from_uuid);
         let accepted_input = identity(202, AcceptedInputId::from_uuid);
@@ -3178,6 +3442,25 @@ mod tests {
                 .expect("user denial provenance is implemented")
             })
             .collect::<Vec<_>>();
+        // The text is produced by the last round's own call and precedes that
+        // round's proposal, which is how a provider response carrying both text
+        // and a tool request lands. Appending it after the round's results
+        // instead would leave the latest round unclosed, which is a frontier
+        // shape the tool loop cannot reach.
+        let assistant_entry = assistant_text.map(|text| {
+            (
+                SemanticTranscriptEntryRef::from_source(
+                    session_id,
+                    identity(8_000, SemanticTranscriptEntryId::from_uuid),
+                ),
+                requests
+                    .last()
+                    .expect("the fixture carries at least one round")
+                    .producing_call(),
+                AssistantText::try_new(String::from(text))
+                    .expect("fixture assistant text is valid"),
+            )
+        });
         let semantic_entries = [SemanticTranscriptEntryReconstitutionInput::new(
             origin_entry.entry(),
             session_id,
@@ -3189,8 +3472,23 @@ mod tests {
                 .iter()
                 .zip(&denial_entries)
                 .zip(&requests)
-                .flat_map(|((proposal, result), request)| {
-                    [
+                .enumerate()
+                .flat_map(|(round, ((proposal, result), request))| {
+                    let text = assistant_entry
+                        .iter()
+                        .filter(|_| round + 1 == rounds)
+                        .map(|(source, producing_call, value)| {
+                            SemanticTranscriptEntryReconstitutionInput::new(
+                                source.entry(),
+                                session_id,
+                                SemanticTranscriptEntryPayload::AssistantText {
+                                    producing_call: *producing_call,
+                                    value: value.clone(),
+                                },
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    text.into_iter().chain([
                         SemanticTranscriptEntryReconstitutionInput::new(
                             proposal.entry(),
                             session_id,
@@ -3206,7 +3504,7 @@ mod tests {
                                 request: request.id(),
                             },
                         ),
-                    ]
+                    ])
                 }),
         )
         .collect::<Vec<_>>();
@@ -3317,7 +3615,15 @@ mod tests {
                 tool_use_entries
                     .iter()
                     .zip(&denial_entries)
-                    .flat_map(|(proposal, result)| [*proposal, *result]),
+                    .enumerate()
+                    .flat_map(|(round, (proposal, result))| {
+                        let text = assistant_entry
+                            .iter()
+                            .filter(|_| round + 1 == rounds)
+                            .map(|(source, _, _)| *source)
+                            .collect::<Vec<_>>();
+                        text.into_iter().chain([*proposal, *result])
+                    }),
             )
             .collect::<Vec<_>>();
         let frontier_entries = frontier_references
@@ -5479,6 +5785,545 @@ mod tests {
             provider.interaction_count(),
             0,
             "a saturated turn must not reach provider interaction"
+        );
+        assert!(retained.is_none());
+    }
+
+    /// Sums the content the rendered messages hold, message kind by message
+    /// kind.
+    ///
+    /// This is the renderer's side of the accounting-fidelity comparison. It
+    /// reads what each message carries *after* the clone, so a term the ceiling
+    /// forgot surfaces as a difference instead of as two copies of the same
+    /// omission agreeing with each other.
+    fn rendered_content_bytes(messages: &[ModelConversationMessage]) -> usize {
+        messages.iter().fold(0_usize, |total, message| {
+            let bytes = match message {
+                ModelConversationMessage::ContextSummary { content, .. }
+                | ModelConversationMessage::Assistant { content, .. } => content.as_str().len(),
+                ModelConversationMessage::User { content, .. } => content.text().as_str().len(),
+                ModelConversationMessage::DelegatedTask { content, .. }
+                | ModelConversationMessage::DelegationMessage { content, .. } => {
+                    content.as_str().len()
+                }
+                ModelConversationMessage::BackgroundDelegationResult { outcome, .. } => outcome
+                    .content()
+                    .map_or(0, |content| content.as_str().len()),
+                ModelConversationMessage::AssistantToolUse { request, .. } => {
+                    request.arguments().as_str().len()
+                }
+                ModelConversationMessage::ToolResult { content, .. } => match content {
+                    ModelToolResultContent::Success(ToolResultContent::Text(text)) => {
+                        text.as_str().len()
+                    }
+                    ModelToolResultContent::ExecutionError(error) => {
+                        error.detail().map_or(0, |detail| detail.as_str().len())
+                    }
+                    ModelToolResultContent::Denied { reason } => {
+                        reason.as_ref().map_or(0, |reason| reason.as_str().len())
+                    }
+                    ModelToolResultContent::ClosedByTurnEnd => 0,
+                    ModelToolResultContent::Delegation(outcome) => outcome
+                        .content()
+                        .map_or(0, |content| content.as_str().len()),
+                },
+                ModelConversationMessage::ImportedUser { content, .. }
+                | ModelConversationMessage::ImportedAssistant { content, .. } => {
+                    content.as_str().len()
+                }
+                // An identity change carries fixed-width facts only.
+                ModelConversationMessage::ModelIdentityChanged { .. } => 0,
+            };
+            total + bytes
+        })
+    }
+
+    /// Counts one prepared request's projected content the way the ceiling
+    /// does, reading the durable frontier and its origin content by reference.
+    fn counted_frontier_bytes(
+        request: &PreparedModelCallRequest,
+        tool_entries: &[ResolvedToolConversationEntry],
+    ) -> usize {
+        projected_frontier_content_bytes(
+            request
+                .frontier_entry_slice()
+                .iter()
+                .map(|entry| (entry.reference(), entry.payload())),
+            |accepted_input| request.origin_content(accepted_input),
+            tool_entries.iter(),
+        )
+    }
+
+    /// The retained-content accounting counts exactly what a render clones,
+    /// including the frontier content no tool evidence names. Byte accounting
+    /// that drifts from the renderer would let the ceiling admit more content
+    /// than it names, so the sum is checked against the messages the same
+    /// frontier actually produces — with assistant text and origin user content
+    /// present, which a tool-only accounting would clone without counting.
+    #[test]
+    fn projected_frontier_content_bytes_matches_the_render_over_tool_and_text_entries() {
+        let assistant_text = "the assistant narrates the round it is about to run";
+        let (request, tool_entries, _) =
+            tool_round_saturated_fixture_with_assistant_text(3, Some(assistant_text));
+        let counted = counted_frontier_bytes(&request, &tool_entries);
+        let no_entries: [(SemanticTranscriptEntryRef, &SemanticTranscriptEntryPayload); 0] = [];
+        let tool_evidence_only =
+            projected_frontier_content_bytes(no_entries, |_| None, tool_entries.iter());
+        let operation = PreparedModelOperation::render(
+            request,
+            credential_reference(),
+            None,
+            Box::new([]),
+            &tool_entries,
+        )
+        .expect("the fixture frontier renders");
+        let rendered = rendered_content_bytes(operation.messages());
+        assert!(
+            tool_evidence_only > 0,
+            "the fixture must retain tool content for the comparison to mean anything"
+        );
+        assert_eq!(
+            counted, rendered,
+            "the ceiling must count exactly the bytes the renderer clones"
+        );
+        assert!(
+            counted >= tool_evidence_only + assistant_text.len(),
+            "the ceiling must count the frontier content no tool evidence names: \
+             counted {counted}, tool evidence {tool_evidence_only}"
+        );
+    }
+
+    /// Every payload kind the renderer clones is counted, term for term.
+    ///
+    /// The fixture frontier reaches only tool evidence, assistant text, and
+    /// origin content. Delegation content, delivered outcomes, context
+    /// summaries, and imported text are cloned by the same renderer and were
+    /// the kinds a tool-only accounting left unbounded, so they are compared
+    /// here against both the rendered messages and an explicit per-term sum.
+    #[test]
+    fn projected_frontier_content_bytes_counts_every_payload_kind_the_render_clones() {
+        let session = identity(300, SessionId::from_uuid);
+        let child = identity(301, SessionId::from_uuid);
+        let turn = identity(302, TurnId::from_uuid);
+        let child_turn = identity(303, TurnId::from_uuid);
+        let producing_call = identity(304, ModelCallId::from_uuid);
+        let spawning_request = identity(305, ToolRequestId::from_uuid);
+        let awaiting_request = identity(306, ToolRequestId::from_uuid);
+        let background_request = identity(307, ToolRequestId::from_uuid);
+        let peer_message = identity(308, DelegationMessageId::from_uuid);
+        let origin_input = identity(309, AcceptedInputId::from_uuid);
+        let steering_input = identity(310, AcceptedInputId::from_uuid);
+        let imported_entry = identity(311, ImportedTranscriptEntryId::from_uuid);
+        let selected = identity(312, DirectModelSelection::from_uuid);
+        let source = |value: u128| {
+            SemanticTranscriptEntryRef::from_source(
+                session,
+                identity(value, SemanticTranscriptEntryId::from_uuid),
+            )
+        };
+
+        let imported_user = ImportedText::new(String::from("imported user question"));
+        let imported_assistant = ImportedText::new(String::from("imported assistant answer"));
+        let unattested = ImportedText::new(String::from("source event type never rendered"));
+        let origin_text = String::from("the origin request this turn answers");
+        let steering_text = String::from("steering added mid-turn");
+        let task = DelegationContent::try_new(String::from("the delegated task"))
+            .expect("fixture task content is valid");
+        let peer = DelegationContent::try_new(String::from("a peer message"))
+            .expect("fixture peer content is valid");
+        let foreground_result = DelegationContent::try_new(String::from("the awaited result"))
+            .expect("fixture foreground content is valid");
+        let background_result = DelegationContent::try_new(String::from("a later child result"))
+            .expect("fixture background content is valid");
+        let summary = AssistantText::try_new(String::from("a summary standing in for a range"))
+            .expect("fixture summary text is valid");
+        let assistant = AssistantText::try_new(String::from("assistant prose with no bound"))
+            .expect("fixture assistant text is valid");
+        let outcome = |content: DelegationContent| {
+            DelegationOutcome::reconstitute(
+                signalbox_domain::DelegationOutcomeKind::ResultReturned,
+                Some(content),
+                signalbox_domain::DelegationOutcomeReason::ChildCompleted,
+                signalbox_domain::DelegationProvenanceReconstitutionInput::ChildTurn {
+                    session: child,
+                    turn: child_turn,
+                },
+            )
+            .expect("fixture child outcome is correlated")
+        };
+        let origin_contents = BTreeMap::from([
+            (
+                origin_input,
+                UserContent::try_text(origin_text.clone()).expect("fixture origin text is valid"),
+            ),
+            (
+                steering_input,
+                UserContent::try_text(steering_text.clone())
+                    .expect("fixture steering text is valid"),
+            ),
+        ]);
+
+        let entries = [
+            (
+                source(400),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: ImportedSourceAttestation::Attested(ImportedSpeaker::User),
+                    content: ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(
+                        imported_user.clone(),
+                    )),
+                },
+            ),
+            (
+                source(401),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: ImportedSourceAttestation::Attested(ImportedSpeaker::Assistant),
+                    content: ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(
+                        imported_assistant.clone(),
+                    )),
+                },
+            ),
+            // Renders no message at all, so it must contribute no bytes.
+            (
+                source(402),
+                SemanticTranscriptEntryPayload::Imported {
+                    imported_entry,
+                    source_speaker: ImportedSourceAttestation::NotAttested,
+                    content: ImportedTranscriptContent::SourceEvent {
+                        source_type: ImportedSourceAttestation::Attested(unattested),
+                    },
+                },
+            ),
+            (
+                source(403),
+                SemanticTranscriptEntryPayload::OriginAcceptedInput {
+                    accepted_input: origin_input,
+                },
+            ),
+            (
+                source(404),
+                SemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                    accepted_input: steering_input,
+                    source_turn: turn,
+                },
+            ),
+            (
+                source(405),
+                SemanticTranscriptEntryPayload::DelegatedTask {
+                    spawning_request,
+                    parent_session: session,
+                    parent_turn: turn,
+                    content: task.clone(),
+                },
+            ),
+            (
+                source(406),
+                SemanticTranscriptEntryPayload::DelegationMessage {
+                    spawning_request,
+                    message: peer_message,
+                    sender: session,
+                    recipient: child,
+                    delivery_sequence: NonZeroU64::MIN,
+                    content: peer.clone(),
+                },
+            ),
+            (
+                source(407),
+                SemanticTranscriptEntryPayload::DelegationResult {
+                    awaiting_request,
+                    spawning_request,
+                    child,
+                    mode: DelegationWaitMode::Foreground,
+                    delivery_sequence: None,
+                    outcome: Box::new(outcome(foreground_result.clone())),
+                },
+            ),
+            (
+                source(408),
+                SemanticTranscriptEntryPayload::DelegationResult {
+                    awaiting_request: background_request,
+                    spawning_request,
+                    child,
+                    mode: DelegationWaitMode::Background,
+                    delivery_sequence: Some(NonZeroU64::new(2).expect("two is positive")),
+                    outcome: Box::new(outcome(background_result.clone())),
+                },
+            ),
+            (
+                source(409),
+                SemanticTranscriptEntryPayload::ContextSummary {
+                    producing_call,
+                    summarized: ContextCompactionRange::inclusive(source(400), source(401)),
+                    value: summary.clone(),
+                },
+            ),
+            (
+                source(410),
+                SemanticTranscriptEntryPayload::AssistantText {
+                    producing_call,
+                    value: assistant.clone(),
+                },
+            ),
+            (
+                source(411),
+                SemanticTranscriptEntryPayload::ModelIdentityChanged {
+                    turn,
+                    defaults_version: SessionConfigurationDefaultsVersion::first(),
+                    selected,
+                },
+            ),
+            (
+                source(412),
+                SemanticTranscriptEntryPayload::TurnCompleted { turn },
+            ),
+        ];
+
+        let counted = projected_frontier_content_bytes(
+            entries.iter().map(|(source, payload)| (*source, payload)),
+            |accepted_input| origin_contents.get(&accepted_input),
+            std::iter::empty(),
+        );
+        let messages = render_frontier_messages(
+            entries.iter().map(|(source, payload)| (*source, payload)),
+            |accepted_input| origin_contents.get(&accepted_input).cloned(),
+            std::iter::empty(),
+        )
+        .expect("the payload fixture renders");
+
+        assert_eq!(
+            counted,
+            rendered_content_bytes(&messages),
+            "the ceiling must count exactly the bytes the renderer clones"
+        );
+        // An equality between two sums can also be satisfied by both sides
+        // dropping the same term, so the expected total is spelled out.
+        assert_eq!(
+            counted,
+            imported_user.as_str().len()
+                + imported_assistant.as_str().len()
+                + origin_text.len()
+                + steering_text.len()
+                + task.as_str().len()
+                + peer.as_str().len()
+                + foreground_result.as_str().len()
+                + background_result.as_str().len()
+                + summary.as_str().len()
+                + assistant.as_str().len(),
+            "every cloned payload kind must contribute its exact content bytes"
+        );
+    }
+
+    /// A frontier over-bound only by its assistant text is refused, and refused
+    /// before anything is cloned.
+    ///
+    /// Assistant text carries no length bound of its own beyond the transport
+    /// cap on a single response, so a ceiling that counted tool evidence alone
+    /// would clone this frontier while reporting it as within bounds. The limit
+    /// here is exactly the same frontier's byte count without the text, which
+    /// makes the text the only reason the render is refused; the unrenderable
+    /// variant then shows the refusal still precedes message construction.
+    #[test]
+    fn assistant_text_over_bound_frontiers_are_refused_before_any_clone() {
+        let assistant_text = "assistant prose that no tool-evidence accounting would ever see";
+        let (plain_request, plain_entries, _) = tool_round_saturated_fixture(2);
+        let plain_bytes = counted_frontier_bytes(&plain_request, &plain_entries);
+        // Control: at this exact ceiling the same frontier without the text
+        // renders, so the refusal below is caused by the text and not by a
+        // ceiling too small for the fixture's tool evidence.
+        PreparedModelOperation::render_within(
+            plain_request,
+            credential_reference(),
+            None,
+            Box::new([]),
+            &plain_entries,
+            plain_bytes,
+        )
+        .expect("the text-free frontier renders at its own byte count");
+
+        let (request, tool_entries, _) =
+            tool_round_saturated_fixture_with_assistant_text(2, Some(assistant_text));
+        let error = PreparedModelOperation::render_within(
+            request.clone(),
+            credential_reference(),
+            None,
+            Box::new([]),
+            &tool_entries,
+            plain_bytes,
+        )
+        .expect_err("an assistant-text-heavy frontier is refused");
+        assert_eq!(
+            error,
+            ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded {
+                observed_bytes: plain_bytes + assistant_text.len(),
+                limit_bytes: plain_bytes,
+            },
+            "the refusal must report the assistant text it counted"
+        );
+
+        // The same refusal still wins over a rendering failure, which places it
+        // before the clones the renderer would perform.
+        let mut unrenderable = tool_entries.into_vec();
+        unrenderable.push(
+            unrenderable
+                .first()
+                .expect("the fixture carries tool evidence")
+                .clone(),
+        );
+        assert!(
+            matches!(
+                PreparedModelOperation::render_within(
+                    request.clone(),
+                    credential_reference(),
+                    None,
+                    Box::new([]),
+                    &unrenderable,
+                    MAX_RETAINED_FRONTIER_CONTENT_BYTES,
+                ),
+                Err(ModelFrontierRenderingError::DuplicateToolEvidence { .. })
+            ),
+            "the duplicated evidence must be unrenderable for this ordering claim to hold"
+        );
+        assert!(
+            matches!(
+                PreparedModelOperation::render_within(
+                    request,
+                    credential_reference(),
+                    None,
+                    Box::new([]),
+                    &unrenderable,
+                    plain_bytes,
+                ),
+                Err(ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded { .. })
+            ),
+            "the content ceiling must win over the rendering failure it precedes"
+        );
+    }
+
+    /// The ceiling is enforced ahead of message construction. A frontier that is
+    /// both over-bound and unrenderable is refused for its content, which places
+    /// the guard before `render_frontier_messages` and therefore before the
+    /// clones that would exhaust memory — the ordering a guard reached only
+    /// after rendering cannot provide.
+    #[test]
+    fn retained_frontier_content_ceiling_precedes_message_rendering() {
+        let (request, tool_entries, _) = tool_round_saturated_fixture(2);
+        let mut unrenderable = tool_entries.into_vec();
+        unrenderable.push(
+            unrenderable
+                .first()
+                .expect("the fixture carries tool evidence")
+                .clone(),
+        );
+        // Control: with the ceiling out of the way this evidence fails inside
+        // the renderer, so the refusal below is genuinely the earlier one.
+        assert!(
+            matches!(
+                PreparedModelOperation::render_within(
+                    request.clone(),
+                    credential_reference(),
+                    None,
+                    Box::new([]),
+                    &unrenderable,
+                    MAX_RETAINED_FRONTIER_CONTENT_BYTES,
+                ),
+                Err(ModelFrontierRenderingError::DuplicateToolEvidence { .. })
+            ),
+            "the fixture must be unrenderable for this ordering claim to hold"
+        );
+        let error = PreparedModelOperation::render_within(
+            request,
+            credential_reference(),
+            None,
+            Box::new([]),
+            &unrenderable,
+            0,
+        )
+        .expect_err("an over-bound frontier is refused");
+        assert!(
+            matches!(
+                error,
+                ModelFrontierRenderingError::RetainedFrontierContentLimitExceeded {
+                    limit_bytes: 0,
+                    ..
+                }
+            ),
+            "the content ceiling must win over the rendering failure it precedes: {error:?}"
+        );
+    }
+
+    /// S15 / INV-071: a turn whose retained tool content exceeds its ceiling
+    /// closes through the same pre-send terminal contract as round saturation
+    /// and never enters the provider. The round ceiling alone bounds latency and
+    /// spend but not retained memory, which is what this bound supplies.
+    #[tokio::test]
+    async fn s15_inv071_retained_frontier_content_limit_fires_before_provider_entry() {
+        // Two rounds: far below the round ceiling, so only the retained-content
+        // bound can explain the closure.
+        let (request, tool_entries, failed) = tool_round_saturated_fixture(2);
+        let session = request.session();
+        let over_bound_call = request.call().id();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready_with_tool_evidence(request, tool_entries))].into(),
+                calls: 0,
+            },
+            ScriptedFailure {
+                results: [Ok(failed.clone())].into(),
+                calls: 0,
+                recorded: Vec::new(),
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            ScriptedModelCallProvider::new([]),
+            InProcessAttemptDispatchGate::default(),
+        )
+        .with_retained_frontier_content_limit(0);
+        let captured = CapturedTelemetry::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_writer(captured.clone())
+            .finish();
+
+        assert_eq!(
+            service
+                .execute(session)
+                .with_subscriber(subscriber)
+                .await
+                .expect("the over-bound turn closes with its own terminal reason"),
+            ModelCallExecutionOutcome::ToolRoundLimitReached(Box::new(failed))
+        );
+        let telemetry = captured.text();
+        assert!(
+            telemetry.contains("retained frontier content limit reached"),
+            "the refusal must name the bound that fired: {telemetry}"
+        );
+        assert!(
+            telemetry.contains("terminal_outcome=\"tool_round_limit_reached\""),
+            "the service terminalization must expose the INV-071 label"
+        );
+        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        assert_eq!(prepare.calls, 1);
+        assert_eq!(failure.calls, 1);
+        assert_eq!(failure.recorded.len(), 1);
+        let committed = &failure.recorded[0];
+        assert_eq!(committed.session, session);
+        assert_eq!(committed.call, over_bound_call);
+        assert_eq!(
+            committed.cause,
+            PreparedModelCallFailureCause::ToolRoundLimitReached
+        );
+        assert_eq!(
+            provider.capability_preparation_count(),
+            0,
+            "an over-bound turn must not reach provider capability preparation"
+        );
+        assert_eq!(
+            provider.interaction_count(),
+            0,
+            "an over-bound turn must not reach provider interaction"
         );
         assert!(retained.is_none());
     }

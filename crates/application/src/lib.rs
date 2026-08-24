@@ -5,6 +5,7 @@
 
 mod approval_judge;
 mod commissioned_dispatch;
+mod convergence_reconciliation;
 mod conversation_import;
 mod create_session;
 mod create_session_from_imported_frontier;
@@ -20,6 +21,7 @@ mod review_workflow;
 mod scheduler;
 mod session_delegation;
 mod session_metadata;
+mod session_timeline;
 mod start_eligible_turn;
 mod startup_scan;
 mod submit_input;
@@ -41,6 +43,10 @@ pub use commissioned_dispatch::{
     CommissionDispatchPreparationError, CommissionDispatchRequest, CommissionedDispatchFence,
     CommissionedDispatchIdGenerator, PreparedCommissionedDispatch,
     UuidV7CommissionedDispatchIdGenerator,
+};
+pub use convergence_reconciliation::{
+    PullRequestCheck, PullRequestCheckState, PullRequestConvergence, PullRequestConvergenceBlocker,
+    PullRequestConvergenceFacts, PullRequestDraftState, evaluate_pull_request_convergence,
 };
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationReport,
@@ -141,7 +147,9 @@ pub use scheduler::{
     EligibilitySweepBatch, EligibilityWorkSource, GoalAwareEligibilityPass,
     GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityNudge,
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
-    ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit, scheduler_pass_admission_cap,
+    InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
+    SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
+    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_pass_admission_cap,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{
@@ -150,6 +158,13 @@ pub use session_metadata::{
     ReplaceSessionMetadataTransaction, SessionMetadataListItem, SessionMetadataListQuery,
     SessionMetadataListQueryError, SessionMetadataLister, SessionMetadataPageReader,
     SessionMetadataReader,
+};
+pub use session_timeline::{
+    ReadSessionTimelineService, SessionTimelineBounds, SessionTimelineDescriptor,
+    SessionTimelineEventKind, SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts,
+    SessionTimelineWindow, SessionWorkFacts, TimelineAddress, TimelineContinuation,
+    TimelineWindowAnchor, TimelineWindowLimitError, TimelineWindowLimits,
+    max_timeline_window_bytes, max_timeline_window_items, min_timeline_window_bytes,
 };
 pub use start_eligible_turn::{
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
@@ -187,8 +202,11 @@ pub use tool_loop_ports::{
     ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 pub use turn_liveness::{
-    StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessBoundError,
-    TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
+    ClaimedModelCallReconciliation, ExhaustedModelCallReconciliation,
+    ModelCallReconciliationAttempt, ModelCallReconciliationBatch,
+    ModelCallReconciliationFailureKind, ModelCallReconciliationOutcome, StaleActiveTurnBound,
+    StaleTurnCandidate, StaleTurnOutcome, TurnLivenessBoundError, TurnLivenessEvidence,
+    TurnLivenessLedger, TurnLivenessScanInterval,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
