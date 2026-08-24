@@ -3837,7 +3837,10 @@ dependencies = [
  "signalbox-domain",
  "signalbox-model-provider-runtime",
  "signalbox-model-runtime",
+ "signalbox-persistence",
  "signalboxd",
+ "sqlx",
+ "testcontainers-modules",
  "tokio",
  "uuid",
 ]
@@ -3990,7 +3993,6 @@ dependencies = [
 name = "signalbox-file-media-provider-runtime"
 version = "0.0.0"
 dependencies = [
- "serde_json",
  "signalbox-domain",
  "signalbox-file-media-runtime",
  "signalbox-tools-file-media",
