@@ -38,6 +38,8 @@ const MAX_REGISTRY_REASON_CODES: usize = 4_096;
 const MAX_INSPECTION_PROBE_BYTES: u64 = 16 * 1_024 * 1_024;
 // numeric-bound: ceiling - bounds one inspection's aggregate probe request fan-out
 const MAX_INSPECTION_PROBE_READS: u32 = 1_024;
+// numeric-bound: ceiling - bounds collision-validation worker fan-out and source I/O
+const MAX_COLLISION_VALIDATION_CANDIDATES: usize = 2;
 // numeric-bound: ceiling - the tool contract permits this many input containers
 const MAX_READ_INPUT_CONTAINERS: u32 = 256;
 // numeric-bound: ceiling - every JSON node emits at least one serialized byte
@@ -346,29 +348,51 @@ impl FileMediaRegistry {
             .map(|candidate| candidate.reader.clone())
             .collect::<std::collections::BTreeSet<_>>();
         if media_types.len() != 1 || readers.len() != 1 {
-            let mut successful = Vec::new();
-            let mut malformed = Vec::new();
-            for candidate in candidates {
-                match self
-                    .validate_candidate(
-                        processor,
-                        request.clone(),
-                        source,
-                        cancellation,
-                        candidate,
-                        evidence,
-                    )
-                    .await?
-                {
-                    inspection @ (FileInspection::Validated(_)
-                    | FileInspection::DeclaredMismatch { .. }) => successful.push(inspection),
-                    inspection @ FileInspection::Malformed { .. } => malformed.push(inspection),
-                    FileInspection::Unknown { .. } => {}
-                    FileInspection::Ambiguous { .. } | FileInspection::EncryptedOrLocked { .. } => {
-                        return Err(FileMediaFailure::ProcessorFailed);
+            if !collision_validation_allowed(evidence, candidates.len()) {
+                return Ok(FileInspection::Ambiguous {
+                    source: request.source,
+                    media_types,
+                });
+            }
+
+            let validations = async {
+                let mut successful = Vec::new();
+                let mut malformed = Vec::new();
+                for candidate in candidates {
+                    match self
+                        .validate_candidate(
+                            processor,
+                            request.clone(),
+                            source,
+                            cancellation,
+                            candidate,
+                            evidence,
+                        )
+                        .await?
+                    {
+                        inspection @ (FileInspection::Validated(_)
+                        | FileInspection::DeclaredMismatch { .. }) => successful.push(inspection),
+                        inspection @ FileInspection::Malformed { .. } => malformed.push(inspection),
+                        FileInspection::Unknown { .. } => {}
+                        FileInspection::Ambiguous { .. }
+                        | FileInspection::EncryptedOrLocked { .. } => {
+                            return Err(FileMediaFailure::ProcessorFailed);
+                        }
                     }
                 }
-            }
+                Ok::<_, FileMediaFailure>((successful, malformed))
+            };
+            let validations = Box::pin(validations);
+            let deadline = Box::pin(futures_timer::Delay::new(std::time::Duration::from_secs(
+                MAX_WORKER_WALL_SECONDS,
+            )));
+            let (mut successful, mut malformed) =
+                match futures_util::future::select(validations, deadline).await {
+                    futures_util::future::Either::Left((result, _)) => result?,
+                    futures_util::future::Either::Right(((), _)) => {
+                        return Err(FileMediaFailure::ProcessorTimedOut);
+                    }
+                };
             if successful.len() == 1 {
                 return successful.pop().ok_or(FileMediaFailure::ProcessorFailed);
             }
@@ -644,6 +668,11 @@ fn recognized_probe_strength(strength: ProbeStrength) -> bool {
         strength,
         ProbeStrength::Strong | ProbeStrength::StructuralCandidate
     )
+}
+
+fn collision_validation_allowed(evidence: ValidationEvidence, candidate_count: usize) -> bool {
+    evidence == ValidationEvidence::StructuralValidation
+        && candidate_count <= MAX_COLLISION_VALIDATION_CANDIDATES
 }
 
 fn streaming_text_terminal_becomes_unknown(evidence: ValidationEvidence) -> bool {
@@ -1251,6 +1280,26 @@ mod tests {
         ));
         assert!(recognized_probe_strength(ProbeStrength::Strong));
         assert!(!recognized_probe_strength(ProbeStrength::DeclaredCandidate));
+    }
+
+    #[test]
+    fn strong_signature_collisions_remain_ambiguous_without_validation() {
+        assert!(!collision_validation_allowed(
+            ValidationEvidence::StrongSignature,
+            2
+        ));
+    }
+
+    #[test]
+    fn structural_collision_validation_has_a_two_candidate_ceiling() {
+        assert!(collision_validation_allowed(
+            ValidationEvidence::StructuralValidation,
+            MAX_COLLISION_VALIDATION_CANDIDATES
+        ));
+        assert!(!collision_validation_allowed(
+            ValidationEvidence::StructuralValidation,
+            MAX_COLLISION_VALIDATION_CANDIDATES + 1
+        ));
     }
 
     #[test]

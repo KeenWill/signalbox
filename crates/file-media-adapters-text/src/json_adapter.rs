@@ -73,9 +73,13 @@ fn incomplete_json_prefix(text: &str) -> bool {
 fn trim_ascii_start(bytes: &[u8]) -> &[u8] {
     let first = bytes
         .iter()
-        .position(|byte| !byte.is_ascii_whitespace())
+        .position(|byte| !is_json_whitespace(*byte))
         .unwrap_or(bytes.len());
     &bytes[first..]
+}
+
+const fn is_json_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
 pub(crate) async fn inspect(
@@ -252,7 +256,7 @@ fn has_declared_json_prefix(prefix: &[u8]) -> bool {
         return false;
     }
     let structural = matches!(prefix.first(), Some(b'{' | b'['));
-    let Some(text) = source::probe_utf8(prefix) else {
+    let Ok(text) = std::str::from_utf8(prefix) else {
         return false;
     };
     let mut deserializer = serde_json::Deserializer::from_str(text);
