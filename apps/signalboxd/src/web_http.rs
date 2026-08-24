@@ -610,7 +610,6 @@ fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummar
             AttentionAction::ProvideGoalNeed => WebAttentionAction::ProvideGoalNeed,
             AttentionAction::DecideApproval => WebAttentionAction::DecideApproval,
             AttentionAction::ReconcileTurn => WebAttentionAction::ReconcileTurn,
-            AttentionAction::RestoreRunner => WebAttentionAction::RestoreRunner,
         }),
         goal_block,
         judge: WebAttentionJudgeFacts {
