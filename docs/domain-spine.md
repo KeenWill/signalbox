@@ -6489,6 +6489,125 @@ impl<Reader: SessionReader> LoadSessionService<Reader> {
 }
 ```
 
+## application: session_timeline
+
+```rust
+pub const fn max_timeline_window_items() -> u16;
+pub const fn max_timeline_window_bytes() -> u32;
+pub const fn min_timeline_window_bytes() -> u32;
+
+pub struct TimelineAddress(/* private NonZeroU64 */);
+impl TimelineAddress {
+    pub const fn new(sequence: NonZeroU64) -> Self;
+    pub const fn sequence(self) -> NonZeroU64;
+}
+
+pub enum TimelineWindowAnchor {
+    First,
+    Latest,
+    Before(TimelineAddress),
+    After(TimelineAddress),
+    Around(TimelineAddress),
+}
+
+pub enum TimelineWindowLimitError { Items, Bytes }
+
+pub struct TimelineWindowLimits { /* private */ }
+impl TimelineWindowLimits {
+    pub const fn new(max_items: u16, max_projected_bytes: u32)
+        -> Result<Self, TimelineWindowLimitError>;
+    pub const fn max_items(self) -> u16;
+    pub const fn max_projected_bytes(self) -> u32;
+}
+
+pub enum SessionTimelineEventKind {
+    SessionCreated,
+    SessionModelSettingsChanged,
+    TurnModelSettingsResolved,
+    InputAccepted,
+    GoalTurnRetired,
+    TurnActivated,
+    TurnFailed,
+    ModelCallTransition,
+    ToolBatchTransition,
+    ToolApprovalDecided,
+    ContextCompacted,
+    TurnCompleted,
+    TurnRefused,
+    TurnCancelled,
+    TurnReconciliationRequired,
+    RunnerStateTransition,
+    DelegationUpdate,
+    DelegationWake,
+}
+
+pub struct SessionTimelineItem {
+    pub address: TimelineAddress,
+    pub kind: SessionTimelineEventKind,
+    pub projected_structured_bytes: u32,
+}
+pub struct SessionTimelineBounds {
+    pub first: Option<TimelineAddress>,
+    pub latest: Option<TimelineAddress>,
+}
+pub struct SessionTimelineSizeFacts {
+    pub item_count: u64,
+    pub projected_text_bytes: u64,
+    pub projected_structured_bytes: u64,
+    pub referenced_blob_count: u64,
+    pub referenced_blob_bytes: u64,
+}
+pub struct SessionWorkFacts {
+    pub active_turn_count: u64,
+    pub queued_turn_count: u64,
+}
+pub struct SessionTimelineDescriptor {
+    pub session: SessionId,
+    pub sizes: SessionTimelineSizeFacts,
+    pub bounds: SessionTimelineBounds,
+    pub work: SessionWorkFacts,
+    pub observed_through: u64,
+}
+pub enum TimelineContinuation {
+    Exhausted,
+    MoreAt(TimelineAddress),
+}
+pub struct SessionTimelineWindow {
+    pub session: SessionId,
+    pub items: Vec<SessionTimelineItem>,
+    pub projected_structured_bytes: u32,
+    pub continuation_before: TimelineContinuation,
+    pub continuation_after: TimelineContinuation,
+}
+
+pub trait SessionTimelineReader {
+    type Error;
+    fn read_descriptor(&self, session: SessionId)
+        -> impl Future<Output = Result<Option<SessionTimelineDescriptor>, Self::Error>> + Send;
+    fn read_window(
+        &self,
+        session: SessionId,
+        anchor: TimelineWindowAnchor,
+        limits: TimelineWindowLimits,
+    ) -> impl Future<Output = Result<Option<SessionTimelineWindow>, Self::Error>> + Send;
+}
+
+pub struct ReadSessionTimelineService<Reader> { /* private */ }
+impl<Reader> ReadSessionTimelineService<Reader> {
+    pub const fn new(reader: Reader) -> Self;
+}
+impl<Reader: SessionTimelineReader> ReadSessionTimelineService<Reader> {
+    pub async fn descriptor(&self, session: SessionId)
+        -> Result<Option<SessionTimelineDescriptor>, Reader::Error>;
+    pub async fn window(
+        &self,
+        session: SessionId,
+        anchor: TimelineWindowAnchor,
+        limits: TimelineWindowLimits,
+    ) -> Result<Option<SessionTimelineWindow>, Reader::Error>;
+}
+```
+
 ## application: model_execution
 
 ```rust
@@ -11414,6 +11533,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
+| application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 36 (incl. 8 traits)              |
 | application: tool_loop                             | 27 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
@@ -11433,4 +11553,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 13                               |
-| **signalbox-application total**                    | **320 (+7 free fn)**             |
+| **signalbox-application total**                    | **334 (+10 free fn)**            |

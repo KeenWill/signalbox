@@ -42,6 +42,7 @@ pub mod session_credentials;
 pub mod session_delegation;
 pub mod session_metadata;
 pub mod session_placement;
+pub mod session_timeline;
 pub mod start_eligible_turn;
 pub mod startup;
 pub mod submit_input;

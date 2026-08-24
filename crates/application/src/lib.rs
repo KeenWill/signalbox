@@ -21,6 +21,7 @@ mod review_workflow;
 mod scheduler;
 mod session_delegation;
 mod session_metadata;
+mod session_timeline;
 mod start_eligible_turn;
 mod startup_scan;
 mod submit_input;
@@ -156,6 +157,13 @@ pub use session_metadata::{
     ReplaceSessionMetadataTransaction, SessionMetadataListItem, SessionMetadataListQuery,
     SessionMetadataListQueryError, SessionMetadataLister, SessionMetadataPageReader,
     SessionMetadataReader,
+};
+pub use session_timeline::{
+    ReadSessionTimelineService, SessionTimelineBounds, SessionTimelineDescriptor,
+    SessionTimelineEventKind, SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts,
+    SessionTimelineWindow, SessionWorkFacts, TimelineAddress, TimelineContinuation,
+    TimelineWindowAnchor, TimelineWindowLimitError, TimelineWindowLimits,
+    max_timeline_window_bytes, max_timeline_window_items, min_timeline_window_bytes,
 };
 pub use start_eligible_turn::{
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
