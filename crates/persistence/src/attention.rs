@@ -193,7 +193,7 @@ fn cursor_from_i64(value: i64) -> Result<AttentionCursor, AttentionRepositoryErr
 }
 
 const SUMMARY_SQL: &str = r#"
-WITH selected AS (
+WITH RECURSIVE selected AS (
     SELECT session_id FROM session
      WHERE ($2::uuid[] IS NULL AND ($3::uuid IS NULL OR session_id > $3))
         OR ($2::uuid[] IS NOT NULL AND session_id = ANY($2))
@@ -223,10 +223,59 @@ WITH selected AS (
               lifecycle.acceptance_position DESC
 ), latest_goal AS (
     SELECT DISTINCT ON (goal.session_id)
-           goal.session_id, goal.generation::text AS generation, goal.event_kind,
+           goal.session_id, goal.event_ordinal,
+           goal.generation::text AS generation, goal.event_kind,
            goal.blocked_reason, LEFT(goal.need, $4) AS need_summary
       FROM goal_event AS goal JOIN selected USING (session_id)
      ORDER BY goal.session_id, goal.event_ordinal DESC
+), automatic_resume_lineage AS (
+    SELECT goal.session_id, goal.generation, goal.event_ordinal AS head_ordinal,
+           0::integer AS spent
+      FROM latest_goal AS goal
+     WHERE goal.event_kind = 'blocked'
+       AND goal.blocked_reason = 'execution_failure'
+    UNION ALL
+    SELECT lineage.session_id, lineage.generation, blocked.event_ordinal,
+           lineage.spent + 1
+      FROM automatic_resume_lineage AS lineage
+      JOIN goal_event AS resumed
+        ON resumed.session_id = lineage.session_id
+       AND resumed.generation::text = lineage.generation
+       AND resumed.event_ordinal = lineage.head_ordinal - 1
+       AND resumed.event_kind = 'resumed'
+      JOIN goal_event AS blocked
+        ON blocked.session_id = lineage.session_id
+       AND blocked.generation::text = lineage.generation
+       AND blocked.event_ordinal = lineage.head_ordinal - 2
+       AND blocked.event_kind = 'blocked'
+       AND blocked.blocked_reason = 'execution_failure'
+      CROSS JOIN LATERAL (
+          SELECT substring(
+              sha256(
+                  convert_to('signalbox.goal.automatic-resume.v1', 'UTF8')
+                  || uuid_send(lineage.session_id)
+                  || decode(
+                      lpad(to_hex(floor(blocked.event_ordinal / 4294967296)::bigint), 8, '0')
+                      || lpad(to_hex(mod(blocked.event_ordinal, 4294967296)::bigint), 8, '0'),
+                      'hex'
+                  )
+              ) FROM 1 FOR 16
+          ) AS bytes
+      ) AS identity
+     WHERE resumed.user_command_id IS NOT NULL
+       AND uuid_send(resumed.user_command_id) = set_byte(
+           set_byte(
+               identity.bytes,
+               6,
+               (get_byte(identity.bytes, 6) & 15) | 128
+           ),
+           8,
+           (get_byte(identity.bytes, 8) & 63) | 128
+       )
+), automatic_resumption AS (
+    SELECT session_id, max(spent) < 5 AS pending
+      FROM automatic_resume_lineage
+     GROUP BY session_id
 ), judge AS (
     SELECT call.session_id,
            count(*) FILTER (WHERE call.state_kind <> 'terminal') AS actionable,
@@ -299,6 +348,7 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
            ELSE false
        END AS approval_human_authority,
        goal.generation, goal.event_kind AS goal_state, goal.blocked_reason, goal.need_summary,
+       COALESCE(automatic.pending, false) AS goal_automatic_resumption_pending,
        COALESCE(judge.actionable, 0) AS judge_actionable,
        COALESCE(judge.completed, 0) AS judge_completed,
        COALESCE(judge.escalated, 0) AS judge_escalated,
@@ -314,6 +364,8 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
     ON approval_call.request_id = request.request_id
   LEFT JOIN latest_goal AS goal
     ON goal.session_id = selected.session_id
+  LEFT JOIN automatic_resumption AS automatic
+    ON automatic.session_id = selected.session_id
   LEFT JOIN judge
     ON judge.session_id = selected.session_id
   LEFT JOIN latest_runner AS runner
@@ -363,18 +415,14 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
     let approval_human_authority = row
         .try_get::<Option<bool>, _>("approval_human_authority")?
         .unwrap_or(false);
-    let action = match state {
-        AttentionState::Blocked => Some(AttentionAction::ProvideGoalNeed),
-        AttentionState::AwaitingApproval if approval_human_authority => {
-            Some(AttentionAction::DecideApproval)
-        }
-        AttentionState::Ambiguous => Some(AttentionAction::ReconcileTurn),
-        AttentionState::AwaitingApproval
-        | AttentionState::AwaitingToolRecovery
-        | AttentionState::AwaitingReconciliation
-        | AttentionState::RunnerLost => None,
-        AttentionState::Active | AttentionState::Queued | AttentionState::Idle => None,
-    };
+    let automatic_resumption_pending = row
+        .try_get::<Option<bool>, _>("goal_automatic_resumption_pending")?
+        .unwrap_or(false);
+    let action = attention_action(
+        state,
+        approval_human_authority,
+        automatic_resumption_pending,
+    );
     let fact_kind = required_string(row, "fact_kind")?;
     let recorded_at = row
         .try_get::<Option<sqlx::types::time::OffsetDateTime>, _>("recorded_at")?
@@ -398,6 +446,30 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
             kind: decode_activity_kind(&fact_kind)?,
         },
     })
+}
+
+fn attention_action(
+    state: AttentionState,
+    approval_human_authority: bool,
+    automatic_resumption_pending: bool,
+) -> Option<AttentionAction> {
+    match state {
+        AttentionState::Blocked if !automatic_resumption_pending => {
+            Some(AttentionAction::ProvideGoalNeed)
+        }
+        AttentionState::Blocked => None,
+        AttentionState::AwaitingApproval if approval_human_authority => {
+            Some(AttentionAction::DecideApproval)
+        }
+        AttentionState::Ambiguous => Some(AttentionAction::ReconcileTurn),
+        AttentionState::AwaitingApproval
+        | AttentionState::AwaitingToolRecovery
+        | AttentionState::AwaitingReconciliation
+        | AttentionState::RunnerLost
+        | AttentionState::Active
+        | AttentionState::Queued
+        | AttentionState::Idle => None,
+    }
 }
 
 fn classify_state(
@@ -619,5 +691,14 @@ mod tests {
             error,
             AttentionRepositoryError::Corruption(AttentionCorruption::Invalid("turn state shape"))
         ));
+    }
+
+    #[test]
+    fn automatic_goal_resumption_suppresses_operator_action() {
+        assert_eq!(attention_action(AttentionState::Blocked, false, true), None);
+        assert_eq!(
+            attention_action(AttentionState::Blocked, false, false),
+            Some(AttentionAction::ProvideGoalNeed)
+        );
     }
 }

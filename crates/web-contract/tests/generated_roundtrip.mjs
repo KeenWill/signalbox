@@ -102,8 +102,61 @@ test("generated stream decoder rejects a missing blocked action", () => {
       decodeWebAttentionStreamEvent({
         kind: "update",
         cursor: "2",
-        summaries: [{ ...idleSummary, state: "blocked" }],
+        summaries: [
+          {
+            ...idleSummary,
+            state: "blocked",
+            goal_block: {
+              generation: "1",
+              reason: "user_input_required",
+              need_summary: "need",
+            },
+          },
+        ],
       }),
     /attention_event\.summaries\[0\]\.action must be consistent with attention state "blocked"/,
   );
+});
+
+test("generated snapshot decoder treats an omitted optional action as null", () => {
+  const { action: _action, ...withoutAction } = idleSummary;
+  assert.doesNotThrow(() => decodeWebAttentionSnapshot({
+    cursor: "1", summaries: [withoutAction], continuation_after_session_id: null,
+  }));
+});
+
+test("generated snapshot decoder rejects goal evidence for an idle state", () => {
+  assert.throws(() => decodeWebAttentionSnapshot({
+    cursor: "1",
+    summaries: [{ ...idleSummary, goal_block: { generation: "1", reason: "user_input_required", need_summary: "need" } }],
+    continuation_after_session_id: null,
+  }), /goal_block must be consistent with attention state "idle"/);
+});
+
+test("generated snapshot decoder admits optional runner-loss evidence", () => {
+  assert.doesNotThrow(() => decodeWebAttentionSnapshot({
+    cursor: "1", summaries: [{ ...idleSummary, state: "runner_lost" }], continuation_after_session_id: null,
+  }));
+});
+
+test("generated snapshot decoder admits evidence retained by runner loss", () => {
+  assert.doesNotThrow(() => decodeWebAttentionSnapshot({
+    cursor: "1",
+    summaries: [{ ...idleSummary, state: "runner_lost", goal_block: { generation: "1", reason: "execution_failure", need_summary: "need" } }],
+    continuation_after_session_id: null,
+  }));
+});
+
+test("generated snapshot decoder rejects unpaired UTF-16 surrogates", () => {
+  assert.throws(() => decodeWebAttentionSnapshot({
+    cursor: "1",
+    summaries: [{ ...idleSummary, state: "blocked", action: "provide_goal_need", goal_block: { generation: "1", reason: "user_input_required", need_summary: "\ud800" } }],
+    continuation_after_session_id: null,
+  }), /one recognized variant/);
+});
+
+test("generated snapshot decoder rejects the removed restore action", () => {
+  assert.throws(() => decodeWebAttentionSnapshot({
+    cursor: "1", summaries: [{ ...idleSummary, action: "restore_runner" }], continuation_after_session_id: null,
+  }), /one recognized variant/);
 });

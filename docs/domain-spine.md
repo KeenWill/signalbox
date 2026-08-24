@@ -5869,7 +5869,6 @@ pub enum AttentionAction {
     ProvideGoalNeed,
     DecideApproval,
     ReconcileTurn,
-    RestoreRunner,
 }
 
 pub enum AttentionBlockedReason {

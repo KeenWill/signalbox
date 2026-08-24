@@ -65,8 +65,7 @@ const schemas = {
         "enum": [
           "provide_goal_need",
           "decide_approval",
-          "reconcile_turn",
-          "restore_runner"
+          "reconcile_turn"
         ],
         "type": "string"
       },
@@ -259,8 +258,7 @@ const schemas = {
         "enum": [
           "provide_goal_need",
           "decide_approval",
-          "reconcile_turn",
-          "restore_runner"
+          "reconcile_turn"
         ],
         "type": "string"
       },
@@ -633,6 +631,22 @@ function fail(path, expected) {
   throw new TypeError(`${path} must be ${expected}`);
 }
 
+function isWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        return false;
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function resolveReference(root, reference) {
   const prefix = "#/$defs/";
   if (!reference.startsWith(prefix)) {
@@ -761,6 +775,9 @@ function assertSchema(root, schema, value, path) {
     if (typeof value !== "string") {
       fail(path, "string");
     }
+    if (!isWellFormedUnicode(value)) {
+      fail(path, "well-formed Unicode scalar values");
+    }
     if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {
       fail(path, `a string matching ${schema.pattern}`);
     }
@@ -781,11 +798,15 @@ function assertSchema(root, schema, value, path) {
 }
 
 function assertAttentionSummary(summary, path) {
+  const action = summary.action ?? null;
+  const goalBlock = summary.goal_block ?? null;
   const valid =
-    (summary.state === "blocked" && summary.action === "provide_goal_need") ||
+    (summary.state === "blocked" &&
+      (action === "provide_goal_need" ||
+        (action === null && goalBlock?.reason === "execution_failure"))) ||
     (summary.state === "awaiting_approval" &&
-      (summary.action === null || summary.action === "decide_approval")) ||
-    (summary.state === "ambiguous" && summary.action === "reconcile_turn") ||
+      (action === null || action === "decide_approval")) ||
+    (summary.state === "ambiguous" && action === "reconcile_turn") ||
     ([
       "active",
       "queued",
@@ -793,9 +814,19 @@ function assertAttentionSummary(summary, path) {
       "awaiting_reconciliation",
       "runner_lost",
       "idle",
-    ].includes(summary.state) && summary.action === null);
+    ].includes(summary.state) && action === null);
   if (!valid) {
     fail(`${path}.action`, `consistent with attention state ${JSON.stringify(summary.state)}`);
+  }
+  const validGoalBlock =
+    (summary.state === "blocked" && goalBlock !== null) ||
+    summary.state === "runner_lost" ||
+    (summary.state !== "blocked" && goalBlock === null);
+  if (!validGoalBlock) {
+    fail(
+      `${path}.goal_block`,
+      `consistent with attention state ${JSON.stringify(summary.state)}`,
+    );
   }
 }
 

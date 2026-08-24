@@ -9,7 +9,7 @@ type WebApiError = {
 
 type WebApiErrorKind = "transport" | "application";
 
-type WebAttentionAction = "provide_goal_need" | "decide_approval" | "reconcile_turn" | "restore_runner";
+type WebAttentionAction = "provide_goal_need" | "decide_approval" | "reconcile_turn";
 
 type WebAttentionActivity = {
   readonly kind: WebAttentionActivityKind;
