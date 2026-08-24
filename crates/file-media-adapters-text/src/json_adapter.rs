@@ -248,18 +248,19 @@ impl<'de> Visitor<'de> for DuplicateCheckedVisitor {
 
 fn has_declared_json_prefix(prefix: &[u8]) -> bool {
     let prefix = trim_ascii_start(prefix);
-    if matches!(prefix.first(), Some(b'{' | b'[')) {
-        return true;
-    }
     if prefix.is_empty() {
         return false;
     }
+    let structural = matches!(prefix.first(), Some(b'{' | b'['));
     let Some(text) = source::probe_utf8(prefix) else {
         return false;
     };
     let mut deserializer = serde_json::Deserializer::from_str(text);
     deserializer.disable_recursion_limit();
-    serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer)).is_ok()
+    match serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer)) {
+        Ok(_) => deserializer.end().is_ok(),
+        Err(error) => structural && error.is_eof(),
+    }
 }
 
 fn parse_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {

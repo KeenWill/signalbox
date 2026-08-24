@@ -164,6 +164,17 @@ async fn declared_json_follow_up_respects_the_validation_ceiling() -> Result<(),
 }
 
 #[tokio::test]
+async fn oversized_declared_json_rejects_trailing_prefix_bytes() -> Result<(), Box<dyn Error>> {
+    let mut bytes = b"true trailing".to_vec();
+    bytes.resize(128 * 1_024 + 1, b' ');
+    let source = MemorySource::new(bytes);
+
+    let inspection = support::inspect(&source, "application/json").await?;
+    support::assert_unknown(inspection);
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_honors_the_effective_validation_source_ceiling() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::json_document());
     let mut ceilings = FileMediaCeilings::version_one();
