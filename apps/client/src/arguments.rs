@@ -2547,6 +2547,7 @@ fn delegation_text_argument(
 }
 
 fn template_name(value: &str) -> Result<String, String> {
+    // numeric-bound: tunable - mirrors the canonical session-template name grammar
     const MAX_UTF8_BYTES: usize = 128;
 
     let first_is_admitted = value
@@ -2652,6 +2653,7 @@ fn review_line_number(value: &str) -> Result<CanonicalU64, String> {
 }
 
 fn review_confidence(value: &str) -> Result<CanonicalU64, String> {
+    // numeric-bound: not-a-bound - fixed full-scale basis-point representation
     const MAXIMUM_REVIEW_CONFIDENCE_BASIS_POINTS: u64 = 10_000;
 
     let parsed = canonical_u64(value)?;

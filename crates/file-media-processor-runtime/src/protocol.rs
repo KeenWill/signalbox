@@ -8,9 +8,9 @@ use signalbox_file_media_runtime::{
     FileDigest, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
     FileUse, ProbeDeclaration, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ReadAccessPattern, ReadOutputKind, ReadViewBounds,
-    ReadViewDeclaration, ReadViewName, ReaderIdentity, RegistryValueError, StreamingTextFallback,
-    ValidationEvidence,
+    ProcessorValidationOutput, ReadAccessPattern, ReadContinuationCursor, ReadOutputKind,
+    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderIdentity, RegistryValueError,
+    StreamingTextFallback, ValidationEvidence,
 };
 
 pub(crate) fn declaration_fingerprint(declarations: &[FileMediaProviderDeclaration]) -> [u8; 32] {
@@ -33,8 +33,10 @@ where
     for declaration in declarations {
         let declaration = declaration.borrow();
         fingerprint_field(&mut fingerprint, declaration.provider().as_str().as_bytes());
-        fingerprint_len(&mut fingerprint, declaration.readers().len());
-        for reader in declaration.readers() {
+        let mut readers = declaration.readers().iter().collect::<Vec<_>>();
+        readers.sort_by(|left, right| left.identity().cmp(right.identity()));
+        fingerprint_len(&mut fingerprint, readers.len());
+        for reader in readers {
             fingerprint_field(
                 &mut fingerprint,
                 reader.identity().provider().as_str().as_bytes(),
@@ -65,8 +67,9 @@ where
                     view.arguments_schema().as_str().as_bytes(),
                 );
                 match view.access() {
-                    ReadAccessPattern::Streaming => {
+                    ReadAccessPattern::Streaming { maximum_ranges } => {
                         fingerprint_field(&mut fingerprint, b"streaming");
+                        fingerprint_u64(&mut fingerprint, u64::from(maximum_ranges));
                     }
                     ReadAccessPattern::RandomAccess { maximum_ranges } => {
                         fingerprint_field(&mut fingerprint, b"random_access");
@@ -259,6 +262,7 @@ pub(crate) enum WireReadEnvelope {
         cumulative_bytes: u64,
     },
     Streaming {
+        ranges: u32,
         cumulative_bytes: u64,
     },
     RandomAccess {
@@ -279,7 +283,8 @@ impl WireReadEnvelope {
 
     pub(crate) const fn for_view(view: &ReadViewDeclaration) -> Self {
         match view.access() {
-            ReadAccessPattern::Streaming => Self::Streaming {
+            ReadAccessPattern::Streaming { maximum_ranges } => Self::Streaming {
+                ranges: maximum_ranges,
                 cumulative_bytes: view.bounds().source_bytes(),
             },
             ReadAccessPattern::RandomAccess { maximum_ranges } => Self::RandomAccess {
@@ -366,7 +371,6 @@ impl TryFrom<WireFileUse> for FileUse {
 #[serde(rename_all = "snake_case")]
 enum WireAttachmentKind {
     Image,
-    Audio,
     Document,
     File,
 }
@@ -375,7 +379,6 @@ impl From<AttachmentKind> for WireAttachmentKind {
     fn from(value: AttachmentKind) -> Self {
         match value {
             AttachmentKind::Image => Self::Image,
-            AttachmentKind::Audio => Self::Audio,
             AttachmentKind::Document => Self::Document,
             AttachmentKind::File => Self::File,
         }
@@ -386,7 +389,6 @@ impl From<WireAttachmentKind> for AttachmentKind {
     fn from(value: WireAttachmentKind) -> Self {
         match value {
             WireAttachmentKind::Image => Self::Image,
-            WireAttachmentKind::Audio => Self::Audio,
             WireAttachmentKind::Document => Self::Document,
             WireAttachmentKind::File => Self::File,
         }
@@ -399,6 +401,8 @@ pub(crate) struct WireValidationRequest {
     source: WireFileUse,
     media_type: String,
     evidence: ValidationEvidence,
+    maximum_source_bytes: u64,
+    maximum_ranges: u32,
 }
 
 impl From<&FileMediaProviderValidationRequest> for WireValidationRequest {
@@ -407,6 +411,8 @@ impl From<&FileMediaProviderValidationRequest> for WireValidationRequest {
             source: (&request.source).into(),
             media_type: request.media_type.as_str().to_owned(),
             evidence: request.evidence,
+            maximum_source_bytes: request.maximum_source_bytes,
+            maximum_ranges: request.maximum_ranges,
         }
     }
 }
@@ -420,6 +426,8 @@ impl TryFrom<WireValidationRequest> for FileMediaProviderValidationRequest {
             media_type: CanonicalMediaType::from_str(&value.media_type)
                 .map_err(|_| ProtocolValueError)?,
             evidence: value.evidence,
+            maximum_source_bytes: value.maximum_source_bytes,
+            maximum_ranges: value.maximum_ranges,
         })
     }
 }
@@ -432,18 +440,28 @@ pub(crate) struct WireReadRequest {
     validation: ValidationEvidence,
     metadata_json: String,
     view: String,
-    options: serde_json::Value,
+    options: Option<serde_json::Value>,
+    continuation: Option<String>,
 }
 
 impl From<&FileMediaProviderReadRequest> for WireReadRequest {
     fn from(request: &FileMediaProviderReadRequest) -> Self {
+        let (options, continuation) = match &request.input {
+            signalbox_file_media_runtime::FileReadInput::Initial { options } => {
+                (Some(options.clone()), None)
+            }
+            signalbox_file_media_runtime::FileReadInput::Continuation { cursor } => {
+                (None, Some(cursor.as_str().to_owned()))
+            }
+        };
         Self {
             source: (&request.source).into(),
             detected_media_type: request.detected_media_type.as_str().to_owned(),
             validation: request.validation,
             metadata_json: request.metadata.as_str().to_owned(),
             view: request.view.as_str().to_owned(),
-            options: request.options.clone(),
+            options,
+            continuation,
         }
     }
 }
@@ -452,6 +470,15 @@ impl TryFrom<WireReadRequest> for FileMediaProviderReadRequest {
     type Error = ProtocolValueError;
 
     fn try_from(value: WireReadRequest) -> Result<Self, Self::Error> {
+        let input = match (value.options, value.continuation) {
+            (Some(options), None) => {
+                signalbox_file_media_runtime::FileReadInput::Initial { options }
+            }
+            (None, Some(cursor)) => signalbox_file_media_runtime::FileReadInput::Continuation {
+                cursor: ReadContinuationCursor::try_new(cursor).map_err(map_value_error)?,
+            },
+            (Some(_), Some(_)) | (None, None) => return Err(ProtocolValueError),
+        };
         Ok(Self {
             source: value.source.try_into()?,
             detected_media_type: CanonicalMediaType::from_str(&value.detected_media_type)
@@ -459,7 +486,7 @@ impl TryFrom<WireReadRequest> for FileMediaProviderReadRequest {
             validation: value.validation,
             metadata: BoundedMetadata::try_new(&value.metadata_json).map_err(map_value_error)?,
             view: ReadViewName::try_new(value.view).map_err(map_value_error)?,
-            options: value.options,
+            input,
         })
     }
 }
@@ -477,4 +504,28 @@ pub(crate) fn encode_bytes(bytes: &[u8]) -> String {
 
 pub(crate) fn decode_bytes(encoded: &str) -> Result<Vec<u8>, ProtocolValueError> {
     STANDARD.decode(encoded).map_err(|_| ProtocolValueError)
+}
+
+#[cfg(test)]
+mod tests {
+    use signalbox_file_media_runtime::{
+        MAX_PROCESSOR_FRAME_BYTES, MAX_TEXT_OR_JSON_BYTES, ProcessorReadOutput,
+    };
+
+    use super::WorkerFrame;
+
+    #[test]
+    fn maximum_escape_heavy_structured_output_fits_one_frame() {
+        let body_json = format!("\"{}\"", "\\\\".repeat((MAX_TEXT_OR_JSON_BYTES - 2) / 2));
+        assert_eq!(body_json.len(), MAX_TEXT_OR_JSON_BYTES);
+        let frame = WorkerFrame::ReadResult {
+            output: ProcessorReadOutput::Structured {
+                body_json,
+                truncated: false,
+                cursor: None,
+            },
+        };
+        let encoded = serde_json::to_vec(&frame).expect("worker frame serializes");
+        assert!(encoded.len() <= MAX_PROCESSOR_FRAME_BYTES);
+    }
 }

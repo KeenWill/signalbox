@@ -31,8 +31,8 @@ use signalboxd::{
     CredentialDelivery, DaemonToolCatalog, DaemonToolComposition, FileCredentialAccess,
     HubModelConfiguration, ModelAdapter,
     approval_judge_eval::{
-        ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, ApprovalJudgeEvalVerdict, judge_eval_case,
-        judge_system_prompt, render_eval_case,
+        ApprovalJudgeEvalBinding, ApprovalJudgeEvalCase, ApprovalJudgeEvalDispatchFence,
+        ApprovalJudgeEvalVerdict, judge_eval_case, judge_system_prompt, render_eval_case,
     },
     model_adapter::ConfiguredModelRuntime,
     usage_limits,
@@ -136,7 +136,21 @@ struct CorpusCase {
     #[serde(default)]
     system_prompt: Option<String>,
     #[serde(default)]
+    dispatch: Option<CorpusDispatchFence>,
+    #[serde(default)]
     notes: Option<String>,
+}
+
+/// The repository-watch pull-request fence a dispatched case carries.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CorpusDispatchFence {
+    repository: String,
+    pull_request: u64,
+    head_sha: String,
+    head_repository: String,
+    head_branch: String,
+    base_branch: String,
 }
 
 struct RunOptions {
@@ -516,6 +530,17 @@ async fn run(options: RunOptions) -> Result<(), String> {
                 goal: case.goal.clone(),
                 template: case.template.clone(),
                 system_prompt: case.system_prompt.clone(),
+                dispatch: case
+                    .dispatch
+                    .as_ref()
+                    .map(|fence| ApprovalJudgeEvalDispatchFence {
+                        repository: fence.repository.clone(),
+                        pull_request: fence.pull_request,
+                        head_sha: fence.head_sha.clone(),
+                        head_repository: fence.head_repository.clone(),
+                        head_branch: fence.head_branch.clone(),
+                        base_branch: fence.base_branch.clone(),
+                    }),
             };
             render_eval_case(&eval_case)
                 .map(|rendered| {

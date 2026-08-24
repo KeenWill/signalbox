@@ -121,6 +121,8 @@ WORKSPACE_SELECTORS = ("--workspace", "--all")
 AGGREGATE_JOB = "postgres-integration"
 RUN_JOB = "postgres-integration-run"
 BUILD_JOB = "postgres-integration-build"
+BUILD_RUNNER = "signalbox-docker"
+RUN_RUNNER = "signalbox-docker"
 # A step or job that may fail without failing anything above it. The archived
 # run carrying this would let every shard fail while the matrix job reports
 # success and the aggregate's assertion passes.
@@ -709,7 +711,11 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
     # subcommand are all already resolved.
     for tokens, variables in executed:
         arguments = cargo_test_arguments(tokens)
-        if arguments is not None and runs_ignored_tests(arguments):
+        if (
+            arguments is not None
+            and runs_ignored_tests(arguments)
+            and not runs_file_media_isolation_tests(arguments)
+        ):
             failures.append(
                 f"{WORKFLOW} runs ignored tests through `cargo test` outside "
                 f"{MANIFEST}: {' '.join(tokens)}"
@@ -786,20 +792,23 @@ def workflow_disagreements(root: Path, suites: tuple[Suite, ...]) -> list[str]:
                 f"take that value from the matrix {MANIFEST} generates"
             )
 
-    # Only the jobs whose environment reaches the archived suites. The archives
-    # are built and run on the same OS by construction, and a Docker-backed
-    # PostgreSQL suite is not portable off it — but an unrelated macOS or
-    # Windows job elsewhere in this workflow is nobody's business here.
-    integration = "\n".join(
-        job_lines(text, BUILD_JOB) + job_lines(text, RUN_JOB)
-    )
-    targets = {match.group("target") for match in RUNS_ON.finditer(integration)}
-    if targets and targets != {"ubuntu-latest"}:
-        listing = ", ".join(sorted(targets))
-        failures.append(
-            f"{WORKFLOW} runs the PostgreSQL integration jobs somewhere other "
-            f"than ubuntu-latest: {listing}"
-        )
+    # The build and run shards must share the dedicated Docker fleet's image and
+    # absolute work-path shape: nextest archives retain paths from compilation,
+    # and every shard needs an isolated Docker daemon for PostgreSQL. Check each
+    # job independently so either half cannot drift to another environment.
+    expected_targets = {
+        BUILD_JOB: BUILD_RUNNER,
+        RUN_JOB: RUN_RUNNER,
+    }
+    for job, expected_target in expected_targets.items():
+        job_text = "\n".join(job_lines(text, job))
+        targets = {match.group("target") for match in RUNS_ON.finditer(job_text)}
+        if targets != {expected_target}:
+            listing = ", ".join(sorted(targets)) or "none"
+            failures.append(
+                f"{WORKFLOW} job `{job}` must run on `{expected_target}`, "
+                f"found: {listing}"
+            )
 
     return failures
 
@@ -1021,6 +1030,25 @@ def runs_ignored_tests(arguments: list[str]) -> bool:
         return False
     harness = arguments[arguments.index("--") + 1 :]
     return "--ignored" in harness or "--include-ignored" in harness
+
+
+def runs_file_media_isolation_tests(arguments: list[str]) -> bool:
+    """Recognize the ignored isolation suite enforced outside the PostgreSQL manifest.
+
+    This exception is intentionally exact: changing the package, feature, test
+    target, or harness selection remains an unmanifested ignored-test run.
+    """
+    return arguments == [
+        "--no-fail-fast",
+        "-p",
+        "signalbox-file-media-processor-runtime",
+        "--features",
+        "test-worker",
+        "--test",
+        "isolation",
+        "--",
+        "--ignored",
+    ]
 
 
 def documented_ignored_commands(

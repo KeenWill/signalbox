@@ -7,10 +7,10 @@ use signalbox_file_media_adapter_svg::{SvgProvider, declaration};
 use signalbox_file_media_runtime::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProcessorFuture, FileMediaProvider, FileMediaProviderReadRequest,
-    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadRequest, FileReadResult,
-    InspectionRequest, NeverCancelled, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation, ReadViewName, ReaderIdentity,
-    VerifiedBlobSource,
+    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadInput, FileReadRequest,
+    FileReadResult, InspectionRequest, NeverCancelled, ProcessorBoundaryFailure, ProcessorFailure,
+    ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
+    ReadContinuation, ReadViewName, ReaderIdentity, VerifiedBlobSource,
 };
 
 struct DirectProcessor {
@@ -32,7 +32,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
-        self.provider.probe(reader, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .probe(reader, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 
     fn validate<'a>(
@@ -42,7 +47,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
-        self.provider.inspect(reader, request, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .inspect(reader, request, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 
     fn read<'a>(
@@ -52,7 +62,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
-        self.provider.read(reader, request, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .read(reader, request, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 }
 
@@ -247,6 +262,29 @@ async fn foreign_prefixed_svg_root_is_rejected() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn foreign_namespaced_svg_root_is_unknown_without_svg_declaration()
+-> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(br#"<x:svg xmlns:x="urn:example"/>"#).into_source()?;
+    let inspection =
+        inspect_as(&DirectProcessor::new(), &source, "application/octet-stream").await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn dtd_bearing_svg_is_malformed_without_svg_declaration() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(br#"<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg"/>"#)
+        .into_source()?;
+    let inspection =
+        inspect_as(&DirectProcessor::new(), &source, "application/octet-stream").await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
+    assert_eq!(malformed_reason(&inspection)?, "malformed_svg");
+    Ok(())
+}
+
+#[tokio::test]
 async fn animation_element_is_rejected_as_active_content() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         SvgFixture::raw(
@@ -367,6 +405,15 @@ async fn invalid_xml_comment_syntax_is_rejected() -> Result<(), Box<dyn Error>> 
 }
 
 #[tokio::test]
+async fn xml_comment_body_ending_in_hyphen_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg"><!--a---></svg>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn incomplete_xml_declaration_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         SvgFixture::raw(br#"<?xml?><svg xmlns="http://www.w3.org/2000/svg"/>"#),
@@ -429,6 +476,26 @@ async fn actual_event_handler_attribute_is_rejected() -> Result<(), Box<dyn Erro
 async fn unbound_attribute_prefix_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" p:x="1"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn reserved_xml_prefix_rebinding_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xml="urn:evil"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn duplicate_expanded_attribute_name_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        SvgFixture::raw(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:p="urn:x" xmlns:q="urn:x" p:a="1" q:a="2"/>"#,
+        ),
         "malformed_svg",
     )
     .await
@@ -590,7 +657,7 @@ async fn read(
             visible_part: None,
         },
         view: ReadViewName::try_new(view).map_err(|_| FileMediaFailure::ProcessorFailed)?,
-        options,
+        input: FileReadInput::Initial { options },
     };
     registry()
         .map_err(|_| FileMediaFailure::ProcessorFailed)?
@@ -599,13 +666,18 @@ async fn read(
 }
 
 #[track_caller]
-async fn assert_malformed(fixture: SvgFixture, reason: &str) -> Result<(), Box<dyn Error>> {
-    let source = fixture.into_source()?;
-    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+fn assert_malformed(
+    fixture: SvgFixture,
+    reason: &str,
+) -> impl Future<Output = Result<(), Box<dyn Error>>> + '_ {
+    async move {
+        let source = fixture.into_source()?;
+        let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
-    assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
-    assert_eq!(malformed_reason(&inspection)?, reason);
-    Ok(())
+        assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
+        assert_eq!(malformed_reason(&inspection)?, reason);
+        Ok(())
+    }
 }
 
 fn malformed_reason(inspection: &FileInspection) -> Result<&str, Box<dyn Error>> {

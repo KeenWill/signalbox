@@ -1,6 +1,6 @@
 //! Data-only SVG interpretation inside the supervised file-media worker.
 
-use std::{borrow::Cow, error::Error, num::NonZeroU64, str::FromStr};
+use std::{borrow::Cow, collections::HashSet, error::Error, num::NonZeroU64, str::FromStr};
 
 use quick_xml::{
     NsReader,
@@ -10,12 +10,12 @@ use quick_xml::{
 };
 use signalbox_file_media_runtime::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider,
-    FileMediaProviderDeclaration, FileMediaProviderFuture, FileMediaProviderReadRequest,
-    FileMediaProviderValidationRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
-    ProbeDeclaration, ProbeStrength, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
-    ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
-    StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    FileMediaProviderDeclaration, FileMediaProviderFailure, FileMediaProviderFuture,
+    FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileReadInput,
+    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration, ProbeStrength,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
+    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
+    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
 };
 
 const MEDIA_TYPE: &str = "image/svg+xml";
@@ -24,6 +24,8 @@ const READER_NAME: &str = "quick-xml";
 const READER_REVISION: &str = "quick-xml-0-41-data-only-v1";
 const SVG_NAMESPACE: &[u8] = b"http://www.w3.org/2000/svg";
 const XLINK_NAMESPACE: &[u8] = b"http://www.w3.org/1999/xlink";
+const XML_NAMESPACE: &[u8] = b"http://www.w3.org/XML/1998/namespace";
+const XMLNS_NAMESPACE: &[u8] = b"http://www.w3.org/2000/xmlns/";
 const TEXT_VIEW: &str = "text";
 const METADATA_VIEW: &str = "metadata";
 const MALFORMED_REASON: &str = "malformed_svg";
@@ -78,7 +80,7 @@ impl FileMediaProvider for SvgProvider {
             require_reader(reader)?;
             require_active(cancellation)?;
             let length = source.byte_length().get().min(PROBE_BYTES);
-            let bytes = read_range(source, 0, length).await?;
+            let bytes = read_range(source, SourceRange { offset: 0, length }).await?;
             require_active(cancellation)?;
             Ok(match probe_root(&bytes) {
                 ProbeRoot::Svg => ProcessorProbeOutput::Candidate {
@@ -102,7 +104,7 @@ impl FileMediaProvider for SvgProvider {
             require_reader(reader)?;
             require_active(cancellation)?;
             if request.media_type.as_str() != MEDIA_TYPE {
-                return Err(ProcessorFailure::Protocol);
+                return Err(FileMediaProviderFailure::Failed);
             }
             if source.byte_length().get() > SOURCE_BYTES {
                 return Ok(malformed_validation(SOURCE_SIZE_REASON));
@@ -127,9 +129,12 @@ impl FileMediaProvider for SvgProvider {
             require_reader(reader)?;
             require_active(cancellation)?;
             if request.detected_media_type.as_str() != MEDIA_TYPE {
-                return Err(ProcessorFailure::Protocol);
+                return Err(FileMediaProviderFailure::Failed);
             }
-            if !empty_options(&request.options) {
+            if !matches!(
+                &request.input,
+                FileReadInput::Initial { options } if empty_options(options)
+            ) {
                 return Ok(ProcessorReadOutput::InvalidViewArguments);
             }
             if source.byte_length().get() > SOURCE_BYTES {
@@ -147,7 +152,7 @@ impl FileMediaProvider for SvgProvider {
             let parsed = match parse_svg(&bytes, mode) {
                 Ok(parsed) => parsed,
                 Err(ParseIssue::TextOutput) => return Ok(ProcessorReadOutput::OutputUnitTooLarge),
-                Err(_) => return Err(ProcessorFailure::Failed),
+                Err(_) => return Err(FileMediaProviderFailure::Failed),
             };
             match request.view.as_str() {
                 TEXT_VIEW => Ok(ProcessorReadOutput::Text {
@@ -169,7 +174,7 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
         ReadViewName::try_new(TEXT_VIEW)?,
         String::from("Extracts bounded text elements without rendering."),
         CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 1 },
         ReadViewBounds::Text {
             source_bytes: SOURCE_BYTES,
             output_bytes: TEXT_OUTPUT_BYTES,
@@ -179,7 +184,7 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
         ReadViewName::try_new(METADATA_VIEW)?,
         String::from("Returns bounded SVG dimensions, view box, and element count."),
         CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 1 },
         ReadViewBounds::Structured {
             source_bytes: SOURCE_BYTES,
             output_bytes: METADATA_OUTPUT_BYTES,
@@ -193,7 +198,7 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
         reader: FileReaderName::try_new(READER_NAME)?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(MEDIA_TYPE)?],
-        probe: ProbeDeclaration::new(PROBE_BYTES, 0, 1, SOURCE_BYTES),
+        probe: ProbeDeclaration::new(PROBE_BYTES, 0, 0, PROBE_BYTES),
         views: vec![text_view, metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
@@ -265,13 +270,14 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
     let mut reader = NsReader::from_reader(bytes);
     let mut buffer = Vec::new();
     let mut declaration_is_utf8 = true;
+    let mut forbidden_prolog_event = false;
     loop {
         match reader.read_resolved_event_into(&mut buffer) {
             Ok((namespace, Event::Start(start) | Event::Empty(start))) => {
-                if start.local_name().as_ref() != b"svg" {
+                if start.local_name().as_ref() != b"svg" || !is_svg_namespace(&namespace) {
                     return ProbeRoot::Other;
                 }
-                return if declaration_is_utf8 && is_svg_namespace(&namespace) {
+                return if declaration_is_utf8 && !forbidden_prolog_event {
                     ProbeRoot::Svg
                 } else {
                     ProbeRoot::MalformedSvg
@@ -281,7 +287,7 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
                 declaration_is_utf8 = declaration_uses_utf8(&declaration).unwrap_or(false);
             }
             Ok((_, Event::DocType(_) | Event::PI(_) | Event::GeneralRef(_) | Event::CData(_))) => {
-                return ProbeRoot::Other;
+                forbidden_prolog_event = true;
             }
             Ok((_, Event::Text(text))) => match text.xml10_content() {
                 Ok(text) if text.trim().is_empty() => {}
@@ -416,7 +422,9 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 validate_declaration(&declaration)?;
             }
             Event::Comment(comment) => {
-                if comment.as_ref().windows(2).any(|window| window == b"--") {
+                if comment.as_ref().windows(2).any(|window| window == b"--")
+                    || comment.as_ref().ends_with(b"-")
+                {
                     return Err(ParseIssue::Malformed);
                 }
                 if depth == 0 {
@@ -446,7 +454,10 @@ fn inspect_element(
     if depth == 0 && root_seen {
         return Err(ParseIssue::Malformed);
     }
-    if matches!(namespace, ResolveResult::Unbound) {
+    if matches!(
+        namespace,
+        ResolveResult::Unbound | ResolveResult::Unknown(_)
+    ) {
         return Err(ParseIssue::Malformed);
     }
     let binding = element.local_name();
@@ -471,6 +482,7 @@ fn inspect_element(
     if parsed.elements > MAX_ELEMENTS {
         return Err(ParseIssue::StructureLimit);
     }
+    let mut expanded_attributes = HashSet::new();
     for attribute in element.attributes() {
         let attribute = attribute.map_err(|_| ParseIssue::Malformed)?;
         *attribute_count = attribute_count
@@ -494,6 +506,7 @@ fn inspect_element(
             return Err(ParseIssue::Malformed);
         }
         if qualified_key == b"xmlns" || qualified_key.starts_with(b"xmlns:") {
+            validate_namespace_declaration(qualified_key, value.as_bytes())?;
             continue;
         }
         let attribute_namespace = if qualified_key.contains(&b':') {
@@ -505,6 +518,16 @@ fn inspect_element(
         } else {
             None
         };
+        let expanded_namespace = match &attribute_namespace {
+            Some(ResolveResult::Bound(namespace)) => namespace.as_ref(),
+            Some(ResolveResult::Unbound | ResolveResult::Unknown(_)) => {
+                return Err(ParseIssue::Malformed);
+            }
+            None => &[][..],
+        };
+        if !expanded_attributes.insert((expanded_namespace.to_vec(), key.to_vec())) {
+            return Err(ParseIssue::Malformed);
+        }
         let is_svg_attribute = attribute_namespace.is_none();
         let is_xlink_href = matches!(
             attribute_namespace,
@@ -811,7 +834,7 @@ fn append_text(output: &mut String, value: &str) -> Result<(), ParseIssue> {
 fn validated_output(
     evidence: ValidationEvidence,
     parsed: &ParsedSvg,
-) -> Result<ProcessorValidationOutput, ProcessorFailure> {
+) -> Result<ProcessorValidationOutput, FileMediaProviderFailure> {
     let metadata_json = metadata_json(parsed)?;
     Ok(ProcessorValidationOutput::Validated {
         media_type: String::from(MEDIA_TYPE),
@@ -820,7 +843,7 @@ fn validated_output(
     })
 }
 
-fn metadata_output(parsed: &ParsedSvg) -> Result<ProcessorReadOutput, ProcessorFailure> {
+fn metadata_output(parsed: &ParsedSvg) -> Result<ProcessorReadOutput, FileMediaProviderFailure> {
     Ok(ProcessorReadOutput::Structured {
         body_json: metadata_json(parsed)?,
         truncated: false,
@@ -828,46 +851,71 @@ fn metadata_output(parsed: &ParsedSvg) -> Result<ProcessorReadOutput, ProcessorF
     })
 }
 
-fn metadata_json(parsed: &ParsedSvg) -> Result<String, ProcessorFailure> {
+fn metadata_json(parsed: &ParsedSvg) -> Result<String, FileMediaProviderFailure> {
     serde_json::to_string(&serde_json::json!({
         "elements": parsed.elements,
         "height": parsed.height,
         "view_box": parsed.view_box,
         "width": parsed.width,
     }))
-    .map_err(|_| ProcessorFailure::Failed)
+    .map_err(|_| FileMediaProviderFailure::Failed)
 }
 
-async fn read_all(source: &dyn VerifiedBlobSource) -> Result<Vec<u8>, ProcessorFailure> {
-    read_range(source, 0, source.byte_length().get()).await
+async fn read_all(source: &dyn VerifiedBlobSource) -> Result<Vec<u8>, FileMediaProviderFailure> {
+    read_range(
+        source,
+        SourceRange {
+            offset: 0,
+            length: source.byte_length().get(),
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SourceRange {
+    offset: u64,
+    length: u64,
 }
 
 async fn read_range(
     source: &dyn VerifiedBlobSource,
-    offset: u64,
-    length: u64,
-) -> Result<Vec<u8>, ProcessorFailure> {
-    let length = NonZeroU64::new(length).ok_or(ProcessorFailure::Failed)?;
+    range: SourceRange,
+) -> Result<Vec<u8>, FileMediaProviderFailure> {
+    let length = NonZeroU64::new(range.length).ok_or(FileMediaProviderFailure::Failed)?;
     source
-        .read_range(offset, length)
+        .read_range(range.offset, length)
         .await
-        .map_err(|_| ProcessorFailure::Failed)
+        .map_err(|_| FileMediaProviderFailure::Failed)
 }
 
-fn require_reader(reader: &ReaderIdentity) -> Result<(), ProcessorFailure> {
+fn validate_namespace_declaration(name: &[u8], value: &[u8]) -> Result<(), ParseIssue> {
+    let prefix = name.strip_prefix(b"xmlns:");
+    if value == XMLNS_NAMESPACE
+        || prefix == Some(b"xmlns")
+        || (prefix == Some(b"xml") && value != XML_NAMESPACE)
+        || (prefix != Some(b"xml") && value == XML_NAMESPACE)
+        || prefix.is_some_and(|_| value.is_empty())
+    {
+        return Err(ParseIssue::Malformed);
+    }
+    Ok(())
+}
+
+fn require_reader(reader: &ReaderIdentity) -> Result<(), FileMediaProviderFailure> {
     if reader.provider().as_str() == PROVIDER_NAME
         && reader.reader().as_str() == READER_NAME
         && reader.revision().as_str() == READER_REVISION
     {
         Ok(())
     } else {
-        Err(ProcessorFailure::Protocol)
+        Err(FileMediaProviderFailure::Failed)
     }
 }
 
-fn require_active(cancellation: &dyn CancellationSignal) -> Result<(), ProcessorFailure> {
+fn require_active(cancellation: &dyn CancellationSignal) -> Result<(), FileMediaProviderFailure> {
     if cancellation.is_cancelled() {
-        Err(ProcessorFailure::Cancelled)
+        Err(FileMediaProviderFailure::Failed)
     } else {
         Ok(())
     }

@@ -8,12 +8,22 @@ pub const MAX_PROBE_SUFFIX_BYTES: u64 = 65_536;
 pub const MAX_PROBE_RANGES: u32 = 16;
 /// Hard safety ceiling; bounds aggregate probe reads to protect broker resources.
 pub const MAX_PROBE_CUMULATIVE_BYTES: u64 = 262_144;
+/// Hard safety ceiling; bounds one validation's aggregate source I/O.
+pub const MAX_VALIDATION_SOURCE_BYTES: u64 = 1_073_741_824;
+/// Hard safety ceiling; bounds one validation's exact-range fan-out.
+pub const MAX_VALIDATION_RANGES: u32 = 4_096;
+/// Hard safety ceiling; bounds one view's aggregate source I/O.
+pub const MAX_READ_SOURCE_BYTES: u64 = 1_073_741_824;
+/// Hard safety ceiling; bounds one random-access view's range fan-out.
+pub const MAX_READ_RANGES: u32 = 4_096;
 /// Hard safety ceiling; bounds one processor frame to protect daemon memory.
 pub const MAX_PROCESSOR_FRAME_BYTES: usize = 1_048_576;
 /// Hard safety ceiling; bounds serialized read options before processor framing.
 pub const MAX_READ_OPTIONS_BYTES: usize = 65_536;
-/// Hard safety ceiling; reserves worst-case JSON escaping space in one processor frame.
-pub const MAX_TEXT_OR_JSON_BYTES: usize = 170_000;
+/// Hard safety ceiling; bounds structured JSON so nested wire escaping fits one frame.
+pub const MAX_TEXT_OR_JSON_BYTES: usize = 500_000;
+/// Hard safety ceiling; bounds text so worst-case JSON escaping fits one tool result.
+pub const MAX_TEXT_BODY_BYTES: usize = 174_000;
 /// Hard safety ceiling; bounds JSON nesting to protect recursive traversal.
 pub const MAX_STRUCTURED_DEPTH: u32 = 64;
 /// Hard safety ceiling; bounds JSON nodes to protect traversal work and memory.
@@ -52,6 +62,8 @@ pub const MAX_WORKER_DESCENDANTS: u32 = 0;
 pub const MAX_WORKER_TASKS: u64 = 64;
 /// Maximum file descriptors available to an isolated worker.
 pub const MAX_WORKER_FILE_DESCRIPTORS: u64 = 32;
+/// Minimum descriptor ceiling that can launch bubblewrap and the dynamic worker.
+pub const MIN_WORKER_FILE_DESCRIPTORS: u64 = 16;
 /// Maximum retained diagnostic bytes from an isolated worker.
 pub const MAX_WORKER_STDERR_BYTES: usize = 16_384;
 
@@ -66,6 +78,14 @@ pub struct FileMediaCeilings {
     pub probe_ranges: u32,
     /// Maximum cumulative probe bytes.
     pub probe_cumulative_bytes: u64,
+    /// Maximum cumulative source bytes for one validation.
+    pub validation_source_bytes: u64,
+    /// Maximum exact ranges for one validation.
+    pub validation_ranges: u32,
+    /// Maximum cumulative source bytes for one read view.
+    pub read_source_bytes: u64,
+    /// Maximum exact ranges for one random-access read view.
+    pub read_ranges: u32,
     /// Maximum result body bytes.
     pub text_or_json_bytes: usize,
     /// Maximum structured nesting.
@@ -104,6 +124,10 @@ impl FileMediaCeilings {
             probe_suffix_bytes: MAX_PROBE_SUFFIX_BYTES,
             probe_ranges: MAX_PROBE_RANGES,
             probe_cumulative_bytes: MAX_PROBE_CUMULATIVE_BYTES,
+            validation_source_bytes: MAX_VALIDATION_SOURCE_BYTES,
+            validation_ranges: MAX_VALIDATION_RANGES,
+            read_source_bytes: MAX_READ_SOURCE_BYTES,
+            read_ranges: MAX_READ_RANGES,
             text_or_json_bytes: MAX_TEXT_OR_JSON_BYTES,
             structured_depth: MAX_STRUCTURED_DEPTH,
             structured_nodes: MAX_STRUCTURED_NODES,
@@ -131,6 +155,14 @@ impl FileMediaCeilings {
             && candidate.probe_ranges <= self.probe_ranges
             && candidate.probe_cumulative_bytes > 0
             && candidate.probe_cumulative_bytes <= self.probe_cumulative_bytes
+            && candidate.validation_source_bytes > 0
+            && candidate.validation_source_bytes <= self.validation_source_bytes
+            && candidate.validation_ranges > 0
+            && candidate.validation_ranges <= self.validation_ranges
+            && candidate.read_source_bytes > 0
+            && candidate.read_source_bytes <= self.read_source_bytes
+            && candidate.read_ranges > 0
+            && candidate.read_ranges <= self.read_ranges
             && candidate.text_or_json_bytes > 0
             && candidate.text_or_json_bytes <= self.text_or_json_bytes
             && candidate.structured_depth > 0
@@ -165,7 +197,7 @@ impl FileMediaCeilings {
 /// Labeled deployment overrides for lowerable worker resource limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileMediaProcessLimitOverrides {
-    /// Address-space byte limit applied before worker startup.
+    /// Combined worker-memory budget split between address space and writable tmpfs.
     pub memory_bytes: u64,
     /// CPU-second limit applied before worker startup.
     pub cpu_seconds: u64,
@@ -228,7 +260,7 @@ impl FileMediaProcessCeilings {
             && candidate.cpu_seconds <= self.cpu_seconds
             && candidate.wall_seconds > 0
             && candidate.wall_seconds <= self.wall_seconds
-            && candidate.file_descriptors >= 3
+            && candidate.file_descriptors >= MIN_WORKER_FILE_DESCRIPTORS
             && candidate.file_descriptors <= self.file_descriptors
             && candidate.stderr_bytes > 0
             && candidate.stderr_bytes <= self.stderr_bytes
@@ -239,7 +271,7 @@ impl FileMediaProcessCeilings {
         self.frame_bytes
     }
 
-    /// Returns the address-space byte limit applied before worker startup.
+    /// Returns the combined worker-memory budget split between address space and writable tmpfs.
     pub const fn memory_bytes(self) -> u64 {
         self.memory_bytes
     }
@@ -284,6 +316,7 @@ mod tests {
         MAX_AGGREGATE_MEDIA_BYTES_PER_CALL, MAX_MEDIA_REFERENCES_PER_CALL,
         MAX_PROCESSOR_FRAME_BYTES, MAX_WORKER_CPU_SECONDS, MAX_WORKER_FILE_DESCRIPTORS,
         MAX_WORKER_MEMORY_BYTES, MAX_WORKER_STDERR_BYTES, MAX_WORKER_WALL_SECONDS,
+        MIN_WORKER_FILE_DESCRIPTORS,
     };
 
     /// INV-072: deployment configuration can lower but never raise a compiled ceiling.
@@ -297,6 +330,24 @@ mod tests {
         assert_eq!(
             media.aggregate_media_bytes_per_call,
             MAX_AGGREGATE_MEDIA_BYTES_PER_CALL
+        );
+        assert!(!FileMediaCeilings::version_one().admits(FileMediaCeilings {
+            media_references_per_call: MAX_MEDIA_REFERENCES_PER_CALL + 1,
+            ..media
+        }));
+        assert!(!FileMediaCeilings::version_one().admits(FileMediaCeilings {
+            aggregate_media_bytes_per_call: MAX_AGGREGATE_MEDIA_BYTES_PER_CALL + 1,
+            ..media
+        }));
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+                memory_bytes: MAX_WORKER_MEMORY_BYTES + 1,
+                cpu_seconds: MAX_WORKER_CPU_SECONDS,
+                wall_seconds: MAX_WORKER_WALL_SECONDS,
+                file_descriptors: MAX_WORKER_FILE_DESCRIPTORS,
+                stderr_bytes: MAX_WORKER_STDERR_BYTES,
+            }),
+            None
         );
         assert_eq!(
             FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
@@ -312,12 +363,56 @@ mod tests {
             FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
                 memory_bytes: MAX_WORKER_MEMORY_BYTES,
                 cpu_seconds: MAX_WORKER_CPU_SECONDS,
+                wall_seconds: MAX_WORKER_WALL_SECONDS + 1,
+                file_descriptors: MAX_WORKER_FILE_DESCRIPTORS,
+                stderr_bytes: MAX_WORKER_STDERR_BYTES,
+            }),
+            None
+        );
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+                memory_bytes: MAX_WORKER_MEMORY_BYTES,
+                cpu_seconds: MAX_WORKER_CPU_SECONDS,
+                wall_seconds: MAX_WORKER_WALL_SECONDS,
+                file_descriptors: MAX_WORKER_FILE_DESCRIPTORS + 1,
+                stderr_bytes: MAX_WORKER_STDERR_BYTES,
+            }),
+            None
+        );
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+                memory_bytes: MAX_WORKER_MEMORY_BYTES,
+                cpu_seconds: MAX_WORKER_CPU_SECONDS,
+                wall_seconds: MAX_WORKER_WALL_SECONDS,
+                file_descriptors: MAX_WORKER_FILE_DESCRIPTORS,
+                stderr_bytes: MAX_WORKER_STDERR_BYTES + 1,
+            }),
+            None
+        );
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+                memory_bytes: MAX_WORKER_MEMORY_BYTES,
+                cpu_seconds: MAX_WORKER_CPU_SECONDS,
                 wall_seconds: MAX_WORKER_WALL_SECONDS,
                 file_descriptors: MAX_WORKER_FILE_DESCRIPTORS,
                 stderr_bytes: MAX_WORKER_STDERR_BYTES,
             })
             .map(FileMediaProcessCeilings::frame_bytes),
             Some(MAX_PROCESSOR_FRAME_BYTES)
+        );
+    }
+
+    #[test]
+    fn process_ceiling_rejects_an_unlaunchable_descriptor_limit() {
+        assert_eq!(
+            FileMediaProcessCeilings::try_lower(FileMediaProcessLimitOverrides {
+                memory_bytes: MAX_WORKER_MEMORY_BYTES,
+                cpu_seconds: MAX_WORKER_CPU_SECONDS,
+                wall_seconds: MAX_WORKER_WALL_SECONDS,
+                file_descriptors: MIN_WORKER_FILE_DESCRIPTORS - 1,
+                stderr_bytes: MAX_WORKER_STDERR_BYTES,
+            }),
+            None
         );
     }
 }

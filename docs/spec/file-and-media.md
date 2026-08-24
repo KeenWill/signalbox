@@ -34,12 +34,14 @@ whose root declares `type: object`; processor metadata is separately parsed and
 bounded as a canonical JSON object before it reaches a tool result.
 
 The common output vocabulary is closed as text, structure, image, audio, or
-general file. View names and meanings remain provider-owned. Every view declares
-an object options schema, streaming or finite-range access posture, cumulative
-source work, and output-specific finite bounds. Text and structured views bound
-body bytes; structure also bounds depth, nodes, and strings. Image, audio, and
-general-file views carry the corresponding dimension, pixel, channel, sample,
-duration, and byte bounds.
+general file. The provider-neutral core admits only text and structured views;
+rich view registration remains unavailable until the durable media-reference
+result path lands. View names and meanings remain provider-owned. Every view
+declares an object options schema, streaming or finite-range access posture,
+cumulative source work, and output-specific finite bounds. Text and structured
+views bound body bytes; structure also bounds depth, nodes, and strings. Image,
+audio, and general-file views carry the corresponding dimension, pixel, channel,
+sample, duration, and byte bounds.
 
 ## Registry and adapter boundary
 
@@ -52,7 +54,8 @@ The daemon-side registry stores checked declarations and calls only
 Registry construction sorts unsigned-ASCII provider/reader identities and
 rejects duplicate providers or readers, duplicate exact media-type claims,
 duplicate per-reader types, views, or reason codes, absent or excessive probe
-and output bounds, contradictory image bounds, ambiguous streaming-text
+and output bounds, read source work or range fan-out above their compiled
+lowerable ceilings, contradictory image bounds, ambiguous streaming-text
 fallback, unavailable isolation when any provider is present, and any effective
 ceiling above the compiled version-one value. An empty registry is valid.
 Configuration can therefore disable providers or lower bounds but cannot add a
@@ -62,9 +65,14 @@ An adapter author supplies one provider declaration with exact owned canonical
 types, probe budget, view schemas and resource envelopes, registered sanitized
 reason codes, and immutable reader revision. Probe, inspect, and read methods
 receive only a placement-free `VerifiedBlobSource`, cooperative cancellation,
-and their checked request. They return raw processor outputs: the registry
-reparses and cross-checks every type, evidence claim, reason, metadata object,
-body, JSON tree, continuation, and bound before admitting it.
+and their checked request. An adapter may report only adapter execution failure;
+the daemon supervisor originates process availability, timeout, cancellation,
+and framing failures. Validation requests carry effective lowerable source-byte
+and exact-range ceilings for broker enforcement. They return raw processor
+outputs: the registry reparses and cross-checks every type, evidence claim,
+reason, metadata object, body, JSON tree, continuation, and bound before
+admitting it. Structured output node and per-container entry ceilings stop
+duplicate-aware deserialization before structural excess is materialized.
 
 ## Implemented adapter coverage
 
@@ -117,11 +125,15 @@ or open database transaction to a processor.
 
 Unknown inspection is successful and has no views. Malformed, ambiguous,
 declared-mismatch, and encrypted outcomes are known typed failures. Reads admit
-only a declared view; options remain structured data for adapter validation.
-Text must be bounded valid UTF-8 without U+0000. Structured output must parse as
-bounded JSON within its declared depth, node, string, and byte limits. A cursor
-is absent on complete output and is a bounded control-free opaque value on a
-truncated result.
+only a declared view; options remain structured data for adapter validation. A
+complete `file_read` argument document admits a maximum nesting depth of 256
+JSON object and array containers; the outer argument and options objects count
+toward that depth. Text must be bounded valid UTF-8 without U+0000. Structured
+output must parse as bounded JSON within its declared depth, node, string, and
+byte limits. A cursor is absent on complete output and is a bounded control-free
+opaque value on a truncated result. A continuation read sends that cursor
+instead of initial view options through the same checked service and processor
+request contracts.
 
 **Committed unimplemented functionality.** No present daemon catalog composes
 these tools because the concrete rendered-frontier attachment resolver is not
@@ -137,8 +149,8 @@ The raw processor enums deliberately carry strings and JSON text rather than
 checked registry values. Oversized, malformed, injection-shaped, cross-reader,
 unregistered-reason, wrong-output-kind, contradictory continuation, and
 excessively nested responses collapse to sanitized processor failure without
-partial success (INV-068). Detection uses generated synthetic bytes and
-byte-derived evidence independent of caller declaration (INV-067).
+partial success (INV-076). Detection uses generated synthetic bytes and
+byte-derived evidence independent of caller declaration (INV-075).
 
 `signalbox-file-media-processor-runtime` implements `FileMediaProcessor` with
 one fresh local process for every probe, validation, or read. A provider maps to
@@ -151,19 +163,29 @@ nonempty registry is constructed.
 On Linux the processor launches the exact worker through bubblewrap. It unshares
 every supported namespace, explicitly unshares and then disables further user
 namespaces, drops every capability, clears the environment, creates private
-`/proc`, `/dev`, `/tmp`, and `/run`, and mounts only the exact worker plus the
-host's dynamic-runtime library trees read-only. It exposes no source path,
-catalog, database, daemon socket, configuration, credential, home directory, or
-network namespace. An architecture-checked seccomp filter returns `ENOSYS` for
-`clone3`, permits fallback `clone` only with `CLONE_THREAD`, and denies process
-creation. Decoder threads remain available while worker descendants stay zero.
+`/proc`, `/dev`, `/tmp`, and `/run`, places `/dev/shm` under its own bounded
+tmpfs mount, and mounts only the exact worker plus the host's dynamic-runtime
+library trees read-only. It exposes no source path, catalog, database, daemon
+socket, configuration, credential, home directory, or network namespace. An
+architecture-checked seccomp filter returns `ENOSYS` for `clone3`, permits
+fallback `clone` only with `CLONE_THREAD`, denies process creation, and denies
+unbudgeted inotify instance and watch allocation. Decoder threads remain
+available while worker descendants stay zero.
 
 Before releasing a dedicated startup gate, the daemon applies hard
-address-space, CPU, and descriptor limits to the sandbox process and all
-inherited worker threads. Address space is the conservative enforceable reading
-of the accepted memory ceiling on an unprivileged Linux host: it can reject an
-allocation before resident use reaches the same value and cannot admit more
-resident memory. The daemon independently owns the wall deadline and kills the
+address-space, CPU, core-dump, and descriptor limits to the sandbox process and
+all inherited worker threads. Each invocation first enters its own child of an
+explicitly configured writable delegated cgroup-v2 root, with `pids.max` set to
+the compiled task ceiling and `memory.max` set to the configured worker-memory
+ceiling before bubblewrap can fork. The memory controller accounts tmpfs data,
+inode slab, and other cgroup-charged kernel memory. Construction fails closed
+when either delegated controller cannot be validated. The configured memory
+ceiling is one combined budget: half is reserved for address space and half is
+split between the three writable tmpfs mounts, so their maxima cannot add to
+more than the configured value; `memory.max` independently bounds their charged
+memory and metadata. The daemon independently owns one wall deadline per
+invocation, one inspection-wide deadline across all serial reader probes, and
+one verification-wide deadline across all configured worker probes. It kills the
 isolated process group on timeout or authoritative cancellation. Bounded stderr
 is drained and discarded; it is never parser evidence, telemetry content, or
 model-visible output.
@@ -172,10 +194,12 @@ The worker receives one digest and positive length, then requests exact byte
 ranges over length-delimited standard I/O. The daemon checks every request for
 positive checked arithmetic, source length, per-frame size, access posture,
 range count, cumulative source work, and cancellation before calling
-`VerifiedBlobSource`. Probe and validation share the reader's declared probe
-envelope. A typed read uses its selected view's streaming or random-access
-envelope. Streaming access is monotonic; no range can exceed half the effective
-frame ceiling, so encoded source replies remain bounded.
+`VerifiedBlobSource`. Probing uses the reader's declared probe envelope.
+Validation uses its independent effective random-access source-byte and
+exact-range ceilings, up to the compiled 1 GiB and 4,096-range maxima. A typed
+read uses its selected view's streaming or random-access envelope. Streaming
+access is monotonic; no range can exceed half the effective frame ceiling, so
+encoded source replies remain bounded.
 
 A worker result is eligible for the existing durable tool-result commit path
 only after one matching final frame, exact EOF with no trailing byte, successful
@@ -183,37 +207,45 @@ worker exit, and complete bounded stderr drain. EOF before a final frame, crash,
 signal, timeout, cancellation, malformed or oversized framing, extra output,
 source failure, or limit excess discards the whole result. Thus the isolation
 slice can leave neither a partial durable result nor parser output that bypasses
-the registry sanitizer (INV-074 through INV-079). Authoritative cancellation
-terminates the in-flight worker and admits no result (INV-080).
+the registry sanitizer (INV-081 through INV-086). Authoritative cancellation
+terminates the in-flight worker and admits no result (INV-087).
 
 The version-one compiled ceilings are:
 
-| Resource                              | Maximum                |
-| ------------------------------------- | ---------------------- |
-| Probe prefix and suffix               | 65,536 bytes each      |
-| Probe ranges / cumulative bytes       | 16 / 262,144           |
-| Processor frame / text-or-JSON body   | 1,048,576 / 170,000    |
-| Serialized read options               | 65,536 bytes           |
-| Structured depth / nodes              | 64 / 100,000           |
-| Observed container entries            | 10,000                 |
-| Image axis / decoded pixels           | 8,192 / 16,777,216     |
-| Presented image bytes                 | 8,388,608              |
-| Audio channels / sample rate          | 8 / 192,000 Hz         |
-| Audio duration / presented bytes      | 60 s / 8,388,608       |
-| Presented general-file bytes          | 8,388,608              |
-| References / aggregate media per call | 16 / 33,554,432 bytes  |
-| Worker address space / CPU / wall     | 512 MiB / 60 s / 120 s |
-| Worker descriptors / retained stderr  | 32 / 16,384 bytes      |
-| Worker descendants                    | 0                      |
+| Resource                              | Maximum                 |
+| ------------------------------------- | ----------------------- |
+| Probe prefix and suffix               | 65,536 bytes each       |
+| Probe ranges / cumulative bytes       | 16 / 262,144            |
+| Processor frame                       | 1,048,576 bytes         |
+| Text body / JSON body                 | 174,000 / 500,000 bytes |
+| Serialized read options               | 65,536 bytes            |
+| Structured depth / nodes              | 64 / 100,000            |
+| Observed container entries            | 10,000                  |
+| Image axis / decoded pixels           | 8,192 / 16,777,216      |
+| Presented image bytes                 | 8,388,608               |
+| Audio channels / sample rate          | 8 / 192,000 Hz          |
+| Audio duration / presented bytes      | 60 s / 8,388,608        |
+| Presented general-file bytes          | 8,388,608               |
+| References / aggregate media per call | 16 / 33,554,432 bytes   |
+| Worker memory budget / CPU / wall     | 512 MiB / 60 s / 120 s  |
+| Worker descriptors / retained stderr  | 32 / 16,384 bytes       |
+| Minimum worker descriptor override    | 16 descriptors          |
+| One / aggregate executable snapshots  | 64 MiB / 64 MiB         |
+| Worker bindings per processor         | 256                     |
+| Worker tasks                          | 64                      |
+| Worker descendants                    | 0                       |
 
 `FileMediaCeilings` admits only positive effective values at or below its
 compiled maxima. `FileMediaProcessCeilings` keeps the protocol frame fixed at
 1,048,576 bytes while admitting only positive resource values at or below their
-compiled maxima; descendants are fixed at zero (INV-072). The text-or-JSON body
-ceiling reserves enough frame space for worst-case JSON escaping and envelope
-fields. A stored source may be larger. A streaming view must request it in
-bounded frames under its finite declared source-work envelope; a whole-decode
-view may reject it without changing the blob.
+compiled maxima; descendants are fixed at zero (INV-072). Each worker snapshot
+is additionally capped by its effective worker address-space budget; bubblewrap
+and all distinct worker snapshots together cannot exceed the 64 MiB aggregate
+snapshot ceiling. The text body ceiling reserves enough frame space for
+worst-case JSON escaping and envelope fields. A stored source may be larger. A
+streaming view must request it in bounded frames under its finite declared
+source-work envelope; a whole-decode view may reject it without changing the
+blob.
 
 **Committed unimplemented functionality.** No worker is composed into
 `signalboxd` because no concrete rendered-frontier resolver is present. No
