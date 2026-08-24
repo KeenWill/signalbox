@@ -6624,7 +6624,7 @@ pub struct UsageAggregateGroup {
     pub key: UsageAggregateKey,
     pub call_count: u64,
     pub tokens: UsageAggregateTokenAxes,
-    pub cost_derivation_safe: bool,
+    pub cache_normalization_safe: bool,
 }
 
 pub struct UsageAggregateReport {

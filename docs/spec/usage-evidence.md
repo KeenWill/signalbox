@@ -28,6 +28,10 @@ Aggregate reads group only calls that agree on call kind, resolved target,
 credential profile, provenance, input-token semantics, and the typed presence
 state of every token axis. Absence is never replaced by zero. This separation is
 the compatibility boundary for later rate-based cost derivation.
+The aggregate cache-normalization flag says only whether cache-inclusive input
+can be normalized without underflow. It does not claim that a configured rate's
+decimal arithmetic is representable or equivalent to checked per-call costing;
+rate consumers must establish those properties independently.
 
 An aggregate consumes at most 10,000 newest matching calls and returns at most
 256 compatibility groups. `truncated` is true when either source calls or groups
@@ -47,8 +51,10 @@ are limited to the shared PostgreSQL/`time` representable range through
 ## Detail pagination
 
 Detail reads return at most 100 calls in newest-first order by
-`(recorded_at, model_call_id)`. A continuation cursor is an exclusive boundary
-at that same pair. The cursor provides deterministic keyset traversal of rows
+`(recorded_at, model_call_id)`. `recorded_at` is the terminal statement time,
+not the enclosing transaction's start time. A continuation cursor is an
+exclusive boundary at that same pair. The cursor provides deterministic keyset
+traversal of rows
 already visible ahead of it, not a cross-page snapshot. Oldest-first traversal
 is not exposed because transaction start timestamps can become visible behind an
 already emitted oldest-first cursor when concurrent transactions commit.

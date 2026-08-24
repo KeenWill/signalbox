@@ -5,7 +5,8 @@
 -- deliberately not stored.
 
 -- Tighten canonical compaction evidence before projection backfill. This is a
--- forward correction because recorded migrations are immutable.
+-- forward correction because recorded migrations are immutable. The replaced
+-- constraint was defined by 202607290401_context_compaction.sql.
 ALTER TABLE context_compaction_model_call
     ADD COLUMN usage_input_includes_cache_tokens boolean;
 ALTER TABLE context_compaction_model_call
@@ -86,7 +87,7 @@ CREATE TABLE web_usage_call_projection (
     output_tokens numeric,
     cache_creation_input_tokens numeric,
     cache_read_input_tokens numeric,
-    recorded_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
+    recorded_at timestamptz NOT NULL DEFAULT statement_timestamp(),
 
     CONSTRAINT web_usage_call_kind_closed
         CHECK (call_kind IN ('model_call', 'approval_judge', 'context_compaction')),
@@ -238,9 +239,9 @@ BEGIN
 END;
 $$;
 
--- Existing terminal rows are projected at the migration transaction's exact
+-- Existing terminal rows are projected at each backfill statement's exact
 -- timestamp. Signalbox is pre-alpha, so no deployed historical time is
--- fabricated; all subsequent rows record their terminal transaction time.
+-- fabricated; all subsequent rows record their terminal statement time.
 INSERT INTO web_usage_call_projection (
     model_call_id, call_kind, session_id, turn_id,
     resolved_provider_model_identity_id, credential_reference,

@@ -381,6 +381,21 @@ async fn usage_projection_has_combined_selection_indexes_and_canonical_token_bou
     .fetch_one(&pool)
     .await?;
     assert!(compaction_semantics_trigger.contains("BEFORE INSERT OR UPDATE"));
+    let recorded_at_default: String = sqlx::query_scalar(
+        "SELECT pg_get_expr(adbin, adrelid)
+           FROM pg_attrdef
+          WHERE adrelid = 'web_usage_call_projection'::regclass
+            AND adnum = (
+                SELECT attnum
+                  FROM pg_attribute
+                 WHERE attrelid = 'web_usage_call_projection'::regclass
+                   AND attname = 'recorded_at'
+                   AND NOT attisdropped
+            )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(recorded_at_default, "statement_timestamp()");
 
     pool.close().await;
     drop(container);
