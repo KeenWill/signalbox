@@ -312,7 +312,7 @@ pub struct CodexCliRuntime {
 
 /// Opaque one-shot capability for one Codex CLI spawn.
 ///
-/// It owns the rendered full context and the temporary output-schema file.
+/// It owns the rendered full context and the temporary output files.
 /// It deliberately implements neither `Clone`, serialization, nor diagnostic
 /// formatting.
 #[must_use]
@@ -321,6 +321,7 @@ pub struct CodexCliPreparedRequest<C> {
     working_directory: PathBuf,
     prompt: Vec<u8>,
     output_schema: NamedTempFile,
+    output_last_message: NamedTempFile,
     correlation: C,
     resolved_target: String,
     delivery: DeliveryMode,
@@ -559,7 +560,7 @@ impl CodexCliRuntime {
         let mut output_schema = match tempfile::Builder::new()
             .prefix("signalbox-codex-output-")
             .suffix(".json")
-            .tempfile_in(temporary_directory)
+            .tempfile_in(&temporary_directory)
         {
             Ok(file) => file,
             Err(error) => {
@@ -580,12 +581,28 @@ impl CodexCliRuntime {
                 },
             };
         }
+        let output_last_message = match tempfile::Builder::new()
+            .prefix("signalbox-codex-last-message-")
+            .suffix(".json")
+            .tempfile_in(&temporary_directory)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                return PreparationOutcome::Defect {
+                    correlation,
+                    defect: PreparationDefect::RequestConstructionFailed {
+                        detail: format!("could not create output-last-message file: {error}"),
+                    },
+                };
+            }
+        };
         let prompt = std::mem::take(&mut translated.prompt);
         PreparationOutcome::Prepared(CodexCliPreparedRequest {
             executable: self.executable.clone(),
             working_directory: self.working_directory.clone(),
             prompt,
             output_schema,
+            output_last_message,
             correlation,
             resolved_target: operation.resolved_target.as_str().to_string(),
             delivery: operation.delivery,
@@ -756,12 +773,16 @@ async fn execute_process<C: Clone + Send + Sync>(
         .arg(&prepared.resolved_target)
         .arg("--output-schema")
         .arg(prepared.output_schema.path())
+        .arg("--output-last-message")
+        .arg(prepared.output_last_message.path())
         .arg("-")
         .current_dir(&prepared.working_directory);
     let decoder = EventDecoder::new(
         prepared.correlation.clone(),
         prepared.delivery,
         &prepared.translated,
+        prepared.output_last_message.path().to_path_buf(),
+        prepared.event_limit,
     );
     let request = CliProcessRequest {
         command,
@@ -776,6 +797,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         environment_overrides: Vec::new(),
     };
     let _output_schema = prepared.output_schema;
+    let _output_last_message = prepared.output_last_message;
     execute_cli_process(request, sink, cancellation).await
 }
 

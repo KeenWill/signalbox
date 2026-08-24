@@ -441,6 +441,7 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     );
     assert_eq!(result.spawns, 1);
     assert!(result.argv.contains("exec\n--json\n--ephemeral"));
+    assert!(result.argv.contains("--output-last-message"));
     assert!(result.argv.contains("--ignore-user-config"));
     assert!(result.argv.contains("--ignore-rules"));
     assert!(result.argv.contains(&disabled_capability_argv()));
@@ -455,6 +456,42 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     assert!(result.argv.contains("--config\nproject_doc_max_bytes=0"));
     assert!(result.argv.contains(RESOLVED_TARGET));
     assert!(result.prompt.contains(scenario));
+}
+
+#[tokio::test]
+async fn completed_turn_recovers_the_clis_independently_retained_final_message() {
+    let result = execute_scenario(
+        "output_last_message_recovery",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a final message recovered from the CLI-owned file still follows
+/// the preceding JSONL redaction state; the second channel cannot bypass a
+/// credential marker retained from an earlier event.
+#[tokio::test]
+async fn inv_035_output_last_message_consults_the_jsonl_redaction_state() {
+    let result = execute_scenario(
+        "output_last_message_split_credential",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = boundary_material(&result);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_STREAM_TOKEN));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
 }
 
 /// Exact ordered argv fragment generated from the audited production fixture,

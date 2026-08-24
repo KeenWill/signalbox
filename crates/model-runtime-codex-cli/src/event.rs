@@ -36,6 +36,8 @@
 //! local to it.
 
 use std::collections::HashSet;
+use std::io::Read;
+use std::path::PathBuf;
 
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -78,6 +80,8 @@ pub(crate) struct EventDecoder<C> {
     exchange: ExchangeFacts,
     message_id: Option<String>,
     agent_message: Option<String>,
+    output_last_message: PathBuf,
+    terminal_message_limit: usize,
     next_part_index: u32,
     usage: TokenUsage,
     terminal: Option<CliTerminal>,
@@ -102,6 +106,8 @@ impl<C: Clone> EventDecoder<C> {
         correlation: C,
         delivery: DeliveryMode,
         translated: &TranslatedOperation,
+        output_last_message: PathBuf,
+        terminal_message_limit: usize,
     ) -> Self {
         Self {
             correlation,
@@ -112,6 +118,8 @@ impl<C: Clone> EventDecoder<C> {
             exchange: ExchangeFacts::default(),
             message_id: None,
             agent_message: None,
+            output_last_message,
+            terminal_message_limit,
             next_part_index: 0,
             usage: TokenUsage::unreported(),
             terminal: None,
@@ -438,14 +446,27 @@ impl<C: Clone> EventDecoder<C> {
     }
 
     fn completed(mut self, sink: &mut RedactingSink<'_, C>) -> TerminalEvidence {
-        let Some(agent_message) = self.agent_message.take() else {
-            return boundary_loss_before_envelope(
-                self.exchange,
-                self.usage,
-                LossCause::ResponseUnintelligible {
-                    detail: "turn.completed carried no response envelope".to_string(),
-                },
-            );
+        let agent_message = match self.agent_message.take() {
+            Some(agent_message) => agent_message,
+            None => match self.read_output_last_message() {
+                Ok(Some(agent_message)) => agent_message,
+                Ok(None) => {
+                    return boundary_loss_before_envelope(
+                        self.exchange,
+                        self.usage,
+                        LossCause::ResponseUnintelligible {
+                            detail: "turn.completed carried no response envelope".to_string(),
+                        },
+                    );
+                }
+                Err(detail) => {
+                    return boundary_loss_before_envelope(
+                        self.exchange,
+                        self.usage,
+                        LossCause::ResponseUnintelligible { detail },
+                    );
+                }
+            },
         };
         if let Err(error) = validate_provider_json_nesting(agent_message.as_bytes()) {
             return boundary_loss_before_envelope(
@@ -613,6 +634,32 @@ impl<C: Clone> EventDecoder<C> {
                 })
             }
         }
+    }
+
+    /// Reads the pinned CLI's independently retained final message only when
+    /// JSONL did not deliver an agent-message item. The process has exited
+    /// before `finish` runs, and the same event-size ceiling bounds this
+    /// secondary representation before allocation or UTF-8 decoding.
+    fn read_output_last_message(&self) -> Result<Option<String>, String> {
+        let file = std::fs::File::open(&self.output_last_message).map_err(|_| {
+            "Codex output-last-message file could not be opened after completion".to_string()
+        })?;
+        let read_limit = u64::try_from(self.terminal_message_limit)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let mut bytes = Vec::new();
+        file.take(read_limit).read_to_end(&mut bytes).map_err(|_| {
+            "Codex output-last-message file could not be read after completion".to_string()
+        })?;
+        if bytes.len() > self.terminal_message_limit {
+            return Err("Codex output-last-message exceeded the event-size bound".to_string());
+        }
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        String::from_utf8(bytes)
+            .map(Some)
+            .map_err(|_| "Codex output-last-message was not UTF-8".to_string())
     }
 
     fn decode_content(
