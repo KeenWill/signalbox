@@ -354,6 +354,32 @@ test('does not widen repeated exact-session parameters to global search', async 
   expect(searchRequests).toBe(0)
 })
 
+test('recovers global search when resubmitting over repeated session parameters', async ({
+  page,
+}) => {
+  await useSearchFixture(page)
+  await page.goto(`/search?q=release&session=${sessionId}&session=${sessionId}`)
+  await expect(page.getByRole('alert')).toContainText('Search parameters are malformed')
+
+  await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
+
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await expect(page).not.toHaveURL(/session=/)
+})
+
+test('restores focus to validation when history restores repeated session parameters', async ({
+  page,
+}) => {
+  await useSearchFixture(page)
+  await page.goto(`/search?q=release&session=${sessionId}&session=${sessionId}`)
+  await expect(page.getByRole('alert')).toBeVisible()
+  await page.getByRole('textbox', { name: 'Search text' }).press('Enter')
+  await expect(page.getByRole('heading', { name: '2 results on this page' })).toBeVisible()
+  await page.goBack()
+
+  await expect(page.getByRole('alert')).toBeFocused()
+})
+
 test('does not search without the bounded JSON capability', async ({ page }) => {
   let searchRequests = 0
   await page.route('**/api/bootstrap', (route) =>

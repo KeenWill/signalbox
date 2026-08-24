@@ -96,8 +96,10 @@ export function SearchSurface({
   const routeStateRef = useRef({
     q: state.q,
     session: state.session,
+    sessionParameterIsValid: state.sessionParameterIsValid,
     afterAddress: state.afterAddress,
     afterProjection: state.afterProjection,
+    cursorParametersAreValid: state.cursorParametersAreValid,
   })
   useEffect(() => setDraftQuery(state.q ?? ''), [state.q])
   useEffect(() => setDraftSession(state.session ?? ''), [state.session])
@@ -106,8 +108,10 @@ export function SearchSurface({
     const routeChanged =
       previous.q !== state.q ||
       previous.session !== state.session ||
+      previous.sessionParameterIsValid !== state.sessionParameterIsValid ||
       previous.afterAddress !== state.afterAddress ||
-      previous.afterProjection !== state.afterProjection
+      previous.afterProjection !== state.afterProjection ||
+      previous.cursorParametersAreValid !== state.cursorParametersAreValid
     if (routeChanged && submittedRouteChangeRef.current) {
       submittedRouteChangeRef.current = false
     } else if (routeChanged) {
@@ -116,10 +120,19 @@ export function SearchSurface({
     routeStateRef.current = {
       q: state.q,
       session: state.session,
+      sessionParameterIsValid: state.sessionParameterIsValid,
       afterAddress: state.afterAddress,
       afterProjection: state.afterProjection,
+      cursorParametersAreValid: state.cursorParametersAreValid,
     }
-  }, [state.afterAddress, state.afterProjection, state.q, state.session])
+  }, [
+    state.afterAddress,
+    state.afterProjection,
+    state.cursorParametersAreValid,
+    state.q,
+    state.session,
+    state.sessionParameterIsValid,
+  ])
   const queryText = state.q?.trim() ?? ''
   const queryBytes = new TextEncoder().encode(queryText).length
   const queryLimit = bootstrap?.limits.max_search_query_bytes ?? 0
@@ -197,6 +210,7 @@ export function SearchSurface({
     if (
       q !== queryText ||
       submittedSession !== state.session ||
+      !sessionIsValid ||
       activeAfter !== undefined ||
       !cursorMetadataIsValid
     ) {
@@ -204,6 +218,7 @@ export function SearchSurface({
       onStateChange({
         q,
         session: submittedSession,
+        sessionParameterIsValid: undefined,
         afterAddress: undefined,
         afterProjection: undefined,
         cursorParametersAreValid: undefined,
