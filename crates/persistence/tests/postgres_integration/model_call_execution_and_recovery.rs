@@ -1664,13 +1664,7 @@ async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database(
     holder.rollback().await?;
     let retried = repository.reconcile(claimed).await?;
 
-    let ModelCallReconciliationRepositoryError::Database {
-        commit_ambiguous,
-        source,
-    } = &contended
-    else {
-        panic!("a bounded lock wait fails as an ordinary database failure")
-    };
+    let (commit_ambiguous, source) = reconciliation_database_failure(&contended);
     assert!(!commit_ambiguous);
     assert_eq!(
         source
@@ -1715,6 +1709,24 @@ async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database(
 /// pairing the daemon does not run.
 fn production_reconciliation_caller_bound() -> std::time::Duration {
     RECONCILIATION_LOCK_WAIT * 5
+}
+
+/// Returns the commit ambiguity and driver failure a database-class error carries.
+///
+/// Reading a variant out is branching, which rule 2 keeps out of a test body.
+/// The helper absorbs only that: which failure each test expects, and what it
+/// asserts about it, stay at the call site.
+#[track_caller]
+fn reconciliation_database_failure(
+    error: &ModelCallReconciliationRepositoryError,
+) -> (bool, &sqlx::Error) {
+    match error {
+        ModelCallReconciliationRepositoryError::Database {
+            commit_ambiguous,
+            source,
+        } => (*commit_ambiguous, source),
+        other => panic!("expected an ordinary database failure, got {other}"),
+    }
 }
 
 /// S04 / S10: the durable failure record is bounded inside the database too, so
@@ -1775,13 +1787,7 @@ async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
     .fetch_one(&pool)
     .await?;
 
-    let ModelCallReconciliationRepositoryError::Database {
-        commit_ambiguous,
-        source,
-    } = &contended
-    else {
-        panic!("a bounded lock wait fails as an ordinary database failure")
-    };
+    let (commit_ambiguous, source) = reconciliation_database_failure(&contended);
     assert!(!commit_ambiguous);
     assert_eq!(
         source
@@ -1825,10 +1831,13 @@ async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
 /// after another.
 ///
 /// The pool is exhausted rather than the server slowed because that is the same
-/// wait from the caller's side and is deterministic. Both constants are read
-/// rather than restated: the wait reached the acquisition budget, and ended
-/// well inside the per-statement database budget that governs everything after
-/// it.
+/// wait from the caller's side and is deterministic. Only the lower bound is
+/// asserted, and the constant is read rather than restated: reaching it is what
+/// shows the acquisition budget ran out rather than something earlier failing.
+/// An upper bound would be measuring the host instead — elapsed time here
+/// includes however long the test task waited to be rescheduled after the
+/// budget became ready, so a paused runner could carry it past an unrelated
+/// budget while the acquisition behaved exactly as asserted.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_begins()
@@ -1863,13 +1872,7 @@ async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_b
     drop(held);
     let retried = repository.reconcile(claimed).await?;
 
-    let ModelCallReconciliationRepositoryError::Database {
-        commit_ambiguous,
-        source,
-    } = &starved
-    else {
-        panic!("a bounded acquisition fails as an ordinary database failure")
-    };
+    let (commit_ambiguous, source) = reconciliation_database_failure(&starved);
     assert!(
         !commit_ambiguous,
         "no transaction began, so no commit could be in doubt"
@@ -1894,11 +1897,6 @@ async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_b
     assert!(
         waited >= RECONCILIATION_ACQUIRE_WAIT,
         "the acquisition spent its budget, so {waited:?} is what that bound ended"
-    );
-    assert!(
-        waited < RECONCILIATION_LOCK_WAIT,
-        "the acquisition budget has to end the wait well inside the \
-         per-statement database budget it protects, but it took {waited:?}"
     );
     assert_eq!(
         parked_still,

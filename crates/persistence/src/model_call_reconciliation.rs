@@ -1,6 +1,6 @@
 //! Durable daemon-owned reconciliation of ambiguous model calls.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, future::Future, time::Duration};
 
 use signalbox_application::{
     ClaimedModelCallReconciliation, ClassifyOperatorFailure, ExhaustedModelCallReconciliation,
@@ -11,7 +11,10 @@ use signalbox_domain::{
     AmbiguousModelCallTurnIdentities, ContextFrontierId, PendingSteeringReclassificationIdentity,
     TurnId,
 };
-use sqlx::{Acquire, PgConnection, PgPool, Postgres, Row, Transaction, pool::PoolConnection};
+use sqlx::{
+    PgConnection, PgPool, Postgres, Row, Transaction,
+    pool::{MaybePoolConnection, PoolConnection},
+};
 use tokio::time::timeout;
 
 use crate::{
@@ -106,20 +109,67 @@ async fn acquire_bounded(
         .map_err(ModelCallReconciliationRepositoryError::database)
 }
 
-/// Opens the transaction on an already-acquired connection.
+/// Drives `work` where a caller that gives up cannot cancel it.
 ///
-/// Deliberately outside [`RECONCILIATION_ACQUIRE_WAIT`]. From here on the
-/// server-side [`RECONCILIATION_LOCK_WAIT`] and the caller's whole-transaction
-/// bound are what govern, and those are budgets a transaction can spend: the
-/// first ends a lock wait inside the database, and the second is the last
-/// resort for a backend that has stopped answering at all.
-async fn begin_acquired(
-    connection: &mut PoolConnection<Postgres>,
-) -> Result<Transaction<'_, Postgres>, ModelCallReconciliationRepositoryError> {
-    connection
-        .begin()
-        .await
-        .map_err(ModelCallReconciliationRepositoryError::database)
+/// Dropping a future is the only way an `async` caller abandons work, so a
+/// deadline that wraps a database operation cancels it mid-flight. Driving the
+/// operation on its own task separates the two: the caller's deadline abandons
+/// the join handle, while the task keeps running and finishes what it sent.
+///
+/// A task that ends without producing its value can only have panicked, which
+/// this crate's lint set denies; it is reported as the driver's own worker
+/// failure so the caller reads one infrastructure class rather than two.
+async fn uncancellable<T>(
+    work: impl Future<Output = Result<T, ModelCallReconciliationRepositoryError>> + Send + 'static,
+) -> Result<T, ModelCallReconciliationRepositoryError>
+where
+    T: Send + 'static,
+{
+    tokio::spawn(work).await.unwrap_or_else(|_| {
+        Err(ModelCallReconciliationRepositoryError::database(
+            sqlx::Error::WorkerCrashed,
+        ))
+    })
+}
+
+/// Opens the transaction and installs its budget, both beyond cancellation.
+///
+/// `BEGIN` and the `lock_timeout` statement are the one stretch of a
+/// reconciliation transaction that no database-side budget covers, because the
+/// budget is what the second of them installs. Until it lands the only bound in
+/// play is the caller's whole-transaction deadline, and letting that deadline
+/// end the stretch is the defect this module exists to close rather than a
+/// smaller one: `BEGIN` is already on the wire, so dropping the future queues a
+/// `ROLLBACK` behind a statement the backend has not acknowledged and the
+/// pooled connection stays checked out for the full real wait — under the
+/// slowdown that made `BEGIN` slow in the first place, and for successive
+/// watchdog attempts in turn.
+///
+/// Running the stretch on its own task makes it uncancellable rather than
+/// merely unbounded. A caller that gives up drops the join handle; the task
+/// finishes `BEGIN`, and the transaction it opened is dropped where it is
+/// complete, which is an ordinary rollback on a connection nobody is racing.
+/// From the returned transaction onward [`RECONCILIATION_LOCK_WAIT`] is in
+/// force, so the caller's deadline is what the specification says it is: the
+/// last resort for a backend that has stopped answering at all, sitting above a
+/// database-side budget that expires first.
+///
+/// The acquisition stays outside, under [`RECONCILIATION_ACQUIRE_WAIT`]:
+/// abandoning it is free in the way abandoning a statement is not, so shielding
+/// it would only delay a pool failure the caller can already read.
+async fn begin_budgeted(
+    pool: &PgPool,
+) -> Result<Transaction<'static, Postgres>, ModelCallReconciliationRepositoryError> {
+    let connection = acquire_bounded(pool).await?;
+    uncancellable(async move {
+        let mut transaction =
+            Transaction::begin(MaybePoolConnection::PoolConnection(connection), None)
+                .await
+                .map_err(ModelCallReconciliationRepositoryError::database)?;
+        bound_reconciliation_lock_wait(&mut transaction).await?;
+        Ok(transaction)
+    })
+    .await
 }
 
 /// Applies [`RECONCILIATION_LOCK_WAIT`] to the transaction on `connection`.
@@ -302,9 +352,7 @@ impl PostgresModelCallReconciliationRepository {
     pub async fn claim_due(
         &self,
     ) -> Result<ModelCallReconciliationBatch, ModelCallReconciliationRepositoryError> {
-        let mut connection = acquire_bounded(&self.pool).await?;
-        let mut transaction = begin_acquired(&mut connection).await?;
-        bound_reconciliation_lock_wait(&mut transaction).await?;
+        let mut transaction = begin_budgeted(&self.pool).await?;
         discover_recoveries(&mut transaction, CLAIM_WINDOW).await?;
         settle_abandoned_attempts(&mut transaction, CLAIM_WINDOW).await?;
         mark_superseded_recoveries(&mut transaction, CLAIM_WINDOW).await?;
@@ -354,9 +402,7 @@ impl PostgresModelCallReconciliationRepository {
         &self,
         claimed: ClaimedModelCallReconciliation,
     ) -> Result<ModelCallReconciliationOutcome, ModelCallReconciliationRepositoryError> {
-        let mut connection = acquire_bounded(&self.pool).await?;
-        let mut transaction = begin_acquired(&mut connection).await?;
-        bound_reconciliation_lock_wait(&mut transaction).await?;
+        let mut transaction = begin_budgeted(&self.pool).await?;
         lock_delegated_child_endpoint_sessions(&mut transaction, claimed.session())
             .await
             .map_err(ModelCallReconciliationRepositoryError::Model)?;
@@ -509,9 +555,7 @@ impl PostgresModelCallReconciliationRepository {
         claimed: ClaimedModelCallReconciliation,
         failure: ModelCallReconciliationFailureKind,
     ) -> Result<(), ModelCallReconciliationRepositoryError> {
-        let mut connection = acquire_bounded(&self.pool).await?;
-        let mut transaction = begin_acquired(&mut connection).await?;
-        bound_reconciliation_lock_wait(&mut transaction).await?;
+        let mut transaction = begin_budgeted(&self.pool).await?;
         let rows = sqlx::query(
             "UPDATE automatic_model_call_reconciliation_attempt
                 SET outcome_kind = $3, finished_at = statement_timestamp()
@@ -714,10 +758,49 @@ async fn finish_attempt(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use tokio::{sync::oneshot, time::timeout};
+
+    use super::uncancellable;
     use crate::lock_inventory::{
         AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY,
         AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION,
     };
+
+    /// A caller that gives up abandons its own wait, not the work.
+    ///
+    /// This is the whole property `begin_budgeted` rests on: `BEGIN` and the
+    /// `lock_timeout` statement run where the caller's whole-transaction
+    /// deadline cannot cancel them, so no future is ever dropped between the
+    /// statement reaching the wire and the backend answering.
+    ///
+    /// Nothing here is timed. The caller's deadline is already expired when it
+    /// first polls, and the work is held on a channel that is sent only after
+    /// the caller has gone, so a shield that had become a plain `await` would
+    /// leave that send with no receiver rather than losing a race.
+    #[tokio::test]
+    async fn work_a_caller_abandons_still_runs_to_completion() {
+        let (release, released) = oneshot::channel::<()>();
+        let (finish, finished) = oneshot::channel::<()>();
+        let shielded = uncancellable(async move {
+            let _ = released.await;
+            let _ = finish.send(());
+            Ok(())
+        });
+
+        let abandoned = timeout(Duration::ZERO, shielded).await;
+        let _ = release.send(());
+
+        assert!(
+            abandoned.is_err(),
+            "the caller gave up before the work could"
+        );
+        assert!(
+            finished.await.is_ok(),
+            "the abandoned work ran to completion on its own task"
+        );
+    }
 
     #[test]
     fn discovery_is_a_bounded_keyset_page() {

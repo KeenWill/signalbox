@@ -119,13 +119,19 @@ const RECOVERY_ATTEMPT_BOUND: Duration = Duration::from_secs(1);
 /// Deliberately wider than [`RECOVERY_ATTEMPT_BOUND`], because these three
 /// transactions bound their row waits inside PostgreSQL and this bound must let
 /// that happen. The two timers do not measure the same thing: this one starts
-/// before the pool is asked for a connection and runs across `BEGIN`,
-/// `set_config`, and every statement, whereas `lock_timeout` starts only when a
-/// lock is actually awaited and applies per statement. Set equal, the client
-/// wins the race — and losing it is not a smaller failure but the original one,
-/// since dropping the future queues a `ROLLBACK` rather than cancelling, so the
-/// backend keeps waiting for the lock and the pooled connection stays checked
-/// out. The database-side budget only works if it expires first.
+/// before the pool is asked for a connection and runs until the transaction
+/// settles, whereas `lock_timeout` starts only when a lock is actually awaited
+/// and applies per statement. Set equal, the client wins the race — and losing
+/// it is not a smaller failure but the original one, since dropping the future
+/// queues a `ROLLBACK` rather than cancelling, so the backend keeps waiting for
+/// the lock and the pooled connection stays checked out. The database-side
+/// budget only works if it expires first.
+///
+/// This bound therefore reaches only the statements that budget already covers.
+/// `BEGIN` and the `set_config` that installs it run inside the repository on a
+/// task this deadline cannot cancel, because until that pair lands there is no
+/// database-side budget for it to expire before — the elapsed time still counts
+/// against the deadline, but expiry abandons the wait rather than the work.
 ///
 /// The margin is against the attempt's whole lock exposure, not one statement's:
 /// it takes the delegated child endpoint locks, the inventoried scheduler row,

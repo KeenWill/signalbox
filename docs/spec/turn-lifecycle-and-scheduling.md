@@ -795,12 +795,18 @@ transaction has begun; any one statement then waits at most one second for a
 contended row under a PostgreSQL lock budget, whose expiry is an ordinary
 infrastructure failure that spends an attempt and writes nothing; and a
 five-second whole-transaction deadline sits above both as the last resort for a
-backend that has stopped answering at all. A claimed attempt whose transaction
-is abandoned remains durably `attempting` until its recorded deadline makes it
-classifiable. An explicitly recorded fifth failure becomes exhausted on the next
-watchdog scan without waiting out that final ambiguity deadline; the deadline
-remains necessary when the daemon cannot tell whether the fifth attempt
-committed.
+backend that has stopped answering at all. Opening the transaction and
+installing that lock budget are the one stretch no database-side budget covers,
+since the budget is what they install, so they run where the five-second
+deadline cannot cancel them: it abandons the daemon's wait while the pair runs
+to completion and releases its connection through an ordinary rollback. Without
+that the deadline would be the only bound over a `BEGIN` already on the wire,
+which is the strand the three bounds exist to prevent rather than a smaller
+failure. A claimed attempt whose transaction is abandoned remains durably
+`attempting` until its recorded deadline makes it classifiable. An explicitly
+recorded fifth failure becomes exhausted on the next watchdog scan without
+waiting out that final ambiguity deadline; the deadline remains necessary when
+the daemon cannot tell whether the fifth attempt committed.
 
 The automatic budget is five attempts. Each attempt locks the same session
 scheduler row as the operator path, reconstitutes the complete scheduling
