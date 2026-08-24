@@ -426,6 +426,20 @@ test("generated usage decoder accepts an omitted optional continuation", () => {
   assert.equal(decodeWebUsageCallPage(page, "newest"), page);
 });
 
+test("generated usage decoder rejects repeated call identities", () => {
+  const first = usageCall();
+  const repeated = usageCall();
+  repeated.recorded_at_micros = "1777777777123455";
+
+  assert.throws(
+    () => decodeWebUsageCallPage(
+      { calls: [first, repeated], continuation: null },
+      "newest",
+    ),
+    /unique within the page/,
+  );
+});
+
 test("generated usage decoder rejects spurious invalid cache breakdowns", () => {
   const call = usageCall();
   call.cost = {
@@ -489,6 +503,18 @@ test("generated usage summary rejects duplicate compatibility keys", () => {
   assert.throws(
     () => decodeWebUsageSummary({ groups: [first, duplicate], truncated: false }),
     /unique compatibility key/,
+  );
+});
+
+test("generated usage summary caps represented calls across groups", () => {
+  const first = usageGroup();
+  first.call_count = "10000";
+  const second = usageGroup();
+  second.profile_id = "fixture-secondary";
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [first, second], truncated: false }),
+    /at most 10000 represented calls/,
   );
 });
 

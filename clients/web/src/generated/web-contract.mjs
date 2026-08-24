@@ -1630,8 +1630,13 @@ export function decodeWebUsageSummary(value) {
   assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
   const encoder = new TextEncoder();
   const compatibilityKeys = new Set();
+  let totalCallCount = 0n;
   value.groups.forEach((group, index) => {
     const callCount = BigInt(group.call_count);
+    totalCallCount += callCount;
+    if (totalCallCount > 10000n) {
+      fail("usage_summary.groups", "at most 10000 represented calls");
+    }
     assertUsageEvidence(
       group.input_semantics,
       group.tokens,
@@ -1679,6 +1684,7 @@ export function decodeWebUsageCallPage(value, order) {
     fail("usage_call_page.order", "newest");
   }
   let previousKey = null;
+  const callIds = new Set();
   value.calls.forEach((call, index) => {
     assertUsageEvidence(
       call.input_semantics,
@@ -1695,6 +1701,10 @@ export function decodeWebUsageCallPage(value, order) {
       );
     }
     const key = { recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id };
+    if (callIds.has(call.call_id)) {
+      fail(`usage_call_page.calls[${index}].call_id`, "unique within the page");
+    }
+    callIds.add(call.call_id);
     if (previousKey !== null) {
       const comparison = key.recordedAt === previousKey.recordedAt
         ? key.callId < previousKey.callId ? -1 : key.callId > previousKey.callId ? 1 : 0
