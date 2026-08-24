@@ -12,8 +12,8 @@ use signalbox_file_media_runtime::{
     FileMediaProviderValidationRequest, FileMediaRegistry, FileMediaRegistryConstructionError,
     FileReadInput, FileReadRequest, FileReadResult, InspectionRequest, NeverCancelled,
     ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation, ReadViewName, ReaderIdentity,
-    VerifiedBlobSource,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadContinuation,
+    ReadViewName, ReaderIdentity, VerifiedBlobSource,
 };
 
 struct DirectProcessor {
@@ -88,6 +88,16 @@ fn declaration_registers_four_archive_formats_under_available_isolation()
     assert_eq!(registry.providers(), &[declaration()?]);
     assert_eq!(declaration()?.readers().len(), 4);
     assert_eq!(declaration()?.observed_container_entries(), Some(1_000));
+    for reader in declaration()?.readers() {
+        let view = reader
+            .views()
+            .first()
+            .ok_or("archive reader must declare its entries view")?;
+        assert_eq!(
+            view.access(),
+            ReadAccessPattern::Streaming { maximum_ranges: 1 }
+        );
+    }
     Ok(())
 }
 

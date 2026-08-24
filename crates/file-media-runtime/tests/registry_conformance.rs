@@ -84,6 +84,7 @@ enum ReadBehavior {
     MalformedStructured,
     DuplicateStructuredMember,
     CanonicalizedStructuredOverflow,
+    ExcessiveContainerEntries,
     ContradictoryContinuation,
 }
 
@@ -194,6 +195,11 @@ impl FileMediaProcessor for SyntheticProcessor {
                     truncated: false,
                     cursor: None,
                 },
+                ReadBehavior::ExcessiveContainerEntries => ProcessorReadOutput::Structured {
+                    body_json: String::from(r#"{"entries":[{},{}]}"#),
+                    truncated: false,
+                    cursor: None,
+                },
                 ReadBehavior::ContradictoryContinuation => ProcessorReadOutput::Text {
                     body: String::from("synthetic admitted text"),
                     truncated: true,
@@ -260,6 +266,13 @@ fn registry_with_view(view: ReadViewDeclaration) -> FileMediaRegistry {
 fn registry_with_view_result(
     view: ReadViewDeclaration,
 ) -> Result<FileMediaRegistry, signalbox_file_media_runtime::FileMediaRegistryConstructionError> {
+    registry_with_view_and_container_entries(view, None)
+}
+
+fn registry_with_view_and_container_entries(
+    view: ReadViewDeclaration,
+    observed_container_entries: Option<u64>,
+) -> Result<FileMediaRegistry, signalbox_file_media_runtime::FileMediaRegistryConstructionError> {
     let provider =
         FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
     let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
@@ -273,8 +286,12 @@ fn registry_with_view_result(
         streaming_text_fallback: StreamingTextFallback::Disabled,
     })
     .expect("fixture reader declaration is nonempty");
-    let declaration = FileMediaProviderDeclaration::try_new(provider, vec![reader])
-        .expect("fixture provider owns its reader");
+    let declaration = FileMediaProviderDeclaration::try_new_with_container_entries(
+        provider,
+        vec![reader],
+        observed_container_entries,
+    )
+    .expect("fixture provider owns its reader");
     FileMediaRegistry::try_new(
         vec![declaration],
         FileMediaCeilings::version_one(),
@@ -834,6 +851,29 @@ fn inv076_canonicalized_structured_bytes_are_rechecked() {
     let processor = SyntheticProcessor {
         validation: ValidationBehavior::Valid,
         read: ReadBehavior::CanonicalizedStructuredOverflow,
+    };
+    let request = FileReadRequest {
+        inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        view: ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
+    };
+
+    let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
+
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+/// INV-076: structured output cannot exceed its provider's declared container inventory.
+#[test]
+fn inv076_provider_container_entry_bound_is_enforced_on_read() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view_and_container_entries(structured_view(), Some(1))
+        .expect("fixture registry is conflict-free");
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::Valid,
+        read: ReadBehavior::ExcessiveContainerEntries,
     };
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),

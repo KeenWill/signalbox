@@ -508,6 +508,12 @@ impl FileMediaRegistry {
             .readers
             .get(validated.reader())
             .ok_or(FileMediaFailure::ProcessorFailed)?;
+        let provider_container_entries = self
+            .providers
+            .iter()
+            .find(|provider| provider.provider() == validated.reader().provider())
+            .ok_or(FileMediaFailure::ProcessorFailed)?
+            .observed_container_entries();
         let raw = processor
             .read(
                 validated.reader(),
@@ -523,7 +529,14 @@ impl FileMediaRegistry {
                 cancellation,
             )
             .await?;
-        sanitize_read(reader, view, self.ceilings, initial_request, raw)
+        sanitize_read(
+            reader,
+            view,
+            self.ceilings,
+            provider_container_entries,
+            initial_request,
+            raw,
+        )
     }
 }
 
@@ -738,6 +751,7 @@ fn sanitize_read(
     reader: &ReaderDeclaration,
     view: &crate::ReadViewDeclaration,
     ceilings: FileMediaCeilings,
+    provider_container_entries: Option<u64>,
     initial_request: bool,
     raw: ProcessorReadOutput,
 ) -> Result<FileReadResult, FileMediaFailure> {
@@ -783,10 +797,13 @@ fn sanitize_read(
             }
             let continuation = sanitize_continuation(truncated, cursor)?;
             let maximum_nodes = nodes.min(ceilings.structured_nodes);
+            let maximum_container_entries = provider_container_entries
+                .unwrap_or(ceilings.observed_container_entries)
+                .min(ceilings.observed_container_entries);
             let body = crate::value::parse_json_without_duplicate_members_bounded(
                 &body_json,
                 maximum_nodes,
-                ceilings.observed_container_entries,
+                maximum_container_entries,
             )
             .map_err(|_| FileMediaFailure::ProcessorFailed)?;
             let canonical_bytes = serde_json::to_string(&body)
@@ -801,7 +818,7 @@ fn sanitize_read(
                 || observed.depth > ceilings.structured_depth
                 || observed.nodes > nodes
                 || observed.nodes > ceilings.structured_nodes
-                || observed.max_container_entries > ceilings.observed_container_entries
+                || observed.max_container_entries > maximum_container_entries
                 || observed.string_bytes > string_bytes
             {
                 return Err(FileMediaFailure::ProcessorFailed);

@@ -49,8 +49,8 @@ const MAX_NAME_BYTES: usize = 512;
 const OUTPUT_BYTES: usize = 500_000;
 // numeric-bound: hard safety ceiling - bounds retained recursive-format prefix evidence
 const PREFIX_BYTES: usize = 1_024;
-// numeric-bound: hard safety ceiling - bounds sequential source request fan-out
-const READ_RANGES: u32 = 256;
+// numeric-bound: hard safety ceiling - the entries view reads the complete source once
+const READ_RANGES: u32 = 1;
 // numeric-bound: hard safety ceiling - bounds structured result nesting
 const OUTPUT_DEPTH: u32 = 5;
 // numeric-bound: hard safety ceiling - bounds structured result traversal work
