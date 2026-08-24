@@ -519,13 +519,21 @@ async fn context_compaction_input_semantics_preserve_history_and_pin_new_calls()
     .execute(&pool)
     .await
     .expect_err("pinned compaction input semantics must be immutable");
-    assert!(
+    assert_eq!(
         changed_semantics_error
             .as_database_error()
-            .is_some_and(|error| error
-                .message()
-                .contains("compaction input-token semantics are immutable"))
+            .and_then(|error| error.code()),
+        Some("23514".into())
     );
+    let retained_semantics: bool = sqlx::query_scalar(
+        "SELECT usage_input_includes_cache_tokens
+           FROM context_compaction_model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .fetch_one(&pool)
+    .await?;
+    assert!(retained_semantics);
 
     pool.close().await;
     drop(container);
