@@ -25,7 +25,9 @@ pub(crate) async fn inspect(
     if request.media_type.as_str() != TEXT_MEDIA_TYPE {
         return Err(ProcessorFailure::Protocol);
     }
-    let Some(bytes) = source::read_complete(source, cancellation).await? else {
+    let Some(bytes) =
+        source::read_complete(source, cancellation, request.maximum_source_bytes).await?
+    else {
         return Ok(validation_failure(&request, "source_too_large"));
     };
     match source::checked_utf8(bytes) {
@@ -63,7 +65,8 @@ pub(crate) async fn read(
     if request.view.as_str() != TEXT_VIEW_NAME || !read_input_is_empty(&request.input) {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
-    let Some(bytes) = source::read_complete(source, cancellation).await? else {
+    let Some(bytes) = source::read_complete(source, cancellation, MAX_TEXT_FAMILY_BYTES).await?
+    else {
         return Ok(ProcessorReadOutput::SourceTooLarge {
             maximum_bytes: MAX_TEXT_FAMILY_BYTES,
         });

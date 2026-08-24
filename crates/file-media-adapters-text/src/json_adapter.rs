@@ -77,7 +77,9 @@ pub(crate) async fn inspect(
     if request.media_type.as_str() != JSON_MEDIA_TYPE {
         return Err(ProcessorFailure::Protocol);
     }
-    let Some(bytes) = source::read_complete(source, cancellation).await? else {
+    let Some(bytes) =
+        source::read_complete(source, cancellation, request.maximum_source_bytes).await?
+    else {
         let declared_candidate = match request.evidence {
             ValidationEvidence::DeclaredCandidateStructurallyValidated => true,
             ValidationEvidence::StrongSignature
@@ -124,7 +126,8 @@ pub(crate) async fn read(
     if request.view.as_str() != STRUCTURED_VIEW_NAME || !read_input_is_empty(&request.input) {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
-    let Some(bytes) = source::read_complete(source, cancellation).await? else {
+    let Some(bytes) = source::read_complete(source, cancellation, MAX_TEXT_FAMILY_BYTES).await?
+    else {
         return Ok(ProcessorReadOutput::SourceTooLarge {
             maximum_bytes: MAX_TEXT_FAMILY_BYTES,
         });

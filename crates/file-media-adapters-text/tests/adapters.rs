@@ -3,7 +3,7 @@ mod support;
 
 use std::error::Error;
 
-use signalbox_file_media_runtime::{FileMediaFailure, ReasonCode};
+use signalbox_file_media_runtime::{FileMediaCeilings, FileMediaFailure, ReasonCode};
 use support::{DeclaredMismatchExpectation, DirectProcessor, MemorySource, ReadInput};
 
 #[tokio::test]
@@ -128,6 +128,17 @@ async fn json_rejects_oversized_input_with_registered_reason() -> Result<(), Box
     let source = MemorySource::new(bytes);
 
     let inspection = support::inspect(&source, "application/json").await?;
+    support::assert_malformed_reason(inspection, "source_too_large");
+    Ok(())
+}
+
+#[tokio::test]
+async fn json_honors_the_effective_validation_source_ceiling() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::json_document());
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 1;
+
+    let inspection = support::inspect_with_ceilings(&source, "application/json", ceilings).await?;
     support::assert_malformed_reason(inspection, "source_too_large");
     Ok(())
 }

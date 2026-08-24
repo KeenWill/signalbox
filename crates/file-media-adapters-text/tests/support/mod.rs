@@ -144,9 +144,15 @@ impl FileMediaProcessor for DirectProcessor {
 }
 
 pub(crate) fn registry() -> Result<FileMediaRegistry, Box<dyn Error>> {
+    registry_with_ceilings(FileMediaCeilings::version_one())
+}
+
+pub(crate) fn registry_with_ceilings(
+    ceilings: FileMediaCeilings,
+) -> Result<FileMediaRegistry, Box<dyn Error>> {
     Ok(FileMediaRegistry::try_new(
         vec![text_family_declaration().map_err(|error| error.to_string())?],
-        FileMediaCeilings::version_one(),
+        ceilings,
         ProcessorIsolation::Available,
     )?)
 }
@@ -155,7 +161,15 @@ pub(crate) async fn inspect(
     source: &MemorySource,
     media_type: &str,
 ) -> Result<FileInspection, Box<dyn Error>> {
-    Ok(registry()?
+    inspect_with_ceilings(source, media_type, FileMediaCeilings::version_one()).await
+}
+
+pub(crate) async fn inspect_with_ceilings(
+    source: &MemorySource,
+    media_type: &str,
+    ceilings: FileMediaCeilings,
+) -> Result<FileInspection, Box<dyn Error>> {
+    Ok(registry_with_ceilings(ceilings)?
         .inspect(
             &DirectProcessor::provider(),
             InspectionRequest {

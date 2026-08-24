@@ -5,11 +5,12 @@ use crate::{MAX_TEXT_FAMILY_BYTES, PROBE_PREFIX_BYTES};
 pub(crate) async fn read_complete(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
+    maximum_bytes: u64,
 ) -> Result<Option<Vec<u8>>, ProcessorFailure> {
     if cancellation.is_cancelled() {
         return Err(ProcessorFailure::Cancelled);
     }
-    if source.byte_length().get() > MAX_TEXT_FAMILY_BYTES {
+    if source.byte_length().get() > MAX_TEXT_FAMILY_BYTES.min(maximum_bytes) {
         return Ok(None);
     }
     let bytes = source
