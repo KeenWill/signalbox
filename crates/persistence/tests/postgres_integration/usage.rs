@@ -440,6 +440,54 @@ async fn usage_projection_has_combined_selection_indexes() -> Result<(), Box<dyn
     assert!(model_kind_index_definition.contains(
         "resolved_provider_model_identity_id, call_kind, recorded_at DESC, model_call_id DESC"
     ));
+    let session_model_provenance_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_session_model_provenance_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(session_model_provenance_index_definition.contains(
+        "session_id, resolved_provider_model_identity_id, usage_provenance_kind, \
+         recorded_at DESC, model_call_id DESC"
+    ));
+    let session_full_selection_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_session_model_provenance_kind_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(session_full_selection_index_definition.contains(
+        "session_id, resolved_provider_model_identity_id, usage_provenance_kind, \
+         call_kind, recorded_at DESC, model_call_id DESC"
+    ));
+    let turn_full_selection_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_turn_model_provenance_kind_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(turn_full_selection_index_definition.contains(
+        "turn_id, resolved_provider_model_identity_id, usage_provenance_kind, \
+         call_kind, recorded_at DESC, model_call_id DESC"
+    ));
+    let model_provenance_kind_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_model_provenance_kind_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(model_provenance_kind_index_definition.contains(
+        "resolved_provider_model_identity_id, usage_provenance_kind, call_kind, \
+         recorded_at DESC, model_call_id DESC"
+    ));
 
     pool.close().await;
     drop(container);
@@ -460,6 +508,57 @@ async fn context_compaction_usage_axes_have_the_canonical_u64_ceiling() -> Resul
     .fetch_one(&pool)
     .await?;
     assert!(compaction_usage_constraint.contains("18446744073709551615"));
+    assert!(compaction_usage_constraint.contains("trunc(input_tokens)"));
+    assert!(compaction_usage_constraint.contains("trunc(output_tokens)"));
+    assert!(compaction_usage_constraint.contains("trunc(cache_read_input_tokens)"));
+    assert!(compaction_usage_constraint.contains("trunc(cache_creation_input_tokens)"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn context_compaction_usage_axes_stay_integral_at_the_column_type()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let input_scale: i32 = sqlx::query_scalar(
+        "SELECT numeric_scale FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'context_compaction_model_call'
+            AND column_name = 'input_tokens'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(input_scale, 0);
+    let output_scale: i32 = sqlx::query_scalar(
+        "SELECT numeric_scale FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'context_compaction_model_call'
+            AND column_name = 'output_tokens'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(output_scale, 0);
+    let cache_read_scale: i32 = sqlx::query_scalar(
+        "SELECT numeric_scale FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'context_compaction_model_call'
+            AND column_name = 'cache_read_input_tokens'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(cache_read_scale, 0);
+    let cache_creation_scale: i32 = sqlx::query_scalar(
+        "SELECT numeric_scale FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'context_compaction_model_call'
+            AND column_name = 'cache_creation_input_tokens'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(cache_creation_scale, 0);
 
     pool.close().await;
     drop(container);

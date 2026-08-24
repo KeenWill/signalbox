@@ -63,11 +63,15 @@ Oldest-first traversal is not exposed because transaction start timestamps can
 become visible behind an already emitted oldest-first cursor when concurrent
 transactions commit.
 
-Indexes led by session, turn, target, provenance, call kind, combined
-session/call-kind selection, combined session/provenance selection, combined
-session/target selection, combined turn/call-kind selection, combined
-target/provenance selection, combined target/call-kind selection, and combined
-provenance/call-kind selection support selective chronological pages.
+Every allowed exact-selection conjunction has an index whose leading columns are
+exactly the selected dimensions followed by the chronological page order: each
+single dimension, every combination of session, target, provenance, and call
+kind, and every combination of turn with target, provenance, and call kind. A
+turn-led index serves a turn selection regardless of an accompanying session
+filter because a turn belongs to exactly one session. Why: pairwise prefixes are
+not enough — each pair can be common while a deeper intersection is rare or
+empty, which would force a large range to be scanned and filtered before the
+bounded detail or aggregate limit applies.
 
 ## Open edges
 

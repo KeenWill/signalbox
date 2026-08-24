@@ -16,20 +16,34 @@ ALTER TABLE context_compaction_model_call
         CHECK (
             (
                 input_tokens IS NULL
-                OR input_tokens BETWEEN 0 AND 18446744073709551615
+                OR (
+                    input_tokens = trunc(input_tokens)
+                    AND input_tokens BETWEEN 0 AND 18446744073709551615
+                )
             )
             AND (
                 output_tokens IS NULL
-                OR output_tokens BETWEEN 0 AND 18446744073709551615
+                OR (
+                    output_tokens = trunc(output_tokens)
+                    AND output_tokens BETWEEN 0 AND 18446744073709551615
+                )
             )
             AND (
                 cache_read_input_tokens IS NULL
-                OR cache_read_input_tokens BETWEEN 0 AND 18446744073709551615
+                OR (
+                    cache_read_input_tokens = trunc(cache_read_input_tokens)
+                    AND cache_read_input_tokens
+                        BETWEEN 0 AND 18446744073709551615
+                )
             )
             AND (
                 cache_creation_input_tokens IS NULL
-                OR cache_creation_input_tokens
-                    BETWEEN 0 AND 18446744073709551615
+                OR (
+                    cache_creation_input_tokens
+                        = trunc(cache_creation_input_tokens)
+                    AND cache_creation_input_tokens
+                        BETWEEN 0 AND 18446744073709551615
+                )
             )
         );
 
@@ -250,6 +264,54 @@ CREATE INDEX web_usage_by_kind_recorded_call
 CREATE INDEX web_usage_by_provenance_kind_recorded_call
     ON web_usage_call_projection
        (usage_provenance_kind, call_kind, recorded_at DESC, model_call_id DESC);
+-- Every allowed exact-selection conjunction gets an ordered path whose leading
+-- columns are exactly the selected dimensions. Pairwise prefixes are not
+-- enough: each pair can be common while a three- or four-way intersection is
+-- rare or empty, which would force a large pairwise range to be scanned and
+-- filtered before the bounded detail or aggregate limit applies.
+CREATE INDEX web_usage_by_session_model_provenance_recorded_call
+    ON web_usage_call_projection
+       (session_id, resolved_provider_model_identity_id, usage_provenance_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_model_kind_recorded_call
+    ON web_usage_call_projection
+       (session_id, resolved_provider_model_identity_id, call_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_provenance_kind_recorded_call
+    ON web_usage_call_projection
+       (session_id, usage_provenance_kind, call_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_model_provenance_kind_recorded_call
+    ON web_usage_call_projection
+       (session_id, resolved_provider_model_identity_id, usage_provenance_kind,
+        call_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_model_recorded_call
+    ON web_usage_call_projection
+       (turn_id, resolved_provider_model_identity_id,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_provenance_recorded_call
+    ON web_usage_call_projection
+       (turn_id, usage_provenance_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_model_provenance_recorded_call
+    ON web_usage_call_projection
+       (turn_id, resolved_provider_model_identity_id, usage_provenance_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_model_kind_recorded_call
+    ON web_usage_call_projection
+       (turn_id, resolved_provider_model_identity_id, call_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_provenance_kind_recorded_call
+    ON web_usage_call_projection
+       (turn_id, usage_provenance_kind, call_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_model_provenance_kind_recorded_call
+    ON web_usage_call_projection
+       (turn_id, resolved_provider_model_identity_id, usage_provenance_kind,
+        call_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_model_provenance_kind_recorded_call
+    ON web_usage_call_projection
+       (resolved_provider_model_identity_id, usage_provenance_kind, call_kind,
+        recorded_at DESC, model_call_id DESC);
 
 CREATE FUNCTION project_terminal_model_call_usage()
 RETURNS trigger
