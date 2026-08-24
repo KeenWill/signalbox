@@ -48,6 +48,7 @@ LANGUAGE sql
 IMMUTABLE
 STRICT
 PARALLEL SAFE
+SET search_path TO public, pg_catalog, pg_temp
 AS $$
     SELECT COALESCE(array_ndims(candidate), 1) = 1
        AND COALESCE(array_lower(candidate, 1), 1) = 1
@@ -69,6 +70,7 @@ LANGUAGE sql
 IMMUTABLE
 STRICT
 PARALLEL SAFE
+SET search_path TO public, pg_catalog, pg_temp
 AS $$
     SELECT COALESCE(array_ndims(candidate), 1) = 1
        AND COALESCE(array_lower(candidate, 1), 1) = 1
@@ -93,6 +95,7 @@ CREATE TABLE repo_watch_pull_request_convergence_assessment (
     base_branch text NOT NULL,
     base_revision text NOT NULL,
     mergeable_state text NOT NULL,
+    settled boolean NOT NULL,
     review_decision text NOT NULL,
     unresolved_threads text[] NOT NULL,
     gating_check_count bigint NOT NULL,
@@ -124,12 +127,14 @@ CREATE TABLE repo_watch_pull_request_convergence_assessment (
     )),
     CHECK (verdict_kind <> 'merge_ready' OR base_branch = 'main'),
     CHECK (verdict_kind <> 'internally_converged' OR base_branch <> 'main'),
-    CHECK (
+    CONSTRAINT repo_watch_convergence_verdict_matches_evidence CHECK (
         (verdict_kind = 'not_converged')
         = (
             cardinality(unresolved_threads) > 0
             OR cardinality(non_green_gating_checks) > 0
-            OR mergeable_state = 'conflicting'
+            OR mergeable_state <> 'mergeable'
+            OR NOT settled
+            OR gating_check_count = 0
             OR review_decision = 'changes_requested'
         )
     ),
@@ -229,13 +234,14 @@ CREATE TABLE repo_watch_convergence_cutoff_goal (
 );
 
 CREATE VIEW repo_watch_current_pull_request_convergence AS
-SELECT DISTINCT ON (identity.repository, identity.pull_request_number)
+SELECT
        assessment.repository,
        assessment.pull_request_number,
        assessment.head_sha,
        assessment.base_branch,
        assessment.base_revision,
        assessment.mergeable_state,
+       assessment.settled,
        assessment.review_decision,
        cardinality(assessment.unresolved_threads) AS unresolved_thread_count,
        assessment.gating_check_count,
@@ -244,17 +250,37 @@ SELECT DISTINCT ON (identity.repository, identity.pull_request_number)
        convergence.convergence_kind AS sealed_kind,
        convergence.converged_at,
        assessment.recorded_at
-  FROM repo_watch_pull_request_convergence_identity AS identity
+  FROM (
+       SELECT DISTINCT ON (repository, pull_request_number) *
+         FROM repo_watch_pull_request_convergence_identity
+        ORDER BY repository, pull_request_number, cursor_generation DESC,
+                 recorded_at DESC, identity_id DESC
+  ) AS identity
   JOIN repo_watch_pull_request_convergence_assessment AS assessment
     ON assessment.assessment_id = identity.assessment_id
+  JOIN LATERAL (
+       SELECT cursor_payload
+         FROM repo_watch_cursor
+        WHERE repository = identity.repository
+        ORDER BY generation DESC
+        LIMIT 1
+  ) AS cursor ON true
+  JOIN LATERAL jsonb_array_elements(
+       cursor.cursor_payload -> 'state' -> 'pull_requests'
+  ) AS pull_request ON
+       (pull_request ->> 'number')::numeric = identity.pull_request_number
+  JOIN LATERAL jsonb_array_elements(
+       cursor.cursor_payload -> 'state' -> 'branch_heads'
+  ) AS base_head ON
+       base_head ->> 'branch' = pull_request ->> 'base_branch'
   LEFT JOIN repo_watch_pull_request_convergence AS convergence
     ON convergence.repository = assessment.repository
    AND convergence.pull_request_number = assessment.pull_request_number
    AND convergence.head_sha = assessment.head_sha
    AND convergence.base_revision = assessment.base_revision
- ORDER BY identity.repository, identity.pull_request_number,
-          identity.cursor_generation DESC, identity.recorded_at DESC,
-          identity.identity_id DESC;
+ WHERE pull_request ->> 'head_sha' = assessment.head_sha
+   AND base_head ->> 'head' = assessment.base_revision
+;
 
 CREATE TRIGGER repo_watch_convergence_assessment_is_append_only
 BEFORE UPDATE OR DELETE ON repo_watch_pull_request_convergence_assessment

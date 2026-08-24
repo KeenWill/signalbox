@@ -85,6 +85,15 @@ pub const MAX_BLOB_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 // numeric-bound: derived ceiling from MAX_FRAME_BYTES
 pub const MAX_BLOB_READ_BYTES: usize = MAX_FRAME_BYTES / 2;
 
+/// Tunable effective ceiling for concurrent process-protocol snapshot readers.
+///
+/// This operational admission bound is not a hard safety ceiling. The daemon
+/// additionally reserves pool connections outside snapshot work; this
+/// protocol-owned ceiling prevents a larger pool from expanding snapshot
+/// admission beyond the implemented contract.
+// numeric-bound: tunable - controls concurrent snapshot-reader admission
+pub const MAX_CONCURRENT_SNAPSHOT_READERS: usize = 8;
+
 /// Maximum replica count representable by the version-one deployment catalog.
 // numeric-bound: ceiling - restates blob-store's durable catalog capacity
 pub const MAX_BLOB_REPLICA_COUNT: u64 = signalbox_blob_store::MAX_BLOB_STORES as u64;
@@ -2708,6 +2717,9 @@ fn validate_tool_approval_event_shape(
                 })
             }
         },
+        ToolApprovalEventDecider::UserOverride { .. } => {
+            matches!(decision, ToolApprovalEventDecision::Approve {}) && rationale.is_none()
+        }
     };
     if !shape_matches {
         return Err(FrameValidationError::ToolApprovalShape);
@@ -3094,6 +3106,40 @@ pub enum DescendantTerminationScope {
     ParentAndDescendants,
 }
 
+/// Immutable authority fence a commissioned-session request records.
+///
+/// The shapes mirror the repository-watch dispatch fence: a pull-request fence
+/// names the pull request, its exact head commit, the repository and branch
+/// holding that head, and the base branch; a branch fence names the repository
+/// and branch alone. Field admission (slug, commit, and branch grammar) is the
+/// daemon's, at command construction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "target", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CommissionedSessionFence {
+    /// Exact pull-request authority for the commissioned session.
+    PullRequest {
+        /// Repository whose pull request the session is commissioned against.
+        repository: String,
+        /// Positive pull-request number within the repository.
+        pull_request: CanonicalU64,
+        /// Exact head commit authorized at commissioning time.
+        head_sha: String,
+        /// Repository containing the authorized head branch.
+        head_repository: String,
+        /// Authorized head branch.
+        head_branch: String,
+        /// Authorized base branch.
+        base_branch: String,
+    },
+    /// Exact branch authority for the commissioned session.
+    Branch {
+        /// Repository whose branch the session is commissioned against.
+        repository: String,
+        /// Authorized branch.
+        branch: String,
+    },
+}
+
 /// Closed versioned request family.
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3123,6 +3169,21 @@ pub enum ClientRequest {
         /// Explicit opt-in placement, defaulting to legacy pathless behavior.
         #[serde(default, skip_serializing_if = "SessionPlacement::is_pathless")]
         placement: SessionPlacement,
+    },
+    /// Atomically commission one session from a daemon-held template: create
+    /// it under a recorded immutable authority fence, attach its goal, and
+    /// submit its first input through the start-when-idle path.
+    CommissionSession {
+        /// Durable mutation identity for the whole composite.
+        command_id: CommandId,
+        /// Validated static template name.
+        template_name: String,
+        /// Immutable authority fence recorded for the created session.
+        fence: CommissionedSessionFence,
+        /// Exact immutable goal statement.
+        statement: String,
+        /// Exact first-input text carried to the created session.
+        content: InputContent,
     },
     /// List available static templates by name and version.
     ListTemplates {},
@@ -3614,6 +3675,15 @@ pub enum ClientRequest {
         /// Exact closed approval decision.
         decision: ToolDecision,
     },
+    /// Record one one-shot user override of a delegate-denied tool request.
+    OverrideDeniedToolRequest {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Session the override covers; part of the canonical payload.
+        session_id: CanonicalUuid,
+        /// Exact delegate-denied logical tool request.
+        tool_request_id: CanonicalUuid,
+    },
 }
 
 /// One closed wire approval decision for a pending tool request.
@@ -3635,7 +3705,9 @@ pub enum ToolDecision {
 impl ClientRequest {
     fn validate(&self) -> Result<(), FrameValidationError> {
         match self {
-            Self::AttachGoal { statement, .. } | Self::SupersedeGoal { statement, .. } => {
+            Self::AttachGoal { statement, .. }
+            | Self::SupersedeGoal { statement, .. }
+            | Self::CommissionSession { statement, .. } => {
                 validate_goal_text(statement)?;
             }
             Self::ResumeGoal {
@@ -3700,7 +3772,8 @@ impl ClientRequest {
             | Self::RecordReviewPublicationOutcomes { .. }
             | Self::ReadReviewOrchestration { .. }
             | Self::StopTurn { .. }
-            | Self::DecideToolRequest { .. } => {}
+            | Self::DecideToolRequest { .. }
+            | Self::OverrideDeniedToolRequest { .. } => {}
         }
         match self {
             Self::CreateSession { placement, .. }
@@ -3718,6 +3791,18 @@ impl ClientRequest {
             && expected_placement_version.value() == 0
         {
             return Err(FrameValidationError::PlacementShape);
+        }
+        if let Self::CommissionSession {
+            fence:
+                CommissionedSessionFence::PullRequest {
+                    pull_request: number,
+                    ..
+                },
+            ..
+        } = self
+            && number.value() == 0
+        {
+            return Err(FrameValidationError::DispatchFenceShape);
         }
         if let Self::SubmitInput {
             expected_defaults_version,
@@ -3810,6 +3895,9 @@ impl ClientRequest {
             }
         }
         if let Self::CreateSessionFromTemplate { template_name, .. } = self {
+            validate_session_template_name(template_name)?;
+        }
+        if let Self::CommissionSession { template_name, .. } = self {
             validate_session_template_name(template_name)?;
         }
         if let Self::CompleteReviewPass {
@@ -4265,6 +4353,22 @@ pub enum RejectionDetail {
         /// Tool request the caller named.
         tool_request_id: CanonicalUuid,
     },
+    /// The named tool request carries no delegate denial, so no override is
+    /// admitted for it.
+    ToolRequestNotDelegateDenied {
+        /// Tool request without a delegate denial.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The named delegate denial has not reached its terminal denied result.
+    ToolRequestNotTerminallyDenied {
+        /// Tool request whose denial is still resolving.
+        tool_request_id: CanonicalUuid,
+    },
+    /// An override is already recorded for the named delegate denial.
+    ToolDenialAlreadyOverridden {
+        /// Already-overridden tool request.
+        tool_request_id: CanonicalUuid,
+    },
     /// The named delegation request belongs to another turn.
     DelegationRequestNotInTurn {
         /// Session the caller named.
@@ -4504,6 +4608,9 @@ impl RejectionDetail {
             | Self::ToolRequestAlreadyResolved { .. }
             | Self::ToolRequestNotEarliestUndecided { .. }
             | Self::ToolRequestNotInSession { .. }
+            | Self::ToolRequestNotDelegateDenied { .. }
+            | Self::ToolRequestNotTerminallyDenied { .. }
+            | Self::ToolDenialAlreadyOverridden { .. }
             | Self::DelegationRequestNotInTurn { .. }
             | Self::DelegationToolRequestNotExecutable { .. }
             | Self::DelegationSpawnConflict { .. }
@@ -6143,6 +6250,14 @@ pub enum ToolApprovalEventDecider {
         /// Exact recorded judge model call.
         model_call_id: CanonicalUuid,
     },
+    /// The user pre-approved the re-proposed command by overriding one exact
+    /// delegate denial through the named durable command.
+    UserOverride {
+        /// Exact durable override-command provenance.
+        command_id: CanonicalUuid,
+        /// The delegate-denied request whose recorded override was consumed.
+        overridden_tool_request_id: CanonicalUuid,
+    },
 }
 
 /// One explicit approval decision retained in an authoritative transcript.
@@ -6877,6 +6992,13 @@ pub enum ServerMessage {
         /// Complete settings snapshot installed as defaults version one.
         model_settings: ModelSettingsSnapshot,
     },
+    /// Commissioned-session receipt: the composite committed or replayed.
+    SessionCommissioned {
+        /// Created session.
+        session_id: CanonicalUuid,
+        /// Append-only commissioned-dispatch record carrying the fence.
+        dispatch_id: CanonicalUuid,
+    },
     /// One delegated child spawn was recorded or equally replayed.
     SessionSpawned {
         /// Exact logical spawn tool request.
@@ -7162,6 +7284,14 @@ pub enum ServerMessage {
         tool_request_id: CanonicalUuid,
         /// Exact recorded decision.
         decision: ToolDecision,
+    },
+    /// One recorded recorded-override receipt.
+    ///
+    /// The receipt mirrors the recorded applied result exactly; an equal
+    /// command replay returns this same projection.
+    ToolDenialOverridden {
+        /// Overridden delegate-denied tool request.
+        tool_request_id: CanonicalUuid,
     },
     /// One completed append-only context-compaction receipt.
     SessionCompacted {
@@ -7982,6 +8112,9 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::ToolRequestNotDelegateDenied { .. }
+        | RejectionDetail::ToolRequestNotTerminallyDenied { .. }
+        | RejectionDetail::ToolDenialAlreadyOverridden { .. }
         | RejectionDetail::DelegationRequestNotInTurn { .. }
         | RejectionDetail::DelegationToolRequestNotExecutable { .. }
         | RejectionDetail::DelegationSpawnConflict { .. }
@@ -8085,6 +8218,9 @@ fn validate_conversation_import_detail(
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::ToolRequestNotDelegateDenied { .. }
+        | RejectionDetail::ToolRequestNotTerminallyDenied { .. }
+        | RejectionDetail::ToolDenialAlreadyOverridden { .. }
         | RejectionDetail::DelegationRequestNotInTurn { .. }
         | RejectionDetail::DelegationToolRequestNotExecutable { .. }
         | RejectionDetail::DelegationSpawnConflict { .. }
@@ -8246,6 +8382,8 @@ pub enum FrameValidationError {
     ModelSettingsShape,
     /// A dotted placement or its root-global-read acknowledgement is invalid.
     PlacementShape,
+    /// A commissioned-session authority fence carried an invalid shape.
+    DispatchFenceShape,
 }
 
 impl fmt::Display for FrameValidationError {
@@ -8281,6 +8419,7 @@ impl fmt::Display for FrameValidationError {
             Self::DelegationShape => "session-delegation frame shape is inconsistent",
             Self::ModelSettingsShape => "model-settings frame shape is inconsistent",
             Self::PlacementShape => "session-placement frame shape is inconsistent",
+            Self::DispatchFenceShape => "commissioned-session fence shape is inconsistent",
         })
     }
 }
@@ -8688,11 +8827,11 @@ mod tests {
     use super::{
         BillingRateVersion, BlobChunk, BulkIngestKind, CanonicalBlobDigest, CanonicalDigest,
         CanonicalDollarAmount, CanonicalU64, CanonicalUuid, CanonicalValueError, ClientFrame,
-        ClientRequest, CommandId, ContentFragment, ConversationCursor, ConversationImportFormat,
-        ConversationImportRejectionClass, ConversationImportSource, ConversationOrigin,
-        ConversationOriginFilter, ConversationSummary, CurrentModelCall, CurrentModelCallState,
-        DelegationMessageDirection, DelegationOutcome, DelegationPolicy, DelegationProvenance,
-        DelegationReason, DelegationToolRequestState, DelegationWaitMode,
+        ClientRequest, CommandId, CommissionedSessionFence, ContentFragment, ConversationCursor,
+        ConversationImportFormat, ConversationImportRejectionClass, ConversationImportSource,
+        ConversationOrigin, ConversationOriginFilter, ConversationSummary, CurrentModelCall,
+        CurrentModelCallState, DelegationMessageDirection, DelegationOutcome, DelegationPolicy,
+        DelegationProvenance, DelegationReason, DelegationToolRequestState, DelegationWaitMode,
         DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail,
         FailedModelCallCause, FailedModelCallDisposition, FailedTerminalModelCall, FastMode,
         FastModeOverlay, FrameDecodeErrorKind, FrameEncodeError, FrameValidationError,
@@ -13125,6 +13264,134 @@ mod tests {
         Ok(())
     }
 
+    /// One commissioned-session request carries its complete composite —
+    /// fence, statement, and first input — in one closed shape, and its
+    /// receipt names the created session and the fence record.
+    #[test]
+    fn inv033_commission_session_has_an_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_request_round_trip(
+            request(1)?,
+            ClientRequest::CommissionSession {
+                command_id: command(2)?,
+                template_name: String::from("review-response"),
+                fence: CommissionedSessionFence::PullRequest {
+                    repository: String::from("sample-user/sample-repository"),
+                    pull_request: CanonicalU64::new(12),
+                    head_sha: String::from("1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"),
+                    head_repository: String::from("sample-user/sample-repository"),
+                    head_branch: String::from("agent/sample-feature"),
+                    base_branch: String::from("main"),
+                },
+                statement: String::from("Address the findings on pull request 12."),
+                content: InputContent::new(String::from("Respond to the review threads.")),
+            },
+            concat!(
+                "{\"type\":\"commission_session\",",
+                "\"command_id\":\"00000000-0000-0000-0000-000000000002\",",
+                "\"template_name\":\"review-response\",",
+                "\"fence\":{\"target\":\"pull_request\",",
+                "\"repository\":\"sample-user/sample-repository\",",
+                "\"pull_request\":\"12\",",
+                "\"head_sha\":\"1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d\",",
+                "\"head_repository\":\"sample-user/sample-repository\",",
+                "\"head_branch\":\"agent/sample-feature\",",
+                "\"base_branch\":\"main\"},",
+                "\"statement\":\"Address the findings on pull request 12.\",",
+                "\"content\":\"Respond to the review threads.\"}"
+            ),
+        )?;
+        assert_client_request_round_trip(
+            request(3)?,
+            ClientRequest::CommissionSession {
+                command_id: command(4)?,
+                template_name: String::from("branch-watch"),
+                fence: CommissionedSessionFence::Branch {
+                    repository: String::from("sample-user/sample-repository"),
+                    branch: String::from("main"),
+                },
+                statement: String::from("Investigate the failing workflow on main."),
+                content: InputContent::new(String::from("The nightly workflow failed.")),
+            },
+            concat!(
+                "{\"type\":\"commission_session\",",
+                "\"command_id\":\"00000000-0000-0000-0000-000000000004\",",
+                "\"template_name\":\"branch-watch\",",
+                "\"fence\":{\"target\":\"branch\",",
+                "\"repository\":\"sample-user/sample-repository\",",
+                "\"branch\":\"main\"},",
+                "\"statement\":\"Investigate the failing workflow on main.\",",
+                "\"content\":\"The nightly workflow failed.\"}"
+            ),
+        )?;
+        assert_server_message_round_trip(
+            request(5)?,
+            ServerMessage::SessionCommissioned {
+                session_id: uuid(6),
+                dispatch_id: uuid(7),
+            },
+            concat!(
+                "{\"type\":\"session_commissioned\",",
+                "\"session_id\":\"00000000-0000-0000-0000-000000000006\",",
+                "\"dispatch_id\":\"00000000-0000-0000-0000-000000000007\"}"
+            ),
+        )?;
+
+        let zero_pull_request = ClientRequest::CommissionSession {
+            command_id: command(8)?,
+            template_name: String::from("review-response"),
+            fence: CommissionedSessionFence::PullRequest {
+                repository: String::from("sample-user/sample-repository"),
+                pull_request: CanonicalU64::new(0),
+                head_sha: String::from("1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d"),
+                head_repository: String::from("sample-user/sample-repository"),
+                head_branch: String::from("agent/sample-feature"),
+                base_branch: String::from("main"),
+            },
+            statement: String::from("Address the findings."),
+            content: InputContent::new(String::from("Respond.")),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(9)?, zero_pull_request),
+            Err(FrameValidationError::DispatchFenceShape)
+        );
+
+        let empty_statement = ClientRequest::CommissionSession {
+            command_id: command(10)?,
+            template_name: String::from("review-response"),
+            fence: CommissionedSessionFence::Branch {
+                repository: String::from("sample-user/sample-repository"),
+                branch: String::from("main"),
+            },
+            statement: String::new(),
+            content: InputContent::new(String::from("Respond.")),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(11)?, empty_statement),
+            Err(FrameValidationError::GoalShape)
+        );
+
+        let uppercase_template = ClientRequest::CommissionSession {
+            command_id: command(12)?,
+            template_name: String::from("Review-Response"),
+            fence: CommissionedSessionFence::Branch {
+                repository: String::from("sample-user/sample-repository"),
+                branch: String::from("main"),
+            },
+            statement: String::from("Address the findings."),
+            content: InputContent::new(String::from("Respond.")),
+        };
+        assert_eq!(
+            ClientFrame::try_new_for_version(
+                ProtocolVersion::One,
+                request(13)?,
+                uppercase_template
+            ),
+            Err(FrameValidationError::TemplateShape)
+        );
+        Ok(())
+    }
+
     /// request shape, and a requested semantic position must be nonzero.
     #[test]
     fn inv033_compaction_request_has_an_exact_closed_shape()
@@ -13380,6 +13647,115 @@ mod tests {
     fn inv033_tool_approval_user_decider_rejects_delegate_rationale() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"5","message":{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":"forged judge rationale"}}}"#,
+        );
+    }
+
+    /// INV-033: the override request carries its exact closed wire shape.
+    #[test]
+    fn inv033_override_denied_tool_request_has_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let override_request = ClientRequest::OverrideDeniedToolRequest {
+            command_id: command(4)?,
+            session_id: uuid(6),
+            tool_request_id: uuid(7),
+        };
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, override_request)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"override_denied_tool_request\",\
+             \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
+             \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
+             \"tool_request_id\":\"00000000-0000-0000-0000-000000000007\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"2","request":{"type":"override_denied_tool_request","command_id":"00000000-0000-0000-0000-000000000004","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"approve"}}}"#,
+        );
+        Ok(())
+    }
+
+    /// INV-033: the override receipt and every override rejection carry their
+    /// exact closed wire shapes.
+    #[test]
+    fn inv033_override_denial_responses_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::ToolDenialOverridden {
+                tool_request_id: uuid(7),
+            },
+            r#"{"type":"tool_denial_overridden","tool_request_id":"00000000-0000-0000-0000-000000000007"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the request carries no delegate denial"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolRequestNotDelegateDenied {
+                    tool_request_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the request carries no delegate denial","detail":{"type":"tool_request_not_delegate_denied","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the denial is still resolving"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolRequestNotTerminallyDenied {
+                    tool_request_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the denial is still resolving","detail":{"type":"tool_request_not_terminally_denied","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("an override is already recorded for the denial"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolDenialAlreadyOverridden {
+                    tool_request_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"an override is already recorded for the denial","detail":{"type":"tool_denial_already_overridden","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )
+    }
+
+    #[test]
+    fn inv033_tool_approval_user_override_event_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(5)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(9),
+                session_id: uuid(6),
+                event: SessionEvent::ToolApprovalDecided {
+                    turn_id: uuid(7),
+                    tool_request_id: uuid(8),
+                    decision: ToolApprovalEventDecision::Approve {},
+                    decider: ToolApprovalEventDecider::UserOverride {
+                        command_id: uuid(9),
+                        overridden_tool_request_id: uuid(12),
+                    },
+                    rationale: None,
+                },
+            },
+            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user_override","command_id":"00000000-0000-0000-0000-000000000009","overridden_tool_request_id":"00000000-0000-0000-0000-00000000000c"},"rationale":null}}"#,
+        )
+    }
+
+    /// A user-override decider is approve-only and carries no rationale: a
+    /// denial or a rationale under that decider is a malformed frame.
+    #[test]
+    fn inv033_tool_approval_user_override_decider_is_approve_only() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"user_override","command_id":"00000000-0000-0000-0000-000000000009","overridden_tool_request_id":"00000000-0000-0000-0000-00000000000c"},"rationale":null}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"7","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user_override","command_id":"00000000-0000-0000-0000-000000000009","overridden_tool_request_id":"00000000-0000-0000-0000-00000000000c"},"rationale":"forged rationale"}}}"#,
         );
     }
 
