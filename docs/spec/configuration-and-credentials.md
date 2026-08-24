@@ -176,11 +176,11 @@ daemon does not emit permissive CORS headers and adds no account, login,
 bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
 listener therefore rejects non-loopback binds; any future remote deployment
 requires an explicit authentication and transport-security design first.
-Unauthenticated session descriptor and timeline reads additionally require a
-loopback `Host` authority: `localhost` or an IPv4 or IPv6 loopback address, with
-an optional port. Another authority receives a structured `403 Forbidden`
-transport error with code `non_loopback_host_rejected` before session data is
-read.
+Unauthenticated session descriptor, timeline, live snapshot, and follow reads
+additionally require a loopback `Host` authority: `localhost` or an IPv4 or IPv6
+loopback address, with an optional port. Another authority receives a structured
+`403 Forbidden` transport error with code `non_loopback_host_rejected` before
+session data is read.
 
 `GET /api/bootstrap` describes the production browser contract. It returns the
 exact contract family `signalbox.web-http`, version `1`, the `bounded_json`,
