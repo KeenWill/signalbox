@@ -39,6 +39,7 @@ export const MAX_LOGICAL_POSITION_VALUE_BYTES = 4_096
 export const MAX_KEY_OVERRIDE_KEY_BYTES = 512
 export const MAX_KEY_OVERRIDE_VALUE_BYTES = 512
 export const MAX_BROWSER_PREFERENCES_BYTES = 1_048_576
+const MAX_U64 = (1n << 64n) - 1n
 
 const isWithinUtf8ByteLimit = (value: string, limit: number): boolean => {
   let bytes = 0
@@ -55,6 +56,12 @@ export const isBoundedLogicalPosition = (sessionId: string, position: string): b
   !/^(?:0|[1-9]\d*)$/.test(sessionId) &&
   isWithinUtf8ByteLimit(sessionId, MAX_LOGICAL_POSITION_KEY_BYTES) &&
   isWithinUtf8ByteLimit(position, MAX_LOGICAL_POSITION_VALUE_BYTES)
+
+const isPersistedLogicalPosition = (sessionId: string, position: string): boolean =>
+  isBoundedLogicalPosition(sessionId, position) &&
+  /^[1-9]\d*$/.test(position) &&
+  position.length <= 20 &&
+  BigInt(position) <= MAX_U64
 
 const isBoundedKeyOverride = (commandId: string, binding: string): boolean =>
   isWithinUtf8ByteLimit(commandId, MAX_KEY_OVERRIDE_KEY_BYTES) &&
@@ -141,7 +148,7 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
       candidate.lastLogicalPositions,
       MAX_SAVED_LOGICAL_POSITIONS,
       'preferences.lastLogicalPositions',
-      isBoundedLogicalPosition,
+      isPersistedLogicalPosition,
     ),
     keyOverrides: boundedRecord(
       candidate.keyOverrides,

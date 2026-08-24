@@ -44,7 +44,6 @@ interface CommandDefinitionShape {
 const always = () => true
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
 const scenarioNavigation = (context: CommandContext) => context.navigateScenario !== undefined
-const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
 export const commandRegistry = [
   {
     id: 'navigate.attention',
@@ -151,7 +150,7 @@ export const commandRegistry = [
     description: 'Review modal navigation and command bindings.',
     category: 'Surface',
     bindings: [{ label: '?', registration: { kind: 'hotkey', hotkey: { key: '/', shift: true } } }],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.overlaySet('help')),
   },
   {

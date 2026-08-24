@@ -239,6 +239,46 @@ describe('session live projection', () => {
     expect(present.durable).toEqual([])
   })
 
+  it('rejects a snapshot whose observed cursor regresses', () => {
+    const initial = applyLiveEvent(
+      EMPTY_LIVE_PRESENTATION,
+      { kind: 'snapshot', snapshot: liveSnapshot },
+      liveSnapshot.session_id,
+    )
+
+    expect(() =>
+      applyLiveEvent(
+        initial,
+        { kind: 'snapshot', snapshot: { ...liveSnapshot, observed_through: '41' } },
+        liveSnapshot.session_id,
+      ),
+    ).toThrow('session live snapshot cursor regressed')
+  })
+
+  it('preserves an eviction gap until history contains the exact missing boundary', () => {
+    const fixture = durablePresentation(MAX_LIVE_DURABLE_ITEMS + 1)
+    const nextSnapshot = {
+      ...liveSnapshot,
+      observed_through: String(MAX_LIVE_DURABLE_ITEMS + 1),
+    }
+
+    const stillGapped = applyLiveEvent(
+      fixture.presentation,
+      { kind: 'snapshot', snapshot: nextSnapshot },
+      liveSnapshot.session_id,
+      new Set([String(MAX_LIVE_DURABLE_ITEMS + 1)]),
+    )
+    const covered = applyLiveEvent(
+      fixture.presentation,
+      { kind: 'snapshot', snapshot: nextSnapshot },
+      liveSnapshot.session_id,
+      new Set(['1']),
+    )
+
+    expect(stillGapped.durableGap).toBe(true)
+    expect(covered.durableGap).toBe(false)
+  })
+
   it('discards all transient presentation while a lagged stream resynchronizes', () => {
     const initial = applyLiveEvent(
       EMPTY_LIVE_PRESENTATION,

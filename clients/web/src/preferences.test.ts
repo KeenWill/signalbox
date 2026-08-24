@@ -167,17 +167,26 @@ describe('browser preferences', () => {
     ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
   })
 
-  it('accepts UTF-8 logical positions exactly at their byte ceilings', () => {
+  it('accepts canonical logical positions with keys at their UTF-8 byte ceiling', () => {
     const decoded = decodeBrowserPreferences({
       ...defaultBrowserPreferences,
       lastLogicalPositions: {
-        ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES / 2)]: '😀'.repeat(
-          MAX_LOGICAL_POSITION_VALUE_BYTES / 4,
-        ),
+        ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES / 2)]: '18446744073709551615',
       },
     })
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(1)
+  })
+
+  it('rejects noncanonical and out-of-range persisted logical positions', () => {
+    for (const position of ['cursor', '0', '01', '18446744073709551616']) {
+      expect(() =>
+        decodeBrowserPreferences({
+          ...defaultBrowserPreferences,
+          lastLogicalPositions: { session: position },
+        }),
+      ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
+    }
   })
 
   it('rejects key-override keys and values above their UTF-8 byte ceilings', () => {

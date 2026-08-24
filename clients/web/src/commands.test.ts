@@ -1,9 +1,20 @@
 import { describe, expect, it } from 'vitest'
-import { invokeCommand } from './commands'
+import { commandById, invokeCommand } from './commands'
 import { productCommandRegistry } from './productCommands'
 import { actions, selectApp, store } from './state'
 
 describe('command registry', () => {
+  it('keeps keyboard help available without timeline rows', () => {
+    expect(
+      commandById('help.open').available({
+        dispatch: store.dispatch,
+        getState: store.getState,
+        timelineIds: [],
+        focusTimeline: () => undefined,
+      }),
+    ).toBe(true)
+  })
+
   it('omits scenario navigation from the product command registry', () => {
     const productCommandIds: readonly string[] = productCommandRegistry.map((command) => command.id)
     expect(productCommandIds).not.toContain('navigation.open')

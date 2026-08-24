@@ -74,10 +74,11 @@ const snapshot = (
   id: string,
   activeState:
     | { kind: 'running'; model_call_id: string }
-    | { kind: 'awaiting_tool_approval'; tool_request_id: string },
+    | { kind: 'awaiting_tool_approval'; tool_request_id: string }
+    | null,
   reconciliation: null | { kind: 'model_call'; model_call_id: string; turn_id: string } = null,
 ) => ({
-  active: { state: activeState, turn_id: sessionId(30_001) },
+  active: activeState === null ? null : { state: activeState, turn_id: sessionId(30_001) },
   observed_through: '42',
   queued_turn_count: '1',
   queued_turn_ids: [sessionId(30_002)],
@@ -294,7 +295,7 @@ test('resynchronizes provider and durable updates through approval and reconcili
   const problems = watchBrowser(page)
   const watchedSession = sessionId(991)
   const watchedSummary = summary(991, 'active')
-  const gates = [deferred(true), deferred(), deferred(), deferred()]
+  const gates = [deferred(true), deferred(), deferred(), deferred(), deferred()]
   const bodies = [
     ndjson(
       {
@@ -337,11 +338,11 @@ test('resynchronizes provider and durable updates through approval and reconcili
     ),
     ndjson({
       kind: 'snapshot',
-      snapshot: snapshot(
-        watchedSession,
-        { kind: 'running', model_call_id: sessionId(40_002) },
-        { kind: 'model_call', model_call_id: sessionId(40_001), turn_id: sessionId(30_001) },
-      ),
+      snapshot: snapshot(watchedSession, null, {
+        kind: 'model_call',
+        model_call_id: sessionId(40_001),
+        turn_id: sessionId(30_001),
+      }),
     }),
     ndjson(
       {
@@ -365,11 +366,11 @@ test('resynchronizes provider and durable updates through approval and reconcili
       kind: 'awaiting_tool_approval',
       tool_request_id: sessionId(50_001),
     }),
-    snapshot(
-      watchedSession,
-      { kind: 'running', model_call_id: sessionId(40_002) },
-      { kind: 'model_call', model_call_id: sessionId(40_001), turn_id: sessionId(30_001) },
-    ),
+    snapshot(watchedSession, null, {
+      kind: 'model_call',
+      model_call_id: sessionId(40_001),
+      turn_id: sessionId(30_001),
+    }),
     snapshot(watchedSession, { kind: 'running', model_call_id: sessionId(40_003) }),
   ]
   let followRequest = 0

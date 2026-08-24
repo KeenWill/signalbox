@@ -44,6 +44,16 @@ export interface LivePresentation {
   resyncing: boolean
 }
 
+const historyCoversDurableGap = (
+  durable: LivePresentation['durable'],
+  historicalEventSequences?: ReadonlySet<string>,
+): boolean => {
+  const oldestRetained = durable[0]
+  if (!oldestRetained || historicalEventSequences === undefined) return false
+  const requiredThrough = BigInt(oldestRetained.address.event_sequence) - 1n
+  return historicalEventSequences.has(String(requiredThrough))
+}
+
 export type FollowConnectionState = 'connecting' | 'live' | 'retrying'
 
 export const EMPTY_CATALOG_PRESENTATION: CatalogPresentation = {
@@ -365,16 +375,21 @@ export const applyLiveEvent = (
       throw new Error('session live snapshot identity does not match the selected session')
     }
     const observedThrough = BigInt(event.snapshot.observed_through)
+    if (current.snapshot !== null && observedThrough < BigInt(current.snapshot.observed_through)) {
+      throw new Error('session live snapshot cursor regressed')
+    }
+    const durable = current.durable.filter(
+      (item) =>
+        BigInt(item.address.event_sequence) > observedThrough ||
+        (historicalEventSequences !== undefined &&
+          !historicalEventSequences.has(item.address.event_sequence)),
+    )
     return {
       snapshot: event.snapshot,
-      durable: current.durable.filter(
-        (item) =>
-          BigInt(item.address.event_sequence) > observedThrough ||
-          (historicalEventSequences !== undefined &&
-            !historicalEventSequences.has(item.address.event_sequence)),
-      ),
+      durable,
       drafts: [],
-      durableGap: false,
+      durableGap:
+        current.durableGap && !historyCoversDurableGap(current.durable, historicalEventSequences),
       resyncing: false,
     }
   }
