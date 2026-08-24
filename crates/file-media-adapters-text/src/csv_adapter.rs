@@ -24,7 +24,7 @@ pub(crate) async fn probe(
         ProbeExtent::TruncatedPrefix
     };
     let json_suppresses_csv = matches!(extent, ProbeExtent::CompleteSource)
-        && json_adapter::has_raw_json_structure(&prefix, extent);
+        && json_adapter::is_complete_json_document(&prefix);
     let candidate = !json_suppresses_csv
         && source::probe_utf8(&prefix).is_some_and(|text| has_record_structure(text, extent));
     if candidate {
@@ -71,8 +71,7 @@ pub(crate) async fn inspect(
             let declared_csv_shape = matches!(
                 request.evidence,
                 ValidationEvidence::DeclaredCandidateStructurallyValidated
-            ) && (has_declared_record_structure(&text)
-                || (text.contains(',') && text.bytes().any(|byte| matches!(byte, b'\r' | b'\n'))));
+            ) && has_declared_record_evidence(&text);
             if declared_csv_shape {
                 return Ok(malformed(reason));
             }
@@ -218,6 +217,20 @@ fn has_declared_record_structure(text: &str) -> bool {
         return false;
     };
     !first.is_empty() && second.len() == first.len()
+}
+
+fn has_declared_record_evidence(text: &str) -> bool {
+    if has_declared_record_structure(text) {
+        return true;
+    }
+    let Some(first_end) = text.find(['\r', '\n']) else {
+        return false;
+    };
+    if first_end == 0 {
+        return false;
+    }
+    let remainder = text[first_end..].trim_start_matches(['\r', '\n']);
+    !remainder.is_empty()
 }
 
 fn first_two_strict_records(text: &str, extent: ProbeExtent) -> Option<&str> {

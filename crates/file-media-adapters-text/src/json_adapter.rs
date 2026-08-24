@@ -255,7 +255,7 @@ fn has_declared_json_prefix(prefix: &[u8]) -> bool {
     if prefix.is_empty() {
         return false;
     }
-    let structural = matches!(prefix.first(), Some(b'{' | b'['));
+    let eof_consistent = matches!(prefix.first(), Some(b'{' | b'[' | b'\"'));
     let Ok(text) = std::str::from_utf8(prefix) else {
         return false;
     };
@@ -263,8 +263,16 @@ fn has_declared_json_prefix(prefix: &[u8]) -> bool {
     deserializer.disable_recursion_limit();
     match serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer)) {
         Ok(_) => deserializer.end().is_ok(),
-        Err(error) => structural && error.is_eof(),
+        Err(error) => eof_consistent && error.is_eof(),
     }
+}
+
+pub(crate) fn is_complete_json_document(prefix: &[u8]) -> bool {
+    let prefix = trim_ascii_start(prefix);
+    let Ok(text) = std::str::from_utf8(prefix) else {
+        return false;
+    };
+    validate_json(text).is_ok()
 }
 
 fn parse_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {

@@ -396,17 +396,13 @@ impl FileMediaRegistry {
                         return Err(FileMediaFailure::ProcessorTimedOut);
                     }
                 };
-            let recognized = successful
-                .len()
-                .saturating_add(malformed.len())
-                .saturating_add(encrypted.len());
-            if recognized == 1 && successful.len() == 1 {
+            if successful.len() == 1 && encrypted.is_empty() {
                 return successful.pop().ok_or(FileMediaFailure::ProcessorFailed);
             }
-            if recognized == 1 && malformed.len() == 1 {
+            if successful.is_empty() && encrypted.is_empty() && malformed.len() == 1 {
                 return malformed.pop().ok_or(FileMediaFailure::ProcessorFailed);
             }
-            if recognized == 1 && encrypted.len() == 1 {
+            if successful.is_empty() && malformed.is_empty() && encrypted.len() == 1 {
                 return encrypted.pop().ok_or(FileMediaFailure::ProcessorFailed);
             }
             return Ok(FileInspection::Ambiguous {

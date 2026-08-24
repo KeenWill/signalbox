@@ -153,6 +153,17 @@ async fn oversized_declared_json_scalar_preserves_the_size_reason() -> Result<()
 }
 
 #[tokio::test]
+async fn oversized_declared_json_string_preserves_the_size_reason() -> Result<(), Box<dyn Error>> {
+    let mut bytes = b"\"".to_vec();
+    bytes.resize(128 * 1_024 + 1, b'a');
+    let source = MemorySource::new(bytes);
+
+    let inspection = support::inspect(&source, "application/json").await?;
+    support::assert_malformed_reason(inspection, "source_too_large");
+    Ok(())
+}
+
+#[tokio::test]
 async fn declared_json_follow_up_respects_the_validation_ceiling() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(b"true ".to_vec());
     let mut ceilings = FileMediaCeilings::version_one();
@@ -224,6 +235,15 @@ async fn csv_probe_does_not_claim_structurally_valid_json() -> Result<(), Box<dy
 
     let inspection = support::inspect(&source, "application/json").await?;
     support::assert_validated_media(inspection, "application/json");
+    Ok(())
+}
+
+#[tokio::test]
+async fn incomplete_json_does_not_suppress_complete_csv() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(b"[1,2\n,3".to_vec());
+
+    let inspection = support::inspect(&source, "text/csv").await?;
+    support::assert_validated_media(inspection, "text/csv");
     Ok(())
 }
 
@@ -536,6 +556,15 @@ async fn declared_one_column_csv_validates() -> Result<(), Box<dyn Error>> {
 
     let inspection = support::inspect(&source, "text/csv").await?;
     support::assert_validated_media(inspection, "text/csv");
+    Ok(())
+}
+
+#[tokio::test]
+async fn declared_one_column_csv_preserves_malformed_quotes() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(b"header\n\"unterminated\n".to_vec());
+
+    let inspection = support::inspect(&source, "text/csv").await?;
+    support::assert_malformed_reason(inspection, "malformed_csv");
     Ok(())
 }
 
