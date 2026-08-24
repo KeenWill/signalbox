@@ -6,7 +6,6 @@ Its isolated processor implementation is verified against this PR
 and registry checks, detection and validation algorithm, untrusted
 processor-response boundary, stable agent tool contracts, visibility-authorizing
 application bridge, and fresh daemon-supervised worker runtime.
-
 The audio-family adapter coverage is verified against PR #908
 (`agent/file-media-audio-family`).
 
