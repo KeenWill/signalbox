@@ -327,16 +327,15 @@ test("generated detail decoder rejects an unknown provider failure cause", () =>
   );
 });
 
-test("generated detail decoder requires a cause for known failures", () => {
+test("generated detail decoder accepts a cause-less known failure", () => {
   const page = modelCallDetailPage();
   page.items[0].body.state = {
     type: "terminal",
     disposition: "known_failed",
   };
-  assert.throws(
-    () => decodeWebSessionTimelineDetailPage(page),
-    /present exactly for a known_failed/,
-  );
+  const decoded = decodeWebSessionTimelineDetailPage(page);
+  assert.equal(decoded.items[0].body.state.disposition, "known_failed");
+  assert.equal(decoded.items[0].body.provider_failure_cause, null);
 });
 
 test("generated detail decoder rejects a failure cause on another disposition", () => {
@@ -345,7 +344,22 @@ test("generated detail decoder rejects a failure cause on another disposition", 
   page.items[0].body.provider_failure_cause = "rate_limited";
   assert.throws(
     () => decodeWebSessionTimelineDetailPage(page),
-    /present exactly for a known_failed/,
+    /present only for a known_failed/,
+  );
+});
+
+test("generated detail decoder bounds attachment media types", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.attachments = [
+    {
+      blob_id: `sha256:${"a".repeat(64)}`,
+      length_bytes: "1",
+      media_type: `application/${"x".repeat(256)}`,
+    },
+  ];
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
   );
 });
 

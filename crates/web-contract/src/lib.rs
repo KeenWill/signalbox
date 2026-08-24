@@ -411,6 +411,7 @@ impl<'de> Deserialize<'de> for WebBlobId {
 pub struct WebTimelineBlobReference {
     pub blob_id: WebBlobId,
     pub length_bytes: WebU64,
+    #[schemars(length(max = 255))]
     pub media_type: Option<String>,
 }
 
@@ -847,6 +848,13 @@ function assertSchema(root, schema, value, path) {{
   }}
   if (
     schema.type === "string" &&
+    schema.maxLength !== undefined &&
+    value.length > schema.maxLength
+  ) {{
+    fail(path, `at most ${{schema.maxLength}} characters`);
+  }}
+  if (
+    schema.type === "string" &&
     (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
     value.length > 20
   ) {{
@@ -979,10 +987,10 @@ function assertTimelineDetailPage(value) {{
           const hasFailureCause =
             item.body.provider_failure_cause !== undefined &&
             item.body.provider_failure_cause !== null;
-          if ((item.body.state.disposition === "known_failed") !== hasFailureCause) {{
+          if (hasFailureCause && item.body.state.disposition !== "known_failed") {{
             fail(
               `${{path}}.body.provider_failure_cause`,
-              "present exactly for a known_failed terminal model call",
+              "present only for a known_failed terminal model call",
             );
           }}
         }}
