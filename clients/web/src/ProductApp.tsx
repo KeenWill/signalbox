@@ -22,7 +22,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { ArtifactInspector } from './ArtifactInspector'
+import { ArtifactInspector, useArtifactInspectorState } from './ArtifactInspector'
 import { type CommandContext, globalHotkeyBindings, globalHotkeySequenceBindings } from './commands'
 import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
 import type { ArtifactItem } from './features/artifacts/artifactTypes'
@@ -464,6 +464,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const artifactDigestRef = useRef<HTMLInputElement>(null)
   const artifactSideWasOpen = useRef(false)
   const narrowInspector = useNarrowInspector()
+  const artifactInspectorState = useArtifactInspectorState()
   const [importsCommandContext, setImportsCommandContext] = useState<CommandContext | null>(null)
   const updateImportsCommandContext = useCallback(
     (nextContext: CommandContext | null) => setImportsCommandContext(nextContext),
@@ -629,6 +630,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <ImportsWorkspace
               api={productImportApi}
               scenario={false}
+              active={surface === 'imports'}
               continuationAvailable={bootstrap.data?.capabilities.imported_continuations === true}
               presentation="product"
               onCommandContext={updateImportsCommandContext}
@@ -642,6 +644,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           {app.overlay === 'artifact' && !inspectorInSheet ? (
             <ArtifactInspector
               available={artifactAvailable}
+              state={artifactInspectorState}
               digestInputRef={artifactDigestRef}
               onClose={() => dispatch(actions.overlaySet(null))}
             />
@@ -705,6 +708,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </Dialog.Description>
             <ArtifactInspector
               available={artifactAvailable}
+              state={artifactInspectorState}
               digestInputRef={artifactDigestRef}
               onClose={() => dispatch(actions.overlaySet(null))}
             />

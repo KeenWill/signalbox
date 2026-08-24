@@ -1,17 +1,55 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import { type FormEvent, type RefObject, useState } from 'react'
+import { type Dispatch, type FormEvent, type RefObject, type SetStateAction, useState } from 'react'
 import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
 import type { ArtifactItem } from './features/artifacts/artifactTypes'
 import type { WebBlobDescriptor } from './generated/web-contract.mjs'
-import { type BlobDescriptorInput, ProductRequestError, productTransport } from './product'
+import {
+  type BlobDescriptorInput,
+  ProductRequestError,
+  ProductTransportError,
+  productTransport,
+} from './product'
 import { store } from './state'
 
 type ArtifactPresentation = 'audio' | 'blocked' | 'document' | 'image' | 'video'
 
-interface ArtifactRequest extends BlobDescriptorInput {
+export interface ArtifactRequest extends BlobDescriptorInput {
   presentation: ArtifactPresentation
   sequence: number
+}
+
+export interface ArtifactInspectorState {
+  digest: string
+  setDigest: Dispatch<SetStateAction<string>>
+  mediaType: string
+  setMediaType: Dispatch<SetStateAction<string>>
+  displayFilename: string
+  setDisplayFilename: Dispatch<SetStateAction<string>>
+  presentation: ArtifactPresentation
+  setPresentation: Dispatch<SetStateAction<ArtifactPresentation>>
+  request: ArtifactRequest | null
+  setRequest: Dispatch<SetStateAction<ArtifactRequest | null>>
+}
+
+export function useArtifactInspectorState(): ArtifactInspectorState {
+  const [digest, setDigest] = useState('')
+  const [mediaType, setMediaType] = useState('')
+  const [displayFilename, setDisplayFilename] = useState('')
+  const [presentation, setPresentation] = useState<ArtifactPresentation>('blocked')
+  const [request, setRequest] = useState<ArtifactRequest | null>(null)
+  return {
+    digest,
+    setDigest,
+    mediaType,
+    setMediaType,
+    displayFilename,
+    setDisplayFilename,
+    presentation,
+    setPresentation,
+    request,
+    setRequest,
+  }
 }
 
 const descriptorQueryPrefix = ['production', 'blob-descriptor'] as const
@@ -19,6 +57,9 @@ const descriptorQueryPrefix = ['production', 'blob-descriptor'] as const
 const errorMessage = (error: Error): string => {
   if (error instanceof ProductRequestError) {
     return `${error.response.error.code}: ${error.message}`
+  }
+  if (error instanceof ProductTransportError) {
+    return 'The daemon transport failed before a descriptor response could be read.'
   }
   return 'The descriptor response did not match the generated web contract.'
 }
@@ -59,19 +100,29 @@ const artifactFromDescriptor = (
 
 export function ArtifactInspector({
   available,
+  state,
   digestInputRef,
   onClose,
 }: {
   available: boolean
+  state?: ArtifactInspectorState
   digestInputRef?: RefObject<HTMLInputElement | null>
   onClose: () => void
 }) {
   const queryClient = useQueryClient()
-  const [digest, setDigest] = useState('')
-  const [mediaType, setMediaType] = useState('')
-  const [displayFilename, setDisplayFilename] = useState('')
-  const [presentation, setPresentation] = useState<ArtifactPresentation>('blocked')
-  const [request, setRequest] = useState<ArtifactRequest | null>(null)
+  const localState = useArtifactInspectorState()
+  const {
+    digest,
+    setDigest,
+    mediaType,
+    setMediaType,
+    displayFilename,
+    setDisplayFilename,
+    presentation,
+    setPresentation,
+    request,
+    setRequest,
+  } = state ?? localState
   const descriptor = useQuery({
     queryKey: request
       ? [...descriptorQueryPrefix, request.sequence, request.digest]

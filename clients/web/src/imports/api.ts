@@ -17,7 +17,7 @@ import { readBoundedJson } from '../session-timeline/model'
 
 const MAX_IMPORT_RESPONSE_BYTES = 1024 * 1024
 const MAX_IMPORT_SOURCE_SESSION_BYTES = 512
-const DEFAULT_IMPORT_WINDOW_RADIUS = 50
+const DEFAULT_IMPORT_WINDOW_RADIUS = 25
 const utf8 = new TextEncoder()
 
 const boundedUtf8Prefix = (value: string, maximumBytes: number): string => {

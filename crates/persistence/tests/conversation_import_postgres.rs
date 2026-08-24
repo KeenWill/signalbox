@@ -39,7 +39,7 @@ use signalbox_persistence::{
     conversation_import_discovery::{
         ImportedConversationDiscoveryCorruption, ImportedConversationDiscoveryError,
         ImportedConversationDiscoveryRepository, ImportedConversationPageRequest,
-        ImportedEntryWindowAnchor,
+        ImportedEntryContentProjection, ImportedEntryWindowAnchor,
     },
     disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels, local_test_connection_options, migrate,
@@ -283,15 +283,38 @@ async fn insert_imported_source_scaffolding(
     sqlx::raw_sql(
         "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
          VALUES (decode(repeat('11', 32), 'hex'), decode('01', 'hex'));
-         INSERT INTO imported_conversation
-            (imported_conversation_id, storage_version, source_format,
-             converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count, raw_source_bytes,
-             normalized_source_record_bytes, normalized_entry_bytes)
-         VALUES
-            ('10000000-0000-4000-8000-000000000039', 1,
-             'claude_code_session_jsonl', 1,
-             decode(repeat('22', 32), 'hex'), 1, 3, 1, 1, 6);
+         DO $$
+         BEGIN
+             IF EXISTS (
+                 SELECT 1
+                   FROM information_schema.columns
+                  WHERE table_schema = current_schema()
+                    AND table_name = 'imported_conversation'
+                    AND column_name = 'raw_source_bytes'
+             ) THEN
+                 EXECUTE $insert$
+                     INSERT INTO imported_conversation
+                        (imported_conversation_id, storage_version, source_format,
+                         converter_version, source_digest, declared_raw_record_count,
+                         declared_entry_count, raw_source_bytes,
+                         normalized_source_record_bytes, normalized_entry_bytes)
+                     VALUES
+                        ('10000000-0000-4000-8000-000000000039', 1,
+                         'claude_code_session_jsonl', 1,
+                         decode(repeat('22', 32), 'hex'), 1, 3, 1, 1, 6)
+                 $insert$;
+             ELSE
+                 INSERT INTO imported_conversation
+                    (imported_conversation_id, storage_version, source_format,
+                     converter_version, source_digest, declared_raw_record_count,
+                     declared_entry_count)
+                 VALUES
+                    ('10000000-0000-4000-8000-000000000039', 1,
+                     'claude_code_session_jsonl', 1,
+                     decode(repeat('22', 32), 'hex'), 1, 3);
+             END IF;
+         END
+         $$;
          INSERT INTO imported_conversation_raw_record
             (imported_conversation_id, raw_record_position, content_hash,
              conversion_digest, normalized_value_encoding,
@@ -2563,6 +2586,112 @@ async fn imported_discovery_classifies_short_content_encodings_as_corruption()
     sqlx::query("ALTER TABLE imported_transcript_entry ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Large valid non-text payloads remain discoverable without projecting their
+/// complete durable encoding into application memory.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn imported_discovery_projects_large_non_text_entries_by_persisted_kind()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x902));
+    let mut importer = ImportConversationService::new(
+        FixedIds::for_conversations([conversation]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    importer
+        .execute(br#"{"type":"user","message":{"content":"evidence"}}"#)
+        .await?;
+    sqlx::query("ALTER TABLE imported_transcript_entry DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    let payload = vec![b'x'; 1024 * 1024 + 1];
+    let mut encoding = vec![1_u8, 1, 5, 2];
+    encoding.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+    encoding.extend_from_slice(&payload);
+    sqlx::query(
+        "UPDATE imported_transcript_entry
+            SET content_encoding = $2, source_speaker_kind = 'attested_assistant'
+          WHERE imported_conversation_id = $1",
+    )
+    .bind(conversation.into_uuid())
+    .bind(encoding)
+    .execute(&pool)
+    .await?;
+
+    let window = ImportedConversationDiscoveryRepository::new(pool.clone())
+        .entry_window(
+            conversation,
+            ImportedEntryWindowAnchor::First,
+            0,
+            0,
+            NonZeroU32::new(1).ok_or("window fixture bound must be nonzero")?,
+            NonZeroU32::new(512).ok_or("entry-text fixture bound must be nonzero")?,
+        )
+        .await?
+        .ok_or("large non-text fixture import must exist")?;
+    assert!(matches!(
+        window.items[0].content,
+        ImportedEntryContentProjection::RedactedThinking
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Discovery enforces the same source-event speaker invariant as aggregate
+/// reconstitution instead of projecting independently decoded evidence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn imported_discovery_rejects_speaker_evidence_on_source_events() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x903));
+    let mut importer = ImportConversationService::new(
+        FixedIds::for_conversations([conversation]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    importer
+        .execute(br#"{"type":"user","message":{"content":"evidence"}}"#)
+        .await?;
+    sqlx::query("ALTER TABLE imported_transcript_entry DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE imported_transcript_entry
+            SET content_encoding = decode('01010000', 'hex'),
+                source_speaker_kind = 'attested_user'
+          WHERE imported_conversation_id = $1",
+    )
+    .bind(conversation.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = ImportedConversationDiscoveryRepository::new(pool.clone())
+        .entry_window(
+            conversation,
+            ImportedEntryWindowAnchor::First,
+            0,
+            0,
+            NonZeroU32::new(1).ok_or("window fixture bound must be nonzero")?,
+            NonZeroU32::new(512).ok_or("entry-text fixture bound must be nonzero")?,
+        )
+        .await
+        .expect_err("source events with speaker evidence must be corruption");
+    assert!(matches!(
+        error,
+        ImportedConversationDiscoveryError::Corruption(
+            ImportedConversationDiscoveryCorruption::Inconsistent("source-event speaker evidence")
+        )
+    ));
 
     pool.close().await;
     drop(container);

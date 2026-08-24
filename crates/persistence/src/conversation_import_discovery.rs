@@ -16,10 +16,6 @@ use crate::conversation_import::{
     DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
     decode_format, decode_source_speaker, encode_format, positive_u64,
 };
-use crate::conversation_import_codec::decode_content;
-
-const MAX_PROJECTED_NON_TEXT_CONTENT_BYTES: i64 = 1024 * 1024;
-
 /// Exact filters and exclusive keyset position for one imports page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedConversationPageRequest {
@@ -447,11 +443,8 @@ impl ImportedConversationDiscoveryRepository {
         let rows = sqlx::query(
             "SELECT imported_entry_position, imported_transcript_entry_id,
                     raw_record_position, record_entry_position, source_speaker_kind,
+                    content_kind,
                     substring(content_encoding FROM 1 FOR 12) AS content_header,
-                    CASE WHEN octet_length(content_encoding) >= 3
-                              AND octet_length(content_encoding) <= $5
-                              AND get_byte(content_encoding, 2) <> 1
-                         THEN content_encoding END AS complete_non_text_content,
                     CASE WHEN octet_length(content_encoding) >= 4
                               AND get_byte(content_encoding, 2) = 1
                               AND get_byte(content_encoding, 3) = 2
@@ -468,7 +461,6 @@ impl ImportedConversationDiscoveryRepository {
         .bind(Decimal::from(first_position))
         .bind(Decimal::from(last_position))
         .bind(i64::from(maximum_text_bytes.get()) + 3)
-        .bind(MAX_PROJECTED_NON_TEXT_CONTENT_BYTES)
         .fetch_all(&self.pool)
         .await?;
         let items = rows
@@ -586,6 +578,14 @@ fn decode_entry(
     let source_speaker = decode_source_speaker(&source_speaker_kind)
         .map_err(|_| ImportedConversationDiscoveryCorruption::Unsupported("source speaker"))?;
     let content = checked_content_projection(row)?;
+    if matches!(content, ImportedEntryContentProjection::SourceEvent)
+        && source_speaker != ImportedSourceAttestation::NotAttested
+    {
+        return Err(ImportedConversationDiscoveryCorruption::Inconsistent(
+            "source-event speaker evidence",
+        )
+        .into());
+    }
     Ok(ImportedEntryProjection {
         frontier: ImportedContinuationReference {
             conversation,
@@ -610,84 +610,41 @@ fn checked_content_projection(
     let header: Vec<u8> = row.try_get("content_header")?;
     let total_bytes: i64 = row.try_get("content_bytes")?;
     let projected_bytes: i64 = row.try_get("content_projected_bytes")?;
+    let content_kind: Option<String> = row.try_get("content_kind")?;
     if header.len() < 3 || !matches!(header[0], 1 | 2) || header[1] != 1 || total_bytes < 3 {
         return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
     }
     match header[2] {
-        0 => checked_non_text_content(row, |content| {
-            matches!(
-                content,
-                signalbox_domain::ImportedTranscriptContent::SourceEvent { .. }
-            )
-        })
-        .map(|()| ImportedEntryContentProjection::SourceEvent),
+        0 if content_kind.as_deref() == Some("source_event") => {
+            Ok(ImportedEntryContentProjection::SourceEvent)
+        }
         1 => checked_text_projection(&header, row, total_bytes, projected_bytes)
             .map(ImportedEntryContentProjection::Text),
-        2 => checked_non_text_content(row, |content| {
-            matches!(
-                content,
-                signalbox_domain::ImportedTranscriptContent::ToolCall { .. }
-            )
-        })
-        .map(|()| ImportedEntryContentProjection::ToolCall),
-        3 => checked_non_text_content(row, |content| {
-            matches!(
-                content,
-                signalbox_domain::ImportedTranscriptContent::ToolResult { .. }
-            )
-        })
-        .map(|()| ImportedEntryContentProjection::ToolResult),
-        4 => checked_non_text_content(row, |content| {
-            matches!(
-                content,
-                signalbox_domain::ImportedTranscriptContent::Thinking { .. }
-            )
-        })
-        .map(|()| ImportedEntryContentProjection::Thinking),
-        5 => checked_non_text_content(row, |content| {
-            matches!(
-                content,
-                signalbox_domain::ImportedTranscriptContent::RedactedThinking { .. }
-            )
-        })
-        .map(|()| ImportedEntryContentProjection::RedactedThinking),
-        6 => checked_non_text_content(row, |content| {
-            matches!(
-                content,
-                signalbox_domain::ImportedTranscriptContent::Document { .. }
-            )
-        })
-        .map(|()| ImportedEntryContentProjection::Document),
-        7 if header.get(3).is_some_and(|tag| *tag <= 4) && total_bytes == 4 => {
+        2 if content_kind.as_deref() == Some("tool_call") => {
+            Ok(ImportedEntryContentProjection::ToolCall)
+        }
+        3 if content_kind.as_deref() == Some("tool_result") => {
+            Ok(ImportedEntryContentProjection::ToolResult)
+        }
+        4 if content_kind.as_deref() == Some("thinking") => {
+            Ok(ImportedEntryContentProjection::Thinking)
+        }
+        5 if content_kind.as_deref() == Some("redacted_thinking") => {
+            Ok(ImportedEntryContentProjection::RedactedThinking)
+        }
+        6 if content_kind.as_deref() == Some("document") => {
+            Ok(ImportedEntryContentProjection::Document)
+        }
+        7 if content_kind.as_deref() == Some("message_content_absent")
+            && header.get(3).is_some_and(|tag| *tag <= 4)
+            && total_bytes == 4 =>
+        {
             Ok(ImportedEntryContentProjection::MessageContentAbsent)
         }
-        8 => checked_non_text_content(row, |content| {
-            matches!(
-                content,
-                signalbox_domain::ImportedTranscriptContent::SourceMessageBlock { .. }
-            )
-        })
-        .map(|()| ImportedEntryContentProjection::SourceMessageBlock),
+        8 if content_kind.as_deref() == Some("source_message_block") => {
+            Ok(ImportedEntryContentProjection::SourceMessageBlock)
+        }
         _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
-    }
-}
-
-fn checked_non_text_content(
-    row: &PgRow,
-    expected: impl FnOnce(&signalbox_domain::ImportedTranscriptContent) -> bool,
-) -> Result<(), ImportedConversationDiscoveryError> {
-    let encoded: Option<Vec<u8>> = row.try_get("complete_non_text_content")?;
-    let content = encoded
-        .as_deref()
-        .ok_or(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)
-        .and_then(|bytes| {
-            decode_content(bytes)
-                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)
-        })?;
-    if expected(&content) {
-        Ok(())
-    } else {
-        Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into())
     }
 }
 

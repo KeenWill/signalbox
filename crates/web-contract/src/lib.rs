@@ -998,7 +998,7 @@ function validateWebImportListPage(value) {{
 
 function validateWebImportDescriptor(value) {{
   assertSha256(value.source.source_digest_sha256, "import_descriptor.source.source_digest_sha256");
-  assertCanonicalNonnegativeU64(value.raw_record_count, "import_descriptor.raw_record_count");
+  assertCanonicalU64(value.raw_record_count, "import_descriptor.raw_record_count");
   assertCanonicalNonnegativeU64(value.entry_count, "import_descriptor.entry_count");
   assertCanonicalNonnegativeU64(value.sizes.raw_source_bytes, "import_descriptor.sizes.raw_source_bytes");
   assertCanonicalNonnegativeU64(value.sizes.normalized_source_record_bytes, "import_descriptor.sizes.normalized_source_record_bytes");

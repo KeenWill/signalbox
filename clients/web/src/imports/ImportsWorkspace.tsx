@@ -53,7 +53,8 @@ const isRetryableContinuationError = (error: unknown): boolean =>
 
 const isAmbiguousContinuationError = (error: unknown): boolean =>
   error instanceof ImportReceiptCorrelationError ||
-  (error instanceof ImportApiError && error.detail.error.code === 'continuation_commit_ambiguous')
+  !(error instanceof ImportApiError) ||
+  error.detail.error.code === 'continuation_commit_ambiguous'
 
 const decimalLabel = (value: string): string => BigInt(value).toLocaleString()
 
@@ -70,12 +71,14 @@ export function ImportsWorkspace({
   api,
   scenario,
   continuationAvailable = true,
+  active = true,
   presentation = 'standalone',
   onCommandContext,
 }: {
   api: ImportApi
   scenario: boolean
   continuationAvailable?: boolean
+  active?: boolean
   presentation?: 'standalone' | 'product'
   onCommandContext?: (context: CommandContext | null) => void
 }) {
@@ -113,6 +116,7 @@ export function ImportsWorkspace({
   const importsQuery = useQuery({
     queryKey: ['imports', queryScope, 'catalog', listRequest],
     queryFn: ({ signal }) => api.list(listRequest, signal),
+    enabled: active,
     gcTime: 0,
   })
   const imports = importsQuery.data
@@ -134,7 +138,7 @@ export function ImportsWorkspace({
   const descriptorQuery = useQuery({
     queryKey: ['imports', queryScope, selectedImport, 'descriptor'],
     queryFn: ({ signal }) => api.descriptor(selectedImport ?? '', signal),
-    enabled: selectedImport !== null,
+    enabled: active && selectedImport !== null,
     gcTime: 0,
   })
   const windowQuery = useQuery({
@@ -147,7 +151,7 @@ export function ImportsWorkspace({
       ])
       return correlateEntryWindowWithDescriptor(windowRequest, window, descriptor)
     },
-    enabled: selectedImport !== null,
+    enabled: active && selectedImport !== null,
     gcTime: 0,
   })
   const entryWindow = windowQuery.data
@@ -220,7 +224,7 @@ export function ImportsWorkspace({
       (binding) => ({
         hotkey: binding.hotkey,
         callback: () => {
-          if (store.getState().app.overlay === null) {
+          if (active && store.getState().app.overlay === null) {
             invokeCommand(binding.commandId, commandContext)
           }
         },
@@ -234,7 +238,7 @@ export function ImportsWorkspace({
     ].map((binding) => ({
       sequence: binding.sequence,
       callback: () => {
-        if (store.getState().app.overlay === null) {
+        if (active && store.getState().app.overlay === null) {
           invokeCommand(binding.commandId, commandContext)
         }
       },
@@ -582,6 +586,7 @@ export function ImportsWorkspace({
                       disabled={
                         !continuationAvailable ||
                         !selectedFrontier ||
+                        modelSelectionId.trim().length === 0 ||
                         continuation.isPending ||
                         hasRetainedCommand
                       }
@@ -594,6 +599,7 @@ export function ImportsWorkspace({
                       disabled={
                         !continuationAvailable ||
                         !selectedFrontier ||
+                        modelSelectionId.trim().length === 0 ||
                         continuation.isPending ||
                         hasRetainedCommand
                       }

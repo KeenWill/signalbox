@@ -1178,7 +1178,7 @@ test("generated imports decoders enforce canonical decimal u64 strings", () => {
   const descriptor = {
     imported_conversation_id: conversation,
     display_title: null,
-    raw_record_count: "0",
+    raw_record_count: "1",
     entry_count: "1",
     source: {
       format: "codex_rollout_jsonl_v1",
@@ -1194,6 +1194,10 @@ test("generated imports decoders enforce canonical decimal u64 strings", () => {
   };
 
   assert.deepEqual(decodeWebImportDescriptor(descriptor), descriptor);
+  assert.throws(
+    () => decodeWebImportDescriptor({ ...descriptor, raw_record_count: "0" }),
+    /raw_record_count must be a positive canonical decimal u64 string/,
+  );
   assert.throws(
     () =>
       decodeWebImportDescriptor({
@@ -1231,7 +1235,7 @@ test("generated imports decoders enforce canonical decimal u64 strings", () => {
         ...descriptor,
         raw_record_count: "18446744073709551616",
       }),
-    /raw_record_count must be a nonnegative canonical decimal u64 string/,
+    /raw_record_count must be a positive canonical decimal u64 string/,
   );
   assert.throws(
     () => decodeWebImportEntryWindowRequest({ anchor: "position", position: "0" }),

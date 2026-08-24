@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { imageArtifact } from './features/artifacts/artifactScenario'
-import { productRoutes, productSurfaceStates, SameOriginProductTransport } from './product'
+import {
+  ProductTransportError,
+  productRoutes,
+  productSurfaceStates,
+  SameOriginProductTransport,
+} from './product'
 import { productHotkeySequenceBindings } from './productCommands'
 
 const bootstrapFixture = {
@@ -73,6 +78,20 @@ describe('SameOriginProductTransport', () => {
       `/api/blobs/${encodeURIComponent(imageArtifact.digest)}/descriptor?media_type=image%2Fpng&display_filename=orbital-map.png`,
       expect.objectContaining({ credentials: 'same-origin' }),
     )
+  })
+
+  it('classifies a rejected descriptor fetch as a transport failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Promise.reject(new TypeError('connection reset'))),
+    )
+
+    await expect(
+      new SameOriginProductTransport().readBlobDescriptor({
+        digest: imageArtifact.digest,
+        mediaType: imageArtifact.declared_media_type,
+      }),
+    ).rejects.toBeInstanceOf(ProductTransportError)
   })
 
   it('preserves a typed daemon error from descriptor resolution', async () => {

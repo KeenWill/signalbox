@@ -100,6 +100,21 @@ export class ProductRequestError extends Error {
   }
 }
 
+export class ProductTransportError extends Error {
+  constructor(cause: unknown) {
+    super('product transport failed', { cause })
+    this.name = 'ProductTransportError'
+  }
+}
+
+const fetchProduct = async (...input: Parameters<typeof fetch>): Promise<Response> => {
+  try {
+    return await fetch(...input)
+  } catch (error) {
+    throw new ProductTransportError(error)
+  }
+}
+
 export class BlobDescriptorCorrelationError extends Error {
   constructor() {
     super('blob descriptor does not correlate with its request')
@@ -109,7 +124,7 @@ export class BlobDescriptorCorrelationError extends Error {
 
 export class SameOriginProductTransport implements ProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
-    const response = await fetch('/api/bootstrap', {
+    const response = await fetchProduct('/api/bootstrap', {
       headers: { accept: 'application/json' },
       credentials: 'same-origin',
       signal,
@@ -124,7 +139,7 @@ export class SameOriginProductTransport implements ProductTransport {
   ): Promise<WebBlobDescriptor> {
     const query = new URLSearchParams({ media_type: input.mediaType })
     if (input.displayFilename) query.set('display_filename', input.displayFilename)
-    const response = await fetch(
+    const response = await fetchProduct(
       `/api/blobs/${encodeURIComponent(input.digest)}/descriptor?${query.toString()}`,
       {
         headers: { accept: 'application/json' },
