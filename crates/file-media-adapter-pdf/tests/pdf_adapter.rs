@@ -313,7 +313,7 @@ async fn oversized_pdf_read_fails_at_the_declared_source_ceiling() -> Result<(),
     )
     .await;
 
-    assert_eq!(expected_source_limit, 8 * 1024 * 1024);
+    assert!(source.byte_length().get() > expected_source_limit);
     assert_eq!(result, Err(FileMediaFailure::ProcessorFailed));
     Ok(())
 }

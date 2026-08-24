@@ -463,7 +463,7 @@ async fn inspect_bounded(
             };
             let stream_length = budget
                 .remaining_bytes
-                .saturating_sub(ROOT_VALIDATION_BYTES)
+                .saturating_sub(2 * ROOT_VALIDATION_BYTES)
                 .min(source_length - stream_offset);
             if !budget.can_read(stream_length) {
                 return Ok(malformed_validation());
@@ -479,6 +479,7 @@ async fn inspect_bounded(
                 &stream_bytes,
                 stream_offset,
                 stream_reference,
+                (ROOT_VALIDATION_BYTES, 1),
             )
             .await?;
             let Some(object) = object_stream_object(
@@ -561,6 +562,7 @@ async fn inspect_bounded(
                         &owned_stream,
                         stream_offset,
                         stream_reference,
+                        (0, 0),
                     )
                     .await?;
                     (owned_stream.as_slice(), limit, length)
@@ -733,10 +735,41 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
         .get(b"Pages")
         .and_then(lopdf::Object::as_reference)
         .map_err(|_| PageCollectionError::Malformed)?;
-    let mut pending = vec![pages_root];
+    let mut pending = vec![(pages_root, false)];
     let mut visited = BTreeSet::new();
+    let mut subtree_counts = std::collections::BTreeMap::new();
     let mut pages = Vec::new();
-    while let Some(object_id) = pending.pop() {
+    while let Some((object_id, exiting)) = pending.pop() {
+        if exiting {
+            let dictionary = document
+                .get_dictionary(object_id)
+                .map_err(|_| PageCollectionError::Malformed)?;
+            let declared_count = dictionary
+                .get(b"Count")
+                .and_then(lopdf::Object::as_i64)
+                .map_err(|_| PageCollectionError::Malformed)?;
+            let kids = dictionary
+                .get(b"Kids")
+                .and_then(lopdf::Object::as_array)
+                .map_err(|_| PageCollectionError::Malformed)?;
+            let descendant_count = kids.iter().try_fold(0_usize, |total, kid| {
+                let kid = kid
+                    .as_reference()
+                    .map_err(|_| PageCollectionError::Malformed)?;
+                total
+                    .checked_add(
+                        *subtree_counts
+                            .get(&kid)
+                            .ok_or(PageCollectionError::Malformed)?,
+                    )
+                    .ok_or(PageCollectionError::Limit)
+            })?;
+            if usize::try_from(declared_count).ok() != Some(descendant_count) {
+                return Err(PageCollectionError::Malformed);
+            }
+            subtree_counts.insert(object_id, descendant_count);
+            continue;
+        }
         if !visited.insert(object_id) {
             return Err(PageCollectionError::Malformed);
         }
@@ -771,11 +804,13 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
                 {
                     return Err(PageCollectionError::Limit);
                 }
+                pending.push((object_id, true));
                 for kid in kids.iter().rev() {
-                    pending.push(
+                    pending.push((
                         kid.as_reference()
                             .map_err(|_| PageCollectionError::Malformed)?,
-                    );
+                        false,
+                    ));
                 }
             }
             b"Page" => {
@@ -788,6 +823,7 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
                 let page_number =
                     u32::try_from(pages.len() + 1).map_err(|_| PageCollectionError::Limit)?;
                 pages.push((page_number, object_id));
+                subtree_counts.insert(object_id, 1);
             }
             _ => return Err(PageCollectionError::Malformed),
         }
@@ -1089,8 +1125,7 @@ fn parse_trailer_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(TrailerF
                 facts.root = parse_optional_indirect_reference(bytes, value_start, cursor)?;
             }
             b"Size" => {
-                let mut value_cursor = value_start;
-                facts.size = Some(parse_nonnegative_integer(bytes, &mut value_cursor)?);
+                facts.size = Some(parse_nonnegative_integer_value(bytes, value_start, cursor)?);
             }
             b"W" => {
                 let mut value_cursor = value_start;
@@ -1101,16 +1136,14 @@ fn parse_trailer_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(TrailerF
                 facts.index = Some(parse_index(bytes, &mut value_cursor)?);
             }
             b"Length" => {
-                let mut value_cursor = value_start;
-                facts.length = Some(parse_nonnegative_integer(bytes, &mut value_cursor)?);
+                facts.length = Some(parse_nonnegative_integer_value(bytes, value_start, cursor)?);
             }
             b"Prev" => {
-                let mut value_cursor = value_start;
-                facts.prev = Some(parse_nonnegative_integer(bytes, &mut value_cursor)?);
+                facts.prev = Some(parse_nonnegative_integer_value(bytes, value_start, cursor)?);
             }
             b"XRefStm" => {
-                let mut value_cursor = value_start;
-                facts.xref_stream = Some(parse_nonnegative_integer(bytes, &mut value_cursor)?);
+                facts.xref_stream =
+                    Some(parse_nonnegative_integer_value(bytes, value_start, cursor)?);
             }
             b"Filter" => {
                 let mut value_cursor = value_start;
@@ -1295,6 +1328,9 @@ fn parse_widths(bytes: &[u8], cursor: &mut usize) -> Option<[u64; 3]> {
 }
 
 fn parse_filter_names(bytes: &[u8], cursor: &mut usize) -> Option<Vec<Vec<u8>>> {
+    if consume_keyword(bytes, cursor, b"null") {
+        return Some(Vec::new());
+    }
     if bytes.get(*cursor) == Some(&b'/') {
         return Some(vec![parse_name(bytes, cursor)?]);
     }
@@ -1763,6 +1799,7 @@ async fn resolve_object_stream_length(
     stream_bytes: &[u8],
     stream_offset: u64,
     stream_reference: IndirectReference,
+    reservation: (u64, u32),
 ) -> Result<Option<(IndirectReference, u64)>, FileMediaProviderFailure> {
     let Some(StreamLength::Indirect(reference)) =
         object_stream_declared_length(stream_bytes, stream_reference)
@@ -1795,7 +1832,9 @@ async fn resolve_object_stream_length(
     let Some(available) = source.byte_length().get().checked_sub(offset) else {
         return Ok(None);
     };
-    let length = budget.remaining_bytes.min(available);
+    let length = budget
+        .available_after_reserving(reservation.0, reservation.1)
+        .min(available);
     if !budget.can_read(length) {
         return Ok(None);
     }
@@ -2121,6 +2160,12 @@ fn parse_nonnegative_integer(bytes: &[u8], cursor: &mut usize) -> Option<u64> {
     parse_unsigned(bytes, cursor)
 }
 
+fn parse_nonnegative_integer_value(bytes: &[u8], start: usize, end: usize) -> Option<u64> {
+    let mut cursor = start;
+    let value = parse_nonnegative_integer(bytes, &mut cursor)?;
+    (cursor == end).then_some(value)
+}
+
 fn token_end(bytes: &[u8], mut cursor: usize) -> Option<usize> {
     let start = cursor;
     while bytes
@@ -2254,11 +2299,11 @@ mod tests {
             .find(|view| view.name().as_str() == TEXT_VIEW)
             .expect("text view");
 
-        assert!(matches!(
-            text.bounds(),
-            ReadViewBounds::Text { output_bytes, .. }
-                if output_bytes <= signalbox_file_media_runtime::MAX_TEXT_BODY_BYTES
-        ));
+        let ReadViewBounds::Text { output_bytes, .. } = text.bounds() else {
+            panic!("expected text view bounds");
+        };
+
+        assert!(output_bytes <= signalbox_file_media_runtime::MAX_TEXT_BODY_BYTES);
     }
 
     #[test]
@@ -2360,6 +2405,20 @@ mod tests {
         assert!(pages_dictionary_is_valid(
             b"<< /Type /Pages /Kids [] /Count +0 >>"
         ));
+    }
+
+    #[test]
+    fn trailer_integers_reject_token_suffixes() {
+        assert!(parse_trailer_dictionary(b"<< /Size 3junk >>", 0).is_none());
+        assert!(parse_trailer_dictionary(b"<< /Prev +42junk >>", 0).is_none());
+    }
+
+    #[test]
+    fn null_stream_filter_is_treated_as_absent() {
+        let mut cursor = 0;
+
+        assert_eq!(parse_filter_names(b"null", &mut cursor), Some(Vec::new()));
+        assert_eq!(cursor, 4);
     }
 
     #[test]
@@ -2706,8 +2765,6 @@ mod tests {
         assert!(!pages_dictionary_is_valid(
             b"<< /Type /Pages /Kids [] /Count 9 0 R >>"
         ));
-        let over_limit = format!("<< /Type /Pages /Kids [] /Count {} >>", MAX_PAGES + 1);
-        assert!(!pages_dictionary_is_valid(over_limit.as_bytes()));
     }
 
     #[test]
@@ -2786,11 +2843,42 @@ mod tests {
             b"9 0 obj\n<< /Type /Pages /Count 0 /Kids [] >>\nendobj",
             pages
         ));
-        let over_limit = format!(
+    }
+
+    #[test]
+    fn bounded_page_tree_rejects_count_above_ceiling() {
+        let pages = IndirectReference {
+            object_number: 8,
+            generation: 0,
+        };
+        let dictionary = format!("<< /Type /Pages /Kids [] /Count {} >>", MAX_PAGES + 1);
+        let object = format!(
             "8 0 obj\n<< /Type /Pages /Count {} /Kids [] >>\nendobj",
             MAX_PAGES + 1
         );
-        assert!(!object_is_pages(over_limit.as_bytes(), pages));
+
+        assert!(!pages_dictionary_is_valid(dictionary.as_bytes()));
+        assert!(!object_is_pages(object.as_bytes(), pages));
+    }
+
+    #[test]
+    fn page_collection_rejects_inconsistent_declared_count() {
+        let mut document = Document::with_version("1.5");
+        let pages_id = document.add_object(dictionary! {
+            "Type" => "Pages",
+            "Kids" => Vec::<Object>::new(),
+            "Count" => 1,
+        });
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+
+        assert!(matches!(
+            collect_pages(&document),
+            Err(PageCollectionError::Malformed)
+        ));
     }
 
     #[test]
