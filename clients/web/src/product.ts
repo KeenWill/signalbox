@@ -359,7 +359,7 @@ export class SameOriginProductTransport implements ProductTransport {
       throw new TypeError('session catalog search exceeds its contract bound')
     }
     const query = new URLSearchParams({
-      sort: request.sort === 'identity' ? 'session_id_asc' : 'last_activity_desc',
+      sort: request.sort === 'identity' ? 'session_identity_ascending' : 'last_activity_descending',
       include_archived: String(request.includeArchived),
     })
     if (request.search) query.set('search', request.search)

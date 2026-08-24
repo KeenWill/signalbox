@@ -73,7 +73,7 @@ const activityPageBoundary = (page: ReturnType<typeof fullActivityPageFixture>) 
   return boundary
 }
 
-const sessionRequestPath = `/api/sessions?sort=last_activity_desc&include_archived=true&search=release&after_session_id=${previousSessionId}&after_activity_unix_microseconds=1724200000000000`
+const sessionRequestPath = `/api/sessions?sort=last_activity_descending&include_archived=true&search=release&after_session_id=${previousSessionId}&after_activity_unix_microseconds=1724200000000000`
 const errorFixture = {
   error: {
     code: 'session_catalog_unavailable',
