@@ -255,7 +255,10 @@ fn has_declared_json_prefix(prefix: &[u8]) -> bool {
     if prefix.is_empty() {
         return false;
     }
-    let eof_consistent = matches!(prefix.first(), Some(b'{' | b'[' | b'\"'));
+    let eof_consistent = matches!(
+        prefix.first(),
+        Some(b'{' | b'[' | b'\"' | b't' | b'f' | b'n' | b'-' | b'0'..=b'9')
+    );
     let Ok(text) = std::str::from_utf8(prefix) else {
         return false;
     };
