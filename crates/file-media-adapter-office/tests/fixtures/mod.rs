@@ -44,7 +44,7 @@ impl OfficeFixture {
     pub fn xlsx() -> Result<Self, Box<dyn Error>> {
         let expected_text = "generated xlsx text";
         let shared = format!(
-            r#"<?xml version="1.0"?><sst xmlns="urn:s"><si><t>{expected_text}</t></si></sst>"#
+            r#"<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>{expected_text}</t></si></sst>"#
         );
         Self::package(
             XLSX_MEDIA_TYPE,
@@ -71,7 +71,7 @@ impl OfficeFixture {
     }
 
     pub fn adjacent_shared_strings_xlsx() -> Result<Self, Box<dyn Error>> {
-        let shared = b"<?xml version=\"1.0\"?><sst><si><t>foo</t></si><si><t>bar</t></si></sst>";
+        let shared = b"<?xml version=\"1.0\"?><sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\"><si><t>foo</t></si><si><t>bar</t></si></sst>";
         Self::package(
             XLSX_MEDIA_TYPE,
             "foo\nbar\n",
