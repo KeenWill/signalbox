@@ -18,11 +18,11 @@ const HUB_FENCE_NAMESPACE: u64 = 1_396_852_273;
 
 /// Tunable effective ceiling for physical sessions in the fenced daemon pool.
 ///
-/// This is operational headroom rather than a hard safety boundary: the daemon
-/// admits up to sixteen scheduler passes concurrently while the process
-/// listener, runner, repository watch, outbox, and guard checks also require
-/// database progress.
-pub const FENCED_POOL_MAX_CONNECTIONS: u32 = 32;
+/// This is operational headroom rather than a hard safety boundary. Sixteen
+/// scheduler passes and eight admitted snapshot readers may hold half the pool;
+/// the remaining half lets the process listener, runner, repository watch,
+/// outbox, recovery, and guard checks make database progress under load.
+pub const FENCED_POOL_MAX_CONNECTIONS: u32 = 48;
 
 /// One positive durable hub-pool generation.
 ///
