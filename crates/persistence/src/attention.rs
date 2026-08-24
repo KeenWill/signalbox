@@ -214,11 +214,20 @@ WITH RECURSIVE selected AS (
                   AND retired.turn_id = lifecycle.turn_id
            )
        AND NOT lifecycle.delegation_runtime_terminal
+       AND (
+           lifecycle.state_kind <> 'queued'
+           OR accepted_input_turn_is_first_nonterminal(
+               lifecycle.session_id, lifecycle.turn_id
+           )
+       )
      ORDER BY lifecycle.session_id,
               CASE lifecycle.state_kind
                   WHEN 'active' THEN 0
                   WHEN 'queued' THEN 1
                   ELSE 2
+              END,
+              CASE WHEN lifecycle.state_kind = 'queued'
+                   THEN lifecycle.acceptance_position
               END,
               lifecycle.acceptance_position DESC
 ), latest_goal AS (
@@ -273,20 +282,42 @@ WITH RECURSIVE selected AS (
            (get_byte(identity.bytes, 8) & 63) | 128
        )
 ), automatic_resumption AS (
-    SELECT session_id, max(spent) < 5 AS pending
-      FROM automatic_resume_lineage
-     GROUP BY session_id
+    SELECT lineage.session_id,
+           max(lineage.spent) < 5
+           AND NOT EXISTS (
+               SELECT 1
+                 FROM goal_command AS command
+                 CROSS JOIN LATERAL (
+                     SELECT substring(
+                         sha256(
+                             convert_to('signalbox.goal.automatic-resume.v1', 'UTF8')
+                             || uuid_send(lineage.session_id)
+                             || decode(
+                                 lpad(to_hex(floor(goal.event_ordinal / 4294967296)::bigint), 8, '0')
+                                 || lpad(to_hex(mod(goal.event_ordinal, 4294967296)::bigint), 8, '0'),
+                                 'hex'
+                             )
+                         ) FROM 1 FOR 16
+                     ) AS bytes
+                 ) AS identity
+                WHERE command.result_kind = 'rejected'
+                  AND uuid_send(command.command_id) = set_byte(
+                      set_byte(
+                          identity.bytes,
+                          6,
+                          (get_byte(identity.bytes, 6) & 15) | 128
+                      ),
+                      8,
+                      (get_byte(identity.bytes, 8) & 63) | 128
+                  )
+           ) AS pending
+      FROM automatic_resume_lineage AS lineage
+      JOIN latest_goal AS goal
+        ON goal.session_id = lineage.session_id
+     GROUP BY lineage.session_id, goal.event_ordinal
 ), judge AS (
-    SELECT call.session_id,
-           count(*) FILTER (WHERE call.state_kind <> 'terminal') AS actionable,
-           count(*) FILTER (WHERE call.terminal_disposition_kind = 'completed'
-                              AND call.recommendation_kind <> 'escalate_to_human') AS completed,
-           count(*) FILTER (WHERE call.terminal_disposition_kind = 'completed'
-                              AND call.recommendation_kind = 'escalate_to_human') AS escalated,
-           count(*) FILTER (WHERE call.state_kind = 'terminal'
-                              AND call.terminal_disposition_kind <> 'completed') AS failed
-      FROM tool_approval_judge_model_call AS call JOIN selected USING (session_id)
-     GROUP BY call.session_id
+    SELECT facts.*
+      FROM operator_attention_judge_facts AS facts JOIN selected USING (session_id)
 ), latest_runner AS (
     SELECT DISTINCT ON (placement.session_id)
            placement.session_id, placement.state_kind

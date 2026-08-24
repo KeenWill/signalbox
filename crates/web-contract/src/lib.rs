@@ -577,6 +577,20 @@ function assertAttentionSummaries(summaries, path) {{
   );
 }}
 
+function assertAttentionSnapshot(snapshot, path) {{
+  assertAttentionSummaries(snapshot.summaries, `${{path}}.summaries`);
+  const continuation = snapshot.continuation_after_session_id ?? null;
+  if (continuation !== null) {{
+    const last = snapshot.summaries.at(-1);
+    if (last === undefined || continuation !== last.session_id) {{
+      fail(
+        `${{path}}.continuation_after_session_id`,
+        "the last returned session identity",
+      );
+    }}
+  }}
+}}
+
 export function decodeWebContractBootstrap(value) {{
   assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "bootstrap");
   if (value.contract.name !== {contract_name:?} || value.contract.version !== {contract_version:?}) {{
@@ -597,17 +611,14 @@ export function decodeWebApiErrorResponse(value) {{
 
 export function decodeWebAttentionSnapshot(value) {{
   assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
-  assertAttentionSummaries(value.summaries, "attention_snapshot.summaries");
+  assertAttentionSnapshot(value, "attention_snapshot");
   return value;
 }}
 
 export function decodeWebAttentionStreamEvent(value) {{
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
   if (value.kind === "snapshot") {{
-    assertAttentionSummaries(
-      value.snapshot.summaries,
-      "attention_event.snapshot.summaries",
-    );
+    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
   }} else if (value.kind === "update") {{
     assertAttentionSummaries(value.summaries, "attention_event.summaries");
   }}

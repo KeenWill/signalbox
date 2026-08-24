@@ -94,6 +94,15 @@ CREATE TRIGGER goal_event_records_operator_attention_change
 AFTER INSERT ON goal_event
 FOR EACH ROW EXECUTE FUNCTION record_operator_attention_goal_change();
 
+-- Rejected goal commands append no goal event, but a rejected automatic
+-- resumption transfers the blocked goal back to operator ownership. Publish
+-- that durable outcome so existing followers refresh the affected summary.
+CREATE TRIGGER rejected_goal_command_records_operator_attention_change
+AFTER INSERT ON goal_command
+FOR EACH ROW
+WHEN (NEW.result_kind = 'rejected')
+EXECUTE FUNCTION record_operator_attention_goal_change();
+
 CREATE FUNCTION record_operator_attention_judge_change()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -108,6 +117,81 @@ $$;
 CREATE TRIGGER tool_approval_judge_records_operator_attention_change
 AFTER INSERT OR UPDATE ON tool_approval_judge_model_call
 FOR EACH ROW EXECUTE FUNCTION record_operator_attention_judge_change();
+
+-- Keep the bounded fleet read independent of unbounded approval history.
+CREATE TABLE operator_attention_judge_facts (
+    session_id uuid PRIMARY KEY REFERENCES session(session_id) ON DELETE RESTRICT,
+    actionable bigint NOT NULL CHECK (actionable >= 0),
+    completed bigint NOT NULL CHECK (completed >= 0),
+    escalated bigint NOT NULL CHECK (escalated >= 0),
+    failed bigint NOT NULL CHECK (failed >= 0)
+);
+
+INSERT INTO operator_attention_judge_facts
+    (session_id, actionable, completed, escalated, failed)
+SELECT call.session_id,
+       count(*) FILTER (WHERE call.state_kind <> 'terminal'),
+       count(*) FILTER (WHERE call.terminal_disposition_kind = 'completed'
+                          AND call.recommendation_kind <> 'escalate_to_human'),
+       count(*) FILTER (WHERE call.terminal_disposition_kind = 'completed'
+                          AND call.recommendation_kind = 'escalate_to_human'),
+       count(*) FILTER (WHERE call.state_kind = 'terminal'
+                          AND call.terminal_disposition_kind <> 'completed')
+  FROM tool_approval_judge_model_call AS call
+ GROUP BY call.session_id;
+
+CREATE FUNCTION update_operator_attention_judge_facts()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    old_actionable bigint := 0;
+    old_completed bigint := 0;
+    old_escalated bigint := 0;
+    old_failed bigint := 0;
+    new_actionable bigint;
+    new_completed bigint;
+    new_escalated bigint;
+    new_failed bigint;
+BEGIN
+    IF TG_OP = 'UPDATE' THEN
+        old_actionable := (OLD.state_kind <> 'terminal')::integer;
+        old_completed := COALESCE((OLD.terminal_disposition_kind = 'completed'
+            AND OLD.recommendation_kind <> 'escalate_to_human')::integer, 0);
+        old_escalated := COALESCE((OLD.terminal_disposition_kind = 'completed'
+            AND OLD.recommendation_kind = 'escalate_to_human')::integer, 0);
+        old_failed := COALESCE((OLD.state_kind = 'terminal'
+            AND OLD.terminal_disposition_kind <> 'completed')::integer, 0);
+    END IF;
+    new_actionable := (NEW.state_kind <> 'terminal')::integer;
+    new_completed := COALESCE((NEW.terminal_disposition_kind = 'completed'
+        AND NEW.recommendation_kind <> 'escalate_to_human')::integer, 0);
+    new_escalated := COALESCE((NEW.terminal_disposition_kind = 'completed'
+        AND NEW.recommendation_kind = 'escalate_to_human')::integer, 0);
+    new_failed := COALESCE((NEW.state_kind = 'terminal'
+        AND NEW.terminal_disposition_kind <> 'completed')::integer, 0);
+
+    INSERT INTO operator_attention_judge_facts
+        (session_id, actionable, completed, escalated, failed)
+    VALUES (
+        NEW.session_id,
+        new_actionable - old_actionable,
+        new_completed - old_completed,
+        new_escalated - old_escalated,
+        new_failed - old_failed
+    )
+    ON CONFLICT (session_id) DO UPDATE SET
+        actionable = operator_attention_judge_facts.actionable + EXCLUDED.actionable,
+        completed = operator_attention_judge_facts.completed + EXCLUDED.completed,
+        escalated = operator_attention_judge_facts.escalated + EXCLUDED.escalated,
+        failed = operator_attention_judge_facts.failed + EXCLUDED.failed;
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER tool_approval_judge_updates_operator_attention_facts
+AFTER INSERT OR UPDATE ON tool_approval_judge_model_call
+FOR EACH ROW EXECUTE FUNCTION update_operator_attention_judge_facts();
 
 CREATE FUNCTION record_operator_attention_runner_change()
 RETURNS trigger
