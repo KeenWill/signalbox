@@ -41,6 +41,26 @@ const CLAIM_WINDOW: i64 = 64;
 // numeric-bound: ceiling - bounds one claim scan's wait for a contended row
 const CLAIM_LOCK_WAIT: &str = "1s";
 
+/// How long one claimed attempt waits for a row lock before giving the turn up.
+///
+/// The attempt transaction takes the delegated child endpoint locks and then
+/// the inventoried strongest-mode lock on the session scheduler row, and takes
+/// them unqualified — it neither skips a locked row nor refuses to wait. Its
+/// caller bounds the attempt with a client-side timeout too, but that bounds
+/// only the daemon, for the reason recorded on the claim scan's budget above:
+/// the dropped future queues a `ROLLBACK` instead of cancelling, so the backend
+/// keeps waiting and every retry strands another pooled connection. Under live
+/// traffic — new exposure, since this transaction used to contend with nothing
+/// — that turns contention into connection exhaustion.
+///
+/// `lock_timeout` bounds the database work itself and raises `55P03`, which
+/// this repository records as an ordinary infrastructure failure and spends
+/// against the attempt budget. It is set before the first lock is taken, so it
+/// can only interrupt a lock wait, never a commit. It matches the claim scan's
+/// budget because it waits on the same rows for the same reason.
+// numeric-bound: ceiling - bounds one claimed attempt's wait for a contended row
+const ATTEMPT_LOCK_WAIT: &str = "1s";
+
 /// The claim statement carries one `CASE` arm per admitted attempt, so its
 /// arity is part of the contract with the domain budget: admitting another
 /// attempt requires another arm and another bound parameter.
@@ -259,6 +279,10 @@ impl PostgresModelCallReconciliationRepository {
         claimed: ClaimedModelCallReconciliation,
     ) -> Result<ModelCallReconciliationOutcome, ModelCallReconciliationRepositoryError> {
         let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(ATTEMPT_LOCK_WAIT)
+            .execute(&mut *transaction)
+            .await?;
         lock_delegated_child_endpoint_sessions(&mut transaction, claimed.session())
             .await
             .map_err(ModelCallReconciliationRepositoryError::Model)?;

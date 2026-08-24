@@ -1599,6 +1599,91 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
     Ok(())
 }
 
+/// S04 / S10: an attempt that meets a held session scheduler row gives the row
+/// up inside the database, so a busy row costs one classified infrastructure
+/// failure with nothing written rather than a pooled connection checked out for
+/// the whole real wait.
+///
+/// The attempt's other bound is its caller's client-side timeout, and dropping
+/// that future queues a `ROLLBACK` instead of cancelling the running statement:
+/// the backend would keep waiting and the connection would stay held while the
+/// caller retried. The wait is therefore bounded inside the transaction or not
+/// at all, and the retry after the contention clears is what shows the failure
+/// is ordinary back pressure rather than a spent attempt.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let parked = park_restart_ambiguity(&pool, 0xF100).await?;
+    let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let batch = repository.claim_due().await?;
+    let claimed = batch.claimed()[0];
+
+    let mut holder = pool.begin().await?;
+    sqlx::query(
+        "SELECT session_id
+           FROM session_scheduler
+          WHERE session_id = $1
+          FOR UPDATE",
+    )
+    .bind(parked.session.into_uuid())
+    .fetch_one(&mut *holder)
+    .await?;
+    let contended = tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        repository.reconcile(claimed),
+    )
+    .await
+    .expect("the attempt bounds its own wait for the held row")
+    .expect_err("a held scheduler row cannot be reconciled");
+    let parked_still: (String, String) = sqlx::query_as(
+        "SELECT lifecycle.state_kind, recovery.state_kind
+           FROM turn_lifecycle AS lifecycle
+           JOIN automatic_model_call_reconciliation AS recovery
+             ON recovery.turn_id = lifecycle.turn_id
+          WHERE lifecycle.turn_id = $1",
+    )
+    .bind(parked.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    holder.rollback().await?;
+    let retried = repository.reconcile(claimed).await?;
+
+    let ModelCallReconciliationRepositoryError::Database {
+        commit_ambiguous,
+        source,
+    } = &contended
+    else {
+        panic!("a bounded lock wait fails as an ordinary database failure")
+    };
+    assert!(!commit_ambiguous);
+    assert_eq!(
+        source
+            .as_database_error()
+            .and_then(|failure| failure.code())
+            .as_deref(),
+        Some("55P03"),
+        "the wait ends as lock_not_available, not as an open-ended block"
+    );
+    assert_eq!(
+        contended.failure_kind(),
+        ModelCallReconciliationFailureKind::Infrastructure
+    );
+    assert!(matches!(
+        contended.operator_failure_class(),
+        OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false
+        }
+    ));
+    assert_eq!(parked_still, ("active".into(), "attempting".into()));
+    assert_eq!(retried, ModelCallReconciliationOutcome::Reconciled);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S04 / S10: infrastructure failures spend the exact automatic budget; only
 /// then does the still-active ambiguity become a visible operator park.
 #[tokio::test(flavor = "multi_thread")]
