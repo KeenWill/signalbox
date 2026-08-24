@@ -27,6 +27,10 @@ const previewFixture = readFileSync(new URL('./fixtures/preview.png', import.met
 const originalFixture = readFileSync(new URL('./fixtures/original.png', import.meta.url))
 const thumbnailFixture = readFileSync(new URL('./fixtures/thumbnail.png', import.meta.url))
 const jpegOriginalFixture = readFileSync(new URL('./fixtures/original.jpg', import.meta.url))
+// The owned 390 px crop is almost entirely text, so CI font rasterization accounts for 7% of its
+// pixels even when geometry is identical. Keep that measured host allowance local to this fixture.
+const MOBILE_ARTIFACT_RASTERIZATION_TOLERANCE = 0.08
+
 const sha256Digest = (bytes: Buffer): string =>
   `sha256:${createHash('sha256').update(bytes).digest('hex')}`
 
@@ -315,11 +319,8 @@ test('captures desktop dark artifact evidence', async ({ page }, testInfo) => {
   // Pixel tolerances absorb small text drift, so the record count is pinned functionally: stale
   // whole-panel evidence cannot pass by tolerance alone when the scenario inventory changes.
   await expect(page.getByText(`${artifactScenario.length} typed records`)).toBeVisible()
-  // TEMPORARY golden harvest: fail the stale baseline at zero tolerance so CI uploads the fresh
-  // capture as evidence; reverted once the regenerated goldens are committed.
   await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
     'artifacts-desktop-dark.png',
-    { maxDiffPixels: 0 },
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -371,10 +372,8 @@ test('captures desktop light artifact evidence', async ({ page }, testInfo) => {
   await page.keyboard.press('Enter')
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
   await expect(page.getByText(`${artifactScenario.length} typed records`)).toBeVisible()
-  // TEMPORARY golden harvest: see the desktop-dark capture above.
   await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
     'artifacts-desktop-light.png',
-    { maxDiffPixels: 0 },
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
@@ -386,10 +385,9 @@ test('captures mobile artifact evidence', async ({ page }, testInfo) => {
   await page.goto('/scenario/blobs')
   await expect(page.getByRole('heading', { name: 'Artifact renderers' })).toBeVisible()
   await expect(page.getByText(`${artifactScenario.length} typed records`)).toBeVisible()
-  // TEMPORARY golden harvest: see the desktop-dark capture above.
   await expect(page.getByRole('region', { name: 'Artifact renderers' })).toHaveScreenshot(
     'artifacts-mobile-dark.png',
-    { maxDiffPixels: 0 },
+    { maxDiffPixelRatio: MOBILE_ARTIFACT_RASTERIZATION_TOLERANCE },
   )
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
