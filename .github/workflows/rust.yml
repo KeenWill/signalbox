@@ -369,6 +369,7 @@ jobs:
           persist-credentials: false
       - name: Install Bubblewrap
         run: |
+          sudo apt-get update
           sudo apt-get install --yes bubblewrap
       - name: Enable unprivileged user namespaces for Bubblewrap
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -398,6 +399,7 @@ jobs:
           runner_uid="$(id -u)"
           runner_gid="$(id -g)"
           runner_home="$HOME"
+          runner_path="$PATH"
           test_command='status=0
             cargo test --no-fail-fast --workspace --all-targets --all-features || status=$?
             cargo test --no-fail-fast -p signalbox-file-media-processor-runtime \
@@ -407,8 +409,8 @@ jobs:
             sh -c '
               echo $$ > "$SIGNALBOX_FILE_MEDIA_CGROUP_ROOT/runner/cgroup.procs"
               exec setpriv --reuid="$1" --regid="$2" --init-groups \
-                env HOME="$3" sh -c "$4"
-            ' sh "$runner_uid" "$runner_gid" "$runner_home" "$test_command"
+                env HOME="$3" PATH="$5" sh -c "$4"
+            ' sh "$runner_uid" "$runner_gid" "$runner_home" "$test_command" "$runner_path"
       - name: Test generated browser contract runtime
         run: node --test crates/web-contract/tests/generated_roundtrip.mjs
       # `--all-targets` excludes doctests, so the domain's compile_fail
