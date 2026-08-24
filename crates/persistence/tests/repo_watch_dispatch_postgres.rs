@@ -11,10 +11,11 @@ use signalbox_application::{
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
     ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority, AuthorizeModelCallOutcome,
     CommissionDispatchRequest, CommissionedDispatchFence, ModelCallCredentialReference,
-    RepoWatchBranchHead, RepoWatchDispatchService, RepoWatchDispatchTransaction,
-    RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
-    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
+    RepoWatchBranchHead, RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
+    RepoWatchDispatchService, RepoWatchDispatchTransaction, RepoWatchEventContentIdentityV1,
+    RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
     RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
     RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome, StartEligibleTurnService,
     UuidV7CommissionedDispatchIdGenerator, UuidV7RepoWatchDispatchIdGenerator,
@@ -22,20 +23,20 @@ use signalbox_application::{
 };
 use signalbox_domain::{
     AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName,
-    CancelledModelCallTurnIdentities, CheckConclusion, CommissionedDispatchId, CommitSha,
-    ContextFrontierId, CreateSession, DangerousToolAutoApproval, DelegateApprovalRecommendation,
-    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, GitHubObjectId, GoalCommandResult, GoalModelProvenance,
-    GoalNeed, GoalReport, GoalSchedulerProvenance, GoalState, GoalStatement, GoalUserAction,
-    GoalUserCommand, InitialToolApproval, MergeableState, ModelCallId, ModelCallTerminalIdentities,
-    ModelCallTerminalObservation, ModelCallTerminalOutcome, ModelSelectionRequest,
-    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments, ProviderModelIdentity,
-    ProviderReportedTokenUsage, PullRequestBody, PullRequestEventContext,
-    PullRequestEventContextInput, PullRequestNumber, PullRequestTitle, RepoWatchActionV1,
-    RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
-    RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1, RepoWatchMatcherV1Input,
-    RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId,
-    RepoWatchRuleIdentityField, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    CancelledModelCallTurnIdentities, CheckConclusion, CheckRunName, CommissionedDispatchId,
+    CommitSha, ContextFrontierId, CreateSession, DangerousToolAutoApproval,
+    DelegateApprovalRecommendation, DeliveryRequest, DescendantTerminationScope,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, GitHubObjectId,
+    GoalCommandResult, GoalModelProvenance, GoalNeed, GoalReport, GoalSchedulerProvenance,
+    GoalState, GoalStatement, GoalUserAction, GoalUserCommand, InitialToolApproval, MergeableState,
+    ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelSelectionRequest, ModelTargetCatalog, ModelTargetDefinition,
+    NormalizedToolArguments, ProviderModelIdentity, ProviderReportedTokenUsage, PullRequestBody,
+    PullRequestEventContext, PullRequestEventContextInput, PullRequestNumber, PullRequestTitle,
+    RepoWatchActionV1, RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId,
+    RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchMatcherV1,
+    RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule, RepoWatchRuleActionV1,
+    RepoWatchRuleId, RepoWatchRuleIdentityField, RepoWatchRuleVersion, RepoWatchSingletonScope,
     RepoWatchWorkflowRunAttempt, RepositorySlug, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
     SessionSystemPrompt, SessionTemplateContentDigest, SessionTemplateName,
@@ -90,6 +91,8 @@ const INITIAL_HEAD: &str = "0000000000000000000000000000000000000000";
 const FIRST_HEAD: &str = "1111111111111111111111111111111111111111";
 const SECOND_HEAD: &str = "2222222222222222222222222222222222222222";
 const THIRD_HEAD: &str = "3333333333333333333333333333333333333333";
+const BASE_REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+const ADVANCED_BASE_REVISION: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const TEMPLATE: &str = "merge-forward";
 const RULE: &str = "merge-forward-on-conflict";
 const FRESH_RULE: &str = "merge-forward-on-conflict-replacement";
@@ -261,6 +264,23 @@ fn lifecycle_observation(
     context: PullRequestEventContext,
     lifecycle: RepoWatchPullRequestLifecycle,
 ) -> Result<RepoWatchObservation, Box<dyn Error>> {
+    pull_request_observation(context, lifecycle, MergeableState::Conflicting)
+}
+
+fn pull_request_observation(
+    context: PullRequestEventContext,
+    lifecycle: RepoWatchPullRequestLifecycle,
+    mergeable_state: MergeableState,
+) -> Result<RepoWatchObservation, Box<dyn Error>> {
+    pull_request_observation_at_base(context, lifecycle, mergeable_state, BASE_REVISION)
+}
+
+fn pull_request_observation_at_base(
+    context: PullRequestEventContext,
+    lifecycle: RepoWatchPullRequestLifecycle,
+    mergeable_state: MergeableState,
+    base_revision: &str,
+) -> Result<RepoWatchObservation, Box<dyn Error>> {
     Ok(RepoWatchObservation::new(
         Vec::new(),
         RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
@@ -268,7 +288,7 @@ fn lifecycle_observation(
                 RepoWatchPullRequestStateInput {
                     context,
                     lifecycle,
-                    mergeable_state: MergeableState::Conflicting,
+                    mergeable_state,
                     completed_check_suites: Vec::new(),
                     completed_check_runs: Vec::new(),
                     reviews: Vec::new(),
@@ -277,7 +297,10 @@ fn lifecycle_observation(
                 },
             )?],
             workflow_runs: Vec::new(),
-            branch_heads: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                BranchName::try_new(BASE_BRANCH.to_owned())?,
+                CommitSha::try_new(base_revision.to_owned())?,
+            )],
         })?,
     ))
 }
@@ -330,12 +353,64 @@ fn merged_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Error
 }
 
 fn conflict_event(value: u128, head: &str) -> Result<RepoWatchEvent, Box<dyn Error>> {
+    mergeable_event(value, head, MergeableState::Conflicting)
+}
+
+fn mergeable_event(
+    value: u128,
+    head: &str,
+    current: MergeableState,
+) -> Result<RepoWatchEvent, Box<dyn Error>> {
     Ok(RepoWatchEvent::try_pull_request(
         RepoWatchEventId::from_uuid(Uuid::from_u128(value)),
         repository()?,
         context(head)?,
-        RepoWatchEventKindV1::MergeableStateChanged {
-            current: MergeableState::Conflicting,
+        RepoWatchEventKindV1::MergeableStateChanged { current },
+    )?)
+}
+
+fn merge_ready_assessment(head: &str) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    assessment_with_review_decision(head, RepoWatchReviewDecision::None)
+}
+
+fn assessment_with_review_decision(
+    head: &str,
+    review_decision: RepoWatchReviewDecision,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    assessment_at_base(head, BASE_REVISION, review_decision)
+}
+
+fn assessment_at_base(
+    head: &str,
+    base_revision: &str,
+    review_decision: RepoWatchReviewDecision,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    assessment_at_base_with_mergeability(
+        head,
+        base_revision,
+        MergeableState::Mergeable,
+        review_decision,
+    )
+}
+
+fn assessment_at_base_with_mergeability(
+    head: &str,
+    base_revision: &str,
+    mergeable_state: MergeableState,
+    review_decision: RepoWatchReviewDecision,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(41_u64.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state,
+            settled: true,
+            review_decision,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::<CheckRunName>::new(),
         },
     )?)
 }
@@ -1593,6 +1668,81 @@ async fn commit_lifecycle(
                 RepoWatchCursorCandidate::new(observation),
                 vec![identified_event(event)],
             ),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn commit_mergeable_head(
+    fixture: &DispatchFixture,
+    event_id: u128,
+    head: &str,
+) -> Result<RepoWatchCursorGeneration, Box<dyn Error>> {
+    commit_mergeable_head_at_base(fixture, event_id, head, BASE_REVISION).await
+}
+
+async fn commit_mergeable_head_at_base(
+    fixture: &DispatchFixture,
+    event_id: u128,
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchCursorGeneration, Box<dyn Error>> {
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let cursor = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let observation = pull_request_observation_at_base(
+        context(head)?,
+        RepoWatchPullRequestLifecycle::Open,
+        MergeableState::Mergeable,
+        base_revision,
+    )?;
+    let committed = event_store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(observation),
+                vec![identified_event(mergeable_event(
+                    event_id,
+                    head,
+                    MergeableState::Mergeable,
+                )?)],
+            ),
+        )
+        .await?;
+    Ok(generation(committed))
+}
+
+async fn record_merge_ready_head(
+    fixture: &DispatchFixture,
+    event_id: u128,
+    head: &str,
+) -> Result<(), Box<dyn Error>> {
+    let generation = commit_mergeable_head(fixture, event_id, head).await?;
+    PostgresRepoWatchStore::new(fixture.pool.clone())
+        .record_convergence_assessments(
+            &fixture.repository,
+            generation,
+            &[merge_ready_assessment(head)?],
+        )
+        .await?;
+    Ok(())
+}
+
+async fn record_assessment_at_base(
+    fixture: &DispatchFixture,
+    generation: RepoWatchCursorGeneration,
+    head: &str,
+    base_revision: &str,
+    review_decision: RepoWatchReviewDecision,
+) -> Result<(), Box<dyn Error>> {
+    PostgresRepoWatchStore::new(fixture.pool.clone())
+        .record_convergence_assessments(
+            &fixture.repository,
+            generation,
+            &[assessment_at_base(head, base_revision, review_decision)?],
         )
         .await?;
     Ok(())
@@ -4690,6 +4840,745 @@ async fn terminal_target_settles_owed_work_without_dispatch() -> Result<(), Box<
     Ok(())
 }
 
+/// A merge-ready exact head ends the repository-watch commission and releases
+/// the singleton held by its dispatched session.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn converged_head_releases_singleton_after_ending_commission() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    record_merge_ready_head(&fixture, 0x54_000, FIRST_HEAD).await?;
+
+    let processed = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_100))
+        })
+        .await?;
+    let replayed = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_100))
+        })
+        .await?;
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("the dispatched goal remains readable");
+    let visible: (String, String, bool, i32, i64) = sqlx::query_as(
+        "SELECT head_sha, verdict_kind, settled, unresolved_thread_count,
+                gating_check_count
+           FROM repo_watch_current_pull_request_convergence",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let cutoff_goal_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_convergence_cutoff_goal
+          WHERE session_id = $1",
+    )
+    .bind(session.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(processed);
+    assert!(!replayed);
+    assert_eq!(goal.current().state(), &GoalState::UserStopped);
+    assert_eq!(
+        visible,
+        (
+            fixture.observation.state().pull_requests()[0]
+                .context()
+                .head_sha()
+                .as_str()
+                .to_owned(),
+            "merge_ready".to_owned(),
+            true,
+            0,
+            1,
+        )
+    );
+    assert_eq!(cutoff_goal_count, 1);
+    assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn convergence_cutoff_preserves_progress_after_corrupt_goal() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    corrupt_goal_generation(&fixture.pool, fixture.session(0)).await?;
+    record_merge_ready_head(&fixture, 0x54_400, FIRST_HEAD).await?;
+
+    let error = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_410))
+        })
+        .await
+        .expect_err("corrupt goal is reported after committing cutoff progress");
+    let replayed = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_420))
+        })
+        .await?;
+    let cutoff_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_convergence_cutoff")
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert!(matches!(
+        error,
+        RepoWatchDispatchRepositoryError::GoalCutoff(
+            signalbox_persistence::goal::GoalRepositoryError::Corruption(_)
+        )
+    ));
+    assert!(!replayed);
+    assert_eq!(cutoff_count, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_drain_processes_convergence_cutoff_after_repository_removal()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    record_merge_ready_head(&fixture, 0x54_450, FIRST_HEAD).await?;
+    fixture
+        .store
+        .deactivate_unconfigured_repositories(&[])
+        .await?;
+
+    fixture
+        .store
+        .process_pending_convergence_cutoffs(|| {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_451))
+        })
+        .await?;
+
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("the removed repository goal remains readable");
+    assert_eq!(goal.current().state(), &GoalState::UserStopped);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn equal_current_convergence_evidence_is_idempotent() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_500, FIRST_HEAD).await?;
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let current = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+
+    event_store
+        .record_convergence_assessments(
+            &fixture.repository,
+            current.generation(),
+            &[merge_ready_assessment(FIRST_HEAD)?],
+        )
+        .await?;
+    let assessment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_assessment")
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert_eq!(assessment_count, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cutoff_binds_seal_and_current_identity_assessments_separately()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_550, FIRST_HEAD).await?;
+    let current = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("the sealed cursor exists");
+    record_assessment_at_base(
+        &fixture,
+        current.generation(),
+        FIRST_HEAD,
+        BASE_REVISION,
+        RepoWatchReviewDecision::ChangesRequested,
+    )
+    .await?;
+
+    let processed = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_551))
+        })
+        .await?;
+    let assessments_differ: bool = sqlx::query_scalar(
+        "SELECT assessment_id <> identity_assessment_id
+           FROM repo_watch_convergence_cutoff",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(processed);
+    assert!(assessments_differ);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn stale_cutoff_waits_until_its_sealed_identity_is_current_again()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_600, FIRST_HEAD).await?;
+    let second_generation = commit_mergeable_head(&fixture, 0x54_601, SECOND_HEAD).await?;
+    record_assessment_at_base(
+        &fixture,
+        second_generation,
+        SECOND_HEAD,
+        BASE_REVISION,
+        RepoWatchReviewDecision::ChangesRequested,
+    )
+    .await?;
+
+    let stale = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_602))
+        })
+        .await?;
+    let stale_cutoff_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_convergence_cutoff")
+            .fetch_one(&fixture.pool)
+            .await?;
+    let restored_generation = commit_mergeable_head(&fixture, 0x54_603, FIRST_HEAD).await?;
+    record_assessment_at_base(
+        &fixture,
+        restored_generation,
+        FIRST_HEAD,
+        BASE_REVISION,
+        RepoWatchReviewDecision::Approved,
+    )
+    .await?;
+    let restored = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_604))
+        })
+        .await?;
+    let restored_cutoff_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_convergence_cutoff")
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert!(!stale);
+    assert_eq!(stale_cutoff_count, 0);
+    assert!(restored);
+    assert_eq!(restored_cutoff_count, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unassessed_targeted_transition_still_reapplies_a_returned_seal()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_650, FIRST_HEAD).await?;
+    let first_cutoff = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_651))
+        })
+        .await?;
+    let mergeable_event = fixture
+        .store
+        .load_next_event(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the first identity's mergeable event remains unevaluated");
+    let mergeable_observation = pull_request_observation(
+        context(FIRST_HEAD)?,
+        RepoWatchPullRequestLifecycle::Open,
+        MergeableState::Mergeable,
+    )?;
+    let mergeable_outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                mergeable_event,
+                &fixture.rule,
+                &mergeable_observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+    assert_eq!(
+        mergeable_outcome,
+        RepoWatchRuleEvaluationOutcome::NotMatched
+    );
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+            immediate_retry_policy(),
+        )
+        .await?
+        .expect("the released sealed-head obligation is ready for settlement");
+    let current = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("the sealed cursor exists");
+    let settled =
+        evaluate_obligation(&fixture, obligation, current.candidate().observation()).await?;
+    assert_eq!(settled, RepoWatchRuleEvaluationOutcome::TargetConverged);
+    let (second_event, second_observation) = load_conflict(&fixture, 0x54_652, SECOND_HEAD).await?;
+    let second_outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                second_event,
+                &fixture.rule,
+                &second_observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+    let (_, second_sessions) = dispatched(second_outcome);
+    let second_session = second_sessions[0];
+    let restored_generation = commit_mergeable_head(&fixture, 0x54_653, FIRST_HEAD).await?;
+    record_assessment_at_base(
+        &fixture,
+        restored_generation,
+        FIRST_HEAD,
+        BASE_REVISION,
+        RepoWatchReviewDecision::Approved,
+    )
+    .await?;
+
+    let restored_cutoff = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_654))
+        })
+        .await?;
+    let second_goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(second_session)
+        .await?
+        .expect("the intervening dispatch goal remains readable");
+    let cutoff_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_convergence_cutoff")
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert!(first_cutoff);
+    assert!(restored_cutoff);
+    assert_eq!(second_goal.current().state(), &GoalState::UserStopped);
+    assert_eq!(cutoff_count, 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn same_generation_green_return_reapplies_its_convergence_cutoff()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_680, FIRST_HEAD).await?;
+    let first_cutoff = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_681))
+        })
+        .await?;
+    let current = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("the sealed cursor exists");
+    record_assessment_at_base(
+        &fixture,
+        current.generation(),
+        FIRST_HEAD,
+        BASE_REVISION,
+        RepoWatchReviewDecision::ChangesRequested,
+    )
+    .await?;
+    record_assessment_at_base(
+        &fixture,
+        current.generation(),
+        FIRST_HEAD,
+        BASE_REVISION,
+        RepoWatchReviewDecision::Approved,
+    )
+    .await?;
+
+    let returned_cutoff = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_682))
+        })
+        .await?;
+    let transition_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_pull_request_convergence_identity",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let transition_generation_count: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT cursor_generation)
+           FROM repo_watch_pull_request_convergence_identity",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+    let cutoff_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_convergence_cutoff")
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert!(first_cutoff);
+    assert!(returned_cutoff);
+    assert_eq!(transition_count, 3);
+    assert_eq!(transition_generation_count, 1);
+    assert_eq!(cutoff_count, 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn base_advance_requires_a_fresh_seal_for_cutoff_and_admission() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let (loaded, stale_observation) = load_second_conflict(&fixture).await?;
+    record_merge_ready_head(&fixture, 0x54_700, SECOND_HEAD).await?;
+    let advanced_generation =
+        commit_mergeable_head_at_base(&fixture, 0x54_701, SECOND_HEAD, ADVANCED_BASE_REVISION)
+            .await?;
+    let stale_view_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_current_pull_request_convergence")
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    let stale_cutoff = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_702))
+        })
+        .await?;
+    let stale_admission =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &stale_observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+    record_assessment_at_base(
+        &fixture,
+        advanced_generation,
+        SECOND_HEAD,
+        ADVANCED_BASE_REVISION,
+        RepoWatchReviewDecision::ChangesRequested,
+    )
+    .await?;
+    record_assessment_at_base(
+        &fixture,
+        advanced_generation,
+        SECOND_HEAD,
+        ADVANCED_BASE_REVISION,
+        RepoWatchReviewDecision::None,
+    )
+    .await?;
+    let fresh_cutoff = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x54_703))
+        })
+        .await?;
+    let sealed_bases: Vec<String> = sqlx::query_scalar(
+        "SELECT base_revision
+           FROM repo_watch_pull_request_convergence
+          ORDER BY base_revision",
+    )
+    .fetch_all(&fixture.pool)
+    .await?;
+
+    assert!(!stale_cutoff);
+    assert_eq!(stale_view_count, 0);
+    assert_eq!(stale_admission, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert!(fresh_cutoff);
+    assert_eq!(
+        sealed_bases,
+        vec![BASE_REVISION.to_owned(), ADVANCED_BASE_REVISION.to_owned()]
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn database_rejects_seal_for_nonconverged_assessment() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let current = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let pull_request = &current.candidate().observation().state().pull_requests()[0];
+    let assessment =
+        RepoWatchConvergenceAssessment::try_new(RepoWatchConvergenceAssessmentInput {
+            number: pull_request.context().number(),
+            head_sha: pull_request.context().head_sha().clone(),
+            base_branch: pull_request.context().base_branch().clone(),
+            base_revision: CommitSha::try_new(BASE_REVISION.to_owned())?,
+            mergeable_state: pull_request.mergeable_state(),
+            settled: true,
+            review_decision: RepoWatchReviewDecision::None,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        })?;
+    event_store
+        .record_convergence_assessments(&fixture.repository, current.generation(), &[assessment])
+        .await?;
+    let assessment_id: Uuid = sqlx::query_scalar(
+        "SELECT assessment_id
+           FROM repo_watch_pull_request_convergence_assessment",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    let error = sqlx::query(
+        "INSERT INTO repo_watch_pull_request_convergence
+                (repository, pull_request_number, head_sha, base_revision,
+                 assessment_id, convergence_kind)
+         SELECT repository, pull_request_number, head_sha, base_revision,
+                assessment_id, 'merge_ready'
+           FROM repo_watch_pull_request_convergence_assessment
+          WHERE assessment_id = $1",
+    )
+    .bind(assessment_id)
+    .execute(&fixture.pool)
+    .await
+    .expect_err("a nonconverged assessment cannot back a convergence seal");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("repo_watch_convergence_assessment_matches")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn database_rejects_merge_ready_verdict_for_unknown_mergeability()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_900, FIRST_HEAD).await?;
+
+    let error = sqlx::query(
+        "INSERT INTO repo_watch_pull_request_convergence_assessment
+                (assessment_id, repository, cursor_generation, pull_request_number,
+                 head_sha, base_branch, base_revision, mergeable_state, settled,
+                 review_decision, unresolved_threads, gating_check_count,
+                 non_green_gating_checks, verdict_kind)
+         SELECT $1, repository, cursor_generation, pull_request_number,
+                head_sha, base_branch, base_revision, 'unknown', settled,
+                review_decision, unresolved_threads, gating_check_count,
+                non_green_gating_checks, 'merge_ready'
+           FROM repo_watch_pull_request_convergence_assessment
+          LIMIT 1",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await
+    .expect_err("unknown mergeability cannot carry a merge-ready verdict");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("repo_watch_convergence_verdict_matches_evidence")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn database_rejects_merge_ready_verdict_for_unsettled_evidence() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_910, FIRST_HEAD).await?;
+
+    let error = sqlx::query(
+        "INSERT INTO repo_watch_pull_request_convergence_assessment
+                (assessment_id, repository, cursor_generation, pull_request_number,
+                 head_sha, base_branch, base_revision, mergeable_state, settled,
+                 review_decision, unresolved_threads, gating_check_count,
+                 non_green_gating_checks, verdict_kind)
+         SELECT $1, repository, cursor_generation, pull_request_number,
+                head_sha, base_branch, base_revision, mergeable_state, false,
+                review_decision, unresolved_threads, gating_check_count,
+                non_green_gating_checks, 'merge_ready'
+           FROM repo_watch_pull_request_convergence_assessment
+          LIMIT 1",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await
+    .expect_err("unsettled evidence cannot carry a merge-ready verdict");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("repo_watch_convergence_verdict_matches_evidence")
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn database_rejects_merge_ready_verdict_without_gating_checks() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    record_merge_ready_head(&fixture, 0x54_920, FIRST_HEAD).await?;
+
+    let error = sqlx::query(
+        "INSERT INTO repo_watch_pull_request_convergence_assessment
+                (assessment_id, repository, cursor_generation, pull_request_number,
+                 head_sha, base_branch, base_revision, mergeable_state, settled,
+                 review_decision, unresolved_threads, gating_check_count,
+                 non_green_gating_checks, verdict_kind)
+         SELECT $1, repository, cursor_generation, pull_request_number,
+                head_sha, base_branch, base_revision, mergeable_state, settled,
+                review_decision, unresolved_threads, 0,
+                ARRAY[]::text[], 'merge_ready'
+           FROM repo_watch_pull_request_convergence_assessment
+          LIMIT 1",
+    )
+    .bind(Uuid::now_v7())
+    .execute(&fixture.pool)
+    .await
+    .expect_err("zero gating checks cannot carry a merge-ready verdict");
+
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|database| database.constraint()),
+        Some("repo_watch_convergence_verdict_matches_evidence")
+    );
+    Ok(())
+}
+
+/// Once one exact head has converged, later review activity on that unchanged
+/// head remains visible but cannot reopen dispatch against it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn later_review_on_sealed_head_does_not_reopen_dispatch() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let (loaded, stale_observation) = load_second_conflict(&fixture).await?;
+    let batches_before: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_batch")
+        .fetch_one(&fixture.pool)
+        .await?;
+    record_merge_ready_head(&fixture, 0x55_000, SECOND_HEAD).await?;
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let current = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    event_store
+        .record_convergence_assessments(
+            &fixture.repository,
+            current.generation(),
+            &[assessment_with_review_decision(
+                SECOND_HEAD,
+                RepoWatchReviewDecision::ChangesRequested,
+            )?],
+        )
+        .await?;
+
+    let outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &stale_observation,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+    let latest_verdict: String =
+        sqlx::query_scalar("SELECT verdict_kind FROM repo_watch_current_pull_request_convergence")
+            .fetch_one(&fixture.pool)
+            .await?;
+    let seal_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence")
+            .fetch_one(&fixture.pool)
+            .await?;
+    let batches_after: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_batch")
+        .fetch_one(&fixture.pool)
+        .await?;
+
+    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::TargetConverged);
+    assert_eq!(latest_verdict, "not_converged");
+    assert_eq!(seal_count, 1);
+    assert_eq!(batches_after, batches_before);
+    Ok(())
+}
+
+/// Owed work for an exact head that later converges is settled rather than
+/// dispatched after the convergence cutoff frees its singleton.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn converged_target_settles_owed_work_without_dispatch() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let occupied = evaluate_second_conflict(&fixture).await?;
+    record_merge_ready_head(&fixture, 0x56_000, SECOND_HEAD).await?;
+    fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x56_100))
+        })
+        .await?;
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+            immediate_retry_policy(),
+        )
+        .await?
+        .expect("released converged-target obligation becomes eligible for settlement");
+    let cursor = PostgresRepoWatchStore::new(fixture.pool.clone())
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+
+    let outcome =
+        evaluate_obligation(&fixture, obligation, cursor.candidate().observation()).await?;
+    let settlement: String = sqlx::query_scalar(
+        "SELECT settled_kind
+           FROM repo_watch_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(occupied, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::TargetConverged);
+    assert_eq!(settlement, "target_converged");
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn terminal_cutoff_preserves_an_obligation_for_its_own_event() -> Result<(), Box<dyn Error>> {
@@ -5058,6 +5947,80 @@ async fn inv069_expiry_retires_a_lease_without_stopping_its_successor_goal()
         resumed,
         PrepareInitialModelCallOutcome::Checkpointed(_)
     ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_event_remains_eligible_after_its_exact_head_converges()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(conflict_and_merged_event_rule()?).await?;
+    declare_session_goal_achieved(&fixture.pool, fixture.session(0), 0x53_21f).await?;
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let cursor = event_store
+        .load_cursor(&fixture.repository)
+        .await?
+        .expect("fixture cursor exists");
+    let merged = pull_request_observation(
+        context(SECOND_HEAD)?,
+        RepoWatchPullRequestLifecycle::Merged,
+        MergeableState::Mergeable,
+    )?;
+    event_store
+        .commit_with_convergence(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(cursor.generation()),
+                RepoWatchCursorCandidate::new(merged.clone()),
+                vec![identified_event(merged_event(0x53_220, SECOND_HEAD)?)],
+            ),
+            &[merge_ready_assessment(SECOND_HEAD)?],
+        )
+        .await?;
+    let loaded = fixture
+        .store
+        .load_next_event(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+        )
+        .await?
+        .expect("the terminal event remains unevaluated");
+
+    let outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, fixture.store.clone())
+            .evaluate(
+                loaded,
+                &fixture.rule,
+                &merged,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+    let (_, sessions) = dispatched(outcome);
+    let session = sessions[0];
+    let cutoff_processed = fixture
+        .store
+        .process_next_convergence_cutoff(&fixture.repository, || {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x53_221))
+        })
+        .await?;
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("terminal-event dispatch goal remains readable");
+    let cutoff_goal_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_convergence_cutoff_goal
+          WHERE session_id = $1",
+    )
+    .bind(session.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(cutoff_processed);
+    assert_eq!(goal.current().state(), &GoalState::Pursuing);
+    assert_eq!(cutoff_goal_count, 0);
     Ok(())
 }
 

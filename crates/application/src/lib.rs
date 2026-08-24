@@ -76,9 +76,10 @@ pub use model_execution::{
     ModelCallInputTokenCounter, ModelCallObservationCommitOutcome, ModelCallProvider,
     ModelCallTerminalIdentityCandidates, ModelConversationMessage, ModelFrontierRenderingError,
     ModelToolResultContent, PrepareModelCallOutcome, PrepareModelCallTransaction,
-    PreparedModelOperation, RetainedCapabilityFailureStatus, RetainedModelCallExecutionState,
-    RetainedModelCallObservationStatus, ScriptedModelCallCapability, ScriptedModelCallError,
-    ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
+    PreparedModelCallFailureCause, PreparedModelOperation, RetainedModelCallExecutionState,
+    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus, ScriptedModelCallCapability,
+    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
+    UuidV7ModelCallExecutionIdGenerator,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{
@@ -88,7 +89,9 @@ pub use replace_session_defaults::{
 pub use repo_watch::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration,
     RepoWatchCheckCompletionGenerationError, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchDifferError, RepoWatchDifferFailureKind,
+    RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
+    RepoWatchConvergenceAssessmentError, RepoWatchConvergenceAssessmentInput,
+    RepoWatchConvergenceVerdict, RepoWatchDifferError, RepoWatchDifferFailureKind,
     RepoWatchDispatchIdGenerator, RepoWatchDispatchPreparationError, RepoWatchDispatchService,
     RepoWatchDispatchServiceError, RepoWatchDispatchTransaction, RepoWatchEventContentIdentityV1,
     RepoWatchEventIdGenerator, RepoWatchEventIdentityFrontierEntryV1,
@@ -96,10 +99,10 @@ pub use repo_watch::{
     RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPreparedDispatchAction,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
-    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewObservation,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchSingletonKey,
-    RepoWatchTemplateResolver, RepoWatchThreadObservation, RepoWatchThreadState,
-    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
+    RepoWatchReviewObservation, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
+    RepoWatchSingletonKey, RepoWatchTemplateResolver, RepoWatchThreadObservation,
+    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
     UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
     repo_watch_events_have_equal_identified_content,
 };

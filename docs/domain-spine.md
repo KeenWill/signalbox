@@ -6590,6 +6590,7 @@ pub trait FailPreparedModelCallTransaction {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        cause: PreparedModelCallFailureCause,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> impl Future<Output = Result<FailedModelCallTurn, Self::Error>> + Send
@@ -6599,10 +6600,15 @@ pub trait FailPreparedModelCallTransaction {
         &mut self,
         session: SessionId,
         call: ModelCallId,
-    ) -> impl Future<Output = Result<RetainedCapabilityFailureStatus, Self::Error>> + Send;
+    ) -> impl Future<Output = Result<RetainedPreparedFailureStatus, Self::Error>> + Send;
 }
 
-pub enum RetainedCapabilityFailureStatus {
+pub enum PreparedModelCallFailureCause {
+    CapabilityKnownFailure,
+    ToolRoundLimitReached,
+}
+
+pub enum RetainedPreparedFailureStatus {
     Pending,
     AlreadyCommitted,
     Cancelled,
@@ -6772,6 +6778,8 @@ pub enum ModelCallExecutionOutcome {
     TargetUnavailable(Box<FailedModelCallTurn>),
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
     CapabilityFailureAlreadyCommitted(ModelCallId),
+    ToolRoundLimitReached(Box<FailedModelCallTurn>),
+    ToolRoundLimitAlreadyCommitted(ModelCallId),
     ObservationCommitted(Box<ModelCallTerminalOutcome>),
     AvailabilitySuccessor(Box<AvailabilitySuccessorOutcome>),
     ObservationAlreadyCommitted(ModelCallId),
@@ -6787,8 +6795,8 @@ pub enum ModelCallExecutionError<
     Prepare(PrepareError),
     Render(ModelFrontierRenderingError),
     CapabilityPreparation(ProviderError),
-    CapabilityFailureCommit(FailureError),
-    CapabilityFailureReread(FailureError),
+    PreparedFailureCommit(FailureError),
+    PreparedFailureReread(FailureError),
     Authorization(AuthorizationError),
     AuthorizationReread {
         authorization_error: AuthorizationError,
@@ -7335,6 +7343,44 @@ impl RepoWatchReviewObservation {
     // accessors: id(), reviewer(), state(), commit()
 }
 
+pub enum RepoWatchReviewDecision {
+    None,
+    Approved,
+    ReviewRequired,
+    ChangesRequested,
+}
+
+pub enum RepoWatchConvergenceVerdict {
+    NotConverged,
+    InternallyConverged,
+    MergeReady,
+}
+
+pub struct RepoWatchConvergenceAssessmentInput {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub base_branch: BranchName,
+    pub base_revision: CommitSha,
+    pub mergeable_state: MergeableState,
+    pub settled: bool,
+    pub review_decision: RepoWatchReviewDecision,
+    pub unresolved_threads: Vec<ReviewThreadId>,
+    pub gating_check_count: u64,
+    pub non_green_gating_checks: Vec<CheckRunName>,
+}
+
+pub struct RepoWatchConvergenceAssessment { /* private */ }
+impl RepoWatchConvergenceAssessment {
+    pub fn try_new(
+        input: RepoWatchConvergenceAssessmentInput,
+    ) -> Result<Self, RepoWatchConvergenceAssessmentError>;
+    // accessors: number(), head_sha(), base_branch(), base_revision(), mergeable_state(),
+    // settled(), review_decision(), unresolved_threads(), gating_check_count(),
+    // non_green_gating_checks(), verdict()
+}
+
+pub struct RepoWatchConvergenceAssessmentError;
+
 pub enum RepoWatchThreadState {
     Open,
     Resolved,
@@ -7512,6 +7558,7 @@ pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
     TargetClosed,
+    TargetConverged,
     Occupied,
     Cooldown,
     Dispatched {
@@ -11184,12 +11231,12 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
-| application: model_execution                       | 35 (incl. 8 traits)              |
+| application: model_execution                       | 36 (incl. 8 traits)              |
 | application: tool_loop                             | 27 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
-| application: repo_watch                            | 38 (+2 free fn) (incl. 4 traits) |
+| application: repo_watch                            | 43 (+2 free fn) (incl. 4 traits) |
 | application: repo_watch_webhook                    | 18 (+2 free fn)                  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
@@ -11202,4 +11249,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **297 (+6 free fn)**             |
+| **signalbox-application total**                    | **303 (+6 free fn)**             |

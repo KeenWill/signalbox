@@ -380,7 +380,14 @@ jobs:
       - name: Run tests
         env:
           SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"
-        run: cargo test --no-fail-fast --workspace --all-targets --all-features
+        # Process-heavy integration targets can exhaust the hosted runner's
+        # file-descriptor limit under libtest's unrestricted CPU-sized pool.
+        # Four concurrent tests matches the explicit cap used by the
+        # PostgreSQL jobs and retains parallel execution without false EMFILE
+        # failures.
+        run: >-
+          cargo test --no-fail-fast --workspace --all-targets --all-features
+          -- --test-threads=4
       - name: Test generated browser contract runtime
         run: node --test crates/web-contract/tests/generated_roundtrip.mjs
       # `--all-targets` excludes doctests, so the domain's compile_fail
