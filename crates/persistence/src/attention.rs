@@ -213,6 +213,7 @@ WITH selected AS (
                 WHERE retired.session_id = lifecycle.session_id
                   AND retired.turn_id = lifecycle.turn_id
            )
+       AND NOT lifecycle.delegation_runtime_terminal
      ORDER BY lifecycle.session_id,
               CASE lifecycle.state_kind
                   WHEN 'active' THEN 0
@@ -367,11 +368,10 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
         AttentionState::AwaitingApproval if approval_human_authority => {
             Some(AttentionAction::DecideApproval)
         }
-        AttentionState::Ambiguous | AttentionState::AwaitingReconciliation => {
-            Some(AttentionAction::ReconcileTurn)
-        }
+        AttentionState::Ambiguous => Some(AttentionAction::ReconcileTurn),
         AttentionState::AwaitingApproval
         | AttentionState::AwaitingToolRecovery
+        | AttentionState::AwaitingReconciliation
         | AttentionState::RunnerLost => None,
         AttentionState::Active | AttentionState::Queued | AttentionState::Idle => None,
     };
