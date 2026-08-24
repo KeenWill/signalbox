@@ -125,6 +125,24 @@ test("generated live decoder correlates queued preview with its count", () => {
   );
 });
 
+test("generated live decoder rejects duplicate queued turn identities", () => {
+  const duplicate = "00000000-0000-0000-0000-000000000992";
+
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "2",
+        queued_turn_ids: [duplicate, duplicate],
+        reconciliation: null,
+        runner: null,
+      }),
+    /unique turn IDs/,
+  );
+});
+
 test("generated live decoder validates identities and active-state correlation", () => {
   assert.throws(
     () =>
@@ -184,6 +202,22 @@ test("generated live decoder rejects malformed runner correlations", () => {
         queued_turn_ids: [],
         reconciliation: null,
         runner: { state: "pinned", placement_revision: "1" },
+      }),
+    /one recognized variant/,
+  );
+});
+
+test("generated live decoder requires positive placement revisions", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: { state: "unpinned", placement_revision: "0" },
       }),
     /one recognized variant/,
   );

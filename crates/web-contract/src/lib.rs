@@ -317,6 +317,33 @@ impl<'de> Deserialize<'de> for WebU64 {
     }
 }
 
+/// Checked positive 64-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebPositiveU64(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
+
+impl WebPositiveU64 {
+    /// Encodes one domain-validated positive value in canonical decimal form.
+    #[must_use]
+    pub fn from_u64(value: u64) -> Self {
+        debug_assert!(value > 0, "positive wire values cannot encode zero");
+        Self(value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebPositiveU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        canonical_u64(&value)
+            .filter(|value| *value > 0)
+            .map(|_| Self(value))
+            .ok_or_else(|| de::Error::custom("wire value must be a canonical positive u64"))
+    }
+}
+
 /// Stable browser-visible location of one durable session event.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -434,7 +461,7 @@ pub enum WebSessionLiveActiveState {
     },
     AwaitingRunnerRecovery {
         runner_id: WebLiveResourceId,
-        placement_revision: WebU64,
+        placement_revision: WebPositiveU64,
     },
 }
 
@@ -471,24 +498,24 @@ pub enum WebSessionLiveRunnerConnectionHealth {
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebSessionLiveRunner {
     Unpinned {
-        placement_revision: WebU64,
+        placement_revision: WebPositiveU64,
     },
     Pinned {
         runner_id: WebLiveResourceId,
-        placement_revision: WebU64,
+        placement_revision: WebPositiveU64,
         connection_health: WebSessionLiveRunnerConnectionHealth,
     },
     RunnerLostBeforePin {
         runner_id: WebLiveResourceId,
-        placement_revision: WebU64,
+        placement_revision: WebPositiveU64,
     },
     RunnerLost {
         runner_id: WebLiveResourceId,
-        placement_revision: WebU64,
+        placement_revision: WebPositiveU64,
     },
     RunnerAbandoned {
         runner_id: WebLiveResourceId,
-        placement_revision: WebU64,
+        placement_revision: WebPositiveU64,
     },
 }
 
@@ -1053,6 +1080,9 @@ function assertLiveSnapshot(snapshot, path) {{
       `${{path}}.queued_turn_ids`,
       `exactly ${{expectedPreviewLength}} IDs for queued_turn_count`,
     );
+  }}
+  if (new Set(snapshot.queued_turn_ids).size !== snapshot.queued_turn_ids.length) {{
+    fail(`${{path}}.queued_turn_ids`, "unique turn IDs");
   }}
   if (snapshot.active != null && snapshot.reconciliation != null) {{
     fail(`${{path}}.reconciliation`, "absent while an active turn is present");

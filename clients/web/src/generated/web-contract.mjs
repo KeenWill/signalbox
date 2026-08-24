@@ -847,6 +847,11 @@ const schemas = {
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         "type": "string"
       },
+      "WebPositiveU64": {
+        "description": "Checked positive 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
       "WebSessionId": {
         "description": "Checked canonical UUID used for browser-visible session identities.",
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -958,7 +963,7 @@ const schemas = {
                 "type": "string"
               },
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "runner_id": {
                 "$ref": "#/$defs/WebLiveResourceId"
@@ -1041,7 +1046,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "state": {
                 "const": "unpinned",
@@ -1061,7 +1066,7 @@ const schemas = {
                 "$ref": "#/$defs/WebSessionLiveRunnerConnectionHealth"
               },
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "runner_id": {
                 "$ref": "#/$defs/WebLiveResourceId"
@@ -1083,7 +1088,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "runner_id": {
                 "$ref": "#/$defs/WebLiveResourceId"
@@ -1104,7 +1109,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "runner_id": {
                 "$ref": "#/$defs/WebLiveResourceId"
@@ -1125,7 +1130,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "runner_id": {
                 "$ref": "#/$defs/WebLiveResourceId"
@@ -1845,6 +1850,9 @@ function assertLiveSnapshot(snapshot, path) {
       `${path}.queued_turn_ids`,
       `exactly ${expectedPreviewLength} IDs for queued_turn_count`,
     );
+  }
+  if (new Set(snapshot.queued_turn_ids).size !== snapshot.queued_turn_ids.length) {
+    fail(`${path}.queued_turn_ids`, "unique turn IDs");
   }
   if (snapshot.active != null && snapshot.reconciliation != null) {
     fail(`${path}.reconciliation`, "absent while an active turn is present");

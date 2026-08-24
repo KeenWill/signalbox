@@ -594,7 +594,9 @@ impl ProcessMonitorSubscription {
 
     pub async fn recv(&mut self) -> Result<ProcessMonitorUpdate, ProcessMonitorReceiveError> {
         self.receiver.recv().await.map_err(|error| match error {
-            broadcast::error::RecvError::Lagged(_) => ProcessMonitorReceiveError::Lagged,
+            broadcast::error::RecvError::Lagged(skipped) => {
+                ProcessMonitorReceiveError::Lagged(usize::try_from(skipped).unwrap_or(usize::MAX))
+            }
             broadcast::error::RecvError::Closed => ProcessMonitorReceiveError::Closed,
         })
     }
@@ -619,7 +621,7 @@ pub enum ProcessMonitorUpdate {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ProcessMonitorReceiveError {
-    Lagged,
+    Lagged(usize),
     Closed,
 }
 

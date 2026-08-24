@@ -92,6 +92,8 @@ type WebContractLimits = {
 
 type WebLiveResourceId = string;
 
+type WebPositiveU64 = string;
+
 type WebSessionId = string;
 
 type WebSessionLiveActiveState = {
@@ -112,7 +114,7 @@ type WebSessionLiveActiveState = {
   readonly tool_attempt_id: WebLiveResourceId;
 } | {
   readonly kind: "awaiting_runner_recovery";
-  readonly placement_revision: WebU64;
+  readonly placement_revision: WebPositiveU64;
   readonly runner_id: WebLiveResourceId;
 };
 
@@ -132,23 +134,23 @@ type WebSessionLiveReconciliation = {
 };
 
 type WebSessionLiveRunner = {
-  readonly placement_revision: WebU64;
+  readonly placement_revision: WebPositiveU64;
   readonly state: "unpinned";
 } | {
   readonly connection_health: WebSessionLiveRunnerConnectionHealth;
-  readonly placement_revision: WebU64;
+  readonly placement_revision: WebPositiveU64;
   readonly runner_id: WebLiveResourceId;
   readonly state: "pinned";
 } | {
-  readonly placement_revision: WebU64;
+  readonly placement_revision: WebPositiveU64;
   readonly runner_id: WebLiveResourceId;
   readonly state: "runner_lost_before_pin";
 } | {
-  readonly placement_revision: WebU64;
+  readonly placement_revision: WebPositiveU64;
   readonly runner_id: WebLiveResourceId;
   readonly state: "runner_lost";
 } | {
-  readonly placement_revision: WebU64;
+  readonly placement_revision: WebPositiveU64;
   readonly runner_id: WebLiveResourceId;
   readonly state: "runner_abandoned";
 };

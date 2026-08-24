@@ -50,7 +50,7 @@ use signalbox_web_contract::{
     WebAttentionAction, WebAttentionActivity, WebAttentionActivityKind, WebAttentionBlockedReason,
     WebAttentionContinuation, WebAttentionGoalBlock, WebAttentionJudgeFacts, WebAttentionSnapshot,
     WebAttentionSort, WebAttentionState, WebAttentionStreamEvent, WebAttentionSummary,
-    WebContractBootstrap, WebContractExample, WebLiveResourceId, WebSessionId,
+    WebContractBootstrap, WebContractExample, WebLiveResourceId, WebPositiveU64, WebSessionId,
     WebSessionLiveActiveState, WebSessionLiveActiveTurn, WebSessionLiveReconciliation,
     WebSessionLiveRunner, WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot,
     WebSessionLiveStreamEvent, WebSessionTimelineDescriptor, WebSessionTimelineEventKind,
@@ -318,8 +318,12 @@ impl WebHttpRuntime {
 }
 
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
-pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> Router {
-    production_router_with_monitor(asset_root, pool, None, None)
+pub fn production_router(
+    asset_root: Option<PathBuf>,
+    pool: Option<PgPool>,
+    monitor: Option<ProcessMonitor>,
+) -> Router {
+    production_router_with_monitor(asset_root, pool, monitor, None)
 }
 
 fn production_router_with_monitor(
@@ -821,7 +825,13 @@ async fn live_follow_next(
             update = state.subscription.recv() => update,
         } {
             Ok(update) => update,
-            Err(ProcessMonitorReceiveError::Lagged) => {
+            Err(ProcessMonitorReceiveError::Lagged(skipped))
+                if skipped <= state.queued_at_snapshot =>
+            {
+                state.queued_at_snapshot -= skipped;
+                continue;
+            }
+            Err(ProcessMonitorReceiveError::Lagged(_)) => {
                 state.ended = true;
                 return Some((
                     WebSessionLiveStreamEvent::ResyncRequired {
@@ -988,7 +998,7 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                     placement_revision,
                 } => WebSessionLiveActiveState::AwaitingRunnerRecovery {
                     runner_id: WebLiveResourceId::from_uuid_bytes(runner.into_uuid().into_bytes()),
-                    placement_revision: WebU64::from_u64(placement_revision),
+                    placement_revision: WebPositiveU64::from_u64(placement_revision),
                 },
             },
         }),
@@ -1019,7 +1029,7 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                 }
             }),
         runner: snapshot.runner.and_then(|runner| {
-            let placement_revision = WebU64::from_u64(runner.placement_revision);
+            let placement_revision = WebPositiveU64::from_u64(runner.placement_revision);
             match (runner.state, runner.runner, runner.connection_health) {
                 (SessionLiveRunnerState::Unpinned, None, None) => {
                     Some(WebSessionLiveRunner::Unpinned { placement_revision })
@@ -1873,6 +1883,13 @@ mod tests {
         }
     }
 
+    fn provider_text_content_length(event: WebSessionLiveStreamEvent) -> usize {
+        let WebSessionLiveStreamEvent::ProviderTextDelta { content, .. } = event else {
+            panic!("expected provider text delta");
+        };
+        content.len()
+    }
+
     #[tokio::test]
     async fn live_follow_orders_provider_draft_before_later_durable_header() {
         let monitor = ProcessMonitor::test_channel();
@@ -1978,6 +1995,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_follow_consumes_lag_covered_by_snapshot_cutoff() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        monitor.fill_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 0,
+            text: Arc::from("stale draft"),
+        });
+        state.queued_at_snapshot = state.subscription.queued_len();
+        monitor.publish_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnCompleted,
+        });
+        let (event, _) = live_follow_next(state)
+            .await
+            .expect("the post-snapshot durable event is delivered");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::Durable {
+                cursor: WebU64::from_u64(8),
+                address: WebTimelineAddress {
+                    event_sequence: WebTimelineEventSequence::from_nonzero(
+                        std::num::NonZeroU64::new(8).expect("the fixture cursor is positive"),
+                    ),
+                },
+                event_kind: WebSessionTimelineEventKind::TurnCompleted,
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn live_follow_fragments_provider_text_lazily() {
         let monitor = ProcessMonitor::test_channel();
         let state = live_follow_state(&monitor, 7, 0);
@@ -2002,10 +2054,7 @@ mod tests {
         assert!(Arc::ptr_eq(&text, &retained.text));
         assert_eq!(retained.offset, super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES);
         assert_eq!(
-            match first {
-                WebSessionLiveStreamEvent::ProviderTextDelta { content, .. } => content.len(),
-                event => panic!("expected provider text delta, got {event:?}"),
-            },
+            provider_text_content_length(first),
             super::MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES,
         );
     }
@@ -2118,7 +2167,7 @@ mod tests {
             .expect("the static index exists");
         let runtime = WebHttpRuntime::bind_router(
             loopback_ephemeral(),
-            production_router(Some(assets.path().to_path_buf()), None),
+            production_router(Some(assets.path().to_path_buf()), None, None),
         )
         .await
         .expect("the production test server binds");
@@ -2356,7 +2405,7 @@ mod tests {
         let request = Request::get("/api/not-a-route")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(Some(assets.path().to_path_buf()), None)
+        let response = production_router(Some(assets.path().to_path_buf()), None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2376,7 +2425,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2397,7 +2446,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2415,7 +2464,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2445,7 +2494,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2497,7 +2546,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
