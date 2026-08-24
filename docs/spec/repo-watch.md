@@ -34,15 +34,14 @@ configuration diagnostics are verified against PR #863
 (`agent/repo-watch-rule-robustness`). Bounded dispatch-start leases, priority
 nudges, expiry retirement, and nudge outcome telemetry are verified against this
 PR (`agent/dispatch-start-lease`). Exact-head convergence assessment and cutoff
-are verified against PR #981 (`agent/dispatch-autonomy-convergence`). The
-dispatch attempt budget, the delay
-between attempts, the parked state, and both ways out of it are verified against
-PR #980 (`agent/dispatch-retry-budget`). The source-independent event occurrence
-identity, its durable frontier, the commit-time coalescing of a restated
-occurrence, and the storage migration are verified against PR #870
-(`agent/repo-watch-content-identity`). The authenticated webhook intake, its
-ingress ceilings, shadow projection, parity view and causes, and targeted
-refresh behavior are verified against this PR
+are verified against PR #832 (`agent/dispatch-autonomy-convergence`). The
+dispatch attempt budget, the delay between attempts, the parked state, and both
+ways out of it are verified against PR #980 (`agent/dispatch-retry-budget`). The
+source-independent event occurrence identity, its durable frontier, the
+commit-time coalescing of a restated occurrence, and the storage migration are
+verified against PR #870 (`agent/repo-watch-content-identity`). The
+authenticated webhook intake, its ingress ceilings, shadow projection, parity
+view and causes, and targeted refresh behavior are verified against this PR
 (`agent/repo-watch-webhook-receiver`). The projection coverage enumeration,
 pull-request issue-comment behavior, per-page hydration coalescing, and
 workflow-run branch symmetry below are verified against PR #891
