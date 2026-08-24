@@ -767,3 +767,238 @@ async fn large_result_set_pages_with_stable_strict_cursors() -> Result<(), Box<d
     drop(container);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn absent_term_returns_an_empty_page() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x310).await?;
+    insert_generated_projections(&pool, session, "present-corpus", 8).await?;
+
+    let page = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "present nonexistentterm",
+            SearchScope::Global,
+            10,
+            None,
+        ))
+        .await?;
+
+    assert!(page.results.is_empty());
+    assert!(page.next.is_none());
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn common_term_query_pages_through_the_keyset_traversal() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x320).await?;
+    // Above the rare-term candidate cap for every query term, so this page is
+    // served by the ordered keyset traversal rather than the seeded candidate
+    // relation.
+    insert_generated_projections(&pool, session, "commonplace traversal", 1_200).await?;
+    let repository = SearchRepository::new(pool.clone());
+
+    let first = repository
+        .search(lexical_query(
+            "commonplace traversal",
+            SearchScope::Session(session),
+            LARGE_PAGE_SIZE,
+            None,
+        ))
+        .await?;
+    let second = repository
+        .search(lexical_query(
+            "commonplace traversal",
+            SearchScope::Session(session),
+            LARGE_PAGE_SIZE,
+            first.next,
+        ))
+        .await?;
+
+    assert_eq!(first.results.len(), usize::from(LARGE_PAGE_SIZE));
+    assert_eq!(second.results.len(), usize::from(LARGE_PAGE_SIZE));
+    assert!(first.next.is_some());
+    assert_ne!(first.results, second.results);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn search_rejects_an_input_rewired_to_a_different_reveal_event() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x330).await?;
+    let input = AcceptedInputId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x331));
+    let turn = TurnId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x332));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                SEARCH_FIXTURE_SEED + 0x333,
+                session.as_uuid().as_u128(),
+                "rewired reveal alpha",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            input,
+            Some(turn),
+        )
+        .await?;
+    let decoy = AcceptedInputId::from_uuid(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x334));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                SEARCH_FIXTURE_SEED + 0x335,
+                session.as_uuid().as_u128(),
+                "unrelated decoy beta",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            decoy,
+            Some(TurnId::from_uuid(Uuid::from_u128(
+                SEARCH_FIXTURE_SEED + 0x336,
+            ))),
+        )
+        .await?;
+
+    // Rewire the first input's projection to the decoy's reveal event: still a
+    // valid same-session address, but not the event that revealed this input.
+    sqlx::query(
+        "UPDATE web_search_projection
+            SET event_sequence = (
+                SELECT event_sequence
+                  FROM input_accepted_outbox_event
+                 WHERE accepted_input_id = $1
+            )
+          WHERE source_kind = 'accepted_input' AND source_id = $2",
+    )
+    .bind(decoy.into_uuid())
+    .bind(input.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "rewired reveal alpha",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await
+        .expect_err("a mismatched reveal event must fail closed");
+
+    assert!(matches!(
+        error,
+        SearchRepositoryError::Corruption(SearchProjectionCorruption::SourceShape)
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn search_rejects_a_semantic_entry_with_a_mismatched_payload_class()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (session, _) = project_oversized_assistant_text(&pool, 0x340).await?;
+
+    // Reclassify the assistant entry as a session-owned derived artifact: the
+    // entry and its terminal reveal event both exist, but the payload kind
+    // contradicts the claimed content class.
+    sqlx::query(
+        "INSERT INTO web_search_projection (
+             source_kind, source_id, session_id, event_sequence, item_kind,
+             item_id, turn_id, content_class, projection_ordinal, content_text
+         )
+         SELECT 'semantic_entry', entry.semantic_entry_id,
+                entry.source_session_id, event.event_sequence,
+                'transcript_entry', entry.semantic_entry_id, NULL,
+                'derived_text_artifact', 0, 'misfiled summary sentinel'
+           FROM semantic_transcript_entry AS entry
+           JOIN model_call AS call
+             ON call.model_call_id = entry.producing_model_call_id
+           JOIN model_call_transition_outbox_event AS event
+             ON event.model_call_id = call.model_call_id
+            AND event.call_state_kind = 'terminal'
+          WHERE entry.source_session_id = $1
+            AND entry.payload_kind = 'assistant_text'",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let error = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "misfiled summary sentinel",
+            SearchScope::Session(session),
+            10,
+            None,
+        ))
+        .await
+        .expect_err("a contradicted payload kind must fail closed");
+
+    assert!(matches!(
+        error,
+        SearchRepositoryError::Corruption(SearchProjectionCorruption::SourceShape)
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn search_validates_the_lookahead_row_before_advertising_continuation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_search_session(&pool, 0x350).await?;
+    let address = session_created_address(&pool, session).await?;
+
+    // Oldest matching row (lowest projection identity) is corrupt: it claims
+    // an accepted input that has no canonical record. Two valid rows follow.
+    sqlx::query(
+        "INSERT INTO web_search_projection (
+             source_kind, source_id, session_id, event_sequence, item_kind,
+             item_id, turn_id, content_class, projection_ordinal, content_text
+         ) VALUES (
+             'accepted_input', $1, $2, $3, 'accepted_input', $1,
+             $4, 'user_transcript', 0, 'lookahead sentinel corrupt'
+         )",
+    )
+    .bind(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x351))
+    .bind(session.into_uuid())
+    .bind(rust_decimal::Decimal::from(address.sequence().get()))
+    .bind(Uuid::from_u128(SEARCH_FIXTURE_SEED + 0x352))
+    .execute(&pool)
+    .await?;
+    insert_generated_projections(&pool, session, "lookahead sentinel", 2).await?;
+
+    let error = SearchRepository::new(pool.clone())
+        .search(lexical_query(
+            "lookahead sentinel",
+            SearchScope::Session(session),
+            2,
+            None,
+        ))
+        .await
+        .expect_err("a corrupt lookahead row must fail the read that observes it");
+
+    assert!(matches!(
+        error,
+        SearchRepositoryError::Corruption(SearchProjectionCorruption::SourceShape)
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

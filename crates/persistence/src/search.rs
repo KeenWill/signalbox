@@ -1,6 +1,6 @@
 //! PostgreSQL adapter for bounded application lexical search.
 
-use std::{error::Error, fmt, num::NonZeroU64};
+use std::{error::Error, fmt, num::NonZeroU64, sync::LazyLock};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -26,72 +26,253 @@ const HEADLINE_START: &str = "\u{e000}";
 #[cfg(test)]
 const HEADLINE_END: &str = "\u{e001}";
 
-const SEARCH_SQL: &str = "
+/// Ceiling on the bounded per-term match probe.
+///
+/// A query term whose complete chunk-match count stays strictly under this cap
+/// is rare enough to seed a materialized candidate set: the set is bounded by
+/// the cap, so grouping and sorting it cannot scale with the corpus. At or
+/// above the cap every term is common enough that the newest-first keyset
+/// traversal reaches a full page without visiting a corpus-sized prefix.
+const RARE_TERM_CANDIDATE_CAP: i64 = 1_000;
+
+/// Index-driven per-term existence and boundedness probe.
+///
+/// Returns the rarest lexeme of the query together with its match count
+/// bounded by `$2`. An absent term surfaces as a zero count, which the caller
+/// turns into an immediate empty page instead of an ordered corpus scan whose
+/// `LIMIT` never fills. The probe deliberately ignores the session scope,
+/// exactly as the page query's per-term coverage check does: a term supplied
+/// only by a chunk whose stored session contradicts its group must still admit
+/// the group so the contradiction fails closed in the decoder.
+const TERM_PROBE_SQL: &str = "
+WITH query_terms AS (
+    SELECT DISTINCT unnest(
+        tsvector_to_array(to_tsvector('simple'::regconfig, $1))
+    ) AS lexeme
+)
+SELECT term.lexeme,
+       (SELECT count(*)
+          FROM (SELECT 1
+                  FROM web_search_projection AS probe
+                 WHERE probe.search_vector @@ to_tsquery(
+                           'simple'::regconfig, quote_literal(term.lexeme)
+                       )
+                 LIMIT $2
+               ) AS bounded_probe
+       ) AS bounded_count
+  FROM query_terms AS term
+ ORDER BY bounded_count ASC, term.lexeme ASC
+ LIMIT 1";
+
+/// Candidate relation seeded by the rarest query term through the GIN index.
+///
+/// The probe admits this path only when the seed term's complete match count
+/// is under [`RARE_TERM_CANDIDATE_CAP`], so the materialized set is hard
+/// bounded and grouping it cannot scale with the corpus. Like the probe and
+/// the coverage check, the seed ignores the session scope; the page's own
+/// predicates still confine returned rows to the requested session.
+const RARE_CANDIDATE_CTE: &str = "
+, rare_candidates AS MATERIALIZED (
+    SELECT DISTINCT seed.source_kind, seed.source_id, seed.content_class
+      FROM web_search_projection AS seed
+     WHERE seed.search_vector @@ to_tsquery(
+               'simple'::regconfig, quote_literal($6)
+           )
+)";
+
+const RARE_CANDIDATE_JOIN: &str = "
+  JOIN rare_candidates
+    ON rare_candidates.source_kind = projection.source_kind
+   AND rare_candidates.source_id = projection.source_id
+   AND rare_candidates.content_class = projection.content_class";
+
+/// Builds one strict keyset page query.
+///
+/// The inner `page` relation selects at most `limit + 1` representative rows
+/// first; validity booleans and the `ts_headline` snippet are computed only
+/// for those rows, never for every examined candidate. Each returned source is
+/// correlated with both its canonical record and the exact durable outbox
+/// event that supplies its reveal address, and the semantic-entry branch pins
+/// the payload kind its content class asserts, so a rewired or reclassified
+/// projection fails closed in the decoder.
+fn page_sql(candidate_seed: &str, candidate_join: &str) -> String {
+    format!(
+        "
 WITH lexical_query AS (
     SELECT plainto_tsquery('simple'::regconfig, $1) AS value
 ), query_terms AS (
     SELECT DISTINCT unnest(
         tsvector_to_array(to_tsvector('simple'::regconfig, $1))
     ) AS lexeme
+){candidate_seed}, page AS MATERIALIZED (
+    SELECT projection.projection_id, projection.session_id,
+           projection.event_sequence, projection.item_kind,
+           projection.item_id, projection.source_kind, projection.source_id,
+           projection.turn_id, projection.content_class,
+           projection.content_text
+      FROM web_search_projection AS projection{candidate_join}
+     WHERE projection.projection_id = (
+           SELECT min(candidate.projection_id)
+             FROM web_search_projection AS candidate
+            WHERE candidate.source_kind = projection.source_kind
+              AND candidate.source_id = projection.source_id
+              AND candidate.content_class = projection.content_class
+              AND candidate.session_id = projection.session_id
+              AND candidate.event_sequence = projection.event_sequence
+              AND candidate.item_kind = projection.item_kind
+              AND candidate.item_id = projection.item_id
+              AND candidate.turn_id IS NOT DISTINCT FROM projection.turn_id
+              AND EXISTS (
+                  SELECT 1
+                    FROM query_terms AS term
+                   WHERE candidate.search_vector @@ to_tsquery(
+                       'simple'::regconfig, quote_literal(term.lexeme)
+                   )
+              )
+       )
+       AND NOT EXISTS (
+           SELECT 1
+             FROM query_terms AS term
+            WHERE NOT EXISTS (
+                SELECT 1
+                  FROM web_search_projection AS matching_chunk
+                 WHERE matching_chunk.source_kind = projection.source_kind
+                   AND matching_chunk.source_id = projection.source_id
+                   AND matching_chunk.content_class = projection.content_class
+                   AND matching_chunk.search_vector @@ to_tsquery(
+                       'simple'::regconfig, quote_literal(term.lexeme)
+                   )
+            )
+       )
+       AND ($2::uuid IS NULL OR projection.session_id = $2)
+       AND (
+           $3::numeric IS NULL
+           OR projection.event_sequence < $3
+           OR (
+               projection.event_sequence = $3
+               AND projection.projection_id < $4
+           )
+       )
+     ORDER BY projection.event_sequence DESC, projection.projection_id DESC
+     LIMIT $5
 )
-SELECT projection.projection_id, projection.session_id,
-       projection.event_sequence, projection.item_kind, projection.item_id,
-       projection.source_kind, projection.source_id, turn_id, content_class,
+SELECT page.projection_id, page.session_id, page.event_sequence,
+       page.item_kind, page.item_id, page.source_kind, page.source_id,
+       page.turn_id, page.content_class,
        NOT EXISTS (
            SELECT 1
              FROM web_search_projection AS correlated_chunk
-            WHERE correlated_chunk.source_kind = projection.source_kind
-              AND correlated_chunk.source_id = projection.source_id
-              AND correlated_chunk.content_class = projection.content_class
+            WHERE correlated_chunk.source_kind = page.source_kind
+              AND correlated_chunk.source_id = page.source_id
+              AND correlated_chunk.content_class = page.content_class
               AND (
-                  correlated_chunk.session_id <> projection.session_id
-                  OR correlated_chunk.event_sequence <> projection.event_sequence
-                  OR correlated_chunk.item_kind <> projection.item_kind
-                  OR correlated_chunk.item_id <> projection.item_id
-                  OR correlated_chunk.turn_id IS DISTINCT FROM projection.turn_id
+                  correlated_chunk.session_id <> page.session_id
+                  OR correlated_chunk.event_sequence <> page.event_sequence
+                  OR correlated_chunk.item_kind <> page.item_kind
+                  OR correlated_chunk.item_id <> page.item_id
+                  OR correlated_chunk.turn_id IS DISTINCT FROM page.turn_id
               )
        ) AS source_group_valid,
-       CASE projection.source_kind
+       CASE page.source_kind
            WHEN 'accepted_input' THEN EXISTS (
-               SELECT 1 FROM accepted_input AS canonical_source
-                WHERE canonical_source.accepted_input_id = projection.source_id
-                  AND canonical_source.session_id = projection.session_id
-                  AND canonical_source.origin_turn_id = projection.turn_id
+               SELECT 1
+                 FROM accepted_input AS canonical_source
+                 JOIN input_accepted_outbox_event AS reveal_event
+                   ON reveal_event.accepted_input_id
+                      = canonical_source.accepted_input_id
+                WHERE canonical_source.accepted_input_id = page.source_id
+                  AND canonical_source.session_id = page.session_id
+                  AND canonical_source.origin_turn_id = page.turn_id
+                  AND reveal_event.session_id = page.session_id
+                  AND reveal_event.event_sequence = page.event_sequence
            )
            WHEN 'steering_input' THEN EXISTS (
-               SELECT 1 FROM semantic_transcript_entry AS canonical_source
-                WHERE canonical_source.origin_accepted_input_id = projection.source_id
-                  AND canonical_source.source_session_id = projection.session_id
-                  AND canonical_source.steering_source_turn_id = projection.turn_id
-                  AND canonical_source.payload_kind = 'steering_accepted_input'
-           )
-           WHEN 'semantic_entry' THEN EXISTS (
                SELECT 1
                  FROM semantic_transcript_entry AS canonical_source
-                 LEFT JOIN model_call AS call
-                   ON call.model_call_id = canonical_source.producing_model_call_id
-                WHERE canonical_source.semantic_entry_id = projection.source_id
-                  AND canonical_source.source_session_id = projection.session_id
-                  AND (
-                      projection.turn_id IS NULL
-                      OR (call.turn_id = projection.turn_id
-                          AND call.session_id = projection.session_id)
-                  )
+                 JOIN accepted_input AS steering_input
+                   ON steering_input.accepted_input_id
+                      = canonical_source.origin_accepted_input_id
+                  AND steering_input.session_id
+                      = canonical_source.source_session_id
+                 JOIN model_call_transition_outbox_event AS reveal_event
+                   ON reveal_event.model_call_id
+                      = steering_input.consuming_model_call_id
+                  AND reveal_event.call_state_kind = 'prepared'
+                WHERE canonical_source.origin_accepted_input_id = page.source_id
+                  AND canonical_source.source_session_id = page.session_id
+                  AND canonical_source.steering_source_turn_id = page.turn_id
+                  AND canonical_source.payload_kind = 'steering_accepted_input'
+                  AND steering_input.disposition_kind = 'consumed_as_steering'
+                  AND reveal_event.session_id = page.session_id
+                  AND reveal_event.event_sequence = page.event_sequence
            )
+           WHEN 'semantic_entry' THEN CASE
+               WHEN page.turn_id IS NULL THEN EXISTS (
+                   SELECT 1
+                     FROM semantic_transcript_entry AS canonical_source
+                     JOIN context_compacted_outbox_event AS reveal_event
+                       ON reveal_event.summary_entry_id
+                          = canonical_source.semantic_entry_id
+                    WHERE canonical_source.semantic_entry_id = page.source_id
+                      AND canonical_source.source_session_id = page.session_id
+                      AND canonical_source.payload_kind = 'context_summary'
+                      AND reveal_event.session_id = page.session_id
+                      AND reveal_event.event_sequence = page.event_sequence
+               )
+               ELSE EXISTS (
+                   SELECT 1
+                     FROM semantic_transcript_entry AS canonical_source
+                     JOIN model_call AS call
+                       ON call.model_call_id
+                          = canonical_source.producing_model_call_id
+                     JOIN model_call_transition_outbox_event AS reveal_event
+                       ON reveal_event.model_call_id = call.model_call_id
+                      AND reveal_event.call_state_kind = 'terminal'
+                    WHERE canonical_source.semantic_entry_id = page.source_id
+                      AND canonical_source.source_session_id = page.session_id
+                      AND canonical_source.payload_kind = 'assistant_text'
+                      AND call.turn_id = page.turn_id
+                      AND call.session_id = page.session_id
+                      AND reveal_event.session_id = page.session_id
+                      AND reveal_event.event_sequence = page.event_sequence
+               )
+           END
            WHEN 'tool_request' THEN EXISTS (
-               SELECT 1 FROM tool_request AS canonical_source
-                WHERE canonical_source.request_id = projection.source_id
-                  AND canonical_source.session_id = projection.session_id
-                  AND canonical_source.turn_id = projection.turn_id
+               SELECT 1
+                 FROM tool_request AS canonical_source
+                 JOIN tool_batch_transition_outbox_event AS reveal_event
+                   ON reveal_event.producing_model_call_id
+                      = canonical_source.producing_model_call_id
+                  AND reveal_event.transition_kind = 'proposed'
+                WHERE canonical_source.request_id = page.source_id
+                  AND canonical_source.session_id = page.session_id
+                  AND canonical_source.turn_id = page.turn_id
+                  AND reveal_event.session_id = page.session_id
+                  AND reveal_event.event_sequence = page.event_sequence
            )
            WHEN 'tool_attempt' THEN EXISTS (
-               SELECT 1 FROM tool_attempt AS canonical_source
-                WHERE canonical_source.attempt_id = projection.source_id
-                  AND canonical_source.session_id = projection.session_id
-                  AND canonical_source.turn_id = projection.turn_id
+               SELECT 1
+                 FROM tool_attempt AS canonical_source
+                 JOIN tool_request AS owning_request
+                   ON owning_request.request_id = canonical_source.request_id
+                 JOIN tool_batch_transition_outbox_event AS reveal_event
+                   ON reveal_event.producing_model_call_id
+                      = owning_request.producing_model_call_id
+                  AND reveal_event.transition_kind = 'results_projected'
+                WHERE canonical_source.attempt_id = page.source_id
+                  AND canonical_source.session_id = page.session_id
+                  AND canonical_source.turn_id = page.turn_id
+                  AND reveal_event.session_id = page.session_id
+                  AND reveal_event.event_sequence = page.event_sequence
            )
            WHEN 'session_metadata' THEN
-               projection.source_id = projection.session_id
+               page.source_id = page.session_id
+               AND EXISTS (
+                   SELECT 1
+                     FROM session_created_outbox_event AS reveal_event
+                    WHERE reveal_event.session_id = page.session_id
+                      AND reveal_event.event_sequence = page.event_sequence
+               )
            ELSE true
        END AS source_correlation_valid,
        '<sb-search-start>' AS start_marker,
@@ -99,59 +280,27 @@ SELECT projection.projection_id, projection.session_id,
        ts_headline(
            'simple'::regconfig,
            replace(
-               replace(projection.content_text, '&', '&amp;'),
+               replace(page.content_text, '&', '&amp;'),
                '<', '&lt;'
            ),
            lexical_query.value,
            'StartSel=<sb-search-start>, StopSel=<sb-search-stop>' ||
            ', MaxWords=32, MinWords=8, ShortWord=1, MaxFragments=1'
        ) AS marked_snippet
-  FROM web_search_projection AS projection
+  FROM page
  CROSS JOIN lexical_query
- WHERE projection.projection_id = (
-       SELECT min(candidate.projection_id)
-         FROM web_search_projection AS candidate
-        WHERE candidate.source_kind = projection.source_kind
-          AND candidate.source_id = projection.source_id
-          AND candidate.content_class = projection.content_class
-          AND candidate.session_id = projection.session_id
-          AND candidate.event_sequence = projection.event_sequence
-          AND candidate.item_kind = projection.item_kind
-          AND candidate.item_id = projection.item_id
-          AND candidate.turn_id IS NOT DISTINCT FROM projection.turn_id
-          AND EXISTS (
-              SELECT 1
-                FROM query_terms AS term
-               WHERE candidate.search_vector @@ to_tsquery(
-                   'simple'::regconfig, quote_literal(term.lexeme)
-               )
-          )
-   )
-   AND NOT EXISTS (
-       SELECT 1
-         FROM query_terms AS term
-        WHERE NOT EXISTS (
-            SELECT 1
-              FROM web_search_projection AS matching_chunk
-             WHERE matching_chunk.source_kind = projection.source_kind
-               AND matching_chunk.source_id = projection.source_id
-               AND matching_chunk.content_class = projection.content_class
-               AND matching_chunk.search_vector @@ to_tsquery(
-                   'simple'::regconfig, quote_literal(term.lexeme)
-               )
-        )
-   )
-   AND ($2::uuid IS NULL OR projection.session_id = $2)
-   AND (
-       $3::numeric IS NULL
-       OR projection.event_sequence < $3
-       OR (
-           projection.event_sequence = $3
-           AND projection.projection_id < $4
-       )
-   )
- ORDER BY projection.event_sequence DESC, projection.projection_id DESC
- LIMIT $5";
+ ORDER BY page.event_sequence DESC, page.projection_id DESC"
+    )
+}
+
+/// Keyset traversal over the newest-first indexes, for all-common-term
+/// queries whose page fills within a bounded ordered prefix.
+static TRAVERSAL_SEARCH_SQL: LazyLock<String> = LazyLock::new(|| page_sql("", ""));
+
+/// Rarest-term-seeded page, for queries whose least frequent term bounds the
+/// candidate set below [`RARE_TERM_CANDIDATE_CAP`].
+static SEEDED_SEARCH_SQL: LazyLock<String> =
+    LazyLock::new(|| page_sql(RARE_CANDIDATE_CTE, RARE_CANDIDATE_JOIN));
 
 const PUBLISH_ARTIFACT_SQL: &str = "
 WITH chunks AS MATERIALIZED (
@@ -311,14 +460,45 @@ impl SearchRepository {
             .transpose()
             .map_err(|_| SearchProjectionCorruption::Invalid("cursor projection"))?;
         let fetch_limit = i64::from(query.limit.get()) + 1;
-        let rows = sqlx::query(SEARCH_SQL)
+        let probe = sqlx::query(TERM_PROBE_SQL)
             .bind(query.text.as_str())
-            .bind(session)
-            .bind(cursor_address)
-            .bind(cursor_projection)
-            .bind(fetch_limit)
-            .fetch_all(&self.pool)
+            .bind(RARE_TERM_CANDIDATE_CAP)
+            .fetch_optional(&self.pool)
             .await?;
+        // No lexeme at all, or a term with zero matches: the conjunction is
+        // empty, and running the ordered page query would traverse the whole
+        // corpus without ever filling its limit.
+        let Some(probe) = probe else {
+            return Ok(SearchPage {
+                results: Vec::new(),
+                next: None,
+            });
+        };
+        let rarest_lexeme: String = probe.try_get("lexeme")?;
+        let bounded_count: i64 = probe.try_get("bounded_count")?;
+        if bounded_count == 0 {
+            return Ok(SearchPage {
+                results: Vec::new(),
+                next: None,
+            });
+        }
+        let page_query = if bounded_count < RARE_TERM_CANDIDATE_CAP {
+            sqlx::query(SEEDED_SEARCH_SQL.as_str())
+                .bind(query.text.as_str())
+                .bind(session)
+                .bind(cursor_address)
+                .bind(cursor_projection)
+                .bind(fetch_limit)
+                .bind(rarest_lexeme)
+        } else {
+            sqlx::query(TRAVERSAL_SEARCH_SQL.as_str())
+                .bind(query.text.as_str())
+                .bind(session)
+                .bind(cursor_address)
+                .bind(cursor_projection)
+                .bind(fetch_limit)
+        };
+        let rows = page_query.fetch_all(&self.pool).await?;
         decode_page(rows, usize::from(query.limit.get()))
     }
 
@@ -433,11 +613,14 @@ impl SearchProjectionWriter for SearchRepository {
 
 fn decode_page(rows: Vec<PgRow>, limit: usize) -> Result<SearchPage, SearchRepositoryError> {
     let has_more = rows.len() > limit;
+    // The lookahead row participates in validation even though it is never
+    // returned: a continuation must not be advertised on the evidence of a
+    // corrupt row, so projection corruption fails the read that observes it.
     let mut decoded = rows
         .into_iter()
-        .take(limit)
         .map(decode_row)
         .collect::<Result<Vec<_>, _>>()?;
+    decoded.truncate(limit);
     let next = if has_more {
         decoded.last().map(|(cursor, _)| *cursor)
     } else {
