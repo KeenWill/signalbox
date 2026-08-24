@@ -571,6 +571,35 @@ impl ReviewThreadsResult {
     }
 }
 
+pub(super) fn bound_scrubbed_review_threads_value(
+    bounds: CodeHostNumericBounds,
+    value: &mut Value,
+) -> Option<()> {
+    let text_budget = bounds
+        .result_text_bytes()
+        .map_or(MAX_ENCODED_RESULT_BYTES, |configured| {
+            configured.min(MAX_ENCODED_RESULT_BYTES)
+        });
+
+    loop {
+        let encoded = serde_json::to_vec(value).ok()?;
+        if encoded.len() <= text_budget {
+            return Some(());
+        }
+
+        let threads = value.get_mut("threads")?.as_array_mut()?;
+        let last = threads.last_mut()?;
+        let comments = last.get_mut("comments")?.as_array_mut()?;
+        if comments.pop().is_some() {
+            *last.get_mut("comments_truncated")? = Value::Bool(true);
+            continue;
+        }
+
+        threads.pop();
+        *value.get_mut("truncated")? = Value::Bool(true);
+    }
+}
+
 /// Typed result of `change_request_thread_reply`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThreadReplyResult {

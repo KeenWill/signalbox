@@ -983,6 +983,9 @@ fn scrub_result_value(
     {
         return None;
     }
+    if kind == CodeHostToolKind::ReviewThreads {
+        result::bound_scrubbed_review_threads_value(bounds, value)?;
+    }
     if !is_file_content {
         return Some(());
     }
@@ -2167,6 +2170,88 @@ mod tests {
                 "nested": ["[redacted]"],
             })
         );
+    }
+
+    /// The aggregate review-thread ceiling applies after credential redaction
+    /// expands the exact model-visible result.
+    #[test]
+    fn review_thread_result_is_rebounded_after_credential_scrubbing() {
+        const CREDENTIAL: &str = "!";
+        const REPETITIONS: usize = 64;
+        let credential = CredentialValue::new(CREDENTIAL.as_bytes().to_vec());
+        let scrubber =
+            CredentialScrubber::try_new(&credential).expect("fixture credential is usable");
+        let credential_body = CREDENTIAL.repeat(REPETITIONS);
+        let redacted_body = "[redacted]".repeat(REPETITIONS);
+        let mut value = serde_json::json!({
+            "threads": [{
+                "comments": [
+                    {
+                        "author": "reviewer",
+                        "body": credential_body,
+                        "id": "PRRC_first",
+                        "url": "https://host.invalid/comments/first",
+                    },
+                    {
+                        "author": "reviewer",
+                        "body": credential_body,
+                        "id": "PRRC_second",
+                        "url": "https://host.invalid/comments/second",
+                    },
+                ],
+                "comments_truncated": false,
+                "id": "PRRT_first",
+                "line": 17,
+                "outdated": false,
+                "path": "src/lib.rs",
+                "resolved": false,
+            }],
+            "truncated": false,
+        });
+        let expected = serde_json::json!({
+            "threads": [{
+                "comments": [{
+                    "author": "reviewer",
+                    "body": redacted_body,
+                    "id": "PRRC_first",
+                    "url": "https://host.invalid/comments/first",
+                }],
+                "comments_truncated": true,
+                "id": "PRRT_first",
+                "line": 17,
+                "outdated": false,
+                "path": "src/lib.rs",
+                "resolved": false,
+            }],
+            "truncated": false,
+        });
+        let encoded_limit = serde_json::to_vec(&expected)
+            .expect("fixture expected result encodes")
+            .len();
+        let bounds = CodeHostNumericBounds::new(None, None, None, Some(encoded_limit), None, None);
+
+        assert!(
+            serde_json::to_vec(&value)
+                .expect("fixture source result encodes")
+                .len()
+                <= encoded_limit
+        );
+        scrub_result_value(
+            bounds,
+            CodeHostToolKind::ReviewThreads,
+            &scrubber,
+            &mut value,
+        )
+        .expect("scrubbed review-thread prefix remains representable");
+
+        assert_eq!(value, expected);
+        assert!(
+            serde_json::to_vec(&value)
+                .expect("fixture scrubbed result encodes")
+                .len()
+                <= encoded_limit
+        );
+        assert!(!value.to_string().contains(CREDENTIAL));
     }
 
     /// File byte counts describe emitted scrubbed content rather than the
