@@ -256,6 +256,25 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
+function SettingsSurface() {
+  return (
+    <div className="surface-body">
+      <section
+        className="surface-empty surface-empty-no-icon"
+        aria-labelledby="settings-local-heading"
+      >
+        <div>
+          <h2 id="settings-local-heading">Local settings are not exposed in this slice</h2>
+          <p>
+            Presentation preferences remain browser-local. Their dedicated controls arrive in Web
+            track H slice 2 and do not depend on a daemon read contract.
+          </p>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function ProductToolbar({
   artifactAvailable,
   artifactButtonRef,
@@ -335,12 +354,16 @@ function useNarrowInspector(): boolean {
   return narrow
 }
 
-function SelectionInspector({ title }: { title: string }) {
+function SelectionInspector({ surface, title }: { surface: ProductRouteId; title: string }) {
   return (
     <>
       <span className="eyebrow">Inspector</span>
       <h2>Selection details</h2>
-      <p>Select an available operational record to inspect its server-provided evidence.</p>
+      <p>
+        {surface === 'settings'
+          ? 'Presentation preferences are stored locally in this browser.'
+          : 'Select an available operational record to inspect its server-provided evidence.'}
+      </p>
       <dl className="selection-inspector-details">
         <div>
           <dt>Surface</dt>
@@ -348,11 +371,11 @@ function SelectionInspector({ title }: { title: string }) {
         </div>
         <div>
           <dt>Authority</dt>
-          <dd>Daemon</dd>
+          <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
         </div>
         <div>
           <dt>Cache</dt>
-          <dd>Bounded query</dd>
+          <dd>{surface === 'settings' ? 'Local preferences' : 'Bounded query'}</dd>
         </div>
       </dl>
     </>
@@ -409,22 +432,20 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     primaryRef.current?.focus()
   }, [])
   useHotkeys(
-    globalHotkeyBindings
-      .filter((binding) => binding.commandId !== 'surface.escape')
-      .map((binding) => ({
-        hotkey: binding.hotkey,
-        callback: () => {
-          if (store.getState().app.overlay === null && !(artifactOpen && inspectorInSheet)) {
-            if (
-              binding.commandId === 'layout.toggle' &&
-              document.activeElement?.closest('.product-navigation-pane')
-            ) {
-              primaryRef.current?.focus()
-            }
-            invokeCommand(binding.commandId, context)
+    globalHotkeyBindings.map((binding) => ({
+      hotkey: binding.hotkey,
+      callback: () => {
+        if (store.getState().app.overlay === null && !(artifactOpen && inspectorInSheet)) {
+          if (
+            binding.commandId === 'layout.toggle' &&
+            document.activeElement?.closest('.product-navigation-pane')
+          ) {
+            primaryRef.current?.focus()
           }
-        },
-      })),
+          invokeCommand(binding.commandId, context)
+        }
+      },
+    })),
   )
   useHotkeySequences(
     globalHotkeySequenceBindings.map((binding) => ({
@@ -441,6 +462,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
+
+  useEffect(() => {
+    document.title = `${surfaceCopy[surface].title} · Signalbox`
+    return () => {
+      document.title = 'Signalbox'
+    }
+  }, [surface])
 
   useEffect(() => {
     if (app.overlay === 'help') {
@@ -493,6 +521,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <AttentionSurface />
     ) : surface === 'sessions' ? (
       <SessionsSurface />
+    ) : surface === 'settings' ? (
+      <SettingsSurface />
     ) : (
       <DeferredSurface surface={surface} />
     )
@@ -518,19 +548,27 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           <p>{copy.question}</p>
           <span
             ref={bootstrapStatusRef}
-            className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+            className={`contract-state ${
+              surface === 'settings' || bootstrap.isSuccess
+                ? 'ready'
+                : bootstrap.isError
+                  ? 'failed'
+                  : ''
+            }`}
             role="status"
             aria-live="polite"
             aria-atomic="true"
             tabIndex={-1}
           >
-            {bootstrap.isSuccess
-              ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
-              : bootstrap.isError
-                ? bootstrapFailure
-                : 'Checking contract…'}
+            {surface === 'settings'
+              ? 'Browser-local preferences'
+              : bootstrap.isSuccess
+                ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
+                : bootstrap.isError
+                  ? bootstrapFailure
+                  : 'Checking contract…'}
           </span>
-          {bootstrap.isError && (
+          {surface !== 'settings' && bootstrap.isError && (
             <button
               type="button"
               onClick={(event) => {
@@ -559,7 +597,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               onStateChange={setArtifactInspectorState}
             />
           ) : (
-            <SelectionInspector title={copy.title} />
+            <SelectionInspector surface={surface} title={copy.title} />
           )}
         </aside>
       )}

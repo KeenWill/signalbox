@@ -4,6 +4,16 @@ import { webContractBootstrapFixture } from '../src/product.fixture'
 const useDeterministicBootstrap = (page: Page) =>
   page.route('**/api/bootstrap', (route) => route.fulfill({ json: webContractBootstrapFixture }))
 
+const useRecoveringBootstrap = async (page: Page) => {
+  const state = { unavailable: true }
+  await page.route('**/api/bootstrap', (route) =>
+    state.unavailable
+      ? route.fulfill({ status: 503 })
+      : route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  return { recover: () => (state.unavailable = false) }
+}
+
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
   page.on('console', (message) => {
@@ -25,6 +35,7 @@ test('opens the product at Attention with generated-contract transport status', 
 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
+  await expect(page).toHaveTitle('Attention · Signalbox')
   await expect(
     page.getByText(
       `${webContractBootstrapFixture.contract.name} · ${webContractBootstrapFixture.contract.version}`,
@@ -75,6 +86,21 @@ test('runs advertised product navigation sequences', async ({ page }) => {
   await page.keyboard.press('g')
   await page.keyboard.press(',')
   await expect(page).toHaveURL(/\/settings$/)
+  await expect(page).toHaveTitle('Settings · Signalbox')
+  await expect(page.getByRole('status')).toHaveText('Browser-local preferences')
+  await expect(page.getByText('Presentation preferences remain browser-local.')).toBeVisible()
+  await expect(page.getByText('Browser', { exact: true })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('returns ordinary product focus to the main surface with Escape', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('link', { name: /Sessions/ }).focus()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -226,15 +252,11 @@ test('clears scenario keyboard help when browser history returns to a product ro
 
 test('retries a transient bootstrap failure without reloading', async ({ page }) => {
   const problems = watchBrowser(page)
-  const state = { unavailable: true }
-  await page.route('**/api/bootstrap', (route) => {
-    if (state.unavailable) return route.fulfill({ status: 503 })
-    return route.fulfill({ json: webContractBootstrapFixture })
-  })
+  const scenario = await useRecoveringBootstrap(page)
   await page.goto('/attention')
 
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
-  state.unavailable = false
+  scenario.recover()
   await page.getByRole('button', { name: 'Retry bootstrap' }).click()
   await expect(
     page.getByText(

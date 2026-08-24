@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs'
 
-import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { expect, type Page, type Route, type TestInfo, test } from '@playwright/test'
 import { imageArtifact } from '../src/features/artifacts/artifactScenario'
 import { decodeWebBlobDescriptor } from '../src/generated/web-contract.mjs'
 import { webContractBootstrapFixture } from '../src/product.fixture'
@@ -102,6 +102,53 @@ const useRecoveringPreviewScenario = async (page: Page) => {
     return previewAttempts === 1 ? route.fulfill({ status: 503 }) : route.fallback()
   })
   return { attempts: () => previewAttempts }
+}
+
+const originalViewUrl = admittedOriginalArtifact.available_views.find(
+  (view) => view.kind === 'browser_native',
+)?.content_url
+
+const fulfillOriginalHeader = (route: Route) =>
+  route.fulfill({
+    status: 206,
+    body: previewFixture,
+    contentType: 'image/png',
+    headers: {
+      etag: `"${admittedOriginalArtifact.digest}"`,
+      'content-range': `bytes 0-${previewFixture.byteLength - 1}/${admittedOriginalArtifact.byte_length}`,
+      'content-length': String(previewFixture.byteLength),
+    },
+  })
+
+const useRecoveringOriginalScenario = async (page: Page) => {
+  await useArtifactScenario(page, admittedOriginalArtifact)
+  let headerAttempts = 0
+  await page.route('**/api/blobs/**/content/image-png', (route) => {
+    const isOriginalProbe =
+      route.request().headers().range !== undefined &&
+      new URL(route.request().url()).pathname === originalViewUrl
+    if (!isOriginalProbe) return route.fallback()
+    headerAttempts += 1
+    return headerAttempts === 1 ? route.fulfill({ status: 503 }) : fulfillOriginalHeader(route)
+  })
+  return { attempts: () => headerAttempts }
+}
+
+const useDelayedOriginalScenario = async (page: Page) => {
+  await useArtifactScenario(page, admittedOriginalArtifact)
+  let releaseHeader: (() => void) | undefined
+  const headerBlocked = new Promise<void>((resolve) => {
+    releaseHeader = resolve
+  })
+  await page.route('**/api/blobs/**/content/image-png', async (route) => {
+    const isOriginalProbe =
+      route.request().headers().range !== undefined &&
+      new URL(route.request().url()).pathname === originalViewUrl
+    if (!isOriginalProbe) return route.fallback()
+    await headerBlocked
+    return fulfillOriginalHeader(route)
+  })
+  return { release: () => releaseHeader?.() }
 }
 
 const submitArtifactWithoutMouse = async (page: Page) => {
@@ -314,30 +361,7 @@ test('retries a transient automatic preview failure', async ({ page }) => {
 
 test('retries a transient original header failure', async ({ page }) => {
   const problems = watchBrowser(page)
-  await useArtifactScenario(page, admittedOriginalArtifact)
-  let headerAttempts = 0
-  await page.route('**/api/blobs/**/content/image-png', (route) => {
-    if (
-      route.request().headers().range &&
-      new URL(route.request().url()).pathname ===
-        admittedOriginalArtifact.available_views.find((view) => view.kind === 'browser_native')
-          ?.content_url
-    ) {
-      headerAttempts += 1
-      if (headerAttempts === 1) return route.fulfill({ status: 503 })
-      return route.fulfill({
-        status: 206,
-        body: previewFixture,
-        contentType: 'image/png',
-        headers: {
-          etag: `"${admittedOriginalArtifact.digest}"`,
-          'content-range': `bytes 0-${previewFixture.byteLength - 1}/${admittedOriginalArtifact.byte_length}`,
-          'content-length': String(previewFixture.byteLength),
-        },
-      })
-    }
-    return route.fallback()
-  })
+  const scenario = await useRecoveringOriginalScenario(page)
   await page.goto('/sessions')
 
   await resolveArtifactWithoutMouse(page)
@@ -346,7 +370,7 @@ test('retries a transient original header failure', async ({ page }) => {
   await expect(retry).toBeEnabled()
   await retry.click()
   await expect(page.getByRole('button', { name: 'Original loaded' })).toBeVisible()
-  expect(headerAttempts).toBe(2)
+  expect(scenario.attempts()).toBe(2)
   expect(problems.pageErrors).toEqual([])
   expect(
     problems.consoleErrors.every(
@@ -359,39 +383,14 @@ test('retries a transient original header failure', async ({ page }) => {
 
 test('does not steal focus when an original header probe completes', async ({ page }) => {
   const problems = watchBrowser(page)
-  await useArtifactScenario(page, admittedOriginalArtifact)
-  let releaseHeader: (() => void) | undefined
-  const headerBlocked = new Promise<void>((resolve) => {
-    releaseHeader = resolve
-  })
-  await page.route('**/api/blobs/**/content/image-png', async (route) => {
-    if (
-      route.request().headers().range &&
-      new URL(route.request().url()).pathname ===
-        admittedOriginalArtifact.available_views.find((view) => view.kind === 'browser_native')
-          ?.content_url
-    ) {
-      await headerBlocked
-      return route.fulfill({
-        status: 206,
-        body: previewFixture,
-        contentType: 'image/png',
-        headers: {
-          etag: `"${admittedOriginalArtifact.digest}"`,
-          'content-range': `bytes 0-${previewFixture.byteLength - 1}/${admittedOriginalArtifact.byte_length}`,
-          'content-length': String(previewFixture.byteLength),
-        },
-      })
-    }
-    return route.fallback()
-  })
+  const scenario = await useDelayedOriginalScenario(page)
   await page.goto('/sessions')
 
   await resolveArtifactWithoutMouse(page)
   await page.getByRole('button', { name: 'Load original' }).click()
   const download = page.getByRole('link', { name: 'Download' })
   await download.focus()
-  releaseHeader?.()
+  scenario.release()
   await expect(page.getByRole('button', { name: 'Original loaded' })).toBeVisible()
   await expect(
     page.getByText(`Original admitted for ${imageArtifact.display_filename[0]}`, { exact: true }),
