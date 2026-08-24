@@ -6599,6 +6599,7 @@ pub struct UsageCallEvidence {
     pub session: SessionId,
     pub turn: Option<TurnId>,
     pub model: ResolvedProviderTarget,
+    pub web_profile: String,
     pub credential_profile: String,
     pub provenance: UsageProvenance,
     pub input_semantics: UsageInputTokenSemantics,
@@ -6614,6 +6615,7 @@ pub struct UsageCallPage {
 pub struct UsageAggregateKey {
     pub call_kind: UsageCallKind,
     pub model: ResolvedProviderTarget,
+    pub web_profile: String,
     pub credential_profile: String,
     pub provenance: UsageProvenance,
     pub input_semantics: UsageInputTokenSemantics,

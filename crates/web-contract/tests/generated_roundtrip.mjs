@@ -426,6 +426,16 @@ test("generated usage summary preserves hidden constituent breakdown failures", 
   );
 });
 
+test("generated usage summary rejects hidden breakdown failures for exclusive input", () => {
+  const group = usageGroup();
+  group.cost = { status: "unavailable", reason: "invalid_cache_breakdown" };
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /consistent with token evidence and input semantics/,
+  );
+});
+
 test("generated usage decoder bounds profile identities by UTF-8 bytes", () => {
   const empty = usageGroup();
   empty.profile_id = "";

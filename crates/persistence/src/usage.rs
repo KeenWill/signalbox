@@ -8,7 +8,7 @@ use signalbox_application::{
     UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPage,
     UsageCallQuery, UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageReader,
     UsageTimestampMicros, UsageTokenAxes, UsageTokenCoverage, UsageTokenPresence,
-    max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_credential_profile_utf8_bytes,
+    max_usage_aggregate_calls, max_usage_aggregate_groups,
 };
 use signalbox_domain::{
     ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId,
@@ -358,9 +358,7 @@ fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
         return Err(UsageProjectionCorruption::Invalid("web profile").into());
     }
     let credential_profile: String = row.try_get("credential_reference")?;
-    if credential_profile.is_empty()
-        || credential_profile.len() > usize::from(max_usage_credential_profile_utf8_bytes())
-    {
+    if credential_profile.is_empty() {
         return Err(UsageProjectionCorruption::Invalid("credential profile").into());
     }
     Ok(UsageCallEvidence {
@@ -386,9 +384,7 @@ fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryEr
         return Err(UsageProjectionCorruption::Invalid("web profile").into());
     }
     let credential_profile: String = row.try_get("credential_reference")?;
-    if credential_profile.is_empty()
-        || credential_profile.len() > usize::from(max_usage_credential_profile_utf8_bytes())
-    {
+    if credential_profile.is_empty() {
         return Err(UsageProjectionCorruption::Invalid("credential profile").into());
     }
     let call_count = u64::try_from(row.try_get::<i64, _>("call_count")?)
@@ -533,10 +529,21 @@ mod tests {
 
     #[test]
     fn usage_queries_retain_raw_and_bounded_profile_projections() {
-        for sql in [AGGREGATE_SQL, CALLS_NEWEST_SQL, CALLS_OLDEST_SQL] {
-            assert!(sql.contains("credential_reference,"));
-            assert!(sql.contains("bounded_web_usage_profile(credential_reference) AS web_profile"));
-        }
+        assert!(AGGREGATE_SQL.contains("credential_reference,"));
+        assert!(
+            AGGREGATE_SQL
+                .contains("bounded_web_usage_profile(credential_reference) AS web_profile")
+        );
+        assert!(CALLS_NEWEST_SQL.contains("credential_reference,"));
+        assert!(
+            CALLS_NEWEST_SQL
+                .contains("bounded_web_usage_profile(credential_reference) AS web_profile")
+        );
+        assert!(CALLS_OLDEST_SQL.contains("credential_reference,"));
+        assert!(
+            CALLS_OLDEST_SQL
+                .contains("bounded_web_usage_profile(credential_reference) AS web_profile")
+        );
     }
 
     #[test]

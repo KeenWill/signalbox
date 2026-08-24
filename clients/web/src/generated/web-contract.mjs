@@ -1627,7 +1627,7 @@ export function decodeWebUsageSummary(value) {
       group.tokens,
       group.cost,
       `usage_summary.groups[${index}]`,
-      true,
+      group.input_semantics === "cache_inclusive",
     );
     const profileBytes = encoder.encode(group.profile_id).length;
     if (profileBytes === 0 || profileBytes > 256) {

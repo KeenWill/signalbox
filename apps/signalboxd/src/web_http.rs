@@ -866,11 +866,13 @@ fn usage_cost_dto(
             {
                 return unavailable(WebUsageCostUnavailableReason::IncompleteCacheAxes);
             }
-            let cache_total = tokens.cache_creation_input.zip(tokens.cache_read_input);
-            if cache_total.is_some_and(|(creation, read)| {
-                creation
-                    .checked_add(read)
-                    .is_none_or(|cache| tokens.input.is_some_and(|input| input < cache))
+            if tokens.input.is_some_and(|input| {
+                tokens
+                    .cache_creation_input
+                    .zip(tokens.cache_read_input)
+                    .is_some_and(|(creation, read)| {
+                        creation.checked_add(read).is_none_or(|cache| input < cache)
+                    })
             }) {
                 return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
             }
@@ -2189,6 +2191,26 @@ mod tests {
                 reason: WebUsageCostUnavailableReason::InvalidCacheBreakdown,
             }
         );
+    }
+
+    #[test]
+    fn configured_usage_cost_prices_overflowing_cache_axes_without_total_input() {
+        let configuration = example_model_configuration();
+        let cost = usage_cost_dto(
+            &configuration,
+            rated_example_target(),
+            "anthropic-primary",
+            UsageInputTokenSemantics::CacheInclusive,
+            UsageTokenAxes {
+                input: None,
+                output: None,
+                cache_creation_input: Some(u64::MAX),
+                cache_read_input: Some(1),
+            },
+            true,
+        );
+
+        assert!(matches!(cost, WebUsageCost::Derived { .. }));
     }
 
     #[test]
