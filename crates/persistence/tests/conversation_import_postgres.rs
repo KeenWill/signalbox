@@ -2526,7 +2526,7 @@ async fn imported_discovery_classifies_short_content_encodings_as_corruption()
         )
         .bind(conversation.into_uuid())
         .bind(vec![1_u8; short_length])
-        .execute(&pool)
+        .execute(pool)
         .await?;
 
         let error = discovery
