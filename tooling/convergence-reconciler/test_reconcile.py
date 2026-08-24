@@ -665,6 +665,24 @@ class GitHubGraphQLTests(unittest.TestCase):
 
         self.assertFalse(exempt)
 
+    def test_unreachable_review_commit_does_not_abort_exemption_loading(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "authenticated_quiet_review_oids": ["reviewed", "unreachable"],
+            "base_oid": "base",
+            "head_oid": "head",
+            "quiet_review_head_oids": [],
+        }
+        with mock.patch.object(
+            client,
+            "_review_exempt_change",
+            side_effect=[RuntimeError("compare failed"), True],
+        ) as review_exempt_change:
+            client._load_review_exempt_status([pull_request])
+
+        self.assertTrue(pull_request["review_exempt_since_quiet_review"])
+        self.assertEqual(review_exempt_change.call_count, 2)
+
     def test_all_declined_review_completes_terminal_wave(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         head = "a" * 40
@@ -995,7 +1013,11 @@ class GitHubGraphQLTests(unittest.TestCase):
                 "comments": {
                     "nodes": [
                         {"author": {"login": "reviewer"}, "body": "Finding"},
-                        {"author": {"login": "owner"}, "body": "ack"},
+                        {
+                            "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
+                            "body": "ack",
+                        },
                     ]
                 },
             }
@@ -1090,6 +1112,47 @@ class GitHubGraphQLTests(unittest.TestCase):
                     "reviewIds": [],
                 }
             ],
+        )
+
+    def test_wave_five_escalation_is_eligible_without_extension(self) -> None:
+        self._assert_escalation_boundary(wave=5, total_waves=5, eligible=True)
+
+    def test_wave_six_escalation_is_rejected_during_extension(self) -> None:
+        self._assert_escalation_boundary(wave=6, total_waves=6, eligible=False)
+
+    def test_wave_eight_escalation_is_eligible_at_hard_stop(self) -> None:
+        self._assert_escalation_boundary(wave=8, total_waves=8, eligible=True)
+
+    def _assert_escalation_boundary(
+        self, *, wave: int, total_waves: int, eligible: bool
+    ) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "review_threads": [
+                {
+                    "dispositionKind": "escalated",
+                    "isDispositioned": True,
+                    "isEscalated": True,
+                    "reviewIds": [f"review-{wave}"],
+                }
+            ]
+        }
+        reviews = [
+            {
+                "id": f"review-{number}",
+                "author": {"login": "chatgpt-codex-connector"},
+                "submittedAt": f"2026-08-16T10:{number:02d}:00Z",
+            }
+            for number in range(1, total_waves + 1)
+        ]
+
+        client._validate_escalation_dispositions(pull_request, reviews)
+
+        thread = pull_request["review_threads"][0]
+        self.assertEqual(thread["isDispositioned"], eligible)
+        self.assertEqual(thread["isEscalated"], eligible)
+        self.assertEqual(
+            thread["dispositionKind"], "escalated" if eligible else None
         )
 
     def test_advanced_base_invalidates_ancestry_comparison(self) -> None:

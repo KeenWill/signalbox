@@ -592,11 +592,15 @@ query($id: ID!, $after: String!) {
             if pull_request["quiet_review_head_oids"]:
                 continue
             for reviewed_oid in reversed(quiet_oids):
-                if self._review_exempt_change(
-                    reviewed_oid,
-                    pull_request["head_oid"],
-                    pull_request["base_oid"],
-                ):
+                try:
+                    exempt = self._review_exempt_change(
+                        reviewed_oid,
+                        pull_request["head_oid"],
+                        pull_request["base_oid"],
+                    )
+                except RuntimeError:
+                    continue
+                if exempt:
                     pull_request["review_exempt_since_quiet_review"] = True
                     break
 
