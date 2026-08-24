@@ -487,6 +487,8 @@ pub struct WebAttentionSummary {
     pub title_summary: Option<String>,
     pub title_truncated: bool,
     pub archived: bool,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub current_turn_id: Option<WebTurnId>,
     pub active_turn_count: WebU64,
     pub queued_turn_count: WebU64,
@@ -595,11 +597,19 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     let mut attention_snapshot_schema =
         canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
     make_property_nullable(&mut attention_snapshot_schema, "continuation")?;
+    make_pointer_nullable(
+        &mut attention_snapshot_schema,
+        "/$defs/WebAttentionSummary/properties/current_turn_id",
+    )?;
     let mut attention_event_schema =
         canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value());
     make_pointer_nullable(
         &mut attention_event_schema,
         "/$defs/WebAttentionSnapshot/properties/continuation",
+    )?;
+    make_pointer_nullable(
+        &mut attention_event_schema,
+        "/$defs/WebAttentionSummary/properties/current_turn_id",
     )?;
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
@@ -697,6 +707,22 @@ const schemas = {schemas};
 
 function fail(path, expected) {{
   throw new TypeError(`${{path}} must be ${{expected}}`);
+}}
+
+function isWellFormedUnicode(value) {{
+  for (let index = 0; index < value.length; index += 1) {{
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {{
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {{
+        return false;
+      }}
+      index += 1;
+    }} else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {{
+      return false;
+    }}
+  }}
+  return true;
 }}
 
 function resolveReference(root, reference) {{
@@ -829,6 +855,9 @@ function assertSchema(root, schema, value, path) {{
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
   }}
+  if (schema.type === "string" && !isWellFormedUnicode(value)) {{
+    fail(path, "well-formed Unicode text");
+  }}
   if (
     schema.type === "string" &&
     schema.maxLength !== undefined &&
@@ -932,6 +961,9 @@ function assertAttentionSummary(summary, path) {{
   const hasGoalBlock = Object.hasOwn(summary, "goal_block") && summary.goal_block !== null;
   if ((summary.state === "blocked") !== hasGoalBlock) {{
     fail(`${{path}}.goal_block`, "present exactly for blocked state");
+  }}
+  if (summary.title_summary === null && summary.title_truncated) {{
+    fail(`${{path}}.title_truncated`, "false when title_summary is null");
   }}
 }}
 "##,

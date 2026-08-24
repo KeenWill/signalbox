@@ -772,7 +772,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
             cursor,
             AttentionFollowDisposition::Continue,
         ),
-        |(repository, mut pending, cursor, disposition)| async move {
+        |(repository, mut pending, mut cursor, disposition)| async move {
             if let Some((event, emitted_cursor)) = pending.pop_front() {
                 return Some((
                     event,
@@ -790,7 +790,12 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
             loop {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 match repository.changes_after(cursor).await {
-                    Ok(AttentionChanges::Updated { summaries, .. }) if summaries.is_empty() => {}
+                    Ok(AttentionChanges::Updated {
+                        cursor: next,
+                        summaries,
+                    }) if summaries.is_empty() => {
+                        cursor = next;
+                    }
                     Ok(AttentionChanges::Updated {
                         cursor: next,
                         summaries,
