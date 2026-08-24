@@ -451,6 +451,32 @@ async fn zstd_signature_like_payload_is_not_a_recursive_archive() -> Result<(), 
 }
 
 #[tokio::test]
+async fn oversized_nested_gzip_is_rejected_as_recursive() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::zip_with_oversized_nested_gzip()?).await?,
+        "recursive_container",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_nested_zstd_is_rejected_as_recursive() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::zip_with_oversized_nested_zstd()?).await?,
+        "recursive_container",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn corrupt_dictionary_zstd_payload_is_not_recursive() -> Result<(), Box<dyn Error>> {
+    assert_valid_inventory(
+        valid_inventory(ArchiveFixture::zip_with_corrupt_dictionary_zstd_payload()?).await?,
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn tar_signature_like_payload_is_not_a_recursive_archive() -> Result<(), Box<dyn Error>> {
     assert_valid_inventory(
         valid_inventory(ArchiveFixture::zip_with_tar_signature_text_payload()?).await?,

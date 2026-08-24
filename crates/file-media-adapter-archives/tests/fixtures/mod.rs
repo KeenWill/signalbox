@@ -257,7 +257,7 @@ impl ArchiveFixture {
         Ok(Self {
             // This frame header declares dictionary ID 1. Classification occurs before
             // dictionary-less decompression.
-            bytes: b"\x28\xb5\x2f\xfd\x21\x01\x00".to_vec(),
+            bytes: b"\x28\xb5\x2f\xfd\x21\x01\x00\x01\x00\x00".to_vec(),
             media_type: "application/zstd",
             expected_format: "zstd",
             expected_name: "content",
@@ -266,7 +266,7 @@ impl ArchiveFixture {
 
     pub fn concatenated_dictionary_zstd() -> Result<Self, Box<dyn Error>> {
         let mut bytes = zstd::stream::encode_all(PAYLOAD, 1)?;
-        bytes.extend_from_slice(b"\x28\xb5\x2f\xfd\x21\x01\x00");
+        bytes.extend_from_slice(b"\x28\xb5\x2f\xfd\x21\x01\x00\x01\x00\x00");
         Ok(Self {
             bytes,
             media_type: "application/zstd",
@@ -410,6 +410,38 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn zip_with_oversized_nested_gzip() -> Result<Self, Box<dyn Error>> {
+        let payload = vec![b'x'; 8 * 1024 * 1024 + 1];
+        let nested = gzip_bytes("payload.txt", &payload)?;
+        Ok(Self {
+            bytes: zip_bytes(&[("payload.bin", &nested, ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
+    pub fn zip_with_oversized_nested_zstd() -> Result<Self, Box<dyn Error>> {
+        let payload = vec![b'x'; 8 * 1024 * 1024 + 1];
+        let nested = zstd::stream::encode_all(payload.as_slice(), 1)?;
+        Ok(Self {
+            bytes: zip_bytes(&[("payload.bin", &nested, ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
+    pub fn zip_with_corrupt_dictionary_zstd_payload() -> Result<Self, Box<dyn Error>> {
+        let nested = b"\x28\xb5\x2f\xfd\x21\x01";
+        Ok(Self {
+            bytes: zip_bytes(&[("payload.bin", nested, ZipEntryKind::File)])?,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload.bin",
+        })
+    }
+
     pub fn zip_with_tar_signature_text_payload() -> Result<Self, Box<dyn Error>> {
         let mut payload = vec![0_u8; 512];
         payload[257..262].copy_from_slice(b"ustar");
@@ -484,7 +516,7 @@ impl ArchiveFixture {
     }
 
     pub fn disguised_dictionary_zstd() -> Result<Self, Box<dyn Error>> {
-        let nested = b"\x28\xb5\x2f\xfd\x21\x01\x00";
+        let nested = b"\x28\xb5\x2f\xfd\x21\x01\x00\x01\x00\x00";
         Ok(Self {
             bytes: zip_bytes(&[("payload.bin", nested, ZipEntryKind::File)])?,
             media_type: "application/zip",

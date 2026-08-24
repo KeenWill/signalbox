@@ -654,7 +654,7 @@ impl RecursiveDetector {
 
 fn structurally_valid_gzip(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x1f\x8b\x08")
-        && reader_decodes_within_limit(&mut MultiGzDecoder::new(bytes))
+        && reader_decode_status(&mut MultiGzDecoder::new(bytes)) != DecodeStatus::Malformed
 }
 
 fn structurally_valid_zstd(bytes: &[u8]) -> bool {
@@ -678,7 +678,7 @@ fn structurally_valid_zstd(bytes: &[u8]) -> bool {
     let Ok(mut decoder) = zstd_decoder(bytes) else {
         return false;
     };
-    reader_decodes_within_limit(&mut decoder)
+    reader_decode_status(&mut decoder) != DecodeStatus::Malformed
 }
 
 fn structurally_valid_tar(bytes: &[u8]) -> bool {
@@ -694,31 +694,38 @@ fn structurally_valid_tar(bytes: &[u8]) -> bool {
         let Ok(mut entry) = entry else {
             return false;
         };
-        if !reader_decodes_within_limit(&mut entry) {
+        if reader_decode_status(&mut entry) == DecodeStatus::Malformed {
             return false;
         }
     }
     true
 }
 
-fn reader_decodes_within_limit(reader: &mut dyn Read) -> bool {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DecodeStatus {
+    Complete,
+    LimitExceeded,
+    Malformed,
+}
+
+fn reader_decode_status(reader: &mut dyn Read) -> DecodeStatus {
     let mut total = 0_u64;
     let mut buffer = [0_u8; 8192];
     loop {
         let Ok(count) = reader.read(&mut buffer) else {
-            return false;
+            return DecodeStatus::Malformed;
         };
         if count == 0 {
-            return true;
+            return DecodeStatus::Complete;
         }
         let Ok(count) = u64::try_from(count) else {
-            return false;
+            return DecodeStatus::Malformed;
         };
         let Some(next) = total.checked_add(count) else {
-            return false;
+            return DecodeStatus::LimitExceeded;
         };
         if next > MAX_ENTRY_BYTES {
-            return false;
+            return DecodeStatus::LimitExceeded;
         }
         total = next;
     }
@@ -791,6 +798,7 @@ fn zstd_header(bytes: &[u8]) -> bool {
 
 fn zstd_frames_have_dictionary(mut bytes: &[u8]) -> Result<bool, ArchiveIssue> {
     let mut saw_frame = false;
+    let mut has_dictionary = false;
     while !bytes.is_empty() {
         let magic = bytes.get(..4).ok_or(ArchiveIssue::Malformed)?;
         let magic = u32::from_le_bytes([magic[0], magic[1], magic[2], magic[3]]);
@@ -808,9 +816,7 @@ fn zstd_frames_have_dictionary(mut bytes: &[u8]) -> Result<bool, ArchiveIssue> {
         if magic != 0xfd2f_b528 {
             return Err(ArchiveIssue::Malformed);
         }
-        if zstd::zstd_safe::get_dict_id_from_frame(bytes).is_some() {
-            return Ok(true);
-        }
+        has_dictionary |= zstd::zstd_safe::get_dict_id_from_frame(bytes).is_some();
         let length = zstd::zstd_safe::find_frame_compressed_size(bytes)
             .map_err(|_| ArchiveIssue::Malformed)?;
         if length == 0 {
@@ -820,7 +826,7 @@ fn zstd_frames_have_dictionary(mut bytes: &[u8]) -> Result<bool, ArchiveIssue> {
         saw_frame = true;
     }
     if saw_frame {
-        Ok(false)
+        Ok(has_dictionary)
     } else {
         Err(ArchiveIssue::Malformed)
     }
