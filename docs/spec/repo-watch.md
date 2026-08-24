@@ -1120,17 +1120,17 @@ coalescing in-memory wake after commit; the listener returns success only while
 that repository's drain task remains available to receive it. The wake is an
 accelerator over durable state, not a work inventory: the repository task drains
 durable pending deliveries in a bounded startup attempt before scheduler work is
-admitted, when woken, and as part of every full
-poll for which no retry is already owed, and a wake arriving during a drain
-remains observable for a follow-up attempt. One pending page is bounded by both
-its row count and the exact payload bytes it may hold, and it reads those bodies
-one at a time, so a backlog of near-limit deliveries cannot retain far more than
-admission itself is allowed to; the oldest delivery is always read, so one body
-at the admission ceiling still drains, and every later body is discarded rather
-than allowed to overshoot, so a page retains no more than that ceiling. One
-drain visits a bounded number of pending pages and then re-arms that same wake,
-so a sustained stream is accelerated without holding the worker past an overdue
-full poll. A progressing drain also yields after the deployment-owned
+admitted, when woken, and as part of every full poll for which no retry is
+already owed, and a wake arriving during a drain remains observable for a
+follow-up attempt. One pending page is bounded by both its row count and the
+exact payload bytes it may hold, and it reads those bodies one at a time, so a
+backlog of near-limit deliveries cannot retain far more than admission itself is
+allowed to; the oldest delivery is always read, so one body at the admission
+ceiling still drains, and every later body is discarded rather than allowed to
+overshoot, so a page retains no more than that ceiling. One drain visits a
+bounded number of pending pages and then re-arms that same wake, so a sustained
+stream is accelerated without holding the worker past an overdue full poll. A
+progressing drain also yields after the deployment-owned
 `numeric_bounds.webhook_drain_work_budget` and re-arms that same wake after its
 last terminal delivery, so a slow but productive page returns before consuming
 the outer deadline and does not enter failure backoff. Configuring that policy
