@@ -245,6 +245,41 @@ impl<'de> Deserialize<'de> for WebTimelineEventSequence {
     }
 }
 
+/// Checked positive unsigned 64-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebPositiveU64(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
+
+impl WebPositiveU64 {
+    /// Encodes one already-validated positive value in canonical decimal form.
+    #[must_use]
+    pub fn from_nonzero(value: std::num::NonZeroU64) -> Self {
+        Self(value.get().to_string())
+    }
+
+    /// Returns the canonical positive decimal wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebPositiveU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let positive = canonical_u64(&value).and_then(std::num::NonZeroU64::new);
+        if positive.is_none() {
+            return Err(de::Error::custom(
+                "wire value must be a canonical positive u64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
 /// Checked unsigned 64-bit value encoded losslessly for JavaScript.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -471,7 +506,9 @@ pub enum WebAttentionActivityKind {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionGoalBlock {
-    pub generation: WebU64,
+    /// Goal generations are strictly positive in the domain and its storage
+    /// constraint, so zero is not a valid wire spelling.
+    pub generation: WebPositiveU64,
     pub reason: WebAttentionBlockedReason,
     /// At least 1 and at most 128 Unicode scalar values; exact text is in
     /// session detail. The stored goal need is never empty, so an empty
@@ -980,10 +1017,15 @@ export function decodeWebAttentionStreamEvent(value) {{
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
   if (value.kind === "snapshot") {{
     assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+    if (value.snapshot.sort !== "last_activity_descending") {{
+      fail("attention_event.snapshot.sort", "the fixed hot-page activity sort");
+    }}
+    assertUnarchivedSummaries(value.snapshot.summaries, "attention_event.snapshot.summaries");
   }} else {{
     value.summaries?.forEach((summary, index) =>
       assertAttentionSummary(summary, `attention_event.summaries[${{index}}]`),
     );
+    assertUnarchivedSummaries(value.summaries ?? [], "attention_event.summaries");
     const identities = new Set();
     for (const summary of value.summaries ?? []) {{
       if (identities.has(summary.session_id)) {{
@@ -993,6 +1035,14 @@ export function decodeWebAttentionStreamEvent(value) {{
     }}
   }}
   return value;
+}}
+
+function assertUnarchivedSummaries(summaries, path) {{
+  summaries.forEach((summary, index) => {{
+    if (summary.archived) {{
+      fail(`${{path}}[${{index}}].archived`, "false on the hot attention stream");
+    }}
+  }});
 }}
 
 function assertAttentionSnapshot(snapshot, path) {{

@@ -109,7 +109,8 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "generation": {
-            "$ref": "#/$defs/WebU64"
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Goal generations are strictly positive in the domain and its storage\nconstraint, so zero is not a valid wire spelling."
           },
           "need_summary": {
             "description": "At least 1 and at most 128 Unicode scalar values; exact text is in\nsession detail. The stored goal need is never empty, so an empty\nsummary is contract-invalid.",
@@ -253,6 +254,11 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
       "WebSessionId": {
         "description": "Checked canonical UUID used for browser-visible session identities.",
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -393,7 +399,8 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "generation": {
-            "$ref": "#/$defs/WebU64"
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Goal generations are strictly positive in the domain and its storage\nconstraint, so zero is not a valid wire spelling."
           },
           "need_summary": {
             "description": "At least 1 and at most 128 Unicode scalar values; exact text is in\nsession detail. The stored goal need is never empty, so an empty\nsummary is contract-invalid.",
@@ -614,6 +621,11 @@ const schemas = {
           "last_activity"
         ],
         "type": "object"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
       },
       "WebSessionId": {
         "description": "Checked canonical UUID used for browser-visible session identities.",
@@ -1341,10 +1353,15 @@ export function decodeWebAttentionStreamEvent(value) {
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
   if (value.kind === "snapshot") {
     assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+    if (value.snapshot.sort !== "last_activity_descending") {
+      fail("attention_event.snapshot.sort", "the fixed hot-page activity sort");
+    }
+    assertUnarchivedSummaries(value.snapshot.summaries, "attention_event.snapshot.summaries");
   } else {
     value.summaries?.forEach((summary, index) =>
       assertAttentionSummary(summary, `attention_event.summaries[${index}]`),
     );
+    assertUnarchivedSummaries(value.summaries ?? [], "attention_event.summaries");
     const identities = new Set();
     for (const summary of value.summaries ?? []) {
       if (identities.has(summary.session_id)) {
@@ -1354,6 +1371,14 @@ export function decodeWebAttentionStreamEvent(value) {
     }
   }
   return value;
+}
+
+function assertUnarchivedSummaries(summaries, path) {
+  summaries.forEach((summary, index) => {
+    if (summary.archived) {
+      fail(`${path}[${index}].archived`, "false on the hot attention stream");
+    }
+  });
 }
 
 function assertAttentionSnapshot(snapshot, path) {

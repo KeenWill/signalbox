@@ -48,10 +48,10 @@ use signalbox_web_contract::{
     WebAttentionAction, WebAttentionActivity, WebAttentionActivityKind, WebAttentionBlockedReason,
     WebAttentionContinuation, WebAttentionGoalBlock, WebAttentionJudgeFacts, WebAttentionSnapshot,
     WebAttentionSort, WebAttentionState, WebAttentionStreamEvent, WebAttentionSummary,
-    WebContractBootstrap, WebContractExample, WebSessionId, WebSessionTimelineDescriptor,
-    WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence,
-    WebTurnId, WebU64,
+    WebContractBootstrap, WebContractExample, WebPositiveU64, WebSessionId,
+    WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
+    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebTimelineEventSequence, WebTurnId, WebU64,
 };
 use sqlx::{PgPool, types::Uuid};
 use tokio::{net::TcpListener, sync::watch};
@@ -1011,7 +1011,9 @@ fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummar
                 return Err(());
             }
             Ok(WebAttentionGoalBlock {
-                generation: WebU64::from_u64(goal.generation),
+                generation: WebPositiveU64::from_nonzero(
+                    std::num::NonZeroU64::new(goal.generation).ok_or(())?,
+                ),
                 reason: match goal.reason {
                     AttentionBlockedReason::UserInputRequired => {
                         WebAttentionBlockedReason::UserInputRequired

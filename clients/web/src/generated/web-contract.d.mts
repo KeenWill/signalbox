@@ -21,7 +21,7 @@ type WebAttentionActivityKind = "session" | "turn" | "goal" | "approval_judge" |
 type WebAttentionBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure";
 
 type WebAttentionGoalBlock = {
-  readonly generation: WebU64;
+  readonly generation: WebPositiveU64;
   readonly need_summary: string;
   readonly reason: WebAttentionBlockedReason;
 };
@@ -85,6 +85,8 @@ type WebContractLimits = {
   readonly max_timeline_window_bytes: number;
   readonly max_timeline_window_items: number;
 };
+
+type WebPositiveU64 = string;
 
 type WebSessionId = string;
 

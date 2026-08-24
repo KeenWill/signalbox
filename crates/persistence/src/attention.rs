@@ -509,8 +509,13 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
     let recorded_at = row
         .try_get::<Option<sqlx::types::time::OffsetDateTime>, _>("recorded_at")?
         .ok_or(AttentionCorruption::Missing("activity timestamp"))?;
+    // A blocked goal's projection is validated whenever the goal is blocked,
+    // even when runner-loss precedence wins the classified state, so a
+    // corrupted blocked row fails the read closed instead of hiding behind a
+    // higher-precedence fact. It is exposed only when blocked wins.
+    let blocked_goal = decode_goal_block(row, goal_state)?;
     let goal_block = if state == AttentionState::Blocked {
-        decode_goal_block(row, goal_state)?
+        blocked_goal
     } else {
         None
     };
