@@ -2312,7 +2312,7 @@ impl RepositoryWatchTask {
             let outcome = store
                 .commit(&repository, request)
                 .await
-                .map_err(|_| TargetedWebhookCompletionError::Persistence)?;
+                .map_err(|_| TargetedWebhookCompletionError::Cursor)?;
             match outcome {
                 RepoWatchCommitOutcome::Committed(cursor)
                 | RepoWatchCommitOutcome::Replayed(cursor)
@@ -2371,6 +2371,14 @@ impl RepositoryWatchTask {
             Err(TargetedWebhookCompletionError::Terminal(
                 WebhookTerminalRecordError::Ambiguous,
             )) => {
+                self.webhook_shadow = None;
+                self.webhook_shadow_superseded = false;
+                Some(Err(RepositoryWatchAttemptError::Persistence))
+            }
+            Err(TargetedWebhookCompletionError::Cursor) => {
+                // The terminal disposition and exact projections are durable,
+                // but the cursor outcome is unknown. Reload the durable cursor
+                // before projecting any later pending receipt.
                 self.webhook_shadow = None;
                 self.webhook_shadow_superseded = false;
                 Some(Err(RepositoryWatchAttemptError::Persistence))
@@ -2644,6 +2652,7 @@ enum WebhookTerminalRecordError {
 #[derive(Debug)]
 enum TargetedWebhookCompletionError {
     Persistence,
+    Cursor,
     Terminal(WebhookTerminalRecordError),
 }
 
