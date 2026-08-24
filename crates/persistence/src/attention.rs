@@ -13,8 +13,12 @@ use signalbox_application::{
 use signalbox_domain::{GoalBlockedReasonKind, SessionId, TurnId};
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
-use crate::mapping::{
-    GoalEventDiscriminator, goal_blocked_reason_from_str, goal_event_kind_from_str,
+use crate::{
+    mapping::{
+        GoalEventDiscriminator, dispatched_runner_state_from_str, goal_blocked_reason_from_str,
+        goal_event_kind_from_str,
+    },
+    outbox::DispatchedRunnerState,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -516,7 +520,18 @@ fn classify_state(
     phase: Option<&str>,
     terminal: Option<&str>,
 ) -> Result<AttentionState, AttentionRepositoryError> {
-    if matches!(runner, Some("runner_lost" | "runner_lost_before_pin")) {
+    let runner_state = runner
+        .map(|value| {
+            dispatched_runner_state_from_str(value).ok_or(AttentionCorruption::Unsupported {
+                field: "runner state",
+                value: value.to_owned(),
+            })
+        })
+        .transpose()?;
+    if matches!(
+        runner_state,
+        Some(DispatchedRunnerState::RunnerLost | DispatchedRunnerState::RunnerLostBeforePin)
+    ) {
         return Ok(AttentionState::RunnerLost);
     }
     if goal == Some(GoalEventDiscriminator::Blocked) {
@@ -671,5 +686,29 @@ mod tests {
     #[test]
     fn goal_event_kind_decoding_rejects_unknown_storage_values() {
         assert!(decode_goal_event_kind("future_goal_state").is_err());
+    }
+
+    #[test]
+    fn state_classification_rejects_unknown_runner_state_spellings() {
+        assert_eq!(
+            classify_state(
+                Some("future_runner_state"),
+                None,
+                Some("active"),
+                Some("running"),
+                None,
+            )
+            .unwrap_err()
+            .to_string(),
+            "unsupported operator attention runner state: future_runner_state"
+        );
+    }
+
+    #[test]
+    fn state_classification_treats_known_healthy_runner_states_as_placements() {
+        assert_eq!(
+            classify_state(Some("suspect"), None, Some("active"), Some("running"), None).unwrap(),
+            AttentionState::Active
+        );
     }
 }
