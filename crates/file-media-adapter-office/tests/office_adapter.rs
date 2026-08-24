@@ -8,9 +8,9 @@ use signalbox_file_media_runtime::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProcessorFuture, FileMediaProvider, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileMediaRegistry, FileReadRequest, FileReadResult,
-    InspectionRequest, NeverCancelled, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation, ReadViewName, ReaderIdentity,
-    VerifiedBlobSource,
+    InspectionRequest, NeverCancelled, ProcessorBoundaryFailure, ProcessorIsolation,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation,
+    ReadViewName, ReaderIdentity, VerifiedBlobSource,
 };
 
 struct DirectProcessor {
@@ -32,7 +32,16 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
-        self.provider.probe(reader, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .probe(reader, source, cancellation)
+                .await
+                .map_err(|_| {
+                    ProcessorBoundaryFailure::Processor(
+                        signalbox_file_media_runtime::ProcessorFailure::Failed,
+                    )
+                })
+        })
     }
 
     fn validate<'a>(
@@ -42,7 +51,16 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
-        self.provider.inspect(reader, request, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .inspect(reader, request, source, cancellation)
+                .await
+                .map_err(|_| {
+                    ProcessorBoundaryFailure::Processor(
+                        signalbox_file_media_runtime::ProcessorFailure::Failed,
+                    )
+                })
+        })
     }
 
     fn read<'a>(
@@ -52,7 +70,16 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
-        self.provider.read(reader, request, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .read(reader, request, source, cancellation)
+                .await
+                .map_err(|_| {
+                    ProcessorBoundaryFailure::Processor(
+                        signalbox_file_media_runtime::ProcessorFailure::Failed,
+                    )
+                })
+        })
     }
 }
 
@@ -209,11 +236,11 @@ async fn vba_part_is_rejected_despite_a_macro_free_main_override() -> Result<(),
 }
 
 #[tokio::test]
-async fn package_with_docx_and_xlsx_main_parts_is_ambiguous() -> Result<(), Box<dyn Error>> {
+async fn package_relationship_selects_the_office_document_family() -> Result<(), Box<dyn Error>> {
     let source = OfficeFixture::mixed_docx_xlsx()?.into_source()?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
-    assert_eq!(inspection.status(), FileInspectionStatus::Ambiguous);
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
     Ok(())
 }
 
@@ -433,7 +460,7 @@ async fn read(
             visible_part: None,
         },
         view: ReadViewName::try_new(view).map_err(|_| FileMediaFailure::ProcessorFailed)?,
-        options,
+        input: signalbox_file_media_runtime::FileReadInput::Initial { options },
     };
     registry()
         .map_err(|_| FileMediaFailure::ProcessorFailed)?

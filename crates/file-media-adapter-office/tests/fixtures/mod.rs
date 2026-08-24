@@ -52,7 +52,17 @@ impl OfficeFixture {
             &[
                 (
                     "xl/workbook.xml",
-                    b"<?xml version=\"1.0\"?><workbook/>".as_slice(),
+                    b"<workbook xmlns:r=\"urn:r\"><sheets><sheet r:id=\"rId1\"/></sheets></workbook>".as_slice(),
+                    EntryKind::File,
+                ),
+                (
+                    "xl/_rels/workbook.xml.rels",
+                    b"<Relationships><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>".as_slice(),
+                    EntryKind::File,
+                ),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    b"<worksheet><sheetData><row><c t=\"s\"><v>0</v></c></row></sheetData></worksheet>".as_slice(),
                     EntryKind::File,
                 ),
                 ("xl/sharedStrings.xml", shared.as_bytes(), EntryKind::File),
@@ -68,7 +78,17 @@ impl OfficeFixture {
             &[
                 (
                     "xl/workbook.xml",
-                    b"<?xml version=\"1.0\"?><workbook/>".as_slice(),
+                    b"<workbook xmlns:r=\"urn:r\"><sheets><sheet r:id=\"rId1\"/></sheets></workbook>".as_slice(),
+                    EntryKind::File,
+                ),
+                (
+                    "xl/_rels/workbook.xml.rels",
+                    b"<Relationships><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/></Relationships>".as_slice(),
+                    EntryKind::File,
+                ),
+                (
+                    "xl/worksheets/sheet1.xml",
+                    b"<worksheet><sheetData><row><c t=\"s\"><v>0</v></c><c t=\"s\"><v>1</v></c></row></sheetData></worksheet>".as_slice(),
                     EntryKind::File,
                 ),
                 ("xl/sharedStrings.xml", shared.as_slice(), EntryKind::File),
@@ -370,6 +390,14 @@ impl OfficeFixture {
             SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
         writer.start_file(CONTENT_TYPES_NAME, file_options)?;
         writer.write_all(content_types)?;
+        writer.start_file("_rels/.rels", file_options)?;
+        let main_part = main_part_for(media_type)?;
+        writer.write_all(
+            format!(
+                r#"<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="{main_part}"/></Relationships>"#
+            )
+            .as_bytes(),
+        )?;
         for (name, body, kind) in entries {
             match kind {
                 EntryKind::File => {
@@ -385,7 +413,7 @@ impl OfficeFixture {
             bytes: writer.finish()?.into_inner(),
             media_type,
             expected_text,
-            expected_entries: entries.len() + 1,
+            expected_entries: entries.len() + 2,
             expected_format: format_for(media_type)?,
             expected_reason: None,
         })
