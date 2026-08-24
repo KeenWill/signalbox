@@ -243,7 +243,7 @@ const schemas = {
             "$ref": "#/$defs/WebTimelineAddress"
           },
           "projection_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebSearchProjectionId"
           }
         },
         "required": [
@@ -273,6 +273,11 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebSearchProjectionId": {
+        "description": "Checked positive PostgreSQL projection identity encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]{0,18}$",
+        "type": "string"
+      },
       "WebSearchResult": {
         "additionalProperties": false,
         "description": "One bounded lexical match with enough identity to reveal unloaded history.",
@@ -287,12 +292,17 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebSearchHighlight"
             },
+            "maxItems": 512,
             "type": "array"
           },
+          "projection_id": {
+            "$ref": "#/$defs/WebSearchProjectionId"
+          },
           "session_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebSessionId"
           },
           "snippet": {
+            "maxLength": 512,
             "type": "string"
           },
           "source": {
@@ -302,6 +312,7 @@ const schemas = {
         "required": [
           "session_id",
           "address",
+          "projection_id",
           "source",
           "content_class",
           "snippet",
@@ -320,7 +331,7 @@ const schemas = {
                 "type": "string"
               },
               "session_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               }
             },
             "required": [
@@ -333,14 +344,14 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "accepted_input_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               },
               "kind": {
                 "const": "accepted_input",
                 "type": "string"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               }
             },
             "required": [
@@ -353,15 +364,36 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
+              "accepted_input_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "steering_input",
+                "type": "string"
+              },
+              "source_turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "accepted_input_id",
+              "source_turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
               "kind": {
                 "const": "turn_transcript_entry",
                 "type": "string"
               },
               "semantic_entry_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               }
             },
             "required": [
@@ -379,7 +411,7 @@ const schemas = {
                 "type": "string"
               },
               "semantic_entry_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               }
             },
             "required": [
@@ -396,10 +428,10 @@ const schemas = {
                 "type": "string"
               },
               "tool_request_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               }
             },
             "required": [
@@ -417,10 +449,10 @@ const schemas = {
                 "type": "string"
               },
               "tool_attempt_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               }
             },
             "required": [
@@ -434,7 +466,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "attachment_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               },
               "kind": {
                 "const": "attachment",
@@ -451,7 +483,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "artifact_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebUuid"
               },
               "kind": {
                 "const": "derived_artifact",
@@ -465,6 +497,11 @@ const schemas = {
             "type": "object"
           }
         ]
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
       },
       "WebTimelineAddress": {
         "additionalProperties": false,
@@ -483,6 +520,11 @@ const schemas = {
       "WebTimelineEventSequence": {
         "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
         "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         "type": "string"
       }
     },
@@ -504,6 +546,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebSearchResult"
         },
+        "maxItems": 100,
         "type": "array"
       }
     },
@@ -515,6 +558,11 @@ const schemas = {
   },
   "WebSessionTimelineDescriptor": {
     "$defs": {
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebSessionTimelineSizeFacts": {
         "additionalProperties": false,
         "description": "Explicit lifetime size facts used only for browser loading policy.",
@@ -600,7 +648,7 @@ const schemas = {
         "$ref": "#/$defs/WebU64"
       },
       "session_id": {
-        "type": "string"
+        "$ref": "#/$defs/WebSessionId"
       },
       "sizes": {
         "$ref": "#/$defs/WebSessionTimelineSizeFacts"
@@ -622,6 +670,11 @@ const schemas = {
   },
   "WebSessionTimelineWindow": {
     "$defs": {
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebSessionTimelineEventKind": {
         "description": "Closed durable event categories in the browser timeline foundation.",
         "enum": [
@@ -725,7 +778,7 @@ const schemas = {
         "type": "integer"
       },
       "session_id": {
-        "type": "string"
+        "$ref": "#/$defs/WebSessionId"
       }
     },
     "required": [
@@ -845,6 +898,9 @@ function assertSchema(root, schema, value, path) {
     if (!Array.isArray(value)) {
       fail(path, "an array");
     }
+    if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+      fail(path, `at most ${schema.maxItems} items`);
+    }
     value.forEach((item, index) => assertSchema(root, schema.items, item, `${path}[${index}]`));
     return;
   }
@@ -872,8 +928,22 @@ function assertSchema(root, schema, value, path) {
   if (typeof value !== schema.type) {
     fail(path, schema.type);
   }
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    value.length > 20
+  ) {
+    fail(path, "an unsigned 64-bit integer");
+  }
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {
     fail(path, `a string matching ${schema.pattern}`);
+  }
+  if (
+    schema.type === "string" &&
+    schema.pattern === "^[1-9][0-9]{0,18}$" &&
+    BigInt(value) > 9223372036854775807n
+  ) {
+    fail(path, "a positive signed 64-bit integer");
   }
   if (
     schema.type === "string" &&
@@ -912,7 +982,93 @@ export function decodeWebSessionTimelineWindow(value) {
   return value;
 }
 
+function validSearchSourceCorrelation(result) {
+  switch (result.source.kind) {
+    case "session":
+      return result.source.session_id === result.session_id && result.content_class === "session_metadata";
+    case "accepted_input":
+    case "steering_input":
+      return result.content_class === "user_transcript";
+    case "turn_transcript_entry":
+      return result.content_class === "assistant_transcript";
+    case "session_transcript_entry":
+      return result.content_class === "derived_text_artifact";
+    case "tool_request":
+      return result.content_class === "tool_arguments";
+    case "tool_attempt":
+      return result.content_class === "tool_result";
+    case "attachment":
+      return result.content_class === "attachment_filename" ||
+        result.content_class === "attachment_media_metadata";
+    case "derived_artifact":
+      return result.content_class === "derived_text_artifact";
+    default:
+      return false;
+  }
+}
+
 export function decodeWebSearchPage(value) {
   assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
+  if (value.continuation !== null) {
+    const lastResult = value.results.at(-1);
+    if (
+      lastResult === undefined ||
+      value.continuation.address.event_sequence !== lastResult.address.event_sequence ||
+      value.continuation.projection_id !== lastResult.projection_id
+    ) {
+      fail(
+        "search_page.continuation",
+        "a cursor anchored to the final search result",
+      );
+    }
+  }
+  const encoder = new TextEncoder();
+  let previousKey = null;
+  value.results.forEach((result, resultIndex) => {
+    const address = BigInt(result.address.event_sequence);
+    const projection = BigInt(result.projection_id);
+    if (
+      previousKey !== null &&
+      (address > previousKey.address ||
+        (address === previousKey.address && projection >= previousKey.projection))
+    ) {
+      fail(
+        `search_page.results[${resultIndex}]`,
+        "a strictly descending search result key",
+      );
+    }
+    previousKey = { address, projection };
+    if (!validSearchSourceCorrelation(result)) {
+      fail(
+        `search_page.results[${resultIndex}].source`,
+        "a source consistent with the result session and content class",
+      );
+    }
+    const bytes = encoder.encode(result.snippet);
+    if (bytes.length > 512) {
+      fail(
+        `search_page.results[${resultIndex}].snippet`,
+        `at most 512 UTF-8 bytes`,
+      );
+    }
+    let previousEnd = 0;
+    result.highlights.forEach((highlight, highlightIndex) => {
+      const rangePath = `search_page.results[${resultIndex}].highlights[${highlightIndex}]`;
+      if (
+        highlight.start_byte < previousEnd ||
+        highlight.start_byte >= highlight.end_byte ||
+        highlight.end_byte > bytes.length
+      ) {
+        fail(rangePath, "an ordered non-overlapping in-bounds UTF-8 byte range");
+      }
+      if (
+        (highlight.start_byte > 0 && (bytes[highlight.start_byte] & 0xc0) === 0x80) ||
+        (highlight.end_byte < bytes.length && (bytes[highlight.end_byte] & 0xc0) === 0x80)
+      ) {
+        fail(rangePath, "a range on UTF-8 boundaries");
+      }
+      previousEnd = highlight.end_byte;
+    });
+  });
   return value;
 }
