@@ -246,6 +246,7 @@ function usageCall() {
     session_id: "00000000-0000-0000-0000-000000000052",
     turn_id: "00000000-0000-0000-0000-000000000053",
     model_id: "00000000-0000-0000-0000-000000000041",
+    profile_id: "fixture-primary",
     provenance: "estimated",
     input_semantics: "cache_exclusive",
     tokens: {
@@ -485,6 +486,21 @@ test("generated usage summary rejects hidden breakdown failures for singletons",
   );
 });
 
+test("generated usage summary rejects hidden breakdown failures missing a cache axis", () => {
+  const group = usageGroup();
+  group.call_count = "2";
+  group.input_semantics = "cache_inclusive";
+  group.coverage.cache_read_input = true;
+  group.tokens.input = "101";
+  group.tokens.cache_read_input = "0";
+  group.cost = { status: "unavailable", reason: "invalid_cache_breakdown" };
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /consistent with token evidence and input semantics/,
+  );
+});
+
 test("generated usage summary bounds totals by represented calls", () => {
   const group = usageGroup();
   group.tokens.input = "18446744073709551616";
@@ -540,6 +556,16 @@ test("generated usage decoder bounds profile identities by UTF-8 bytes", () => {
   );
   assert.throws(
     () => decodeWebUsageSummary({ groups: [oversized], truncated: false }),
+    /1 through 256 UTF-8 bytes/,
+  );
+});
+
+test("generated usage decoder bounds call profile identities by UTF-8 bytes", () => {
+  const oversized = usageCall();
+  oversized.profile_id = "é".repeat(129);
+
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [oversized], continuation: null }, "newest"),
     /1 through 256 UTF-8 bytes/,
   );
 });

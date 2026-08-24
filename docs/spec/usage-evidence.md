@@ -23,7 +23,12 @@ comparison resolves digest collisions without indexing or bounding the canonical
 reference. The exact reference is retained once in that mapping and is not
 copied into each projected call. Reads expose only the bounded, collision-free
 profile label, while server-side configured-cost derivation reconstructs the
-exact reference from that label and mapping. Each physical token axis is either
+exact reference from that label and mapping. Reconstruction is itself bounded
+by the 256-byte configured-profile ceiling: a longer canonical reference can
+never name a configured profile, so reads report it as unpriceable instead of
+copying it out of the mapping, and the aggregate resolves each emitted group's
+reference exactly once, after grouping and the group ceiling, never per
+candidate call. Each physical token axis is either
 absent or an exact integer in the `u64` domain. Aggregate token sums use `u128`,
 so every sum admitted by the bounded source-call ceiling remains exact.
 
@@ -77,12 +82,18 @@ provenance/call-kind selection support selective chronological pages.
 selection and time filters above, including all three closed call-kind
 spellings: `model_call`, `approval_judge`, and `context_compaction`. Malformed
 bounds, closed values, UUIDs, or partial cursors are application errors.
+Summary groups and individual calls both carry the bounded profile label, so a
+call can be associated with the profile-partitioned group that represents it.
 
 Dollar cost is not stored in the projection. Signalboxd reconstructs the exact
-non-secret credential reference from the bounded profile label, then derives
-cost at read time from configuration-owned target rates. Independently reported
-axes remain priceable when cache normalization is incomplete; only a
-contradictory cache-inclusive breakdown is invalid. Each derived amount carries
-its rate version and `real` or `metered_equivalent` label. Unavailable cost
-carries one closed reason: no token evidence, unknown input semantics,
+non-secret credential reference from the bounded profile label when it fits the
+configured-profile ceiling, then derives cost at read time from
+configuration-owned target rates; an over-ceiling reference derives unavailable
+configuration. Independently reported axes remain priceable when cache
+normalization is incomplete; only a contradictory cache-inclusive breakdown is
+invalid. A derived amount prices every reported axis exactly: when any reported
+axis cannot be represented by exact decimal arithmetic, the whole cost is
+unavailable rather than an understated partial total. Each derived amount
+carries its rate version and `real` or `metered_equivalent` label. Unavailable
+cost carries one closed reason: no token evidence, unknown input semantics,
 incomplete cache axes, invalid cache breakdown, or unavailable configuration.

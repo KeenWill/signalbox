@@ -69,6 +69,7 @@ const usageCall = (index: number): WebUsageCallPage['calls'][number] => {
     session_id: SEARCH_USAGE_SCENARIO_SESSION_ID,
     turn_id: uuidAt(998, Math.floor(index / 2) + 1),
     model_id: modelId,
+    profile_id: modelId === MODEL_ALPHA ? PROFILE_ALPHA : PROFILE_BETA,
     recorded_at_micros: String(1_787_400_000_000_000 - index * 1_000_000),
     provenance: reported ? 'reported' : 'estimated',
     input_semantics: 'cache_exclusive',

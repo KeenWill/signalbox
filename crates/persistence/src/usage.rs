@@ -8,7 +8,7 @@ use signalbox_application::{
     UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPage,
     UsageCallQuery, UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageReader,
     UsageTimestampMicros, UsageTokenAxes, UsageTokenCoverage, UsageTokenPresence,
-    max_usage_aggregate_calls, max_usage_aggregate_groups,
+    max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_credential_profile_utf8_bytes,
 };
 use signalbox_domain::{
     ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId,
@@ -21,18 +21,17 @@ use crate::mapping::{
     usage_provenance_to_str,
 };
 
+// Canonical references are unbounded, so neither query may copy a
+// reconstructed reference into per-call rows. Both resolve the oversized
+// mapping through the bounded profile label and transfer a reference only when
+// it fits the configured-profile ceiling: a longer reference can never name a
+// configured profile, so it derives no cost and is reported as over-ceiling
+// instead of being materialized. The aggregate resolves each emitted group's
+// reference exactly once, after grouping and the group ceiling.
 const AGGREGATE_SQL: &str = "
 WITH candidate_calls AS MATERIALIZED (
-    SELECT usage_call.*,
-           CASE
-               WHEN credential_profile_label LIKE 'exact:%'
-                   THEN substring(credential_profile_label FROM 7)
-               ELSE oversized_profile.exact_reference
-           END AS credential_reference
-      FROM web_usage_call_projection AS usage_call
-      LEFT JOIN web_usage_oversized_profile_identity AS oversized_profile
-        ON credential_profile_label NOT LIKE 'exact:%'
-       AND oversized_profile.profile_id::text = substring(credential_profile_label FROM 8)
+    SELECT *
+      FROM web_usage_call_projection
      WHERE ($1::timestamptz IS NULL OR recorded_at >= $1)
        AND ($2::timestamptz IS NULL OR recorded_at < $2)
        AND ($3::uuid IS NULL OR session_id = $3)
@@ -49,43 +48,66 @@ WITH candidate_calls AS MATERIALIZED (
      LIMIT $9
 ), bounded_state AS (
     SELECT count(*) > $9 AS calls_truncated FROM candidate_calls
+), grouped AS (
+    SELECT call_kind, resolved_provider_model_identity_id,
+           credential_profile_label,
+           usage_provenance_kind, usage_input_includes_cache_tokens,
+           input_tokens IS NOT NULL AS has_input,
+           output_tokens IS NOT NULL AS has_output,
+           cache_creation_input_tokens IS NOT NULL AS has_cache_creation,
+           cache_read_input_tokens IS NOT NULL AS has_cache_read,
+           count(*) AS call_count,
+           sum(input_tokens) AS input_tokens,
+           sum(output_tokens) AS output_tokens,
+           sum(cache_creation_input_tokens) AS cache_creation_input_tokens,
+           sum(cache_read_input_tokens) AS cache_read_input_tokens,
+           usage_input_includes_cache_tokens IS NOT NULL
+           AND bool_and(
+               usage_input_includes_cache_tokens IS DISTINCT FROM true
+               OR input_tokens IS NULL
+               OR cache_creation_input_tokens IS NULL
+               OR cache_read_input_tokens IS NULL
+               OR input_tokens >= cache_creation_input_tokens + cache_read_input_tokens
+           ) AS cache_normalization_safe,
+           bounded_state.calls_truncated
+      FROM bounded_calls
+     CROSS JOIN bounded_state
+     GROUP BY call_kind, resolved_provider_model_identity_id,
+              credential_profile_label, usage_provenance_kind,
+              usage_input_includes_cache_tokens,
+              input_tokens IS NOT NULL, output_tokens IS NOT NULL,
+              cache_creation_input_tokens IS NOT NULL,
+              cache_read_input_tokens IS NOT NULL, bounded_state.calls_truncated
+     ORDER BY call_kind, resolved_provider_model_identity_id,
+              credential_profile_label, usage_provenance_kind,
+              usage_input_includes_cache_tokens NULLS FIRST,
+              has_input, has_output, has_cache_creation, has_cache_read
+     LIMIT $10
 )
 SELECT call_kind, resolved_provider_model_identity_id,
-       credential_reference,
        credential_profile_label AS web_profile,
        usage_provenance_kind, usage_input_includes_cache_tokens,
-       input_tokens IS NOT NULL AS has_input,
-       output_tokens IS NOT NULL AS has_output,
-       cache_creation_input_tokens IS NOT NULL AS has_cache_creation,
-       cache_read_input_tokens IS NOT NULL AS has_cache_read,
-       count(*) AS call_count,
-       sum(input_tokens) AS input_tokens,
-       sum(output_tokens) AS output_tokens,
-       sum(cache_creation_input_tokens) AS cache_creation_input_tokens,
-       sum(cache_read_input_tokens) AS cache_read_input_tokens,
-       usage_input_includes_cache_tokens IS NOT NULL
-       AND bool_and(
-           usage_input_includes_cache_tokens IS DISTINCT FROM true
-           OR input_tokens IS NULL
-           OR cache_creation_input_tokens IS NULL
-           OR cache_read_input_tokens IS NULL
-           OR input_tokens >= cache_creation_input_tokens + cache_read_input_tokens
-       ) AS cache_normalization_safe,
-       bounded_state.calls_truncated
-  FROM bounded_calls
- CROSS JOIN bounded_state
- GROUP BY call_kind, resolved_provider_model_identity_id,
-          credential_reference, credential_profile_label, usage_provenance_kind,
-          usage_input_includes_cache_tokens,
-          input_tokens IS NOT NULL, output_tokens IS NOT NULL,
-          cache_creation_input_tokens IS NOT NULL,
-          cache_read_input_tokens IS NOT NULL, bounded_state.calls_truncated
- ORDER BY call_kind, resolved_provider_model_identity_id, credential_profile_label,
-          usage_provenance_kind, usage_input_includes_cache_tokens NULLS FIRST,
-          input_tokens IS NOT NULL, output_tokens IS NOT NULL,
-          cache_creation_input_tokens IS NOT NULL,
-          cache_read_input_tokens IS NOT NULL
- LIMIT $10";
+       has_input, has_output, has_cache_creation, has_cache_read,
+       call_count, input_tokens, output_tokens,
+       cache_creation_input_tokens, cache_read_input_tokens,
+       cache_normalization_safe, calls_truncated,
+       CASE
+           WHEN credential_profile_label LIKE 'exact:%'
+               THEN substring(credential_profile_label FROM 7)
+           WHEN octet_length(oversized_profile.exact_reference) <= 256
+               THEN oversized_profile.exact_reference
+           ELSE NULL
+       END AS credential_reference,
+       COALESCE(octet_length(oversized_profile.exact_reference) > 256, false)
+           AS credential_reference_over_ceiling
+  FROM grouped
+  LEFT JOIN web_usage_oversized_profile_identity AS oversized_profile
+    ON credential_profile_label NOT LIKE 'exact:%'
+   AND oversized_profile.profile_id::text = substring(credential_profile_label FROM 8)
+ ORDER BY call_kind, resolved_provider_model_identity_id,
+          credential_profile_label, usage_provenance_kind,
+          usage_input_includes_cache_tokens NULLS FIRST,
+          has_input, has_output, has_cache_creation, has_cache_read";
 
 const CALLS_NEWEST_SQL: &str = "
 SELECT model_call_id, call_kind, session_id, turn_id,
@@ -93,8 +115,12 @@ SELECT model_call_id, call_kind, session_id, turn_id,
        CASE
            WHEN credential_profile_label LIKE 'exact:%'
                THEN substring(credential_profile_label FROM 7)
-           ELSE oversized_profile.exact_reference
+           WHEN octet_length(oversized_profile.exact_reference) <= 256
+               THEN oversized_profile.exact_reference
+           ELSE NULL
        END AS credential_reference,
+       COALESCE(octet_length(oversized_profile.exact_reference) > 256, false)
+           AS credential_reference_over_ceiling,
        credential_profile_label AS web_profile,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
@@ -347,10 +373,7 @@ fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
     if web_profile.is_empty() || web_profile.len() > 256 {
         return Err(UsageProjectionCorruption::Invalid("web profile").into());
     }
-    let credential_profile: String = row.try_get("credential_reference")?;
-    if credential_profile.is_empty() {
-        return Err(UsageProjectionCorruption::Invalid("credential profile").into());
-    }
+    let credential_profile = decode_credential_reference(&row)?;
     Ok(UsageCallEvidence {
         call_kind: decode_call_kind(row.try_get("call_kind")?)?,
         call: ModelCallId::from_uuid(row.try_get("model_call_id")?),
@@ -373,10 +396,7 @@ fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryEr
     if web_profile.is_empty() || web_profile.len() > 256 {
         return Err(UsageProjectionCorruption::Invalid("web profile").into());
     }
-    let credential_profile: String = row.try_get("credential_reference")?;
-    if credential_profile.is_empty() {
-        return Err(UsageProjectionCorruption::Invalid("credential profile").into());
-    }
+    let credential_profile = decode_credential_reference(&row)?;
     let call_count = u64::try_from(row.try_get::<i64, _>("call_count")?)
         .map_err(|_| UsageProjectionCorruption::Invalid("call count"))?;
     if call_count == 0 {
@@ -403,6 +423,33 @@ fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryEr
         tokens: decode_aggregate_tokens(&row)?,
         cache_normalization_safe: row.try_get("cache_normalization_safe")?,
     })
+}
+
+/// Decodes the ceiling-bounded credential reference used for cost derivation.
+///
+/// The queries reconstruct a reference only when it fits
+/// [`max_usage_credential_profile_utf8_bytes`]; a longer canonical reference
+/// can never name a configured profile, so it is reported as over-ceiling
+/// (`None`) instead of being copied out of the mapping. A null reference
+/// without the over-ceiling marker means the projected label points at no
+/// mapping row, which is corruption and fails closed.
+fn decode_credential_reference(row: &PgRow) -> Result<Option<String>, UsageRepositoryError> {
+    match row.try_get::<Option<String>, _>("credential_reference")? {
+        Some(reference)
+            if !reference.is_empty()
+                && reference.len() <= usize::from(max_usage_credential_profile_utf8_bytes()) =>
+        {
+            Ok(Some(reference))
+        }
+        Some(_) => Err(UsageProjectionCorruption::Invalid("credential profile").into()),
+        None => {
+            if row.try_get::<bool, _>("credential_reference_over_ceiling")? {
+                Ok(None)
+            } else {
+                Err(UsageProjectionCorruption::Invalid("credential profile").into())
+            }
+        }
+    }
 }
 
 fn decode_model(row: &PgRow) -> Result<ResolvedProviderTarget, sqlx::Error> {
@@ -525,6 +572,33 @@ mod tests {
         assert!(CALLS_NEWEST_SQL.contains("oversized_profile.exact_reference"));
         assert!(CALLS_NEWEST_SQL.contains("substring(credential_profile_label FROM 7)"));
         assert!(CALLS_NEWEST_SQL.contains("credential_profile_label AS web_profile"));
+    }
+
+    #[test]
+    fn usage_queries_bound_reconstructed_references_to_the_profile_ceiling() {
+        let ceiling_guard = format!(
+            "octet_length(oversized_profile.exact_reference) <= {}",
+            max_usage_credential_profile_utf8_bytes()
+        );
+        let over_ceiling_marker = format!(
+            "COALESCE(octet_length(oversized_profile.exact_reference) > {}, false)",
+            max_usage_credential_profile_utf8_bytes()
+        );
+
+        assert!(AGGREGATE_SQL.contains(&ceiling_guard));
+        assert!(AGGREGATE_SQL.contains(&over_ceiling_marker));
+        assert!(CALLS_NEWEST_SQL.contains(&ceiling_guard));
+        assert!(CALLS_NEWEST_SQL.contains(&over_ceiling_marker));
+    }
+
+    #[test]
+    fn usage_aggregate_resolves_references_only_after_grouping() {
+        let (grouping, reference_join) = AGGREGATE_SQL
+            .split_once("GROUP BY")
+            .expect("the aggregate query groups bounded calls");
+
+        assert!(!grouping.contains("oversized_profile"));
+        assert!(reference_join.contains("LEFT JOIN web_usage_oversized_profile_identity"));
     }
 
     #[test]

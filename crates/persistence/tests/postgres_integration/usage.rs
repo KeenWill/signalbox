@@ -733,8 +733,104 @@ async fn usage_projection_retains_only_bounded_credential_identity() -> Result<(
     let report = repository.aggregate(all_usage_query()).await?;
 
     assert_eq!(page.calls[0].call, fixture.call);
-    assert_eq!(page.calls[0].credential_profile, "anthropic-primary");
-    assert_eq!(report.groups[0].key.credential_profile, "anthropic-primary");
+    assert_eq!(
+        page.calls[0].credential_profile.as_deref(),
+        Some("anthropic-primary")
+    );
+    assert_eq!(
+        report.groups[0].key.credential_profile.as_deref(),
+        Some("anthropic-primary")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Projects one session-level compaction call directly so the recorded
+/// credential reference is exactly the supplied text; the canonical write
+/// pipeline resolves references through session credential pins, which is not
+/// the behavior under test here.
+async fn insert_compaction_projection_with_reference(
+    pool: &PgPool,
+    seed: u128,
+    reference: &str,
+) -> Result<(), Box<dyn Error>> {
+    let call = Uuid::from_u128(seed + 1);
+    sqlx::query(
+        "INSERT INTO model_call_identity (model_call_id, call_kind)
+         VALUES ($1, 'context_compaction')",
+    )
+    .bind(call)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO web_usage_call_projection (
+             model_call_id, call_kind, session_id, turn_id,
+             resolved_provider_model_identity_id, credential_profile_label,
+             usage_provenance_kind, usage_input_includes_cache_tokens,
+             input_tokens, output_tokens,
+             cache_creation_input_tokens, cache_read_input_tokens
+         ) VALUES (
+             $1, 'context_compaction', $2, NULL, $3,
+             bounded_web_usage_profile($4), 'reported', false,
+             11, NULL, NULL, NULL
+         )",
+    )
+    .bind(call)
+    .bind(Uuid::from_u128(seed + 2))
+    .bind(Uuid::from_u128(seed + 3))
+    .bind(reference)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn usage_reads_reconstruct_a_mapped_reference_within_the_profile_ceiling()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    // 251 bytes: above the 250-byte exact-label bound, within the 256-byte
+    // configured-profile ceiling, so reads reconstruct it from the mapping.
+    let reference = "r".repeat(251);
+    insert_compaction_projection_with_reference(&pool, 0x95_a00, &reference).await?;
+    let repository = UsageRepository::new(pool.clone());
+    let page = repository.calls(call_query(1, None)).await?;
+    let report = repository.aggregate(all_usage_query()).await?;
+
+    assert!(page.calls[0].web_profile.starts_with("mapped:"));
+    assert_eq!(
+        page.calls[0].credential_profile.as_deref(),
+        Some(reference.as_str())
+    );
+    assert_eq!(
+        report.groups[0].key.credential_profile.as_deref(),
+        Some(reference.as_str())
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn usage_reads_report_an_over_ceiling_reference_instead_of_materializing_it()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    // 257 bytes: beyond the 256-byte configured-profile ceiling, so no
+    // configured profile can match and reads never copy the reference out of
+    // the mapping.
+    let reference = "s".repeat(257);
+    insert_compaction_projection_with_reference(&pool, 0x95_b00, &reference).await?;
+    let repository = UsageRepository::new(pool.clone());
+    let page = repository.calls(call_query(1, None)).await?;
+    let report = repository.aggregate(all_usage_query()).await?;
+
+    assert!(page.calls[0].web_profile.starts_with("mapped:"));
+    assert_eq!(page.calls[0].credential_profile, None);
+    assert_eq!(report.groups[0].key.credential_profile, None);
 
     pool.close().await;
     drop(container);

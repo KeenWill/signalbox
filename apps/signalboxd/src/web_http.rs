@@ -816,6 +816,9 @@ fn usage_call_dto(call: UsageCallEvidence, configuration: &HubModelConfiguration
         session_id: WebSessionId::from_uuid_bytes(*call.session.into_uuid().as_bytes()),
         turn_id: call.turn.map(|turn| web_uuid(turn.into_uuid())),
         model_id: web_uuid(call.model.identity().into_uuid()),
+        profile_id: signalbox_web_contract::WebUsageProfileId::from_bounded(
+            call.web_profile.clone(),
+        ),
         provenance: usage_provenance_dto(call.provenance),
         input_semantics: usage_input_semantics_dto(call.input_semantics),
         tokens: usage_tokens_dto(call.tokens),
@@ -823,7 +826,7 @@ fn usage_call_dto(call: UsageCallEvidence, configuration: &HubModelConfiguration
         cost: usage_cost_dto(
             configuration,
             call.model,
-            &call.credential_profile,
+            call.credential_profile.as_deref(),
             call.input_semantics,
             call.tokens,
             true,
@@ -834,7 +837,7 @@ fn usage_call_dto(call: UsageCallEvidence, configuration: &HubModelConfiguration
 fn usage_cost_dto(
     configuration: &HubModelConfiguration,
     model: ResolvedProviderTarget,
-    credential_profile: &str,
+    credential_profile: Option<&str>,
     input_semantics: UsageInputTokenSemantics,
     tokens: UsageTokenAxes,
     cost_derivation_safe: bool,
@@ -880,6 +883,9 @@ fn usage_cost_dto(
     if !cost_derivation_safe {
         return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
     }
+    let Some(credential_profile) = credential_profile else {
+        return unavailable(WebUsageCostUnavailableReason::ConfigurationUnavailable);
+    };
     let Some(cost) = configuration.derive_model_call_cost(
         model,
         credential_profile,
@@ -946,9 +952,12 @@ fn usage_aggregate_cost_dto(
     {
         return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
     }
+    let Some(credential_profile) = group.key.credential_profile.as_deref() else {
+        return unavailable(WebUsageCostUnavailableReason::ConfigurationUnavailable);
+    };
     let Some(cost) = configuration.derive_usage_aggregate_cost(
         group.key.model,
-        &group.key.credential_profile,
+        credential_profile,
         semantics,
         [
             group.tokens.input,
@@ -2121,7 +2130,7 @@ mod tests {
         let real = usage_cost_dto(
             &configuration,
             rated_example_target(),
-            "anthropic-primary",
+            Some("anthropic-primary"),
             UsageInputTokenSemantics::CacheExclusive,
             tokens,
             true,
@@ -2129,7 +2138,7 @@ mod tests {
         let metered_equivalent = usage_cost_dto(
             &configuration,
             rated_example_target(),
-            "codex-subscription-primary",
+            Some("codex-subscription-primary"),
             UsageInputTokenSemantics::CacheExclusive,
             tokens,
             true,
@@ -2152,7 +2161,7 @@ mod tests {
         let cost = usage_cost_dto(
             &configuration,
             rated_example_target(),
-            "anthropic-primary",
+            Some("anthropic-primary"),
             UsageInputTokenSemantics::CacheInclusive,
             UsageTokenAxes {
                 input: Some(10),
@@ -2174,7 +2183,7 @@ mod tests {
         let cost = usage_cost_dto(
             &configuration,
             rated_example_target(),
-            "anthropic-primary",
+            Some("anthropic-primary"),
             UsageInputTokenSemantics::CacheInclusive,
             UsageTokenAxes {
                 input: Some(u64::MAX),
@@ -2199,7 +2208,7 @@ mod tests {
         let cost = usage_cost_dto(
             &configuration,
             rated_example_target(),
-            "anthropic-primary",
+            Some("anthropic-primary"),
             UsageInputTokenSemantics::CacheInclusive,
             UsageTokenAxes {
                 input: None,
@@ -2219,7 +2228,7 @@ mod tests {
         let cost = usage_cost_dto(
             &configuration,
             rated_example_target(),
-            "anthropic-primary",
+            Some("anthropic-primary"),
             UsageInputTokenSemantics::CacheInclusive,
             UsageTokenAxes {
                 input: Some(10),

@@ -348,7 +348,11 @@ pub struct UsageCallEvidence {
     /// Bounded non-secret identity safe for browser partitioning.
     pub web_profile: String,
     /// Non-secret credential-profile reference needed for cost labeling.
-    pub credential_profile: String,
+    ///
+    /// Bounded by [`max_usage_credential_profile_utf8_bytes`]; absent when the
+    /// canonical reference exceeds that ceiling and therefore cannot name a
+    /// configured profile or derive a configured cost.
+    pub credential_profile: Option<String>,
     /// Reported or estimated provenance.
     pub provenance: UsageProvenance,
     /// Meaning of the input-token axis.
@@ -378,7 +382,11 @@ pub struct UsageAggregateKey {
     /// Bounded non-secret identity safe for browser partitioning.
     pub web_profile: String,
     /// Non-secret credential-profile cost dimension.
-    pub credential_profile: String,
+    ///
+    /// Bounded by [`max_usage_credential_profile_utf8_bytes`]; absent when the
+    /// canonical reference exceeds that ceiling and therefore cannot name a
+    /// configured profile or derive a configured cost.
+    pub credential_profile: Option<String>,
     /// Reported or estimated provenance.
     pub provenance: UsageProvenance,
     /// Meaning of the input-token axis.

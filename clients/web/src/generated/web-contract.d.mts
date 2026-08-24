@@ -157,6 +157,7 @@ type WebUsageCall = {
   readonly cost: WebUsageCost;
   readonly input_semantics: WebUsageInputSemantics;
   readonly model_id: WebUuid;
+  readonly profile_id: WebUsageProfileId;
   readonly provenance: WebUsageProvenance;
   readonly recorded_at_micros: WebUsageTimestampMicros;
   readonly session_id: WebSessionId;

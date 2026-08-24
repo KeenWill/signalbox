@@ -855,6 +855,9 @@ const schemas = {
           "model_id": {
             "$ref": "#/$defs/WebUuid"
           },
+          "profile_id": {
+            "$ref": "#/$defs/WebUsageProfileId"
+          },
           "provenance": {
             "$ref": "#/$defs/WebUsageProvenance"
           },
@@ -879,6 +882,7 @@ const schemas = {
           "session_id",
           "turn_id",
           "model_id",
+          "profile_id",
           "provenance",
           "input_semantics",
           "tokens",
@@ -986,6 +990,12 @@ const schemas = {
           "cache_exclusive",
           "cache_inclusive"
         ],
+        "type": "string"
+      },
+      "WebUsageProfileId": {
+        "description": "Non-secret bounded profile identity retained by usage summaries.",
+        "maxLength": 256,
+        "minLength": 1,
         "type": "string"
       },
       "WebUsageProvenance": {
@@ -1642,7 +1652,11 @@ export function decodeWebUsageSummary(value) {
       group.tokens,
       group.cost,
       `usage_summary.groups[${index}]`,
-      group.input_semantics === "cache_inclusive" && callCount > 1n,
+      group.input_semantics === "cache_inclusive" &&
+        callCount > 1n &&
+        group.tokens.input !== null &&
+        group.tokens.cache_creation_input !== null &&
+        group.tokens.cache_read_input !== null,
     );
     const compatibilityKey = JSON.stringify([
       group.call_kind,
@@ -1683,6 +1697,7 @@ export function decodeWebUsageCallPage(value, order) {
   if (order !== "newest") {
     fail("usage_call_page.order", "newest");
   }
+  const encoder = new TextEncoder();
   let previousKey = null;
   const callIds = new Set();
   value.calls.forEach((call, index) => {
@@ -1693,6 +1708,10 @@ export function decodeWebUsageCallPage(value, order) {
       `usage_call_page.calls[${index}]`,
       false,
     );
+    const profileBytes = encoder.encode(call.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {
+      fail(`usage_call_page.calls[${index}].profile_id`, "1 through 256 UTF-8 bytes");
+    }
     const isCompaction = call.call_kind === "context_compaction";
     if (!Object.hasOwn(call, "turn_id") || isCompaction !== (call.turn_id === null)) {
       fail(
