@@ -2713,14 +2713,16 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
         let fatal_shutdown = restart_after_fatal_shutdown(&mut scheduler, &mut runtime).await?;
         let model_calls = census_repository.model_call_ids().await?;
         let census = census_repository.census_for(&model_calls).await?;
-        if fleet.sessions.len() != FLEET_SESSION_COUNT || model_calls.len() != FLEET_SESSION_COUNT {
-            return Err(io::Error::other(format!(
-                "fleet census cardinality mismatch: sessions={}, model_calls={}",
-                fleet.sessions.len(),
-                model_calls.len()
-            ))
-            .into());
-        }
+        assert_eq!(
+            fleet.sessions.len(),
+            FLEET_SESSION_COUNT,
+            "fleet session cardinality mismatch"
+        );
+        assert_eq!(
+            model_calls.len(),
+            FLEET_SESSION_COUNT,
+            "fleet model-call cardinality mismatch"
+        );
         let hung_model_calls = model_calls
             .iter()
             .copied()
@@ -2784,13 +2786,11 @@ async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), 
         scheduler = Some(start_fleet_scheduler(&mut runtime, hanging_model.clone())?);
         wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
         let pre_kill_model_call_ids = census_repository.model_call_ids().await?;
-        if pre_kill_model_call_ids.len() != FLEET_SESSION_COUNT {
-            return Err(io::Error::other(format!(
-                "pre-kill model-call cardinality mismatch: {}",
-                pre_kill_model_call_ids.len()
-            ))
-            .into());
-        }
+        assert_eq!(
+            pre_kill_model_call_ids.len(),
+            FLEET_SESSION_COUNT,
+            "pre-kill model-call cardinality mismatch"
+        );
         abort_fleet_scheduler(
             scheduler
                 .take()
@@ -2812,13 +2812,11 @@ async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), 
         let census = census_repository
             .census_for(&pre_kill_model_call_ids)
             .await?;
-        if fleet.sessions.len() != FLEET_SESSION_COUNT {
-            return Err(io::Error::other(format!(
-                "fleet session cardinality mismatch: {}",
-                fleet.sessions.len()
-            ))
-            .into());
-        }
+        assert_eq!(
+            fleet.sessions.len(),
+            FLEET_SESSION_COUNT,
+            "fleet session cardinality mismatch"
+        );
         assert_restarted_fleet_outcome(
             census,
             &hanging_model,
