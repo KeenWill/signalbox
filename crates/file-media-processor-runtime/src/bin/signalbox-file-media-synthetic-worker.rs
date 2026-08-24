@@ -1,4 +1,4 @@
-use std::{error::Error, str::FromStr, time::Duration};
+use std::{error::Error, fs, path::Path, str::FromStr, time::Duration};
 
 use signalbox_file_media_processor_runtime::{WorkerCatalog, serve_one};
 use signalbox_file_media_runtime::{
@@ -28,27 +28,33 @@ impl FileMediaProvider for SyntheticProvider {
     ) -> FileMediaProviderFuture<'a, ProcessorProbeOutput> {
         Box::pin(async move {
             let length = std::num::NonZeroU64::new(1)
-                .ok_or(signalbox_file_media_runtime::ProcessorFailure::Failed)?;
+                .ok_or(signalbox_file_media_runtime::FileMediaProviderFailure::Failed)?;
             let prefix = source
                 .read_range(0, length)
                 .await
-                .map_err(|_| signalbox_file_media_runtime::ProcessorFailure::Failed)?;
+                .map_err(|_| signalbox_file_media_runtime::FileMediaProviderFailure::Failed)?;
             match prefix.first().copied() {
                 Some(b'C') => std::process::exit(7),
                 Some(b'T') => std::thread::sleep(Duration::from_secs(5)),
                 Some(b'X') => {
-                    let thread_output = std::thread::spawn(|| 1_u8)
-                        .join()
-                        .map_err(|_| signalbox_file_media_runtime::ProcessorFailure::Failed)?;
+                    let thread_output = std::thread::spawn(|| 1_u8).join().map_err(|_| {
+                        signalbox_file_media_runtime::FileMediaProviderFailure::Failed
+                    })?;
                     if thread_output != 1 {
-                        return Err(signalbox_file_media_runtime::ProcessorFailure::Failed);
+                        return Err(signalbox_file_media_runtime::FileMediaProviderFailure::Failed);
                     }
                     let spawned = std::process::Command::new("/signalbox-file-media-worker")
                         .arg("--signalbox-file-media-isolation-probe")
                         .status();
                     if spawned.is_ok() {
-                        return Err(signalbox_file_media_runtime::ProcessorFailure::Failed);
+                        return Err(signalbox_file_media_runtime::FileMediaProviderFailure::Failed);
                     }
+                }
+                Some(b'I') => verify_sandbox_authority()?,
+                Some(b'V') => {
+                    source.read_range(0, length).await.map_err(|_| {
+                        signalbox_file_media_runtime::FileMediaProviderFailure::Failed
+                    })?;
                 }
                 Some(b'H') => {
                     return Ok(ProcessorProbeOutput::Candidate {
@@ -57,7 +63,7 @@ impl FileMediaProvider for SyntheticProvider {
                     });
                 }
                 Some(_) => {}
-                None => return Err(signalbox_file_media_runtime::ProcessorFailure::Failed),
+                None => return Err(signalbox_file_media_runtime::FileMediaProviderFailure::Failed),
             }
             Ok(ProcessorProbeOutput::Candidate {
                 media_type: String::from("application/x-signalbox-synthetic"),
@@ -99,13 +105,52 @@ impl FileMediaProvider for SyntheticProvider {
     }
 }
 
+fn verify_sandbox_authority() -> Result<(), signalbox_file_media_runtime::FileMediaProviderFailure>
+{
+    let failed = || signalbox_file_media_runtime::FileMediaProviderFailure::Failed;
+    if Path::new("/etc/passwd").exists()
+        || std::env::current_dir().map_err(|_| failed())? != Path::new("/tmp")
+    {
+        return Err(failed());
+    }
+    let mut environment = std::env::vars().collect::<Vec<_>>();
+    environment.sort_unstable();
+    if environment
+        != [
+            (String::from("LANG"), String::from("C.UTF-8")),
+            (String::from("LC_ALL"), String::from("C.UTF-8")),
+            (String::from("PWD"), String::from("/tmp")),
+        ]
+    {
+        return Err(failed());
+    }
+    let status = fs::read_to_string("/proc/self/status").map_err(|_| failed())?;
+    let capabilities = status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:"))
+        .ok_or_else(failed)?;
+    if u64::from_str_radix(capabilities.trim(), 16).map_err(|_| failed())? != 0 {
+        return Err(failed());
+    }
+    let routes = fs::read_to_string("/proc/net/route").map_err(|_| failed())?;
+    if routes
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .any(|interface| interface != "lo")
+    {
+        return Err(failed());
+    }
+    Ok(())
+}
+
 fn synthetic_declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
     let provider = FileReaderProviderName::try_new("synthetic")?;
     let view = ReadViewDeclaration::try_new(
         ReadViewName::try_new("text")?,
         String::from("Reads synthetic text."),
         CanonicalJsonObjectSchema::try_new(r#"{"type":"object"}"#)?,
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 1 },
         ReadViewBounds::Text {
             source_bytes: 64,
             output_bytes: 64,

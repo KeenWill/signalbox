@@ -4,19 +4,20 @@
     reason = "conformance fixtures use explicit construction and outcome expectations"
 )]
 
-use std::{future::Future, num::NonZeroU64, pin::pin, str::FromStr, task::Context};
+use std::{future::Future, num::NonZeroU64, str::FromStr};
 
 use signalbox_file_media_runtime::{
     AttachmentKind, CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType,
     DeclaredMediaType, FileDigest, FileInspection, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProcessorFuture, FileMediaProviderDeclaration,
     FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileMediaRegistry,
-    FileReadRequest, FileReaderName, FileReaderProviderName, FileReaderRevision, FileUse,
-    InspectionRequest, NeverCancelled, ProbeDeclaration, ProbeStrength, ProcessorFailure,
-    ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
-    ReaderDeclarationInput, ReaderIdentity, ReasonCode, SourceReadError, SourceReadFuture,
-    StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    FileReadInput, FileReadRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
+    FileUse, InspectionRequest, MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, NeverCancelled,
+    ProbeDeclaration, ProbeStrength, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds,
+    ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity,
+    ReasonCode, SourceReadError, SourceReadFuture, StreamingTextFallback, ValidationEvidence,
+    VerifiedBlobSource,
 };
 
 const SYNTHETIC_MEDIA_TYPE: &str = "application/x-signalbox-synthetic";
@@ -77,9 +78,12 @@ enum ValidationBehavior {
 #[derive(Clone, Copy)]
 enum ReadBehavior {
     Text,
+    InvalidViewArguments,
+    SourceTooLarge,
     OversizedText,
     MalformedStructured,
     DuplicateStructuredMember,
+    CanonicalizedStructuredOverflow,
     ContradictoryContinuation,
 }
 
@@ -130,6 +134,11 @@ impl FileMediaProcessor for SyntheticProcessor {
         _cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
         Box::pin(async move {
+            if request.maximum_source_bytes != MAX_VALIDATION_SOURCE_BYTES
+                || request.maximum_ranges != MAX_VALIDATION_RANGES
+            {
+                return Err(ProcessorFailure::Failed.into());
+            }
             let metadata_json = match self.validation {
                 ValidationBehavior::Valid => String::from(r#"{"synthetic":true}"#),
                 ValidationBehavior::OversizedMetadata => {
@@ -161,6 +170,10 @@ impl FileMediaProcessor for SyntheticProcessor {
                     truncated: false,
                     cursor: None,
                 },
+                ReadBehavior::InvalidViewArguments => ProcessorReadOutput::InvalidViewArguments,
+                ReadBehavior::SourceTooLarge => ProcessorReadOutput::SourceTooLarge {
+                    maximum_bytes: 1_024,
+                },
                 ReadBehavior::OversizedText => ProcessorReadOutput::Text {
                     body: "x".repeat(65),
                     truncated: false,
@@ -176,6 +189,11 @@ impl FileMediaProcessor for SyntheticProcessor {
                     truncated: false,
                     cursor: None,
                 },
+                ReadBehavior::CanonicalizedStructuredOverflow => ProcessorReadOutput::Structured {
+                    body_json: String::from("1e400"),
+                    truncated: false,
+                    cursor: None,
+                },
                 ReadBehavior::ContradictoryContinuation => ProcessorReadOutput::Text {
                     body: String::from("synthetic admitted text"),
                     truncated: true,
@@ -187,12 +205,11 @@ impl FileMediaProcessor for SyntheticProcessor {
 }
 
 fn block_on_ready<Output>(future: impl Future<Output = Output>) -> Output {
-    let mut future = pin!(future);
-    let mut context = Context::from_waker(std::task::Waker::noop());
-    match future.as_mut().poll(&mut context) {
-        std::task::Poll::Ready(output) => output,
-        std::task::Poll::Pending => panic!("memory-backed conformance future unexpectedly parked"),
-    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("the conformance runtime is constructed")
+        .block_on(future)
 }
 
 fn media_type(value: &str) -> CanonicalMediaType {
@@ -205,7 +222,7 @@ fn text_view() -> ReadViewDeclaration {
         String::from("Reads the bounded synthetic body."),
         CanonicalJsonObjectSchema::try_new(EMPTY_OPTIONS_SCHEMA)
             .expect("fixture schema is object-rooted"),
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 16 },
         ReadViewBounds::Text {
             source_bytes: 1_024,
             output_bytes: 64,
@@ -215,18 +232,22 @@ fn text_view() -> ReadViewDeclaration {
 }
 
 fn structured_view() -> ReadViewDeclaration {
+    structured_view_with_output_bytes(256)
+}
+
+fn structured_view_with_output_bytes(output_bytes: usize) -> ReadViewDeclaration {
     ReadViewDeclaration::try_new(
         ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
         String::from("Reads bounded synthetic structure."),
         CanonicalJsonObjectSchema::try_new(EMPTY_OPTIONS_SCHEMA)
             .expect("fixture schema is object-rooted"),
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 16 },
         ReadViewBounds::Structured {
             source_bytes: 1_024,
-            output_bytes: 256,
+            output_bytes,
             depth: 8,
             nodes: 32,
-            string_bytes: 128,
+            string_bytes: output_bytes.min(128),
         },
     )
     .expect("fixture view declaration is valid")
@@ -283,9 +304,9 @@ fn inspect(
     ))
 }
 
-/// INV-067: byte signatures, not caller metadata, select one reader.
+/// INV-075: byte signatures, not caller metadata, select one reader.
 #[test]
-fn inv067_synthetic_signature_produces_validated_detection() {
+fn inv075_synthetic_signature_produces_validated_detection() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
 
@@ -308,9 +329,9 @@ fn inv067_synthetic_signature_produces_validated_detection() {
     assert_eq!(validated.source().digest(), source.digest());
 }
 
-/// INV-067: a caller declaration cannot override byte-derived detection.
+/// INV-075: a caller declaration cannot override byte-derived detection.
 #[test]
-fn inv067_declared_type_disagreement_is_reported_without_fallback() {
+fn inv075_declared_type_disagreement_is_reported_without_fallback() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
 
@@ -332,9 +353,9 @@ fn inv067_declared_type_disagreement_is_reported_without_fallback() {
     );
 }
 
-/// INV-068: oversized processor metadata never crosses the registry boundary.
+/// INV-076: oversized processor metadata never crosses the registry boundary.
 #[test]
-fn inv068_oversized_processor_metadata_is_sanitized_to_failure() {
+fn inv076_oversized_processor_metadata_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -347,9 +368,9 @@ fn inv068_oversized_processor_metadata_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-068: malformed injection-shaped processor metadata never propagates.
+/// INV-076: malformed injection-shaped processor metadata never propagates.
 #[test]
-fn inv068_malformed_injection_shaped_metadata_is_sanitized_to_failure() {
+fn inv076_malformed_injection_shaped_metadata_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -362,9 +383,9 @@ fn inv068_malformed_injection_shaped_metadata_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-068: an oversized processor text body never becomes a typed read result.
+/// INV-076: an oversized processor text body never becomes a typed read result.
 #[test]
-fn inv068_oversized_processor_text_is_sanitized_to_failure() {
+fn inv076_oversized_processor_text_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -374,7 +395,9 @@ fn inv068_oversized_processor_text_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
-        options: serde_json::json!({}),
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -382,9 +405,9 @@ fn inv068_oversized_processor_text_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-068: malformed structured output carrying injection-shaped text is discarded.
+/// INV-076: malformed structured output carrying injection-shaped text is discarded.
 #[test]
-fn inv068_malformed_injection_shaped_structure_is_sanitized_to_failure() {
+fn inv076_malformed_injection_shaped_structure_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(structured_view());
     let processor = SyntheticProcessor {
@@ -394,7 +417,9 @@ fn inv068_malformed_injection_shaped_structure_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
-        options: serde_json::json!({}),
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -402,9 +427,9 @@ fn inv068_malformed_injection_shaped_structure_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-068: duplicate structured members never cross the processor boundary.
+/// INV-076: duplicate structured members never cross the processor boundary.
 #[test]
-fn inv068_duplicate_structured_member_is_sanitized_to_failure() {
+fn inv076_duplicate_structured_member_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(structured_view());
     let processor = SyntheticProcessor {
@@ -414,7 +439,9 @@ fn inv068_duplicate_structured_member_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
-        options: serde_json::json!({}),
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -422,10 +449,32 @@ fn inv068_duplicate_structured_member_is_sanitized_to_failure() {
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
 }
 
-/// INV-068: contradictory continuation facts from a processor do not enter the
+/// INV-076: canonicalization cannot expand structured output past its declared bound.
+#[test]
+fn inv076_canonicalized_structured_bytes_are_rechecked() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view(structured_view_with_output_bytes(5));
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::Valid,
+        read: ReadBehavior::CanonicalizedStructuredOverflow,
+    };
+    let request = FileReadRequest {
+        inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        view: ReadViewName::try_new(STRUCTURED_VIEW_NAME).expect("fixture view name is valid"),
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
+    };
+
+    let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
+
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+/// INV-076: contradictory continuation facts from a processor do not enter the
 /// sanitized read-result type.
 #[test]
-fn inv068_contradictory_processor_continuation_is_sanitized_to_failure() {
+fn inv076_contradictory_processor_continuation_is_sanitized_to_failure() {
     let source = MemorySource::synthetic();
     let registry = registry_with_view(text_view());
     let processor = SyntheticProcessor {
@@ -435,7 +484,55 @@ fn inv068_contradictory_processor_continuation_is_sanitized_to_failure() {
     let request = FileReadRequest {
         inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
         view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
-        options: serde_json::json!({}),
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
+    };
+
+    let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
+
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+/// INV-076: a processor cannot relabel a continuation cursor as invalid
+/// model-supplied initial options.
+#[test]
+fn inv076_continuation_invalid_arguments_is_sanitized_to_failure() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view(text_view());
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::Valid,
+        read: ReadBehavior::InvalidViewArguments,
+    };
+    let request = FileReadRequest {
+        inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
+        input: FileReadInput::Continuation {
+            cursor: signalbox_file_media_runtime::ReadContinuationCursor::try_new("next-page")
+                .expect("fixture continuation cursor is valid"),
+        },
+    };
+
+    let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
+
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+/// INV-076: a processor cannot report an authenticated in-bounds source as too large.
+#[test]
+fn inv076_false_source_too_large_is_sanitized_to_failure() {
+    let source = MemorySource::synthetic();
+    let registry = registry_with_view(text_view());
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::Valid,
+        read: ReadBehavior::SourceTooLarge,
+    };
+    let request = FileReadRequest {
+        inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
     };
 
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
@@ -526,6 +623,8 @@ fn provider_declaration(name: &str, owned_media_type: &str) -> FileMediaProvider
 fn distinct_static_media_claims_are_admitted() {
     let first_provider = provider_declaration("first", SYNTHETIC_MEDIA_TYPE);
     let second_provider = provider_declaration("second", OTHER_SYNTHETIC_MEDIA_TYPE);
+    let first_name = first_provider.provider().clone();
+    let second_name = second_provider.provider().clone();
 
     let registry = FileMediaRegistry::try_new(
         vec![second_provider, first_provider],
@@ -534,8 +633,8 @@ fn distinct_static_media_claims_are_admitted() {
     )
     .expect("distinct media claims are conflict-free");
 
-    assert_eq!(registry.providers()[0].provider().as_str(), "first");
-    assert_eq!(registry.providers()[1].provider().as_str(), "second");
+    assert_eq!(registry.providers()[0].provider(), &first_name);
+    assert_eq!(registry.providers()[1].provider(), &second_name);
 }
 
 #[test]
@@ -544,6 +643,8 @@ fn provider_reader_inventory_is_canonically_sorted() {
         FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
     let second = reader_declaration(&provider, "second", OTHER_SYNTHETIC_MEDIA_TYPE);
     let first = reader_declaration(&provider, "first", SYNTHETIC_MEDIA_TYPE);
+    let first_name = first.identity().reader().clone();
+    let second_name = second.identity().reader().clone();
     let declaration = FileMediaProviderDeclaration::try_new(provider, vec![second, first])
         .expect("fixture provider owns both readers");
 
@@ -559,15 +660,170 @@ fn provider_reader_inventory_is_canonically_sorted() {
             .identity()
             .reader()
             .as_str(),
-        "first"
+        first_name.as_str()
     );
     assert_eq!(
         registry.providers()[0].readers()[1]
             .identity()
             .reader()
             .as_str(),
-        "second"
+        second_name.as_str()
     );
+}
+
+fn oversized_reader_inventory(provider: &FileReaderProviderName) -> Vec<ReaderDeclaration> {
+    (0..257)
+        .map(|index| {
+            let reader = format!("reader-{index:03}");
+            let owned_media_type = format!("application/x-synthetic-{index:03}");
+            reader_declaration(provider, &reader, &owned_media_type)
+        })
+        .collect()
+}
+
+fn inspection_probe_inventory(
+    provider: &FileReaderProviderName,
+    count: usize,
+    probe: ProbeDeclaration,
+) -> Vec<ReaderDeclaration> {
+    (0..count)
+        .map(|index| {
+            let reader = format!("probe-reader-{index:03}");
+            let owned_media_type = format!("application/x-probe-synthetic-{index:03}");
+            reader_declaration_with_probe(provider, &reader, &owned_media_type, probe)
+        })
+        .collect()
+}
+
+fn oversized_inspection_view_inventory() -> Vec<ReadViewDeclaration> {
+    (0..17)
+        .map(|index| {
+            let name = format!("view-{index:02}");
+            let schema = format!(
+                r#"{{"description":"{}","type":"object"}}"#,
+                "x".repeat(65_000)
+            );
+            ReadViewDeclaration::try_new(
+                ReadViewName::try_new(name).expect("fixture view name is valid"),
+                String::from("Reads one bounded synthetic projection."),
+                CanonicalJsonObjectSchema::try_new(&schema)
+                    .expect("fixture schema is object-rooted and individually bounded"),
+                ReadAccessPattern::Streaming { maximum_ranges: 16 },
+                ReadViewBounds::Text {
+                    source_bytes: 1_024,
+                    output_bytes: 64,
+                },
+            )
+            .expect("fixture view declaration is individually valid")
+        })
+        .collect()
+}
+
+#[test]
+fn oversized_provider_reader_inventory_is_rejected() {
+    let provider =
+        FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
+    let readers = oversized_reader_inventory(&provider);
+    let declaration = FileMediaProviderDeclaration::try_new(provider, readers)
+        .expect("the provider constructor defers inventory limits to the registry");
+
+    let outcome = FileMediaRegistry::try_new(
+        vec![declaration],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    );
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::Inventory)
+    ));
+}
+
+#[test]
+fn oversized_inspection_probe_byte_budget_is_rejected() {
+    let provider =
+        FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
+    let probe = ProbeDeclaration::new(1, 0, 0, 262_144);
+    let readers = inspection_probe_inventory(&provider, 65, probe);
+    let declaration = FileMediaProviderDeclaration::try_new(provider, readers)
+        .expect("the provider constructor defers probe budgets to the registry");
+
+    let outcome = FileMediaRegistry::try_new(
+        vec![declaration],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    );
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ProbeBounds)
+    ));
+}
+
+#[test]
+fn oversized_inspection_probe_request_budget_is_rejected() {
+    let provider =
+        FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
+    let probe = ProbeDeclaration::new(1, 1, 16, 2);
+    let readers = inspection_probe_inventory(&provider, 57, probe);
+    let declaration = FileMediaProviderDeclaration::try_new(provider, readers)
+        .expect("the provider constructor defers probe budgets to the registry");
+
+    let outcome = FileMediaRegistry::try_new(
+        vec![declaration],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    );
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ProbeBounds)
+    ));
+}
+
+#[test]
+fn oversized_inspection_view_inventory_is_rejected() {
+    let provider =
+        FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
+    let views = oversized_inspection_view_inventory();
+    let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
+        provider: provider.clone(),
+        reader: FileReaderName::try_new("fixture").expect("fixture reader name is valid"),
+        revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
+        media_types: vec![media_type(SYNTHETIC_MEDIA_TYPE)],
+        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        views,
+        reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
+        streaming_text_fallback: StreamingTextFallback::Disabled,
+    })
+    .expect("fixture reader declaration is nonempty");
+    let declaration = FileMediaProviderDeclaration::try_new(provider, vec![reader])
+        .expect("fixture provider owns its reader");
+
+    let outcome = FileMediaRegistry::try_new(
+        vec![declaration],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    );
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::Inventory)
+    ));
+}
+
+#[test]
+fn lowered_result_ceiling_applies_to_inspection_view_inventory() {
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.text_or_json_bytes = 64 * 1_024;
+    let view = text_view();
+
+    let outcome = registry_outcome_with_view(view, ceilings);
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::Inventory)
+    ));
 }
 
 #[test]
@@ -577,7 +833,10 @@ fn read_view_source_work_above_the_compiled_ceiling_is_rejected() {
         .read_source_bytes
         .checked_add(1)
         .expect("the fixture ceiling leaves room for one excessive byte");
-    let view = bounded_text_view(ReadAccessPattern::Streaming, source_bytes);
+    let view = bounded_text_view(
+        ReadAccessPattern::Streaming { maximum_ranges: 16 },
+        source_bytes,
+    );
 
     let outcome = registry_outcome_with_view(view, ceilings);
 
@@ -602,6 +861,39 @@ fn random_access_range_fanout_above_the_compiled_ceiling_is_rejected() {
         outcome,
         Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ViewBounds)
     ));
+}
+
+#[test]
+fn streaming_range_fanout_above_the_compiled_ceiling_is_rejected() {
+    let ceilings = FileMediaCeilings::version_one();
+    let maximum_ranges = ceilings
+        .read_ranges
+        .checked_add(1)
+        .expect("the fixture ceiling leaves room for one excessive range");
+    let view = bounded_text_view(ReadAccessPattern::Streaming { maximum_ranges }, 1_024);
+
+    let outcome = registry_outcome_with_view(view, ceilings);
+
+    assert!(matches!(
+        outcome,
+        Err(signalbox_file_media_runtime::FileMediaRegistryConstructionError::ViewBounds)
+    ));
+}
+
+#[test]
+fn validation_source_work_ceiling_can_only_be_lowered() {
+    let compiled = FileMediaCeilings::version_one();
+    let mut lowered = compiled;
+    lowered.validation_source_bytes = compiled.validation_source_bytes - 1;
+    lowered.validation_ranges = compiled.validation_ranges - 1;
+    let mut raised_bytes = compiled;
+    raised_bytes.validation_source_bytes = compiled.validation_source_bytes + 1;
+    let mut raised_ranges = compiled;
+    raised_ranges.validation_ranges = compiled.validation_ranges + 1;
+
+    assert!(compiled.admits(lowered));
+    assert!(!compiled.admits(raised_bytes));
+    assert!(!compiled.admits(raised_ranges));
 }
 
 fn bounded_text_view(access: ReadAccessPattern, source_bytes: u64) -> ReadViewDeclaration {
@@ -653,12 +945,26 @@ fn reader_declaration(
     reader: &str,
     owned_media_type: &str,
 ) -> ReaderDeclaration {
+    reader_declaration_with_probe(
+        provider,
+        reader,
+        owned_media_type,
+        ProbeDeclaration::new(4, 0, 0, 4),
+    )
+}
+
+fn reader_declaration_with_probe(
+    provider: &FileReaderProviderName,
+    reader: &str,
+    owned_media_type: &str,
+    probe: ProbeDeclaration,
+) -> ReaderDeclaration {
     ReaderDeclaration::try_new(ReaderDeclarationInput {
         provider: provider.clone(),
         reader: FileReaderName::try_new(reader).expect("fixture reader name is valid"),
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(owned_media_type)],
-        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        probe,
         views: vec![text_view()],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback: StreamingTextFallback::Disabled,
