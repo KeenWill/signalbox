@@ -38,7 +38,7 @@ ownership confirmation are verified through this PR (`agent/thread-ownership`).
 
 The automatic tool-round saturation terminal contract is verified through this
 PR (`agent/tool-round-saturation`) at implementation ref
-`e3324597071041bb192c315855304805d6fa6f4e`.
+`95eec29a38b6b05586ef2e1d45d29328ad5c3c55`.
 
 The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
