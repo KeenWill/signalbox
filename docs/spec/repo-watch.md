@@ -912,6 +912,9 @@ thread must be resolved, without filtering by author or outdated state; at least
 one gating check must exist and every gating check on the exact current commit
 must be green; the pull request must be settled with known `mergeable`
 mergeability; and the aggregate review decision must not be `changes_requested`.
+The filtered gating-check inventory is settled only after the same inventory is
+observed in two consecutive committed polls for the unchanged exact head, so a
+fast check cannot permanently seal the head before a later workflow registers.
 Check runs are green only when completed with `success`, `skipped`, or
 `neutral`, and status contexts are green only at `success`. Pending, incomplete,
 missing-conclusion, and other terminal results are not green. Check names

@@ -3230,7 +3230,9 @@ struct GitHubRepositoryPoller {
 
 struct PullRequestFreshness {
     updated_at: String,
+    head_sha: CommitSha,
     settlement: PullRequestSettlement,
+    gating_check_inventory: Vec<String>,
     skipped_polls: usize,
     // A fetch that never reached the durable cursor must not authorize reuse:
     // the next attempt would compare this updated_at against a stale committed
@@ -3255,6 +3257,8 @@ struct FetchedPullRequest {
 struct FetchedConvergenceEvidence {
     base_revision: CommitSha,
     gating_checks_settled: bool,
+    gating_check_inventory_quiesced: bool,
+    gating_check_inventory: Vec<String>,
     review_decision: RepoWatchReviewDecision,
     gating_check_count: u64,
     non_green_gating_checks: Vec<CheckRunName>,
@@ -3276,6 +3280,7 @@ impl FetchedConvergenceEvidence {
             base_revision,
             mergeable_state: state.mergeable_state(),
             settled: self.gating_checks_settled
+                && self.gating_check_inventory_quiesced
                 && state.mergeable_state() != MergeableState::Unknown,
             review_decision: self.review_decision,
             unresolved_threads: state
@@ -3673,12 +3678,25 @@ impl GitHubRepositoryPoller {
             && self.pull_request_detail_is_reusable(number, listed, previous, cursor_generation)
         {
             let reviews = self.fetch_reviews(number, Some(previous.reviews())).await?;
-            let convergence_evidence = self.fetch_convergence_evidence(previous.context()).await?;
+            let mut convergence_evidence =
+                self.fetch_convergence_evidence(previous.context()).await?;
+            convergence_evidence.gating_check_inventory_quiesced = self
+                .gating_check_inventory_quiesced(
+                    number,
+                    listed,
+                    cursor_generation,
+                    &convergence_evidence.gating_check_inventory,
+                );
             let threads = self.fetch_threads(number).await?;
             let reactions = self
                 .fetch_reactions(number, Some(previous.reactions()))
                 .await?;
             self.record_skipped_poll(number);
+            self.record_gating_check_inventory(
+                number,
+                listed,
+                convergence_evidence.gating_check_inventory.clone(),
+            );
             let state = reuse_pull_request(previous, reviews, threads, reactions)?;
             return Ok(FetchedPullRequest {
                 state,
@@ -3686,12 +3704,24 @@ impl GitHubRepositoryPoller {
                 convergence_evidence,
             });
         }
-        let fetched = self
+        let mut fetched = self
             .fetch_pull_request(number, previous_pull_request)
             .await?;
         match listed_pull_request {
             Some(listed) => {
-                self.record_fetched_pull_request(number, listed, fetched.settlement);
+                fetched.convergence_evidence.gating_check_inventory_quiesced = self
+                    .gating_check_inventory_quiesced(
+                        number,
+                        listed,
+                        cursor_generation,
+                        &fetched.convergence_evidence.gating_check_inventory,
+                    );
+                self.record_fetched_pull_request(
+                    number,
+                    listed,
+                    fetched.settlement,
+                    fetched.convergence_evidence.gating_check_inventory.clone(),
+                );
             }
             None => self.forget_pull_request(number),
         }
@@ -3721,17 +3751,50 @@ impl GitHubRepositoryPoller {
         }
     }
 
+    fn gating_check_inventory_quiesced(
+        &self,
+        number: u64,
+        listed: &ListedPullRequest,
+        cursor_generation: Option<RepoWatchCursorGeneration>,
+        gating_check_inventory: &[String],
+    ) -> bool {
+        self.freshness().get(&number).is_some_and(|freshness| {
+            freshness.published_generation == cursor_generation
+                && cursor_generation.is_some()
+                && freshness.updated_at == listed.updated_at
+                && freshness.head_sha == listed.head_sha
+                && freshness.gating_check_inventory == gating_check_inventory
+        })
+    }
+
+    fn record_gating_check_inventory(
+        &self,
+        number: u64,
+        listed: &ListedPullRequest,
+        gating_check_inventory: Vec<String>,
+    ) {
+        if let Some(freshness) = self.freshness().get_mut(&number) {
+            freshness.updated_at = listed.updated_at.clone();
+            freshness.head_sha = listed.head_sha.clone();
+            freshness.gating_check_inventory = gating_check_inventory;
+            freshness.published_generation = None;
+        }
+    }
+
     fn record_fetched_pull_request(
         &self,
         number: u64,
         listed: &ListedPullRequest,
         settlement: PullRequestSettlement,
+        gating_check_inventory: Vec<String>,
     ) {
         self.freshness().insert(
             number,
             PullRequestFreshness {
                 updated_at: listed.updated_at.clone(),
+                head_sha: listed.head_sha.clone(),
                 settlement,
+                gating_check_inventory,
                 skipped_polls: 0,
                 published_generation: None,
             },
@@ -4077,6 +4140,7 @@ impl GitHubRepositoryPoller {
         let mut page = 1_u16;
         let mut gating_check_count = 0_u64;
         let mut gating_checks_settled = true;
+        let mut gating_check_inventory = Vec::new();
         let mut non_green_gating_checks = Vec::new();
         let mut retained_review_decision = None;
         let mut retained_base_revision = None;
@@ -4144,6 +4208,7 @@ impl GitHubRepositoryPoller {
                 if check.is_report_only() {
                     continue;
                 }
+                gating_check_inventory.push(check.name().to_owned());
                 gating_check_count = gating_check_count
                     .checked_add(1)
                     .ok_or(RepositoryWatchAttemptError::ResourceLimit)?;
@@ -4170,9 +4235,12 @@ impl GitHubRepositoryPoller {
             retained_base_revision.ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
         )
         .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
+        gating_check_inventory.sort_unstable();
         Ok(FetchedConvergenceEvidence {
             base_revision,
             gating_checks_settled,
+            gating_check_inventory_quiesced: false,
+            gating_check_inventory,
             review_decision: retained_review_decision
                 .ok_or(RepositoryWatchAttemptError::InvalidResponse)?,
             gating_check_count,
@@ -8366,6 +8434,8 @@ mod tests {
             base_revision: CommitSha::try_new(CHANGED_LISTED_HEAD_SHA.to_owned())
                 .expect("fixture provider base revision is valid"),
             gating_checks_settled: true,
+            gating_check_inventory_quiesced: true,
+            gating_check_inventory: vec![String::from(CHECK_RUN_NAME)],
             review_decision: super::RepoWatchReviewDecision::Approved,
             gating_check_count: 1,
             non_green_gating_checks: Vec::new(),
@@ -9377,9 +9447,12 @@ mod tests {
         let previous = &observation.state().pull_requests()[0];
         let listed = listed_pull_request(HEAD_SHA);
         let number = previous.context().number().get();
-        fixture
-            .poller
-            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
+        fixture.poller.record_fetched_pull_request(
+            number,
+            &listed,
+            PullRequestSettlement::Settled,
+            Vec::new(),
+        );
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -9419,9 +9492,12 @@ mod tests {
         let loaded_generation = published_generation
             .next()
             .expect("fixture cursor generation has a successor");
-        fixture
-            .poller
-            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
+        fixture.poller.record_fetched_pull_request(
+            number,
+            &listed,
+            PullRequestSettlement::Settled,
+            Vec::new(),
+        );
         fixture.poller.publish_freshness(published_generation);
 
         assert!(
@@ -9433,6 +9509,46 @@ mod tests {
             ),
             "freshness published against another durable cursor must not authorize reuse"
         );
+    }
+
+    #[tokio::test]
+    async fn a_new_gating_context_requires_another_committed_poll_to_quiesce() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let listed = listed_pull_request(HEAD_SHA);
+        let generation = RepoWatchCursorGeneration::INITIAL;
+        fixture.poller.record_fetched_pull_request(
+            PULL_NUMBER,
+            &listed,
+            PullRequestSettlement::Settled,
+            vec![String::from(CHECK_RUN_NAME)],
+        );
+        fixture.poller.publish_freshness(generation);
+        let expanded_inventory = vec![
+            String::from(CHECK_RUN_NAME),
+            String::from("later gating check"),
+        ];
+
+        assert!(!fixture.poller.gating_check_inventory_quiesced(
+            PULL_NUMBER,
+            &listed,
+            Some(generation),
+            &expanded_inventory,
+        ));
+        fixture.poller.record_gating_check_inventory(
+            PULL_NUMBER,
+            &listed,
+            expanded_inventory.clone(),
+        );
+        fixture.poller.publish_freshness(generation);
+        assert!(fixture.poller.gating_check_inventory_quiesced(
+            PULL_NUMBER,
+            &listed,
+            Some(generation),
+            &expanded_inventory,
+        ));
     }
 
     #[tokio::test]
@@ -9449,9 +9565,12 @@ mod tests {
             head_sha: listed.head_sha.clone(),
         };
         let number = previous.context().number().get();
-        fixture
-            .poller
-            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
+        fixture.poller.record_fetched_pull_request(
+            number,
+            &listed,
+            PullRequestSettlement::Settled,
+            Vec::new(),
+        );
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -9474,9 +9593,12 @@ mod tests {
         let previous = &observation.state().pull_requests()[0];
         let listed = listed_pull_request(HEAD_SHA);
         let number = previous.context().number().get();
-        fixture
-            .poller
-            .record_fetched_pull_request(number, &listed, PullRequestSettlement::Settled);
+        fixture.poller.record_fetched_pull_request(
+            number,
+            &listed,
+            PullRequestSettlement::Settled,
+            Vec::new(),
+        );
         fixture
             .poller
             .publish_freshness(RepoWatchCursorGeneration::INITIAL);
@@ -9524,6 +9646,7 @@ mod tests {
             number,
             &previously_listed,
             PullRequestSettlement::Settled,
+            Vec::new(),
         );
         fixture
             .poller
