@@ -8,10 +8,7 @@
 -- forward correction because recorded migrations are immutable.
 ALTER TABLE context_compaction_model_call
     ADD COLUMN usage_input_includes_cache_tokens boolean;
-UPDATE context_compaction_model_call
-   SET usage_input_includes_cache_tokens = false;
 ALTER TABLE context_compaction_model_call
-    ALTER COLUMN usage_input_includes_cache_tokens SET NOT NULL,
     DROP CONSTRAINT context_compaction_model_call_usage_nonnegative;
 ALTER TABLE context_compaction_model_call
     ADD CONSTRAINT context_compaction_model_call_usage_u64
@@ -35,11 +32,19 @@ ALTER TABLE context_compaction_model_call
             )
         );
 
-CREATE FUNCTION reject_context_compaction_usage_input_semantics_change()
+CREATE FUNCTION require_context_compaction_usage_input_semantics()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    IF TG_OP = 'INSERT' THEN
+        IF NEW.usage_input_includes_cache_tokens IS NULL THEN
+            RAISE EXCEPTION 'compaction input-token semantics must be pinned'
+                USING ERRCODE = '23514';
+        END IF;
+        RETURN NEW;
+    END IF;
+
     IF NEW.usage_input_includes_cache_tokens IS DISTINCT FROM
        OLD.usage_input_includes_cache_tokens
     THEN
@@ -50,10 +55,10 @@ BEGIN
 END;
 $$;
 
-CREATE TRIGGER context_compaction_usage_input_semantics_are_immutable
-BEFORE UPDATE ON context_compaction_model_call
+CREATE TRIGGER context_compaction_usage_input_semantics_are_pinned
+BEFORE INSERT OR UPDATE ON context_compaction_model_call
 FOR EACH ROW
-EXECUTE FUNCTION reject_context_compaction_usage_input_semantics_change();
+EXECUTE FUNCTION require_context_compaction_usage_input_semantics();
 
 CREATE FUNCTION bounded_web_usage_profile(value text)
 RETURNS text

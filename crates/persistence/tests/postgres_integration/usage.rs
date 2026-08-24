@@ -361,6 +361,26 @@ async fn usage_projection_has_combined_selection_indexes_and_canonical_token_bou
     .fetch_one(&pool)
     .await?;
     assert!(compaction_usage_constraint.contains("18446744073709551615"));
+    let compaction_semantics_nullable: bool = sqlx::query_scalar(
+        "SELECT NOT attnotnull
+           FROM pg_attribute
+          WHERE attrelid = 'context_compaction_model_call'::regclass
+            AND attname = 'usage_input_includes_cache_tokens'
+            AND NOT attisdropped",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(compaction_semantics_nullable);
+    let compaction_semantics_trigger: String = sqlx::query_scalar(
+        "SELECT pg_get_triggerdef(oid)
+           FROM pg_trigger
+          WHERE tgrelid = 'context_compaction_model_call'::regclass
+            AND tgname = 'context_compaction_usage_input_semantics_are_pinned'
+            AND NOT tgisinternal",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(compaction_semantics_trigger.contains("BEFORE INSERT OR UPDATE"));
 
     pool.close().await;
     drop(container);
