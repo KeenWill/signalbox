@@ -559,7 +559,10 @@ pub enum WebSessionLiveStreamEvent {
         content: String,
     },
     ResyncRequired {
-        cursor: WebU64,
+        /// Positive: production initializes the observed cursor from the
+        /// positive snapshot cursor and only advances it, so zero is never a
+        /// valid resynchronization position.
+        cursor: WebPositiveU64,
     },
 }
 

@@ -729,10 +729,14 @@ async fn session_live_follow(
     // Subscribe before the repeatable-read snapshot so every update after its
     // cursor is either observed or converted into an explicit resync.
     let subscription = monitor.subscribe();
-    let snapshot = match repository
-        .read_live_snapshot_at_completion(session, || subscription.queued_len())
-        .await
-    {
+    // Sample the queue before the snapshot below establishes its repeatable
+    // read: a record already queued here was broadcast only after its durable
+    // cursor committed, so the later snapshot observes that cursor and the
+    // record is proven covered. A record queued after this sample may carry a
+    // cursor above the snapshot, so a lag reaching past this count must
+    // resynchronize rather than be absorbed silently.
+    let queued_at_snapshot = subscription.queued_len();
+    let snapshot = match repository.read_live_snapshot(session).await {
         Ok(Some(snapshot)) => snapshot,
         Ok(None) => {
             return application_error(
@@ -743,8 +747,9 @@ async fn session_live_follow(
         }
         Err(error) => return live_projection_error(error),
     };
-    let (snapshot, queued_at_snapshot) = snapshot;
-    let observed_through = snapshot.observed_through;
+    let Some(observed_through) = std::num::NonZeroU64::new(snapshot.observed_through) else {
+        return live_projection_corruption();
+    };
     let mut pending = VecDeque::new();
     let Some(snapshot) = live_snapshot_dto(snapshot) else {
         return live_projection_corruption();
@@ -771,7 +776,7 @@ async fn session_live_follow(
 struct LiveFollowState {
     subscription: crate::ProcessMonitorSubscription,
     session: SessionId,
-    observed_through: u64,
+    observed_through: std::num::NonZeroU64,
     queued_at_snapshot: usize,
     pending: VecDeque<WebSessionLiveStreamEvent>,
     provider_fragment: Option<PendingProviderTextDelta>,
@@ -839,7 +844,7 @@ async fn live_follow_next(
                 state.ended = true;
                 return Some((
                     WebSessionLiveStreamEvent::ResyncRequired {
-                        cursor: WebU64::from_u64(state.observed_through),
+                        cursor: WebPositiveU64::from_nonzero(state.observed_through),
                     },
                     state,
                 ));
@@ -858,22 +863,19 @@ async fn live_follow_next(
                 session,
                 kind,
             } => {
-                if cursor <= state.observed_through {
+                // A cursor above the positive observed cursor is itself
+                // positive, so the observed cursor stays provably positive
+                // and the resynchronization cursor is always a valid durable
+                // position.
+                let Some(sequence) = std::num::NonZeroU64::new(cursor)
+                    .filter(|sequence| sequence.get() > state.observed_through.get())
+                else {
                     continue;
-                }
-                state.observed_through = cursor;
+                };
+                state.observed_through = sequence;
                 if session != state.session {
                     continue;
                 }
-                let Some(sequence) = std::num::NonZeroU64::new(cursor) else {
-                    state.ended = true;
-                    return Some((
-                        WebSessionLiveStreamEvent::ResyncRequired {
-                            cursor: WebU64::from_u64(state.observed_through),
-                        },
-                        state,
-                    ));
-                };
                 return Some((
                     WebSessionLiveStreamEvent::Durable {
                         cursor: WebU64::from_u64(cursor),
@@ -924,7 +926,10 @@ async fn live_follow_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
             return;
         }
     }
-    std::future::pending::<()>().await;
+    // The last shutdown sender was dropped. An embedded caller that hands
+    // `production_router` a receiver and then closes the channel is requesting
+    // shutdown, so the stream ends instead of holding the connection open
+    // through graceful shutdown forever.
 }
 
 fn next_web_text_fragment(
@@ -1950,7 +1955,7 @@ mod tests {
     use signalbox_domain::{ModelCallId, SessionId, TurnId};
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebAttentionStreamEvent, WebContractBootstrap,
-        WebContractExample, WebLiveResourceId, WebSessionLiveStreamEvent,
+        WebContractExample, WebLiveResourceId, WebPositiveU64, WebSessionLiveStreamEvent,
         WebSessionTimelineEventKind, WebTimelineAddress, WebTimelineEventSequence, WebTurnId,
         WebU64,
     };
@@ -1999,7 +2004,8 @@ mod tests {
         LiveFollowState {
             subscription: monitor.subscribe(),
             session: live_session(),
-            observed_through,
+            observed_through: std::num::NonZeroU64::new(observed_through)
+                .expect("test snapshot cursors are positive"),
             queued_at_snapshot,
             pending: std::collections::VecDeque::new(),
             provider_fragment: None,
@@ -2114,7 +2120,9 @@ mod tests {
         assert_eq!(
             event,
             WebSessionLiveStreamEvent::ResyncRequired {
-                cursor: WebU64::from_u64(7),
+                cursor: WebPositiveU64::from_nonzero(
+                    std::num::NonZeroU64::new(7).expect("the fixture cursor is positive"),
+                ),
             }
         );
     }
@@ -2197,6 +2205,24 @@ mod tests {
         let event = tokio::time::timeout(Duration::from_secs(1), live_follow_next(state))
             .await
             .expect("shutdown ends the follow stream promptly");
+
+        assert!(event.is_none());
+    }
+
+    /// An embedded `production_router` caller that drops its last shutdown
+    /// sender is requesting shutdown, so an open follow stream ends instead of
+    /// blocking graceful shutdown behind a permanently pending future.
+    #[tokio::test]
+    async fn live_follow_ends_when_the_shutdown_sender_is_dropped() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        state.shutdown = Some(shutdown);
+        drop(shutdown_sender);
+
+        let event = tokio::time::timeout(Duration::from_secs(1), live_follow_next(state))
+            .await
+            .expect("a closed shutdown channel ends the follow stream promptly");
 
         assert!(event.is_none());
     }
@@ -2631,7 +2657,7 @@ mod tests {
         .header(header::HOST, host)
         .body(Body::empty())
         .expect("the request is valid");
-        production_router(None, None)
+        production_router(None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds")

@@ -1360,7 +1360,8 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "cursor": {
-            "$ref": "#/$defs/WebU64"
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Positive: production initializes the observed cursor from the\npositive snapshot cursor and only advances it, so zero is never a\nvalid resynchronization position."
           },
           "kind": {
             "const": "resync_required",

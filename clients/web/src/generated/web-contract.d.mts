@@ -283,7 +283,7 @@ export type WebSessionLiveStreamEvent = {
   readonly part_index: number;
   readonly turn_id: WebTurnId;
 } | {
-  readonly cursor: WebU64;
+  readonly cursor: WebPositiveU64;
   readonly kind: "resync_required";
 };
 

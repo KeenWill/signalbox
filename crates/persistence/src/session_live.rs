@@ -71,22 +71,14 @@ impl SessionLiveRepository {
         Self { pool }
     }
 
+    /// Reads one current projection inside a read-only repeatable-read
+    /// transaction. State a caller samples before this call is proven covered
+    /// by the returned `observed_through`; state sampled during or after the
+    /// read is not, because the transaction's snapshot predates it.
     pub async fn read_live_snapshot(
         &self,
         session: SessionId,
     ) -> Result<Option<SessionLiveSnapshot>, SessionLiveRepositoryError> {
-        self.read_live_snapshot_at_completion(session, || ())
-            .await
-            .map(|result| result.map(|(snapshot, ())| snapshot))
-    }
-
-    /// Reads one snapshot and samples caller-owned state immediately after its
-    /// repeatable-read transaction completes.
-    pub async fn read_live_snapshot_at_completion<T>(
-        &self,
-        session: SessionId,
-        at_completion: impl FnOnce() -> T,
-    ) -> Result<Option<(SessionLiveSnapshot, T)>, SessionLiveRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .execute(&mut *transaction)
@@ -160,9 +152,8 @@ impl SessionLiveRepository {
             reconciliation,
             runner,
         };
-        let completion = at_completion();
         transaction.commit().await?;
-        Ok(Some((snapshot, completion)))
+        Ok(Some(snapshot))
     }
 }
 

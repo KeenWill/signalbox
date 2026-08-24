@@ -696,11 +696,14 @@ an open workspace or prevents following any listed session.
 
 Already-redacted provider text deltas are ephemeral presentation, carry no
 durable cursor, and are split at UTF-8 boundaries below the NDJSON item ceiling.
-Deltas already queued when the repeatable-read snapshot completes are discarded.
-Falling behind the monitor emits one `resync_required` item and ends the
-response. A client resynchronizes by replacing all transient presentation with a
-fresh bounded live snapshot and resumes durable history above its cursor; it
-does not reload the historical transcript.
+Deltas already queued when the subscription samples its queue — immediately
+before the repeatable-read snapshot is established, so everything counted is
+proven covered by the snapshot cursor — are discarded. A lag confined to those
+pre-snapshot records is absorbed silently; falling behind past them emits one
+`resync_required` item, whose cursor is always positive, and ends the response.
+A client resynchronizes by replacing all transient presentation with a fresh
+bounded live snapshot and resumes durable history above its cursor; it does not
+reload the historical transcript.
 
 ## Bounded browser session timeline
 

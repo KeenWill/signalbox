@@ -343,6 +343,22 @@ test("generated live stream decoder correlates durable cursor and address", () =
   );
 });
 
+test("generated live stream decoder requires a positive resynchronization cursor", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "resync_required",
+        cursor: "0",
+      }),
+    /one recognized variant/,
+  );
+  const resync = decodeWebSessionLiveStreamEvent({
+    kind: "resync_required",
+    cursor: "7",
+  });
+  assert.equal(resync.cursor, "7");
+});
+
 test("generated error decoder preserves the transport application boundary", () => {
   const transport = decodeWebApiErrorResponse({
     error: {
