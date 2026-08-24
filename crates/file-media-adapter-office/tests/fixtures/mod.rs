@@ -52,7 +52,7 @@ impl OfficeFixture {
             &[
                 (
                     "xl/workbook.xml",
-                    b"<workbook xmlns:r=\"urn:r\"><sheets><sheet r:id=\"rId1\"/></sheets></workbook>".as_slice(),
+                    b"<workbook xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet r:id=\"rId1\"/></sheets></workbook>".as_slice(),
                     EntryKind::File,
                 ),
                 (
@@ -78,7 +78,7 @@ impl OfficeFixture {
             &[
                 (
                     "xl/workbook.xml",
-                    b"<workbook xmlns:r=\"urn:r\"><sheets><sheet r:id=\"rId1\"/></sheets></workbook>".as_slice(),
+                    b"<workbook xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><sheets><sheet r:id=\"rId1\"/></sheets></workbook>".as_slice(),
                     EntryKind::File,
                 ),
                 (
@@ -101,7 +101,7 @@ impl OfficeFixture {
         let slide = format!(
             r#"<?xml version="1.0"?><p:sld xmlns:p="urn:p" xmlns:a="urn:a"><a:p><a:r><a:t>{expected_text}</a:t></a:r></a:p></p:sld>"#
         );
-        let presentation = br#"<?xml version="1.0"?><p:presentation xmlns:p="urn:p" xmlns:r="urn:r"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#;
+        let presentation = br#"<?xml version="1.0"?><p:presentation xmlns:p="urn:p" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#;
         let relationships = br#"<?xml version="1.0"?><Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/></Relationships>"#;
         Self::package(
             PPTX_MEDIA_TYPE,
@@ -123,7 +123,7 @@ impl OfficeFixture {
     }
 
     pub fn reordered_pptx() -> Result<Self, Box<dyn Error>> {
-        let presentation = br#"<?xml version="1.0"?><p:presentation xmlns:p="urn:p" xmlns:r="urn:r"><p:sldIdLst><p:sldId r:id="rId2"/><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#;
+        let presentation = br#"<?xml version="1.0"?><p:presentation xmlns:p="urn:p" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst><p:sldId r:id="rId2"/><p:sldId r:id="rId1"/></p:sldIdLst></p:presentation>"#;
         let relationships = br#"<?xml version="1.0"?><Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide2.xml"/></Relationships>"#;
         let first = b"<p:sld><a:p><a:t>first</a:t></a:p></p:sld>";
         let second = b"<p:sld><a:p><a:t>second</a:t></a:p></p:sld>";
