@@ -1694,6 +1694,12 @@ function assertCanonicalNonnegativeU64(value, path) {
   }
 }
 
+function assertSha256(value, path) {
+  if (!/^[0-9a-f]{64}$/.test(value)) {
+    fail(path, "a lowercase hexadecimal SHA-256 digest");
+  }
+}
+
 function validateWebImportFrontier(value, path) {
   assertUuid(value.imported_conversation_id, `${path}.imported_conversation_id`);
   assertUuid(value.imported_entry_id, `${path}.imported_entry_id`);
@@ -1706,6 +1712,7 @@ function validateWebImportListPage(value) {
 }
 
 function validateWebImportDescriptor(value) {
+  assertSha256(value.source.source_digest_sha256, "import_descriptor.source.source_digest_sha256");
   assertCanonicalNonnegativeU64(value.raw_record_count, "import_descriptor.raw_record_count");
   assertCanonicalNonnegativeU64(value.entry_count, "import_descriptor.entry_count");
   assertCanonicalNonnegativeU64(value.sizes.raw_source_bytes, "import_descriptor.sizes.raw_source_bytes");

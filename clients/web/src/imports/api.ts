@@ -232,7 +232,13 @@ export class HttpImportApi implements ImportApi {
       signal,
     })
     const descriptor = await decodeResponse(response, decodeWebImportDescriptor)
-    if (descriptor.imported_conversation_id !== importedConversationId) {
+    if (
+      descriptor.imported_conversation_id !== importedConversationId ||
+      descriptor.timeline.first.imported_conversation_id !== importedConversationId ||
+      descriptor.timeline.latest.imported_conversation_id !== importedConversationId ||
+      descriptor.timeline.first.position !== '1' ||
+      descriptor.timeline.latest.position !== descriptor.entry_count
+    ) {
       throw new ImportDescriptorCorrelationError()
     }
     return descriptor

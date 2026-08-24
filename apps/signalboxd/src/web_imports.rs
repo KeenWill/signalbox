@@ -1,6 +1,6 @@
 //! Production browser adapter for bounded imported-conversation discovery.
 
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -58,13 +58,13 @@ const DEFAULT_IMPORT_WINDOW_RADIUS: u32 = 25;
 #[derive(Clone, Debug)]
 struct WebImportState {
     pool: PgPool,
-    model_configuration: HubModelConfiguration,
+    model_configuration: Arc<HubModelConfiguration>,
 }
 
 pub(crate) fn router(pool: PgPool, model_configuration: HubModelConfiguration) -> Router {
     let state = WebImportState {
         pool,
-        model_configuration,
+        model_configuration: Arc::new(model_configuration),
     };
     let mutation = Router::new()
         .route("/{conversation}/continuations", post(continue_import))

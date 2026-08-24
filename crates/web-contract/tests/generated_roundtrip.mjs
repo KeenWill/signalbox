@@ -1174,6 +1174,14 @@ test("generated imports decoders enforce canonical decimal u64 strings", () => {
     () =>
       decodeWebImportDescriptor({
         ...descriptor,
+        source: { ...descriptor.source, source_digest_sha256: "not-a-digest" },
+      }),
+    /source_digest_sha256 must be a lowercase hexadecimal SHA-256 digest/,
+  );
+  assert.throws(
+    () =>
+      decodeWebImportDescriptor({
+        ...descriptor,
         timeline: { ...descriptor.timeline, first: { ...frontier, imported_entry_id: "entry" } },
       }),
     /imported_entry_id must be a canonical lowercase UUID/,

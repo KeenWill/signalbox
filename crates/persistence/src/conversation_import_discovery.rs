@@ -18,6 +18,8 @@ use crate::conversation_import::{
 };
 use crate::conversation_import_codec::decode_content;
 
+const MAX_PROJECTED_NON_TEXT_CONTENT_BYTES: i64 = 1024 * 1024;
+
 /// Exact filters and exclusive keyset position for one imports page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedConversationPageRequest {
@@ -459,6 +461,7 @@ impl ImportedConversationDiscoveryRepository {
                     raw_record_position, record_entry_position, source_speaker_kind,
                     substring(content_encoding FROM 1 FOR 12) AS content_header,
                     CASE WHEN octet_length(content_encoding) >= 3
+                              AND octet_length(content_encoding) <= $5
                               AND get_byte(content_encoding, 2) <> 1
                          THEN content_encoding END AS complete_non_text_content,
                     CASE WHEN octet_length(content_encoding) >= 4
@@ -477,6 +480,7 @@ impl ImportedConversationDiscoveryRepository {
         .bind(Decimal::from(first_position))
         .bind(Decimal::from(last_position))
         .bind(i64::from(maximum_text_bytes.get()) + 3)
+        .bind(MAX_PROJECTED_NON_TEXT_CONTENT_BYTES)
         .fetch_all(&self.pool)
         .await?;
         let items = rows

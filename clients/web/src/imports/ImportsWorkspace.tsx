@@ -135,6 +135,7 @@ export function ImportsWorkspace({
     queryKey: ['imports', queryScope, selectedImport, 'entries', windowRequest],
     queryFn: ({ signal }) => api.entries(selectedImport ?? '', windowRequest, signal),
     enabled: selectedImport !== null,
+    gcTime: 0,
   })
   const entryWindow = windowQuery.data
   const selectedEntry =
@@ -161,8 +162,9 @@ export function ImportsWorkspace({
       setContinuationAmbiguous(false)
     },
     onError: (error) => {
-      if (isAmbiguousContinuationError(error)) setContinuationAmbiguous(true)
-      if (!isRetryableContinuationError(error)) {
+      const ambiguous = continuationAmbiguous || isAmbiguousContinuationError(error)
+      if (ambiguous) setContinuationAmbiguous(true)
+      if (!ambiguous && !isRetryableContinuationError(error)) {
         setPendingCommand(null)
         setContinuationAmbiguous(false)
       }
@@ -204,7 +206,11 @@ export function ImportsWorkspace({
     [...(presentation === 'standalone' ? surfaceHotkeyBindings : []), ...importHotkeyBindings].map(
       (binding) => ({
         hotkey: binding.hotkey,
-        callback: () => invokeCommand(binding.commandId, commandContext),
+        callback: () => {
+          if (store.getState().app.overlay === null) {
+            invokeCommand(binding.commandId, commandContext)
+          }
+        },
       }),
     ),
   )
@@ -214,7 +220,11 @@ export function ImportsWorkspace({
       ...importHotkeySequenceBindings,
     ].map((binding) => ({
       sequence: binding.sequence,
-      callback: () => invokeCommand(binding.commandId, commandContext),
+      callback: () => {
+        if (store.getState().app.overlay === null) {
+          invokeCommand(binding.commandId, commandContext)
+        }
+      },
     })),
   )
 
