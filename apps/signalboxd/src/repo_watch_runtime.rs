@@ -918,6 +918,7 @@ struct RepositoryWatchTask {
     webhook_targeted_completion:
         Option<JoinHandle<Result<TargetedWebhookCompletion, TargetedWebhookCompletionError>>>,
     webhook_drain_first_failure: Option<RepositoryWatchAttemptError>,
+    webhook_drain_timed_out: bool,
     payload_purge: WebhookPayloadPurgeSchedule,
     rules_activated: bool,
 }
@@ -1002,6 +1003,7 @@ impl RepositoryWatchTask {
             webhook_dispatch_in_flight: false,
             webhook_targeted_completion: None,
             webhook_drain_first_failure: None,
+            webhook_drain_timed_out: false,
             payload_purge,
             rules_activated: false,
         })
@@ -1469,12 +1471,7 @@ impl RepositoryWatchTask {
             WebhookDrain::Run => {
                 let outcome = self.process_webhook_deliveries_with_timeout().await;
                 *drained = Some(outcome);
-                if matches!(
-                    outcome,
-                    WebhookDrainOutcome::ProjectionFailed(
-                        RepositoryWatchAttemptError::WebhookDrainTimedOut
-                    )
-                ) {
+                if self.webhook_drain_timed_out {
                     // A complete poll after a cancelled pre-drain could advance
                     // the durable cursor past the delivery that remains pending.
                     // Return to the scheduler so retained drain state settles
@@ -1754,12 +1751,14 @@ impl RepositoryWatchTask {
         &mut self,
         deadline: Duration,
     ) -> WebhookDrainOutcome {
+        self.webhook_drain_timed_out = false;
         match timeout(deadline, self.process_webhook_deliveries()).await {
             Ok(outcome) => {
                 self.webhook_drain_first_failure = None;
                 outcome
             }
             Err(_) => {
+                self.webhook_drain_timed_out = true;
                 // A future implementation may use the poller's bounded child
                 // fetch set while hydrating a delivery. Bound this cleanup so
                 // cancellation itself cannot wedge the repository task. The
@@ -5680,6 +5679,7 @@ mod tests {
                 webhook_dispatch_in_flight: false,
                 webhook_targeted_completion: None,
                 webhook_drain_first_failure: None,
+                webhook_drain_timed_out: false,
                 repository,
                 interval: POLL_INTERVAL,
                 poller,
