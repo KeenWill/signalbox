@@ -62,8 +62,8 @@ transactions commit.
 
 Indexes led by session, turn, target, provenance, call kind, combined
 session/call-kind selection, combined session/provenance selection, combined
-session/target selection, and combined provenance/call-kind selection support
-selective chronological pages.
+session/target selection, combined target/provenance selection, and combined
+provenance/call-kind selection support selective chronological pages.
 
 ## Open edges
 
