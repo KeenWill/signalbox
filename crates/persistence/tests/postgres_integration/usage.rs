@@ -633,6 +633,57 @@ async fn oversized_credential_references_receive_bounded_distinct_usage_labels()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn oversized_profile_identity_enforces_digest_and_reference_uniqueness()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let reference = "table-boundary-profile".repeat(16);
+    let mismatched_digest_error = sqlx::query(
+        "INSERT INTO web_usage_oversized_profile_identity
+            (reference_digest, exact_reference)
+         VALUES ('00000000000000000000000000000000', $1)",
+    )
+    .bind(&reference)
+    .execute(&pool)
+    .await
+    .expect_err("table boundary must reject a digest unrelated to the reference");
+    assert_eq!(
+        mismatched_digest_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    sqlx::query(
+        "INSERT INTO web_usage_oversized_profile_identity
+            (reference_digest, exact_reference)
+         VALUES (md5($1), $1)",
+    )
+    .bind(&reference)
+    .execute(&pool)
+    .await?;
+    let duplicate_error = sqlx::query(
+        "INSERT INTO web_usage_oversized_profile_identity
+            (reference_digest, exact_reference)
+         VALUES (md5($1), $1)",
+    )
+    .bind(&reference)
+    .execute(&pool)
+    .await
+    .expect_err("table boundary must reject a duplicate exact reference");
+    assert_eq!(
+        duplicate_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23505".into())
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn usage_projection_retains_only_bounded_credential_identity() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let projection_retains_exact_reference: bool = sqlx::query_scalar(
