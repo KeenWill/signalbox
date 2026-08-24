@@ -26,8 +26,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{
-    commission_fixture_session_goal, migrated_postgres, prepared_complete_delegation_outbox,
-    stop_fixture_session_goal, test_session_credential_pin,
+    Decimal, commission_fixture_session_goal, insert_frontier, migrated_postgres,
+    prepared_complete_delegation_outbox, stop_fixture_session_goal, test_session_credential_pin,
 };
 
 fn credential_pin() -> signalbox_persistence::SessionCredentialPin {
@@ -739,6 +739,10 @@ async fn goal_work_facts_agree_with_a_fresh_backfill_at_every_transition()
         .expect("created session has a descriptor");
     assert_eq!(created.work.queued_turn_count, 0);
     assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
 
     commission_fixture_session_goal(&pool, identity, 0x0009_9900).await?;
     let pursuing = repository
@@ -747,6 +751,10 @@ async fn goal_work_facts_agree_with_a_fresh_backfill_at_every_transition()
         .expect("commissioned session has a descriptor");
     assert_eq!(pursuing.work.queued_turn_count, 1);
     assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 1);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
 
     stop_fixture_session_goal(&pool, identity, 0x0009_9A00).await?;
     let stopped = repository
@@ -755,6 +763,268 @@ async fn goal_work_facts_agree_with_a_fresh_backfill_at_every_transition()
         .expect("stopped session has a descriptor");
     assert_eq!(stopped.work.queued_turn_count, 0);
     assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Counts the generations whose incrementally maintained queued count differs
+/// from a fresh recomputation of the intersection it stands for.
+///
+/// That fact is what makes the goal-event reconciliation two keyed reads rather
+/// than a scan of the generation's history or of the session's queue, so it is
+/// only as good as its agreement with the join it replaced. Recomputing after
+/// each transition is what makes a drifting delta fail here instead of
+/// surfacing as a wrong `queued_turn_count` much later. A generation whose
+/// turns have all left the queue keeps a zero row the recomputation has no
+/// group for, so the stored side drops zeroes before the comparison.
+async fn generation_work_fact_disagreements(
+    pool: &PgPool,
+    identity: SessionId,
+) -> Result<i64, Box<dyn Error>> {
+    let disagreements: i64 = sqlx::query_scalar(
+        "WITH stored AS (
+             SELECT goal_generation, queued_turn_count
+               FROM session_goal_generation_work_fact
+              WHERE session_id = $1 AND queued_turn_count <> 0
+         ), recomputed AS (
+             SELECT goal.goal_generation, count(*)::numeric AS queued_turn_count
+               FROM goal_turn AS goal
+               JOIN turn_lifecycle AS turn
+                 ON turn.session_id = goal.session_id
+                AND turn.turn_id = goal.turn_id
+              WHERE goal.session_id = $1
+                AND turn.state_kind = 'queued'
+                AND NOT turn.delegation_runtime_terminal
+              GROUP BY goal.goal_generation
+         )
+         SELECT count(*)::bigint FROM (
+             (TABLE stored EXCEPT ALL TABLE recomputed)
+             UNION ALL
+             (TABLE recomputed EXCEPT ALL TABLE stored)
+         ) AS disagreements",
+    )
+    .bind(identity.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    Ok(disagreements)
+}
+
+/// Recomputes the goal half of the credit predicate the way the lifecycle
+/// trigger now evaluates it, and compares it against
+/// `goal_turn_is_queue_order_relevant` for every turn in the session.
+///
+/// The trigger cannot call that function for the state a row is *leaving*,
+/// because it reads the row's stored `state_kind`. Asserting the two agree on
+/// live rows is what keeps the extracted predicate honest.
+async fn relevance_predicates_disagree(
+    pool: &PgPool,
+    identity: SessionId,
+) -> Result<i64, Box<dyn Error>> {
+    let disagreements: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM turn_lifecycle AS turn
+          WHERE turn.session_id = $1
+            AND goal_turn_is_queue_order_relevant(turn.session_id, turn.turn_id)
+                IS DISTINCT FROM (
+                    turn.state_kind <> 'queued'
+                    OR goal_turn_generation_is_pursued(
+                        turn.session_id, turn.turn_id
+                    )
+                )",
+    )
+    .bind(identity.into_uuid())
+    .fetch_one(pool)
+    .await?;
+    Ok(disagreements)
+}
+
+/// A queued goal turn whose generation a goal event retired is no longer
+/// credited to `queued_turn_count`, so the lifecycle trigger must not subtract
+/// it again when that turn later leaves the queue.
+///
+/// No repository path reaches this state today, which is exactly why it is
+/// asserted here rather than through one. Activation refuses a retired turn
+/// (`start_eligible_turn` filters on `goal_turn_is_runtime_relevant`) and every
+/// terminalization requires `state_kind = 'active'`, so a retired queued turn
+/// merely lingers. The delegation cascade cannot reach it either: a goal turn is
+/// `origin_kind = 'accepted_input'` by `goal_turn_lifecycle_fk`, and
+/// `turn_lifecycle_delegation_runtime_terminal_shape` admits that flag only on
+/// `origin_kind = 'delegation'`. The fact triggers still have to agree with the
+/// backfill on their own terms instead of borrowing those gates, because an
+/// unguarded subtraction removes credit that was never granted and drives the
+/// count to -1, aborting the writing transaction on the nonnegative check.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_retired_queued_goal_turn_is_never_subtracted_twice() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x9a1);
+    create_session(&pool, identity).await?;
+    let seed = 0x0009_A100_u128;
+    commission_fixture_session_goal(&pool, identity, seed).await?;
+    let repository = SessionTimelineRepository::new(pool.clone());
+    let pursuing = repository
+        .read_descriptor(identity)
+        .await?
+        .expect("commissioned session has a descriptor");
+    assert_eq!(pursuing.work.queued_turn_count, 1);
+
+    stop_fixture_session_goal(&pool, identity, seed + 0x100).await?;
+    let stopped = repository
+        .read_descriptor(identity)
+        .await?
+        .expect("stopped session has a descriptor");
+    assert_eq!(stopped.work.queued_turn_count, 0);
+    assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 0);
+    assert_eq!(relevance_predicates_disagree(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
+
+    // The retired turn leaves the queue. Only the final-state assertion is
+    // suspended -- it demands the attempts and boundary entries a turn that
+    // never ran does not have. The transition guard and the fact trigger both
+    // stay enabled, so this exercises exactly the subtraction under test. The
+    // suspension spans its own statements rather than the cancelling
+    // transaction because a deferred trigger the update leaves pending blocks
+    // any `ALTER TABLE` that would re-enable it in that same transaction.
+    let goal_turn = Uuid::from_u128(seed + 2);
+    let frontier = Uuid::from_u128(seed + 0x200);
+    let mut connection = pool.acquire().await?;
+    insert_frontier(
+        &mut connection,
+        identity.into_uuid(),
+        frontier,
+        Decimal::ZERO,
+        &[],
+    )
+    .await?;
+    drop(connection);
+    sqlx::raw_sql(
+        "ALTER TABLE turn_lifecycle
+             DISABLE TRIGGER turn_lifecycle_requires_complete_final_state",
+    )
+    .execute(&pool)
+    .await?;
+    let cancelling = sqlx::query(
+        "UPDATE turn_lifecycle
+            SET state_kind = 'terminal',
+                start_lineage_kind = 'first_in_session',
+                starting_frontier_id = $1,
+                terminal_frontier_id = $1,
+                terminal_disposition_kind = 'cancelled'
+          WHERE session_id = $2 AND turn_id = $3",
+    )
+    .bind(frontier)
+    .bind(identity.into_uuid())
+    .bind(goal_turn)
+    .execute(&pool)
+    .await;
+    sqlx::raw_sql(
+        "ALTER TABLE turn_lifecycle
+             ENABLE TRIGGER turn_lifecycle_requires_complete_final_state",
+    )
+    .execute(&pool)
+    .await?;
+    assert_eq!(
+        cancelling?.rows_affected(),
+        1,
+        "the retired queued goal turn leaves the queue"
+    );
+
+    let cancelled = repository
+        .read_descriptor(identity)
+        .await?
+        .expect("the session still has a descriptor");
+    assert_eq!(
+        cancelled.work.queued_turn_count, 0,
+        "a turn the goal event already retired must not be subtracted again"
+    );
+    assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 0);
+    assert_eq!(relevance_predicates_disagree(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0,
+        "the generation's count follows the turn out of the queue"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The goal-event reconciliation maintains `queued_turn_count` with a delta
+/// keyed on the generation each event leaves pursued, rather than by rescanning
+/// the session. Carrying a second generation through the same fixture is what
+/// exercises that incremental path: the first event of a session returns before
+/// the allocator, the retiring event moves the turns of the generation it
+/// retires, and the next commission credits the generation it opens.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn goal_work_facts_track_a_second_generation_incrementally() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x9a2);
+    create_session(&pool, identity).await?;
+    let repository = SessionTimelineRepository::new(pool.clone());
+
+    commission_fixture_session_goal(&pool, identity, 0x0009_A200).await?;
+    let first = repository
+        .read_descriptor(identity)
+        .await?
+        .expect("commissioned session has a descriptor");
+    assert_eq!(first.work.queued_turn_count, 1);
+    assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 1);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
+
+    stop_fixture_session_goal(&pool, identity, 0x0009_A300).await?;
+    let retired = repository
+        .read_descriptor(identity)
+        .await?
+        .expect("stopped session has a descriptor");
+    assert_eq!(retired.work.queued_turn_count, 0);
+    assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
+
+    // The second generation credits only its own turn. The first generation's
+    // turn is still queued and must stay uncredited, which a delta keyed on the
+    // pursued generation gets right and an event-kind delta would not.
+    commission_fixture_session_goal(&pool, identity, 0x0009_A400).await?;
+    let second = repository
+        .read_descriptor(identity)
+        .await?
+        .expect("recommissioned session has a descriptor");
+    assert_eq!(second.work.queued_turn_count, 1);
+    assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 1);
+    assert_eq!(relevance_predicates_disagree(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0,
+        "the retired generation keeps its own queued turn, uncredited"
+    );
+
+    stop_fixture_session_goal(&pool, identity, 0x0009_A500).await?;
+    let settled = repository
+        .read_descriptor(identity)
+        .await?
+        .expect("stopped session has a descriptor");
+    assert_eq!(settled.work.queued_turn_count, 0);
+    assert_eq!(backfilled_queued_turn_count(&pool, identity).await?, 0);
+    assert_eq!(relevance_predicates_disagree(&pool, identity).await?, 0);
+    assert_eq!(
+        generation_work_fact_disagreements(&pool, identity).await?,
+        0
+    );
 
     pool.close().await;
     drop(container);

@@ -51,6 +51,10 @@ use signalbox_persistence::{
         PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
     },
     commissioned_dispatch::{CommissionDispatchOutcome, PostgresCommissionedDispatchStore},
+    convergence_sweep::{
+        ConvergenceSweepFailureDisposition, ConvergenceSweepObservation,
+        PostgresConvergenceSweepStore,
+    },
     create_session::{
         CreateSessionHandlingOutcome, CreateSessionRepository, CreateSessionRepositoryError,
     },
@@ -2336,6 +2340,28 @@ async fn stopped_runtime_irrelevant_turn_releases_its_singleton() -> Result<(), 
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn convergence_census_loads_the_latest_repository_watch_session() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let pull_request = pull_request_number(&fixture.event);
+    let state = PostgresConvergenceSweepStore::new(fixture.pool.clone())
+        .load_target(&fixture.repository, pull_request)
+        .await?
+        .expect("loading enrolls the repository-watch target");
+
+    assert_eq!(
+        state
+            .latest_dispatch()
+            .expect("repository-watch dispatch is visible to convergence census")
+            .session_id(),
+        fixture.session(0)
+    );
+    assert_eq!(state.latest_dispatch_observation(), None);
+    Ok(())
+}
+
 /// The current taxonomy has no separate stale-dispatch terminal variant: an
 /// operator stop after stale classification is the durable `user_stopped`
 /// transition. It must retain work before its singleton becomes reusable.
@@ -2844,6 +2870,17 @@ async fn a_released_dispatch_escalates_resumed_work_to_its_operator() -> Result<
             )
             .await?,
     );
+    let commissioned =
+        PostgresCommissionedDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let (provenance, defaults) = commissioned_template();
+    let competing =
+        commission_request_with_fence(COMMISSION_AFTER_WATCH_COMMAND_ID, commissioned_fence()?)?
+            .prepare(
+                &mut UuidV7CommissionedDispatchIdGenerator,
+                provenance,
+                defaults,
+            )?;
+    let ownership = commissioned.commission(competing, |_| None).await?;
     let (resumed_repository, resumed_prepared, resumed_turn, _resumed_requests) =
         checkpoint_dispatched_delegated_approval(&fixture, 0x50_300).await?;
     let resumed_approvals = resumed_repository.approval_judge_repository();
@@ -2886,6 +2923,12 @@ async fn a_released_dispatch_escalates_resumed_work_to_its_operator() -> Result<
         CompleteApprovalJudgeOutcome::HeadlessEscalationTerminalized
     );
     assert_eq!(released, 1);
+    assert_eq!(
+        ownership,
+        CommissionDispatchOutcome::TargetBusy {
+            session: fixture.session(0),
+        }
+    );
     assert_eq!(
         resumed_turn,
         TurnId::from_uuid(Uuid::from_u128(RESUMED_DISPATCH_TURN_ID))
@@ -6817,6 +6860,13 @@ async fn rule_deactivation_settles_its_outstanding_dispatch_obligation()
 // --- Operator-commissioned dispatch: fence consumption and escalation ---
 
 const COMMISSION_COMMAND_ID: u128 = 0x60_100;
+const COMMISSION_AFTER_WATCH_COMMAND_ID: u128 = 0x60_110;
+const STOP_WATCH_DISPATCH_COMMAND_ID: u128 = 0x60_111;
+const INACTIVITY_COMMISSION_COMMAND_ID: u128 = 0x60_112;
+const STOP_INACTIVITY_COMMISSION_COMMAND_ID: u128 = 0x60_114;
+const RESUME_INACTIVITY_WATCH_COMMAND_ID: u128 = 0x60_115;
+const REPLACEMENT_COMMISSION_COMMAND_ID: u128 = 0x60_116;
+const STOP_EXTERNAL_BLOCKER_COMMAND_ID: u128 = 0x60_117;
 const COMMISSION_TEMPLATE: &str = "review-response";
 const COMMISSION_STATEMENT: &str =
     "Address the review findings on pull request 41 and push fixes to its head branch.";
@@ -6912,6 +6962,597 @@ async fn commissioned_fixture() -> Result<CommissionedFixture, Box<dyn Error>> {
         dispatch_id: dispatch,
         session,
     })
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn resume_started_before_release_retains_target_ownership() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    let turn = TurnId::from_uuid(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT delivery.turn_id
+               FROM repo_watch_dispatch_delivery AS delivery
+               JOIN repo_watch_dispatch_action AS action
+                 ON action.dispatch_id = delivery.dispatch_id
+                AND action.action_ordinal = delivery.action_ordinal
+              WHERE delivery.dispatch_id = $1 AND action.session_id = $2",
+        )
+        .bind(fixture.dispatch_id.as_uuid())
+        .bind(session.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?,
+    );
+    mark_queued_turn_failed(&fixture.pool, session, turn, 0x60_150).await?;
+    sqlx::query(
+        "ALTER TABLE goal_event
+         DISABLE TRIGGER repo_watch_dispatch_release_on_terminal_goal",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let blocked = GoalRepository::new(fixture.pool.clone())
+        .block_execution_failure(
+            session,
+            GoalNeed::try_new(String::from("resume after repository-watch release"))
+                .expect("fixture goal need is valid"),
+            GoalSchedulerProvenance::new(turn),
+        )
+        .await?;
+    sqlx::query(
+        "ALTER TABLE goal_event
+         ENABLE TRIGGER repo_watch_dispatch_release_on_terminal_goal",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let mut target_lock = fixture.pool.begin().await?;
+    let target_key = format!(
+        "commissioned-dispatch:{}:{}",
+        fixture.repository.as_str(),
+        BOTTOM_PULL_REQUEST_NUMBER
+    );
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(target_key)
+        .execute(&mut *target_lock)
+        .await?;
+    let pool = fixture.pool.clone();
+    let resume = tokio::spawn(async move {
+        GoalRepository::new(pool)
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x60_160)),
+                    session,
+                    GoalUserAction::Resume(None),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0x60_161)),
+                    TurnId::from_uuid(Uuid::from_u128(0x60_162)),
+                )),
+                |_| None,
+            )
+            .await
+    });
+
+    wait_for_advisory_lock(&fixture.pool).await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_dispatch_release (dispatch_id, released_at)
+         VALUES ($1, clock_timestamp())",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    target_lock.commit().await?;
+    let resumed = resume.await??;
+    let store = PostgresCommissionedDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let (provenance, defaults) = commissioned_template();
+    let prepared = commission_request_with_fence(0x60_170, commissioned_fence()?)?.prepare(
+        &mut UuidV7CommissionedDispatchIdGenerator,
+        provenance,
+        defaults,
+    )?;
+    let ownership = store.commission(prepared, |_| None).await?;
+
+    assert_applied_goal_transition(blocked);
+    assert_applied_goal_command(resumed);
+    assert_eq!(ownership, CommissionDispatchOutcome::TargetBusy { session });
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_commission_observes_repository_watch_target_ownership()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let store = PostgresCommissionedDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let (provenance, defaults) = commissioned_template();
+    let prepared = commission_request_with_fence(COMMISSION_COMMAND_ID, commissioned_fence()?)?
+        .prepare(
+            &mut UuidV7CommissionedDispatchIdGenerator,
+            provenance,
+            defaults,
+        )?;
+
+    assert_eq!(
+        store.commission(prepared, |_| None).await?,
+        CommissionDispatchOutcome::TargetBusy {
+            session: fixture.session(0),
+        }
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_commission_observes_repository_watch_dispatch_cool_off()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    let stopped = GoalRepository::new(fixture.pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(STOP_WATCH_DISPATCH_COMMAND_ID)),
+                session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let store = PostgresCommissionedDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let (provenance, defaults) = commissioned_template();
+    let prepared =
+        commission_request_with_fence(COMMISSION_AFTER_WATCH_COMMAND_ID, commissioned_fence()?)?
+            .prepare(
+                &mut UuidV7CommissionedDispatchIdGenerator,
+                provenance,
+                defaults,
+            )?;
+    let outcome = store
+        .commission_after_cool_off(prepared, Duration::from_secs(60), |_| None)
+        .await?;
+
+    assert_applied_goal_command(stopped);
+    assert_eq!(
+        outcome,
+        CommissionDispatchOutcome::TargetCoolingOff { session }
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_commission_uses_repository_watch_batch_admission_for_cool_off()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let session = fixture.session(0);
+    let stopped = GoalRepository::new(fixture.pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x60_150)),
+                session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    sqlx::query(
+        "ALTER TABLE repo_watch_dispatch_action
+             DISABLE TRIGGER repo_watch_dispatch_action_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "UPDATE repo_watch_dispatch_action
+            SET recorded_at = clock_timestamp() - interval '2 hours'
+          WHERE dispatch_id = $1",
+    )
+    .bind(fixture.dispatch_id.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE repo_watch_dispatch_action
+             ENABLE TRIGGER repo_watch_dispatch_action_is_append_only",
+    )
+    .execute(&fixture.pool)
+    .await?;
+    let store = PostgresCommissionedDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let (provenance, defaults) = commissioned_template();
+    let prepared = commission_request_with_fence(0x60_151, commissioned_fence()?)?.prepare(
+        &mut UuidV7CommissionedDispatchIdGenerator,
+        provenance,
+        defaults,
+    )?;
+    let outcome = store
+        .commission_after_cool_off(prepared, Duration::from_secs(60), |_| None)
+        .await?;
+
+    assert_applied_goal_command(stopped);
+    assert_eq!(
+        outcome,
+        CommissionDispatchOutcome::TargetCoolingOff { session }
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_watch_session_prevents_inactivity_parking() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    let watch_session = fixture.session(0);
+    let goal_store = GoalRepository::new(fixture.pool.clone());
+    let watch_turn = TurnId::from_uuid(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT turn_id FROM repo_watch_dispatch_delivery WHERE dispatch_id = $1",
+        )
+        .bind(fixture.dispatch_id.as_uuid())
+        .fetch_one(&fixture.pool)
+        .await?,
+    );
+    mark_queued_turn_failed(&fixture.pool, watch_session, watch_turn, 0x60_116).await?;
+    let blocked_watch = goal_store
+        .block_execution_failure(
+            watch_session,
+            GoalNeed::try_new(String::from("retry repository-watch work"))
+                .expect("fixture goal need is valid"),
+            GoalSchedulerProvenance::new(watch_turn),
+        )
+        .await?;
+    let commissioned =
+        PostgresCommissionedDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let (provenance, defaults) = commissioned_template();
+    let prepared =
+        commission_request_with_fence(INACTIVITY_COMMISSION_COMMAND_ID, commissioned_fence()?)?
+            .prepare(
+                &mut UuidV7CommissionedDispatchIdGenerator,
+                provenance,
+                defaults,
+            )?;
+    let CommissionDispatchOutcome::Dispatched {
+        session: inactive_session,
+        ..
+    } = commissioned.commission(prepared, |_| None).await?
+    else {
+        panic!("the inactive fixture commission dispatches fresh")
+    };
+    let stopped_commission = goal_store
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(STOP_INACTIVITY_COMMISSION_COMMAND_ID)),
+                inactive_session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let resumed_watch = goal_store
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(RESUME_INACTIVITY_WATCH_COMMAND_ID)),
+                watch_session,
+                GoalUserAction::Resume(None),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x60_119)),
+                TurnId::from_uuid(Uuid::from_u128(0x60_11a)),
+            )),
+            |_| None,
+        )
+        .await?;
+    let observation =
+        ConvergenceSweepObservation::new(CommitSha::try_new(FIRST_HEAD.to_owned())?, 0);
+    let disposition = PostgresConvergenceSweepStore::new(fixture.pool.clone())
+        .record_no_model_activity_failure(
+            Uuid::from_u128(0x60_118),
+            &fixture.repository,
+            PullRequestNumber::new(BOTTOM_PULL_REQUEST_NUMBER.try_into()?),
+            &observation,
+            inactive_session,
+        )
+        .await?;
+
+    assert_applied_goal_transition(blocked_watch);
+    assert_applied_goal_command(stopped_commission);
+    assert_applied_goal_command(resumed_watch);
+    assert_eq!(
+        disposition,
+        ConvergenceSweepFailureDisposition::ActivityObserved
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inactive_repository_watch_sibling_allows_inactivity_parking() -> Result<(), Box<dyn Error>>
+{
+    let fixture = dispatch_fixture().await?;
+    let expected_session = fixture.session(0);
+    let inactive_sibling = fixture.session(1);
+    let goal_store = GoalRepository::new(fixture.pool.clone());
+    let expected_stopped = goal_store
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x60_120)),
+                expected_session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let sibling_stopped = goal_store
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x60_121)),
+                inactive_sibling,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let observation =
+        ConvergenceSweepObservation::new(CommitSha::try_new(FIRST_HEAD.to_owned())?, 0);
+
+    let disposition = PostgresConvergenceSweepStore::new(fixture.pool.clone())
+        .record_no_model_activity_failure(
+            Uuid::from_u128(0x60_122),
+            &fixture.repository,
+            PullRequestNumber::new(BOTTOM_PULL_REQUEST_NUMBER.try_into()?),
+            &observation,
+            expected_session,
+        )
+        .await?;
+
+    assert_applied_goal_command(expected_stopped);
+    assert_applied_goal_command(sibling_stopped);
+    assert_ne!(inactive_sibling, expected_session);
+    assert_eq!(disposition, ConvergenceSweepFailureDisposition::Parked);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn productive_repository_watch_sibling_prevents_inactivity_parking()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let expected_session = fixture.session(0);
+    let productive_sibling = fixture.session(1);
+    let (_model_repository, _prepared, _turn, _requests) = checkpoint_delegated_approval_at(
+        &fixture.pool,
+        productive_sibling,
+        0x60_130,
+        &[("exec", r#"{"cmd":"git status"}"#)],
+    )
+    .await?;
+    let goal_store = GoalRepository::new(fixture.pool.clone());
+    let expected_stopped = goal_store
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x60_140)),
+                expected_session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let sibling_stopped = goal_store
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x60_141)),
+                productive_sibling,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let observation =
+        ConvergenceSweepObservation::new(CommitSha::try_new(FIRST_HEAD.to_owned())?, 0);
+
+    let disposition = PostgresConvergenceSweepStore::new(fixture.pool.clone())
+        .record_no_model_activity_failure(
+            Uuid::from_u128(0x60_142),
+            &fixture.repository,
+            PullRequestNumber::new(BOTTOM_PULL_REQUEST_NUMBER.try_into()?),
+            &observation,
+            expected_session,
+        )
+        .await?;
+
+    assert_applied_goal_command(expected_stopped);
+    assert_applied_goal_command(sibling_stopped);
+    assert_ne!(productive_sibling, expected_session);
+    assert_eq!(
+        disposition,
+        ConvergenceSweepFailureDisposition::ActivityObserved
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_watch_observes_operator_commission_target_ownership()
+-> Result<(), Box<dyn Error>> {
+    let fixture = commissioned_fixture().await?;
+    let repository = repository()?;
+    let rule = one_action_rule(Duration::ZERO)?;
+    let event_store = PostgresRepoWatchStore::new(fixture.pool.clone());
+    let dispatch_store =
+        PostgresRepoWatchDispatchStore::new(fixture.pool.clone(), credential_pin());
+    let initial_observation = observation(context(INITIAL_HEAD)?)?;
+    let first_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(initial_observation),
+                    vec![identified_event(opened_event(100, INITIAL_HEAD)?)],
+                ),
+            )
+            .await?,
+    );
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let event = conflict_event(101, FIRST_HEAD)?;
+    let observed = observation(context(FIRST_HEAD)?)?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(observed.clone()),
+                vec![identified_event(event)],
+            ),
+        )
+        .await?;
+    let loaded = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the activated rule sees the conflict event");
+    let outcome =
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
+            .evaluate(
+                loaded,
+                &rule,
+                &observed,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?;
+
+    let obligation: (Uuid, Vec<Uuid>, bool) = sqlx::query_as(
+        "SELECT external_blocking_session_id, occupying_session_ids, ready
+           FROM repo_watch_outstanding_dispatch_obligation",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(outcome, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(obligation.0, fixture.session.into_uuid());
+    assert_eq!(obligation.1, vec![fixture.session.into_uuid()]);
+    assert!(!obligation.2);
+    assert!(
+        dispatch_store
+            .load_next_dispatch_obligation(
+                &repository,
+                rule.id(),
+                rule.version(),
+                immediate_retry_policy(),
+            )
+            .await?
+            .is_none(),
+        "a live external blocker keeps the obligation out of the dispatch loader"
+    );
+
+    let stopped = GoalRepository::new(fixture.pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(STOP_EXTERNAL_BLOCKER_COMMAND_ID)),
+                fixture.session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let (provenance, defaults) = commissioned_template();
+    let replacement =
+        commission_request_with_fence(REPLACEMENT_COMMISSION_COMMAND_ID, commissioned_fence()?)?
+            .prepare(
+                &mut UuidV7CommissionedDispatchIdGenerator,
+                provenance,
+                defaults,
+            )?;
+    let CommissionDispatchOutcome::Dispatched {
+        session: replacement_session,
+        ..
+    } = fixture.store.commission(replacement, |_| None).await?
+    else {
+        panic!("the replacement commission dispatches after the blocker stops")
+    };
+    let owed = dispatch_store
+        .load_next_dispatch_obligation(
+            &repository,
+            rule.id(),
+            rule.version(),
+            immediate_retry_policy(),
+        )
+        .await?
+        .expect("the obligation becomes ready after its original blocker stops");
+    let owed_event = owed.latest_event().clone();
+    let redispatch = RepoWatchDispatchService::new(
+        UuidV7RepoWatchDispatchIdGenerator,
+        ObligationTransaction {
+            store: dispatch_store,
+            obligation: Some(owed),
+        },
+    )
+    .evaluate(
+        owed_event,
+        &rule,
+        &observed,
+        &TemplateResolver,
+        dispatch_context(),
+    )
+    .await?;
+    let refreshed_blocker: Uuid = sqlx::query_scalar(
+        "SELECT external_blocking_session_id
+           FROM repo_watch_dispatch_obligation
+          WHERE settled_kind IS NULL",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_applied_goal_command(stopped);
+    assert_eq!(redispatch, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(refreshed_blocker, replacement_session.into_uuid());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_watch_siblings_do_not_block_each_others_pursuit_commands()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let outcome = GoalRepository::new(fixture.pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0x60_130)),
+                fixture.session(0),
+                GoalUserAction::Supersede(GoalStatement::try_new(String::from(
+                    "continue the first action while its sibling remains live",
+                ))?),
+            ),
+            Some(GoalTurnCandidates::new(
+                AcceptedInputId::from_uuid(Uuid::from_u128(0x60_131)),
+                TurnId::from_uuid(Uuid::from_u128(0x60_132)),
+            )),
+            |_| None,
+        )
+        .await?;
+
+    assert_applied_goal_command(outcome);
+    Ok(())
 }
 
 #[derive(Debug, sqlx::FromRow)]
