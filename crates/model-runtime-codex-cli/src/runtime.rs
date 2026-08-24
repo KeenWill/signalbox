@@ -808,6 +808,12 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn oversized_version_fixture() -> (tempfile::TempDir, PathBuf) {
+        let banner = "x".repeat(super::MAX_VERSION_BANNER_BYTES + 1);
+        version_fixture(&format!("#!/bin/sh\nprintf '%s' '{banner}'\n"))
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn pinned_version_probe_accepts_the_exact_adapter_pin() {
         let script =
@@ -838,6 +844,16 @@ mod tests {
         let result = verify_pinned_codex_cli_version(&executable, Duration::from_millis(10)).await;
 
         assert_eq!(result, Err(CodexCliVersionProbeError::TimedOut));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_version_probe_bounds_the_version_banner() {
+        let (_directory, executable) = oversized_version_fixture();
+
+        let result = verify_pinned_codex_cli_version(&executable, Duration::from_secs(1)).await;
+
+        assert_eq!(result, Err(CodexCliVersionProbeError::InvalidBanner));
     }
 
     /// INV-035: the CLI receives only a reference to its ambient login store;
