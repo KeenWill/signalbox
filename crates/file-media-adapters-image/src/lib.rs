@@ -14,6 +14,9 @@ use signalbox_file_media_runtime::{
     ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
     ReaderDeclarationInput, ReaderIdentity, ReasonCode, StreamingTextFallback, VerifiedBlobSource,
 };
+pub use signalbox_file_media_runtime::{
+    MAX_DECODED_IMAGE_PIXELS as MAX_IMAGE_DECODED_PIXELS, MAX_IMAGE_AXIS,
+};
 
 const PROVIDER_NAME: &str = "signalbox_image";
 const READER_REVISION: &str = "v1";
@@ -21,10 +24,6 @@ const METADATA_VIEW_NAME: &str = "metadata";
 
 /// Maximum encoded bytes one image adapter accepts.
 pub const MAX_IMAGE_SOURCE_BYTES: u64 = 262_144;
-/// Maximum width or height decoded by an image adapter.
-pub const MAX_IMAGE_AXIS: u32 = 8_192;
-/// Maximum decoded pixels admitted by an image adapter.
-pub const MAX_IMAGE_DECODED_PIXELS: u64 = 16_777_216;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AdapterFormat {
@@ -162,7 +161,7 @@ fn reader(
         reader: FileReaderName::try_new(format.reader_name())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(format.media_type())?],
-        probe: ProbeDeclaration::new(16, 1, 2, MAX_IMAGE_SOURCE_BYTES),
+        probe: ProbeDeclaration::new(16, 0, 1, 16),
         views: vec![metadata_view()?],
         reason_codes: reasons,
         streaming_text_fallback: StreamingTextFallback::Disabled,
