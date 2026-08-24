@@ -292,8 +292,20 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
             Ok((_, Event::Decl(declaration))) => {
                 declaration_is_utf8 = declaration_uses_utf8(&declaration).unwrap_or(false);
             }
-            Ok((_, Event::PI(_))) => {
-                active_prolog_event = true;
+            Ok((_, Event::PI(instruction))) => {
+                if instruction
+                    .as_ref()
+                    .get(..3)
+                    .is_some_and(|target| target.eq_ignore_ascii_case(b"xml"))
+                    && instruction
+                        .as_ref()
+                        .get(3)
+                        .is_none_or(|byte| !is_name_character(char::from(*byte)))
+                {
+                    forbidden_prolog_event = true;
+                } else {
+                    active_prolog_event = true;
+                }
             }
             Ok((_, Event::DocType(_) | Event::GeneralRef(_) | Event::CData(_))) => {
                 forbidden_prolog_event = true;
@@ -488,7 +500,7 @@ fn inspect_element(
     } else if is_svg_element(namespace, name, b"svg") {
         return Err(ParseIssue::NestedSvg);
     }
-    if is_svg_namespace(namespace) && active_element(name) {
+    if active_element(name) {
         return Err(ParseIssue::ActiveContent);
     }
     if is_svg_namespace(namespace) && resource_element(name) {
@@ -622,6 +634,10 @@ fn resource_capable_attribute(name: &[u8]) -> bool {
             | b"marker-start"
             | b"marker-mid"
             | b"marker-end"
+            | b"offset-path"
+            | b"shape-inside"
+            | b"shape-outside"
+            | b"shape-subtract"
     )
 }
 
@@ -849,8 +865,8 @@ fn parse_view_box(value: &str) -> Result<[f64; 4], ParseIssue> {
     ];
     if values.next().is_some()
         || view_box.iter().any(|value| !value.is_finite())
-        || view_box[2] <= 0.0
-        || view_box[3] <= 0.0
+        || view_box[2] < 0.0
+        || view_box[3] < 0.0
     {
         Err(ParseIssue::Malformed)
     } else {
@@ -976,7 +992,10 @@ fn declaration_uses_utf8(declaration: &BytesDecl<'_>) -> Result<bool, ()> {
 fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), ParseIssue> {
     let mut input = declaration.as_ref();
     input = input.strip_prefix(b"xml").ok_or(ParseIssue::Malformed)?;
-    if !input.first().is_some_and(u8::is_ascii_whitespace) {
+    if !input
+        .first()
+        .is_some_and(|byte| is_xml_whitespace_byte(*byte))
+    {
         return Err(ParseIssue::Malformed);
     }
 
@@ -988,7 +1007,7 @@ fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), ParseIssue> {
         }
         let name_end = input
             .iter()
-            .position(|byte| byte.is_ascii_whitespace() || *byte == b'=')
+            .position(|byte| is_xml_whitespace_byte(*byte) || *byte == b'=')
             .ok_or(ParseIssue::Malformed)?;
         let name = &input[..name_end];
         input = trim_ascii_start(&input[name_end..]);
@@ -1005,7 +1024,11 @@ fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), ParseIssue> {
             .ok_or(ParseIssue::Malformed)?;
         attributes.push((name, &input[..value_end]));
         input = &input[value_end + 1..];
-        if !input.is_empty() && !input.first().is_some_and(u8::is_ascii_whitespace) {
+        if !input.is_empty()
+            && !input
+                .first()
+                .is_some_and(|byte| is_xml_whitespace_byte(*byte))
+        {
             return Err(ParseIssue::Malformed);
         }
     }
@@ -1038,10 +1061,17 @@ fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), ParseIssue> {
 }
 
 fn trim_ascii_start(mut input: &[u8]) -> &[u8] {
-    while input.first().is_some_and(u8::is_ascii_whitespace) {
+    while input
+        .first()
+        .is_some_and(|byte| is_xml_whitespace_byte(*byte))
+    {
         input = &input[1..];
     }
     input
+}
+
+const fn is_xml_whitespace_byte(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\r')
 }
 
 fn decode_reference(reference: &str) -> Result<Cow<'_, str>, ParseIssue> {
