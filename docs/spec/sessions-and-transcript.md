@@ -1097,7 +1097,13 @@ carry the exact terminal child turn. Returned content is derived only from the
 proof-bearing completed call; independently supplied text cannot authorize a
 result. A completed turn with empty or oversized returned text records the
 distinct `ChildResultUnavailable` reason. Reconciliation-required work is not
-terminal delegation evidence and produces no outcome. **Committed unimplemented
+terminal delegation evidence on its own and produces no outcome while its
+ambiguity stands. Automatic reconciliation is the exception: the daemon's
+durable attempt seals the child as a failed result carrying that same
+`ChildResultUnavailable` reason and the exact reconciled child turn, in the
+transaction that commits the terminal transition, so a parent waiting on a call
+whose provider outcome can never be established is woken by evidence rather than
+left waiting on a turn that has already ended. **Committed unimplemented
 functionality.** Durable terminal-result reconstitution is not exposed by this
 foundation slice; the persistence slice must consume a sealed reconstituted
 ended-call/turn projection rather than accepting parallel raw identities or

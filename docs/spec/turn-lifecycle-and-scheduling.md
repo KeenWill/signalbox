@@ -1390,10 +1390,14 @@ edge whose child already has a terminal result records an `AlreadyTerminal`
 disposition for the evaluating command, creates no second terminal result, and
 still traverses the child's outgoing relationships. Child-originated
 cancellation instead carries the child's exact proof-bearing cancelled turn. A
-reconciliation-required turn supplies no terminal child outcome, and the same
-cancelled-turn evidence cannot be selected as a stopped outcome. Detached child
-work stays independently schedulable after the parent's turn or goal has
-terminalized.
+reconciliation-required turn supplies no terminal child outcome while its
+ambiguity stands; the daemon's automatic reconciliation supplies one, sealing
+the child as failed with the `ChildResultUnavailable` reason and the exact
+reconciled child turn in the transaction that commits the terminal transition,
+so an ambiguity the provider can never settle wakes the parent instead of
+holding it. The same cancelled-turn evidence cannot be selected as a stopped
+outcome. Detached child work stays independently schedulable after the parent's
+turn or goal has terminalized.
 
 **SPEC PROPOSAL — immediate descendant terminalization.** A bound `Stop` or
 `Cancel` policy action commits an authoritative logical terminal proof for the
