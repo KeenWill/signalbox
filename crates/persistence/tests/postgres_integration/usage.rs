@@ -116,7 +116,7 @@ fn all_usage_query() -> UsageQuery {
 fn call_query(limit: u16, after: Option<signalbox_application::UsageCallCursor>) -> UsageCallQuery {
     UsageCallQuery {
         scope: all_usage_query(),
-        order: UsageCallOrder::OldestFirst,
+        order: UsageCallOrder::NewestFirst,
         limit: UsageCallPageLimit::new(limit).expect("fixture page limit fits"),
         after,
     }
@@ -133,7 +133,7 @@ fn evidence_signature(
 
 fn aggregate_signature(
     report: &UsageAggregateReport,
-) -> BTreeMap<(ProviderModelIdentity, UsageProvenance), (u64, Option<u64>)> {
+) -> BTreeMap<(ProviderModelIdentity, UsageProvenance), (u64, Option<u128>)> {
     report
         .groups
         .iter()
@@ -160,13 +160,13 @@ fn paged_evidence_signature(
 
 fn expected_aggregate_signature(
     calls: &[UsageCallEvidence],
-) -> BTreeMap<(ProviderModelIdentity, UsageProvenance), (u64, Option<u64>)> {
+) -> BTreeMap<(ProviderModelIdentity, UsageProvenance), (u64, Option<u128>)> {
     calls
         .iter()
         .map(|call| {
             (
                 (call.model.identity(), call.provenance),
-                (1, call.tokens.input),
+                (1, call.tokens.input.map(u128::from)),
             )
         })
         .collect()
@@ -316,7 +316,62 @@ async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn usage_projection_has_session_terminal_order_index() -> Result<(), Box<dyn Error>> {
+async fn incomplete_cache_inclusive_aggregates_are_not_normalization_safe()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x95_100;
+    let fixture = terminal_reported_usage_call(
+        &pool,
+        seed,
+        ProviderReportedTokenUsage::unreported().with_input_tokens(Some(FIRST_INPUT_TOKENS)),
+    )
+    .await?;
+    let source_frontier = Uuid::from_u128(seed + 0x80);
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(source_frontier)
+    .execute(&pool)
+    .await?;
+    let mut connection = pool.acquire().await?;
+    insert_completed_context_compaction_call(
+        &mut connection,
+        Uuid::from_u128(seed + 0x81),
+        fixture.session.into_uuid(),
+        Uuid::from_u128(seed + 0x82),
+        Uuid::from_u128(seed + 0x83),
+        source_frontier,
+    )
+    .await?;
+    drop(connection);
+
+    let report = UsageRepository::new(pool.clone())
+        .aggregate(UsageQuery {
+            time: UsageTimeRange::all(),
+            selection: UsageSelection {
+                session: Some(fixture.session),
+                turn: None,
+                model: None,
+                provenance: None,
+                call_kind: Some(signalbox_application::UsageCallKind::ContextCompaction),
+            },
+        })
+        .await?;
+
+    assert_eq!(report.groups.len(), 1);
+    assert!(!report.groups[0].cache_normalization_safe);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn usage_projection_has_combined_selection_indexes() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let index_definition: String = sqlx::query_scalar(
         "SELECT indexdef FROM pg_indexes
@@ -328,6 +383,270 @@ async fn usage_projection_has_session_terminal_order_index() -> Result<(), Box<d
     .await?;
 
     assert!(index_definition.contains("session_id, recorded_at DESC, model_call_id DESC"));
+    let combined_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_session_kind_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        combined_index_definition
+            .contains("session_id, call_kind, recorded_at DESC, model_call_id DESC")
+    );
+    let session_model_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_session_model_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(session_model_index_definition.contains(
+        "session_id, resolved_provider_model_identity_id, recorded_at DESC, model_call_id DESC"
+    ));
+    let model_provenance_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_model_provenance_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(model_provenance_index_definition.contains(
+        "resolved_provider_model_identity_id, usage_provenance_kind, recorded_at DESC, model_call_id DESC"
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn context_compaction_usage_axes_have_the_canonical_u64_ceiling() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let compaction_usage_constraint: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid)
+           FROM pg_constraint
+          WHERE conrelid = 'context_compaction_model_call'::regclass
+            AND conname = 'context_compaction_model_call_usage_u64'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(compaction_usage_constraint.contains("18446744073709551615"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn context_compaction_input_semantics_preserve_history_and_pin_new_calls()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let compaction_semantics_nullable: bool = sqlx::query_scalar(
+        "SELECT NOT attnotnull
+           FROM pg_attribute
+          WHERE attrelid = 'context_compaction_model_call'::regclass
+            AND attname = 'usage_input_includes_cache_tokens'
+            AND NOT attisdropped",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(compaction_semantics_nullable);
+    let seed = 0x98_000;
+    let fixture =
+        terminal_reported_usage_call(&pool, seed, ProviderReportedTokenUsage::unreported()).await?;
+    let source_frontier = Uuid::from_u128(seed + 0x80);
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(source_frontier)
+    .execute(&pool)
+    .await?;
+
+    let call = Uuid::from_u128(seed + 0x81);
+    let missing_semantics_error = sqlx::query(
+        "INSERT INTO context_compaction_model_call
+            (model_call_id, session_id, direct_model_selection_id,
+             resolved_provider_model_identity_id, source_frontier_id,
+             credential_reference, state_kind)
+         VALUES ($1, $2, $3, $4, $5, 'semantic-pin-fixture', 'prepared')",
+    )
+    .bind(call)
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(seed + 0x82))
+    .bind(Uuid::from_u128(seed + 0x83))
+    .bind(source_frontier)
+    .execute(&pool)
+    .await
+    .expect_err("new compaction calls must pin input semantics");
+    assert!(
+        missing_semantics_error
+            .as_database_error()
+            .is_some_and(|error| error
+                .message()
+                .contains("compaction input-token semantics must be pinned"))
+    );
+
+    sqlx::query(
+        "INSERT INTO context_compaction_model_call
+            (model_call_id, session_id, direct_model_selection_id,
+             resolved_provider_model_identity_id, source_frontier_id,
+             credential_reference, usage_input_includes_cache_tokens, state_kind)
+         VALUES ($1, $2, $3, $4, $5, 'semantic-pin-fixture', true, 'prepared')",
+    )
+    .bind(call)
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(seed + 0x82))
+    .bind(Uuid::from_u128(seed + 0x83))
+    .bind(source_frontier)
+    .execute(&pool)
+    .await?;
+    let changed_semantics_error = sqlx::query(
+        "UPDATE context_compaction_model_call
+            SET usage_input_includes_cache_tokens = false
+          WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .execute(&pool)
+    .await
+    .expect_err("pinned compaction input semantics must be immutable");
+    assert_eq!(
+        changed_semantics_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+    let retained_semantics: bool = sqlx::query_scalar(
+        "SELECT usage_input_includes_cache_tokens
+           FROM context_compaction_model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .fetch_one(&pool)
+    .await?;
+    assert!(retained_semantics);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn usage_projection_records_terminal_statement_time() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let recorded_at_default: String = sqlx::query_scalar(
+        "SELECT pg_get_expr(adbin, adrelid)
+           FROM pg_attrdef
+          WHERE adrelid = 'web_usage_call_projection'::regclass
+            AND adnum = (
+                SELECT attnum
+                  FROM pg_attribute
+                 WHERE attrelid = 'web_usage_call_projection'::regclass
+                   AND attname = 'recorded_at'
+                   AND NOT attisdropped
+            )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(recorded_at_default, "statement_timestamp()");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn oversized_credential_references_receive_bounded_distinct_usage_labels()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first = "a".repeat(257);
+    let second = format!("{}b", "a".repeat(256));
+    let labels: (String, String) =
+        sqlx::query_as("SELECT bounded_web_usage_profile($1), bounded_web_usage_profile($2)")
+            .bind(&first)
+            .bind(&second)
+            .fetch_one(&pool)
+            .await?;
+
+    assert!(labels.0.len() <= 256);
+    assert!(labels.1.len() <= 256);
+    assert_ne!(labels.0, labels.1);
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT bounded_web_usage_profile($1)")
+            .bind("within-bound")
+            .fetch_one(&pool)
+            .await?,
+        "exact:within-bound"
+    );
+    let oversized = "z".repeat(257);
+    let mapped_label: String = sqlx::query_scalar("SELECT bounded_web_usage_profile($1)")
+        .bind(&oversized)
+        .fetch_one(&pool)
+        .await?;
+    assert!(mapped_label.starts_with("mapped:"));
+    let repeated_label: String = sqlx::query_scalar("SELECT bounded_web_usage_profile($1)")
+        .bind(&oversized)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(repeated_label, mapped_label);
+    let exact_label: String = sqlx::query_scalar("SELECT bounded_web_usage_profile($1)")
+        .bind(&mapped_label)
+        .fetch_one(&pool)
+        .await?;
+    assert_ne!(mapped_label, exact_label);
+    let incompressible = (0..4_096_u32)
+        .map(|value| format!("{value:08x}"))
+        .collect::<String>();
+    let incompressible_label: String = sqlx::query_scalar("SELECT bounded_web_usage_profile($1)")
+        .bind(&incompressible)
+        .fetch_one(&pool)
+        .await?;
+    assert!(incompressible_label.starts_with("mapped:"));
+    let mapping_indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_oversized_profile_identity'",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert!(
+        mapping_indexes
+            .iter()
+            .all(|index| !index.contains("exact_reference"))
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn usage_projection_retains_only_bounded_credential_identity() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let projection_retains_exact_reference: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM information_schema.columns
+              WHERE table_schema = current_schema()
+                AND table_name = 'web_usage_call_projection'
+                AND column_name = 'credential_reference'
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!projection_retains_exact_reference);
 
     pool.close().await;
     drop(container);
@@ -405,6 +724,70 @@ async fn terminal_approval_judge_usage_enters_dedicated_call_evidence() -> Resul
     assert_eq!(page.calls[0].tokens.cache_creation_input, None);
     assert_eq!(page.calls[0].tokens.cache_read_input, None);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn terminal_context_compaction_usage_enters_session_level_call_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x97_000;
+    let fixture =
+        terminal_reported_usage_call(&pool, seed, ProviderReportedTokenUsage::unreported()).await?;
+    let source_frontier = Uuid::from_u128(seed + 0x80);
+    let compaction_call = Uuid::from_u128(seed + 0x81);
+    let mut connection = pool.acquire().await?;
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(source_frontier)
+    .execute(&mut *connection)
+    .await?;
+    insert_completed_context_compaction_call(
+        &mut connection,
+        compaction_call,
+        fixture.session.into_uuid(),
+        Uuid::from_u128(seed + 0x82),
+        Uuid::from_u128(seed + 0x83),
+        source_frontier,
+    )
+    .await?;
+
+    let page = UsageRepository::new(pool.clone())
+        .calls(UsageCallQuery {
+            scope: UsageQuery {
+                time: UsageTimeRange::all(),
+                selection: UsageSelection {
+                    session: Some(fixture.session),
+                    turn: None,
+                    model: None,
+                    provenance: Some(UsageProvenance::Reported),
+                    call_kind: Some(signalbox_application::UsageCallKind::ContextCompaction),
+                },
+            },
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(1).expect("fixture page limit fits"),
+            after: None,
+        })
+        .await?;
+
+    assert_eq!(page.calls.len(), 1);
+    assert_eq!(page.calls[0].call.into_uuid(), compaction_call);
+    assert_eq!(page.calls[0].turn, None);
+    assert_eq!(page.calls[0].tokens.input, Some(17));
+    assert_eq!(page.calls[0].tokens.output, Some(5));
+    assert_eq!(
+        page.calls[0].input_semantics,
+        signalbox_application::UsageInputTokenSemantics::CacheInclusive
+    );
+
+    drop(connection);
     pool.close().await;
     drop(container);
     Ok(())

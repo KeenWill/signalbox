@@ -1432,6 +1432,13 @@ impl HubModelConfiguration {
         self.provider_model_adapters.get(provider_model).copied()
     }
 
+    /// Returns whether one configured target's reported input count includes cache axes.
+    pub fn input_includes_cache_tokens(&self, target: ResolvedProviderTarget) -> bool {
+        self.target_adapters
+            .get(&target)
+            .is_some_and(|adapter| adapter.reports_cache_inclusive_input())
+    }
+
     /// Returns targets whose provider-reported input count includes cache axes.
     pub fn cache_inclusive_input_targets(&self) -> HashSet<ResolvedProviderTarget> {
         self.target_adapters
@@ -1518,7 +1525,55 @@ impl HubModelConfiguration {
             ProcessModelCallInputTokenSemantics::CacheExclusive => input.tokens,
         };
         let amount_usd = fold_reported_cost([
-            (input_tokens, rates.input),
+            (input_tokens.map(u128::from), rates.input),
+            (output_tokens.map(u128::from), rates.output),
+            (
+                cache_creation_input_tokens.map(u128::from),
+                rates.cache_creation_input,
+            ),
+            (
+                cache_read_input_tokens.map(u128::from),
+                rates.cache_read_input,
+            ),
+        ])?;
+        Some(DerivedModelCallCost {
+            amount_usd,
+            rate_version: Arc::clone(&rates.version),
+            billing_kind,
+        })
+    }
+
+    /// Derives a labeled USD figure from widened aggregate token totals.
+    pub(crate) fn derive_usage_aggregate_cost(
+        &self,
+        target: ResolvedProviderTarget,
+        profile: &str,
+        semantics: ProcessModelCallInputTokenSemantics,
+        token_axes: [Option<u128>; 4],
+    ) -> Option<DerivedModelCallCost> {
+        let [
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        ] = token_axes;
+        let rates = self.billing_rates.get(&target)?;
+        let billing_kind = self.credential_profiles.get(profile)?.billing_kind();
+        let ordinary_input_tokens = match semantics {
+            ProcessModelCallInputTokenSemantics::CacheInclusive => match (
+                input_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+            ) {
+                (Some(total), Some(cache_creation), Some(cache_read)) => {
+                    Some(total.checked_sub(cache_creation.checked_add(cache_read)?)?)
+                }
+                _ => None,
+            },
+            ProcessModelCallInputTokenSemantics::CacheExclusive => input_tokens,
+        };
+        let amount_usd = fold_usage_aggregate_cost([
+            (ordinary_input_tokens, rates.input),
             (output_tokens, rates.output),
             (cache_creation_input_tokens, rates.cache_creation_input),
             (cache_read_input_tokens, rates.cache_read_input),
@@ -2536,7 +2591,7 @@ fn validated_rate_version(value: &str) -> Result<Arc<str>, HubModelConfiguration
     }
 }
 
-fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
+fn fold_reported_cost(axes: [(Option<u128>, Decimal); 4]) -> Option<Decimal> {
     const TOKENS_PER_MILLION: u64 = 1_000_000;
     let mut amount = Decimal::ZERO;
     let mut reported = false;
@@ -2561,14 +2616,49 @@ fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
     reported.then(|| amount.normalize())
 }
 
-fn exact_rate_token_product(rate: Decimal, tokens: u64) -> Option<Decimal> {
+fn fold_usage_aggregate_cost(axes: [(Option<u128>, Decimal); 4]) -> Option<Decimal> {
+    const TOKENS_PER_MILLION: u64 = 1_000_000;
+    let divisor = Decimal::from(TOKENS_PER_MILLION);
+    let mut amount = Decimal::ZERO;
+    let mut priced = false;
+    for (tokens, rate) in axes {
+        let Some(tokens) = tokens else {
+            continue;
+        };
+        let Some(numerator) = exact_rate_token_product(rate, tokens) else {
+            continue;
+        };
+        let Some(axis_cost) = numerator.checked_div(divisor) else {
+            continue;
+        };
+        if axis_cost.checked_mul(divisor) != Some(numerator) {
+            continue;
+        }
+        let Some(next_amount) = amount.checked_add(axis_cost) else {
+            continue;
+        };
+        if next_amount.checked_sub(amount) != Some(axis_cost)
+            || next_amount.checked_sub(axis_cost) != Some(amount)
+        {
+            continue;
+        }
+        amount = next_amount;
+        priced = true;
+    }
+    priced.then(|| amount.normalize())
+}
+
+fn exact_rate_token_product(rate: Decimal, tokens: u128) -> Option<Decimal> {
+    if tokens > u128::try_from(Decimal::MAX.mantissa()).ok()? {
+        return None;
+    }
     let product = rate.checked_mul(Decimal::from(tokens))?;
     let scale_loss = rate.scale().checked_sub(product.scale())?;
     if scale_loss == 0 {
         return Some(product);
     }
     let mut rate_mantissa = u128::try_from(rate.mantissa()).ok()?;
-    let mut token_mantissa = u128::from(tokens);
+    let mut token_mantissa = tokens;
     for _ in 0..scale_loss {
         divide_product_factor(&mut rate_mantissa, &mut token_mantissa, 2)?;
         divide_product_factor(&mut rate_mantissa, &mut token_mantissa, 5)?;
@@ -5603,6 +5693,38 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             .expect("fixture quotient is representable");
 
         assert_eq!(cost.amount_usd(), expected);
+    }
+
+    #[test]
+    fn widened_usage_aggregate_cost_prices_totals_above_u64() {
+        let configuration =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+        let cost = configuration
+            .derive_usage_aggregate_cost(
+                configured_target(&configuration),
+                "anthropic-primary",
+                ProcessModelCallInputTokenSemantics::CacheExclusive,
+                [None, Some(u128::from(u64::MAX) + 1), None, None],
+            )
+            .expect("the widened output total is exactly priceable");
+
+        assert!(cost.amount_usd() > Decimal::ZERO);
+    }
+
+    #[test]
+    fn widened_usage_aggregate_cost_preserves_an_independently_priceable_axis() {
+        let configuration =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+        let cost = configuration
+            .derive_usage_aggregate_cost(
+                configured_target(&configuration),
+                "anthropic-primary",
+                ProcessModelCallInputTokenSemantics::CacheExclusive,
+                [Some(u128::MAX), Some(1_000_000), None, None],
+            )
+            .expect("the representable output axis remains priceable");
+
+        assert_eq!(cost.amount_usd().to_string(), "15");
     }
 
     #[test]

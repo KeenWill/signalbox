@@ -6452,6 +6452,7 @@ pub struct SearchArtifactProjection {
 pub enum SearchResultSource {
     Session(SessionId),
     AcceptedInput { input: AcceptedInputId, turn: TurnId },
+    SteeringInput { input: AcceptedInputId, source_turn: TurnId },
     TurnTranscriptEntry { entry: SemanticTranscriptEntryId, turn: TurnId },
     SessionTranscriptEntry { entry: SemanticTranscriptEntryId },
     ToolRequest { request: ToolRequestId, turn: TurnId },
@@ -6464,6 +6465,7 @@ pub struct SearchHighlight { pub start_byte: u16, pub end_byte: u16 }
 pub struct SearchResult {
     pub session: SessionId,
     pub address: TimelineAddress,
+    pub projection: NonZeroU64,
     pub source: SearchResultSource,
     pub content_class: SearchContentClass,
     pub snippet: String,
@@ -6500,6 +6502,8 @@ impl<Reader: SearchReader> SearchService<Reader> {
 ```rust
 pub const fn max_usage_call_page_items() -> u16;
 pub const fn max_usage_aggregate_groups() -> u16;
+pub const fn max_usage_aggregate_calls() -> u16;
+pub const fn max_usage_credential_profile_utf8_bytes() -> u16;
 
 pub struct UsageTimestampError;
 
@@ -6511,27 +6515,27 @@ impl UsageTimestampMicros {
 
 pub struct UsageTimeRangeError;
 
-pub struct UsageTimeRange {
-    pub from_inclusive: Option<UsageTimestampMicros>,
-    pub to_exclusive: Option<UsageTimestampMicros>,
-}
+pub struct UsageTimeRange { /* private */ }
 impl UsageTimeRange {
     pub const fn all() -> Self;
     pub const fn new(
         from_inclusive: Option<UsageTimestampMicros>,
         to_exclusive: Option<UsageTimestampMicros>,
     ) -> Result<Self, UsageTimeRangeError>;
+    pub const fn from_inclusive(self) -> Option<UsageTimestampMicros>;
+    pub const fn to_exclusive(self) -> Option<UsageTimestampMicros>;
 }
 
-pub enum UsageCallKind { ModelCall, ApprovalJudge }
+pub enum UsageCallKind { ModelCall, ApprovalJudge, ContextCompaction }
 pub enum UsageProvenance { Reported, Estimated }
 pub enum UsageInputTokenSemantics { Unknown, CacheExclusive, CacheInclusive }
+pub enum UsageTokenPresence { Absent, Present }
 
 pub struct UsageTokenCoverage {
-    pub input: bool,
-    pub output: bool,
-    pub cache_creation_input: bool,
-    pub cache_read_input: bool,
+    pub input: UsageTokenPresence,
+    pub output: UsageTokenPresence,
+    pub cache_creation_input: UsageTokenPresence,
+    pub cache_read_input: UsageTokenPresence,
 }
 
 pub struct UsageTokenAxes {
@@ -6542,6 +6546,13 @@ pub struct UsageTokenAxes {
 }
 impl UsageTokenAxes {
     pub const fn coverage(self) -> UsageTokenCoverage;
+}
+
+pub struct UsageAggregateTokenAxes {
+    pub input: Option<u128>,
+    pub output: Option<u128>,
+    pub cache_creation_input: Option<u128>,
+    pub cache_read_input: Option<u128>,
 }
 
 pub struct UsageSelection {
@@ -6568,7 +6579,7 @@ impl UsageCallPageLimit {
     pub const fn get(self) -> u16;
 }
 
-pub enum UsageCallOrder { NewestFirst, OldestFirst }
+pub enum UsageCallOrder { NewestFirst }
 
 pub struct UsageCallCursor {
     pub recorded_at: UsageTimestampMicros,
@@ -6586,8 +6597,9 @@ pub struct UsageCallEvidence {
     pub call_kind: UsageCallKind,
     pub call: ModelCallId,
     pub session: SessionId,
-    pub turn: TurnId,
+    pub turn: Option<TurnId>,
     pub model: ResolvedProviderTarget,
+    pub web_profile: String,
     pub credential_profile: String,
     pub provenance: UsageProvenance,
     pub input_semantics: UsageInputTokenSemantics,
@@ -6603,6 +6615,7 @@ pub struct UsageCallPage {
 pub struct UsageAggregateKey {
     pub call_kind: UsageCallKind,
     pub model: ResolvedProviderTarget,
+    pub web_profile: String,
     pub credential_profile: String,
     pub provenance: UsageProvenance,
     pub input_semantics: UsageInputTokenSemantics,
@@ -6612,8 +6625,8 @@ pub struct UsageAggregateKey {
 pub struct UsageAggregateGroup {
     pub key: UsageAggregateKey,
     pub call_count: u64,
-    pub tokens: UsageTokenAxes,
-    pub cost_derivation_safe: bool,
+    pub tokens: UsageAggregateTokenAxes,
+    pub cache_normalization_safe: bool,
 }
 
 pub struct UsageAggregateReport {
@@ -11469,7 +11482,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
 | application: search                                | 21 (+4 free fn) (incl. 2 traits) |
-| application: usage                                 | 23 (+2 free fn) (incl. 1 trait)  |
+| application: usage                                 | 25 (+4 free fn) (incl. 1 trait)  |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 35 (incl. 8 traits)              |
 | application: tool_loop                             | 26 (incl. 5 traits)              |
@@ -11489,4 +11502,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **353 (+15 free fn)**            |
+| **signalbox-application total**                    | **355 (+17 free fn)**            |

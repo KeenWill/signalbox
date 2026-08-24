@@ -37,13 +37,15 @@ type WebContractLimits = {
 
 type WebDollarAmount = string;
 
+type WebNullableU128 = WebU128 | null;
+
 type WebNullableU64 = WebU64 | null;
 
 type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_arguments" | "tool_result" | "session_metadata" | "attachment_filename" | "attachment_media_metadata" | "derived_text_artifact";
 
 type WebSearchCursor = {
   readonly address: WebTimelineAddress;
-  readonly projection_id: string;
+  readonly projection_id: WebSearchProjectionId;
 };
 
 type WebSearchHighlight = {
@@ -51,44 +53,53 @@ type WebSearchHighlight = {
   readonly start_byte: number;
 };
 
+type WebSearchProjectionId = string;
+
 type WebSearchResult = {
   readonly address: WebTimelineAddress;
   readonly content_class: WebSearchContentClass;
   readonly highlights: ReadonlyArray<WebSearchHighlight>;
-  readonly session_id: string;
+  readonly projection_id: WebSearchProjectionId;
+  readonly session_id: WebSessionId;
   readonly snippet: string;
   readonly source: WebSearchResultSource;
 };
 
 type WebSearchResultSource = {
   readonly kind: "session";
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
 } | {
-  readonly accepted_input_id: string;
+  readonly accepted_input_id: WebUuid;
   readonly kind: "accepted_input";
-  readonly turn_id: string;
+  readonly turn_id: WebUuid;
+} | {
+  readonly accepted_input_id: WebUuid;
+  readonly kind: "steering_input";
+  readonly source_turn_id: WebUuid;
 } | {
   readonly kind: "turn_transcript_entry";
-  readonly semantic_entry_id: string;
-  readonly turn_id: string;
+  readonly semantic_entry_id: WebUuid;
+  readonly turn_id: WebUuid;
 } | {
   readonly kind: "session_transcript_entry";
-  readonly semantic_entry_id: string;
+  readonly semantic_entry_id: WebUuid;
 } | {
   readonly kind: "tool_request";
-  readonly tool_request_id: string;
-  readonly turn_id: string;
+  readonly tool_request_id: WebUuid;
+  readonly turn_id: WebUuid;
 } | {
   readonly kind: "tool_attempt";
-  readonly tool_attempt_id: string;
-  readonly turn_id: string;
+  readonly tool_attempt_id: WebUuid;
+  readonly turn_id: WebUuid;
 } | {
-  readonly attachment_id: string;
+  readonly attachment_id: WebUuid;
   readonly kind: "attachment";
 } | {
-  readonly artifact_id: string;
+  readonly artifact_id: WebUuid;
   readonly kind: "derived_artifact";
 };
+
+type WebSessionId = string;
 
 type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
 
@@ -117,43 +128,55 @@ type WebTimelineAddress = {
 
 type WebTimelineEventSequence = string;
 
+type WebU128 = string;
+
 type WebU64 = string;
 
 type WebUsageAggregateGroup = {
-  readonly call_count: WebU64;
+  readonly call_count: WebUsageCallCount;
   readonly call_kind: WebUsageCallKind;
   readonly cost: WebUsageCost;
   readonly coverage: WebUsageTokenCoverage;
   readonly input_semantics: WebUsageInputSemantics;
-  readonly model_id: string;
+  readonly model_id: WebUuid;
+  readonly profile_id: WebUsageProfileId;
   readonly provenance: WebUsageProvenance;
-  readonly tokens: WebUsageTokenAxes;
+  readonly tokens: WebUsageAggregateTokenAxes;
+};
+
+type WebUsageAggregateTokenAxes = {
+  readonly cache_creation_input: WebNullableU128;
+  readonly cache_read_input: WebNullableU128;
+  readonly input: WebNullableU128;
+  readonly output: WebNullableU128;
 };
 
 type WebUsageCall = {
-  readonly call_id: string;
+  readonly call_id: WebUuid;
   readonly call_kind: WebUsageCallKind;
   readonly cost: WebUsageCost;
   readonly input_semantics: WebUsageInputSemantics;
-  readonly model_id: string;
+  readonly model_id: WebUuid;
   readonly provenance: WebUsageProvenance;
-  readonly recorded_at_micros: WebU64;
-  readonly session_id: string;
+  readonly recorded_at_micros: WebUsageTimestampMicros;
+  readonly session_id: WebSessionId;
   readonly tokens: WebUsageTokenAxes;
   readonly turn_id: string;
 };
 
+type WebUsageCallCount = string;
+
 type WebUsageCallCursor = {
-  readonly call_id: string;
-  readonly recorded_at_micros: WebU64;
+  readonly call_id: WebUuid;
+  readonly recorded_at_micros: WebUsageTimestampMicros;
 };
 
-type WebUsageCallKind = "model_call" | "approval_judge";
+type WebUsageCallKind = "model_call" | "approval_judge" | "context_compaction";
 
 type WebUsageCost = {
   readonly amount_usd: WebDollarAmount;
   readonly label: WebUsageCostLabel;
-  readonly rate_version: string;
+  readonly rate_version: WebUsageRateVersion;
   readonly status: "derived";
 } | {
   readonly reason: WebUsageCostUnavailableReason;
@@ -166,7 +189,13 @@ type WebUsageCostUnavailableReason = "no_token_evidence" | "unknown_input_semant
 
 type WebUsageInputSemantics = "unknown" | "cache_exclusive" | "cache_inclusive";
 
+type WebUsageProfileId = string;
+
 type WebUsageProvenance = "reported" | "estimated";
+
+type WebUsageRateVersion = string;
+
+type WebUsageTimestampMicros = string;
 
 type WebUsageTokenAxes = {
   readonly cache_creation_input: WebNullableU64;
@@ -181,6 +210,8 @@ type WebUsageTokenCoverage = {
   readonly input: boolean;
   readonly output: boolean;
 };
+
+type WebUuid = string;
 
 export type WebContractBootstrap = {
   readonly capabilities: WebContractCapabilities;
@@ -200,7 +231,7 @@ export type WebSessionTimelineDescriptor = {
   readonly first_address: WebTimelineAddress;
   readonly latest_address: WebTimelineAddress;
   readonly observed_through: WebU64;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
   readonly sizes: WebSessionTimelineSizeFacts;
   readonly work: WebSessionWorkFacts;
 };
@@ -210,7 +241,7 @@ export type WebSessionTimelineWindow = {
   readonly continuation_before?: WebTimelineAddress | null;
   readonly items: ReadonlyArray<WebSessionTimelineItem>;
   readonly projected_structured_bytes: number;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
 };
 
 export type WebSearchPage = {
@@ -235,4 +266,4 @@ export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTi
 export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;
 export function decodeWebSearchPage(value: unknown): WebSearchPage;
 export function decodeWebUsageSummary(value: unknown): WebUsageSummary;
-export function decodeWebUsageCallPage(value: unknown): WebUsageCallPage;
+export function decodeWebUsageCallPage(value: unknown, order: "newest"): WebUsageCallPage;

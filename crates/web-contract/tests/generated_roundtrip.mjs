@@ -6,12 +6,37 @@ import {
   decodeWebApiErrorResponse,
   decodeWebContractBootstrap,
   decodeWebContractExample,
+  decodeWebSearchPage,
   decodeWebSessionTimelineDescriptor,
   decodeWebSessionTimelineWindow,
+  decodeWebUsageCallPage,
   decodeWebUsageSummary,
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
+
+function searchPage() {
+  return {
+    results: [
+      {
+        session_id: "00000000-0000-0000-0000-000000000991",
+        address: { event_sequence: "1" },
+        projection_id: "1",
+        source: {
+          kind: "session",
+          session_id: "00000000-0000-0000-0000-000000000991",
+        },
+        content_class: "session_metadata",
+        snippet: "café",
+        highlights: [{ start_byte: 0, end_byte: 5 }],
+      },
+    ],
+    continuation: {
+      address: { event_sequence: "1" },
+      projection_id: "1",
+    },
+  };
+}
 
 test("generated example decoder round trips the Rust fixture", async () => {
   const source = JSON.parse(await readFile(fixtureUrl, "utf8"));
@@ -105,6 +130,26 @@ test("generated timeline decoder rejects an address beyond u64", () => {
   );
 });
 
+test("generated timeline decoder rejects an overlong decimal before BigInt", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineWindow({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        items: [
+          {
+            address: { event_sequence: "1".repeat(1000) },
+            kind: "session_created",
+            projected_structured_bytes: 79,
+          },
+        ],
+        projected_structured_bytes: 79,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    /unsigned 64-bit integer/,
+  );
+});
+
 test("generated descriptor decoder rejects a fact beyond u64", () => {
   assert.throws(
     () =>
@@ -132,6 +177,7 @@ test("generated usage decoder preserves nullable axes and labeled cost", () => {
       {
         call_kind: "model_call",
         model_id: "00000000-0000-0000-0000-000000000041",
+        profile_id: "fixture-primary",
         provenance: "estimated",
         input_semantics: "cache_exclusive",
         coverage: {
@@ -162,4 +208,513 @@ test("generated usage decoder preserves nullable axes and labeled cost", () => {
   assert.equal(summary.groups[0].cost.status, "derived");
   assert.equal(summary.groups[0].cost.rate_version, "fixture-v2");
   assert.equal(summary.groups[0].cost.label, "metered_equivalent");
+});
+
+function usageGroup() {
+  return {
+    call_kind: "model_call",
+    model_id: "00000000-0000-0000-0000-000000000041",
+    profile_id: "fixture-primary",
+    provenance: "estimated",
+    input_semantics: "cache_exclusive",
+    coverage: {
+      input: true,
+      output: false,
+      cache_creation_input: false,
+      cache_read_input: false,
+    },
+    call_count: "1",
+    tokens: {
+      input: "17",
+      output: null,
+      cache_creation_input: null,
+      cache_read_input: null,
+    },
+    cost: {
+      status: "derived",
+      amount_usd: "0.17",
+      rate_version: "fixture-v2",
+      label: "metered_equivalent",
+    },
+  };
+}
+
+function usageCall() {
+  return {
+    call_kind: "model_call",
+    call_id: "00000000-0000-0000-0000-000000000051",
+    session_id: "00000000-0000-0000-0000-000000000052",
+    turn_id: "00000000-0000-0000-0000-000000000053",
+    model_id: "00000000-0000-0000-0000-000000000041",
+    provenance: "estimated",
+    input_semantics: "cache_exclusive",
+    tokens: {
+      input: "17",
+      output: null,
+      cache_creation_input: null,
+      cache_read_input: null,
+    },
+    recorded_at_micros: "1777777777123456",
+    cost: {
+      status: "derived",
+      amount_usd: "0.17",
+      rate_version: "fixture-v2",
+      label: "metered_equivalent",
+    },
+  };
+}
+
+test("generated usage decoder enforces collection ceilings", () => {
+  assert.throws(
+    () => decodeWebUsageSummary({
+      groups: Array.from({ length: 257 }, usageGroup),
+      truncated: true,
+    }),
+    /at most 256 items/,
+  );
+  assert.throws(
+    () => decodeWebUsageCallPage({
+      calls: Array.from({ length: 101 }, usageCall),
+      continuation: null,
+    }, "newest"),
+    /at most 100 items/,
+  );
+});
+
+test("generated usage decoder rejects noncanonical dollar amounts", () => {
+  const trailingZero = usageGroup();
+  trailingZero.cost.amount_usd = "0.170";
+  const oversizedCoefficient = usageGroup();
+  oversizedCoefficient.cost.amount_usd = "79228162514264337593543950336";
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [trailingZero], truncated: false }),
+    /one recognized variant/,
+  );
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [oversizedCoefficient], truncated: false }),
+    /one recognized variant/,
+  );
+});
+
+test("generated usage decoder requires positive summary call counts", () => {
+  const group = usageGroup();
+  group.call_count = "0";
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /matching|positive/,
+  );
+});
+
+test("generated usage decoder caps summary call counts at the aggregation ceiling", () => {
+  const group = usageGroup();
+  group.call_count = "10001";
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /matching/,
+  );
+});
+
+test("generated usage decoder constrains call and cursor timestamps", () => {
+  const call = usageCall();
+  call.recorded_at_micros = "253402300800000000";
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [call], continuation: null }, "newest"),
+    /application-range usage timestamp|matching|one recognized variant/,
+  );
+
+  const validCall = usageCall();
+  const continuation = {
+    recorded_at_micros: "253402300800000000",
+    call_id: validCall.call_id,
+  };
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [validCall], continuation }, "newest"),
+    /application-range usage timestamp|matching|one recognized variant/,
+  );
+});
+
+test("generated usage decoder bounds rate versions by UTF-8 bytes", () => {
+  const empty = usageGroup();
+  empty.cost.rate_version = "";
+  const oversized = usageGroup();
+  oversized.cost.rate_version = "é".repeat(65);
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [empty], truncated: false }),
+    /at least 1 characters|1 through 128 UTF-8 bytes/,
+  );
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [oversized], truncated: false }),
+    /1 through 128 UTF-8 bytes/,
+  );
+});
+
+test("generated usage summary rejects contradictory coverage", () => {
+  const group = usageGroup();
+  group.coverage.input = false;
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /consistent with token evidence/,
+  );
+});
+
+test("generated summary and call decoders reject derived cost without tokens", () => {
+  const group = usageGroup();
+  group.coverage.input = false;
+  group.tokens.input = null;
+  const call = usageCall();
+  call.tokens.input = null;
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /unavailable with reason no_token_evidence/,
+  );
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [call], continuation: null }, "newest"),
+    /unavailable with reason no_token_evidence/,
+  );
+});
+
+test("generated usage decoder rejects malformed identities", () => {
+  const call = usageCall();
+  call.call_id = "not-a-uuid";
+
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [call], continuation: null }, "newest"),
+    /matching/,
+  );
+});
+
+test("generated usage decoder validates ordering and cursor correlation", () => {
+  const first = usageCall();
+  const second = usageCall();
+  second.call_id = "00000000-0000-0000-0000-000000000050";
+  second.recorded_at_micros = "1777777777123455";
+  const page = {
+    calls: [first, second],
+    continuation: {
+      recorded_at_micros: second.recorded_at_micros,
+      call_id: second.call_id,
+    },
+  };
+
+  assert.equal(decodeWebUsageCallPage(page, "newest"), page);
+  assert.throws(
+    () => decodeWebUsageCallPage({ ...page, calls: [second, first] }, "newest"),
+    /strictly descending by call key/,
+  );
+  assert.throws(
+    () =>
+      decodeWebUsageCallPage(
+        {
+          ...page,
+          continuation: { ...page.continuation, call_id: first.call_id },
+        },
+        "newest",
+      ),
+    /cursor anchored to the final usage call/,
+  );
+});
+
+test("generated usage decoder accepts an omitted optional continuation", () => {
+  const page = { calls: [usageCall()] };
+
+  assert.equal(decodeWebUsageCallPage(page, "newest"), page);
+});
+
+test("generated usage decoder rejects spurious invalid cache breakdowns", () => {
+  const call = usageCall();
+  call.cost = {
+    status: "unavailable",
+    reason: "invalid_cache_breakdown",
+  };
+
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [call], continuation: null }, "newest"),
+    /consistent with token evidence and input semantics/,
+  );
+});
+
+test("generated usage summary preserves hidden constituent breakdown failures", () => {
+  const group = usageGroup();
+  group.input_semantics = "cache_inclusive";
+  group.coverage.cache_creation_input = true;
+  group.coverage.cache_read_input = true;
+  group.tokens.input = "101";
+  group.tokens.cache_creation_input = "2";
+  group.tokens.cache_read_input = "0";
+  group.cost = { status: "unavailable", reason: "invalid_cache_breakdown" };
+
+  assert.equal(
+    decodeWebUsageSummary({ groups: [group], truncated: false }).groups[0],
+    group,
+  );
+});
+
+test("generated usage summary rejects hidden breakdown failures for exclusive input", () => {
+  const group = usageGroup();
+  group.cost = { status: "unavailable", reason: "invalid_cache_breakdown" };
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /consistent with token evidence and input semantics/,
+  );
+});
+
+test("generated usage decoder bounds profile identities by UTF-8 bytes", () => {
+  const empty = usageGroup();
+  empty.profile_id = "";
+  const oversized = usageGroup();
+  oversized.profile_id = "é".repeat(129);
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [empty], truncated: false }),
+    /at least 1 characters|1 through 256 UTF-8 bytes/,
+  );
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [oversized], truncated: false }),
+    /1 through 256 UTF-8 bytes/,
+  );
+});
+
+test("generated usage decoder correlates call kind with turn presence", () => {
+  const compaction = usageCall();
+  compaction.call_kind = "context_compaction";
+  const ordinary = usageCall();
+  ordinary.turn_id = null;
+
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [compaction], continuation: null }, "newest"),
+    /turn_id must be string|null exactly for context compaction calls/,
+  );
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [ordinary], continuation: null }, "newest"),
+    /turn_id must be string|null exactly for context compaction calls/,
+  );
+});
+
+test("generated usage decoder rejects omitted turns for turn-scoped calls", () => {
+  const ordinary = usageCall();
+  delete ordinary.turn_id;
+
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [ordinary], continuation: null }, "newest"),
+    /turn_id.*present|null exactly for context compaction calls/,
+  );
+});
+
+test("generated usage decoders reject cost states inconsistent with evidence", () => {
+  const unknownSemantics = usageCall();
+  unknownSemantics.input_semantics = "unknown";
+  assert.throws(
+    () =>
+      decodeWebUsageCallPage(
+        { calls: [unknownSemantics], continuation: null },
+        "newest",
+      ),
+    /unavailable with reason unknown_input_semantics/,
+  );
+
+  const contradictoryUnavailable = usageGroup();
+  contradictoryUnavailable.cost = {
+    status: "unavailable",
+    reason: "no_token_evidence",
+  };
+  assert.throws(
+    () =>
+      decodeWebUsageSummary({
+        groups: [contradictoryUnavailable],
+        truncated: false,
+      }),
+    /consistent with token evidence and input semantics/,
+  );
+});
+
+test("generated search decoder rejects an invalid projection identity", () => {
+  const page = searchPage();
+  page.continuation.projection_id = "0";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /continuation must be one recognized variant/,
+  );
+});
+
+test("generated search decoder rejects more than one bounded page", () => {
+  const page = searchPage();
+  page.results = Array.from({ length: 101 }, () => page.results[0]);
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /results must be at most 100 items/,
+  );
+});
+
+test("generated search decoder rejects an oversized UTF-8 snippet", () => {
+  const page = searchPage();
+  page.results[0].snippet = "é".repeat(257);
+  page.results[0].highlights = [];
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /snippet must be at most 512 UTF-8 bytes/,
+  );
+});
+
+test("generated search decoder rejects a highlight inside a UTF-8 character", () => {
+  const page = searchPage();
+  page.results[0].highlights = [{ start_byte: 4, end_byte: 5 }];
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /range on UTF-8 boundaries/,
+  );
+});
+
+test("generated search decoder rejects overlapping highlight ranges", () => {
+  const page = searchPage();
+  page.results[0].highlights = [
+    { start_byte: 0, end_byte: 3 },
+    { start_byte: 2, end_byte: 5 },
+  ];
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /ordered non-overlapping in-bounds UTF-8 byte range/,
+  );
+});
+
+test("generated search decoder rejects too many highlight ranges", () => {
+  const page = searchPage();
+  page.results[0].snippet = "x".repeat(512);
+  page.results[0].highlights = Array.from({ length: 513 }, () => ({
+    start_byte: 0,
+    end_byte: 1,
+  }));
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /highlights must be at most 512 items/,
+  );
+});
+
+test("generated search decoder rejects continuation on an empty page", () => {
+  const empty = searchPage();
+  empty.results = [];
+  assert.throws(
+    () => decodeWebSearchPage(empty),
+    /cursor anchored to the final search result/,
+  );
+});
+
+test("generated search decoder rejects a continuation address mismatch", () => {
+  const mismatched = searchPage();
+  mismatched.continuation.address.event_sequence = "2";
+  assert.throws(
+    () => decodeWebSearchPage(mismatched),
+    /cursor anchored to the final search result/,
+  );
+});
+
+test("generated search decoder rejects a continuation projection mismatch", () => {
+  const mismatchedProjection = searchPage();
+  mismatchedProjection.continuation.projection_id = "2";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedProjection),
+    /cursor anchored to the final search result/,
+  );
+});
+
+test("generated search decoder rejects out-of-order result addresses", () => {
+  const page = searchPage();
+  const newer = structuredClone(page.results[0]);
+  newer.address.event_sequence = "2";
+  newer.projection_id = "2";
+  page.results.push(newer);
+  page.continuation.address.event_sequence = "2";
+  page.continuation.projection_id = "2";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /strictly descending search result key/,
+  );
+});
+
+test("generated search decoder rejects out-of-order same-address projections", () => {
+  const page = searchPage();
+  page.results[0].projection_id = "2";
+  const outOfOrder = structuredClone(page.results[0]);
+  outOfOrder.projection_id = "3";
+  page.results.push(outOfOrder);
+  page.continuation.projection_id = "3";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /strictly descending search result key/,
+  );
+});
+
+test("generated search decoder rejects malformed result identities", () => {
+  const page = searchPage();
+  page.results[0].session_id = "not-a-uuid";
+
+  assert.throws(() => decodeWebSearchPage(page), /matching/);
+});
+
+test("generated search decoder rejects a contradictory source session", () => {
+  const mismatchedSession = searchPage();
+  mismatchedSession.results[0].source.session_id =
+    "00000000-0000-0000-0000-000000000992";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedSession),
+    /source consistent with the result session and content class/,
+  );
+});
+
+test("generated search decoder rejects a contradictory content class", () => {
+  const mismatchedContent = searchPage();
+  mismatchedContent.results[0].content_class = "tool_result";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedContent),
+    /source consistent with the result session and content class/,
+  );
+});
+
+test("generated descriptor decoder rejects an invalid session ID", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineDescriptor({
+        session_id: "not-a-uuid",
+        sizes: {
+          item_count: "1",
+          projected_text_bytes: "0",
+          projected_structured_bytes: "96",
+          referenced_blob_count: "0",
+          referenced_blob_bytes: "0",
+        },
+        first_address: { event_sequence: "1" },
+        latest_address: { event_sequence: "1" },
+        work: { active_turn_count: "0", queued_turn_count: "0" },
+        observed_through: "1",
+      }),
+    /matching/,
+  );
+});
+
+test("generated window decoder rejects an invalid session ID", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineWindow({
+        session_id: "not-a-uuid",
+        items: [],
+        projected_structured_bytes: 0,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    /matching/,
+  );
 });

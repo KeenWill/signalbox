@@ -23,6 +23,24 @@ use crate::{
 
 const COMMAND_KIND: &str = durable_command_kind_to_str(DurableCommandKind::CompactSession);
 
+/// Meaning of the input-token axis retained for a context-compaction call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContextCompactionInputTokenSemantics {
+    /// Input tokens exclude separately reported cache axes.
+    CacheExclusive,
+    /// Input tokens include separately reported cache axes.
+    CacheInclusive,
+}
+
+impl ContextCompactionInputTokenSemantics {
+    const fn includes_cache_tokens(self) -> bool {
+        match self {
+            Self::CacheExclusive => false,
+            Self::CacheInclusive => true,
+        }
+    }
+}
+
 /// All caller and hub-minted facts for a fresh explicit command attempt.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PrepareContextCompactionRequest {
@@ -40,6 +58,8 @@ pub struct PrepareContextCompactionRequest {
     pub selection: DirectModelSelection,
     /// Exact resolved provider target.
     pub target: ResolvedProviderTarget,
+    /// Meaning of reported input tokens relative to separate cache axes.
+    pub input_token_semantics: ContextCompactionInputTokenSemantics,
     /// Non-secret credential reference pinned for the call.
     pub credential_reference: String,
     /// Fresh physical call candidate.
@@ -1049,8 +1069,8 @@ async fn prepare_in_transaction(
         "INSERT INTO context_compaction_model_call
             (model_call_id, session_id, direct_model_selection_id,
              resolved_provider_model_identity_id, source_frontier_id,
-             credential_reference, state_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, 'prepared')",
+             credential_reference, usage_input_includes_cache_tokens, state_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'prepared')",
     )
     .bind(request.call.into_uuid())
     .bind(session_id_to_uuid(request.session))
@@ -1058,6 +1078,7 @@ async fn prepare_in_transaction(
     .bind(request.target.identity().into_uuid())
     .bind(source_frontier.into_uuid())
     .bind(&request.credential_reference)
+    .bind(request.input_token_semantics.includes_cache_tokens())
     .execute(&mut **transaction)
     .await;
     if let Err(error) = insert_call {
