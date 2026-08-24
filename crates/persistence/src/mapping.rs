@@ -2,6 +2,7 @@
 
 use std::{error::Error, fmt};
 
+use crate::repo_watch_webhook::RepoWatchWebhookDisposition;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -182,6 +183,38 @@ use sqlx::types::Uuid;
 
 use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
 
+/// Closed evaluation-corpus source discriminators stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvaluationCorpusSourceStorageKind {
+    /// Cases originated in a repository checkout.
+    Repository,
+    /// Cases were authored directly into the instance database.
+    DatabaseNative,
+    /// Cases are addressed through a blob-store binding.
+    BlobReference,
+}
+
+/// Encodes an evaluation-corpus source as its closed PostgreSQL spelling.
+pub const fn evaluation_corpus_source_to_str(
+    value: EvaluationCorpusSourceStorageKind,
+) -> &'static str {
+    match value {
+        EvaluationCorpusSourceStorageKind::Repository => "repository",
+        EvaluationCorpusSourceStorageKind::DatabaseNative => "database_native",
+        EvaluationCorpusSourceStorageKind::BlobReference => "blob_reference",
+    }
+}
+
+/// Decodes an evaluation-corpus source from its closed PostgreSQL spelling.
+pub fn evaluation_corpus_source_from_str(value: &str) -> Option<EvaluationCorpusSourceStorageKind> {
+    match value {
+        "repository" => Some(EvaluationCorpusSourceStorageKind::Repository),
+        "database_native" => Some(EvaluationCorpusSourceStorageKind::DatabaseNative),
+        "blob_reference" => Some(EvaluationCorpusSourceStorageKind::BlobReference),
+        _ => None,
+    }
+}
+
 /// Closed stored states for one durable runner-loss propagation cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RunnerLossPropagationStateStorageKind {
@@ -337,6 +370,34 @@ pub fn delegation_wake_subject_from_str(value: &str) -> Option<DelegationWakeSto
     match value {
         "result" => Some(DelegationWakeStorageKind::Result),
         "message" => Some(DelegationWakeStorageKind::Message),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_webhook_disposition_to_str(
+    value: RepoWatchWebhookDisposition,
+) -> &'static str {
+    match value {
+        RepoWatchWebhookDisposition::Projected => "projected",
+        RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
+        RepoWatchWebhookDisposition::Superseded => "superseded",
+        RepoWatchWebhookDisposition::Ignored => "ignored",
+        RepoWatchWebhookDisposition::Quarantined => "quarantined",
+    }
+}
+
+/// Paired with the encoder above so a renamed or added disposition cannot
+/// update the writer while leaving a reader interpreting the old spelling.
+#[cfg(feature = "test-support")]
+pub(crate) fn repo_watch_webhook_disposition_from_str(
+    value: &str,
+) -> Option<RepoWatchWebhookDisposition> {
+    match value {
+        "projected" => Some(RepoWatchWebhookDisposition::Projected),
+        "duplicate_state" => Some(RepoWatchWebhookDisposition::DuplicateState),
+        "superseded" => Some(RepoWatchWebhookDisposition::Superseded),
+        "ignored" => Some(RepoWatchWebhookDisposition::Ignored),
+        "quarantined" => Some(RepoWatchWebhookDisposition::Quarantined),
         _ => None,
     }
 }
@@ -662,6 +723,7 @@ pub(crate) enum ToolApprovalDecisionSourceStorageKind {
     PolicyAuto,
     SessionBlanket,
     Delegate,
+    UserOverride,
 }
 
 pub(crate) const fn tool_approval_decision_source_to_str(
@@ -672,6 +734,7 @@ pub(crate) const fn tool_approval_decision_source_to_str(
         ToolApprovalDecisionSourceStorageKind::PolicyAuto => "policy_auto",
         ToolApprovalDecisionSourceStorageKind::SessionBlanket => "session_blanket",
         ToolApprovalDecisionSourceStorageKind::Delegate => "delegate",
+        ToolApprovalDecisionSourceStorageKind::UserOverride => "user_override",
     }
 }
 
@@ -683,6 +746,7 @@ pub(crate) fn tool_approval_decision_source_from_str(
         "policy_auto" => Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto),
         "session_blanket" => Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket),
         "delegate" => Some(ToolApprovalDecisionSourceStorageKind::Delegate),
+        "user_override" => Some(ToolApprovalDecisionSourceStorageKind::UserOverride),
         _ => None,
     }
 }
@@ -702,6 +766,8 @@ pub(crate) enum DurableCommandKind {
     SubmitInput,
     /// Tool-request decision.
     DecideToolRequest,
+    /// Delegate-denial override.
+    OverrideDeniedToolRequest,
     /// Review-workflow command.
     ReviewWorkflow,
     /// Review-orchestration command.
@@ -731,6 +797,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::ReplaceSessionMetadata => "replace_session_metadata",
         DurableCommandKind::SubmitInput => "submit_input",
         DurableCommandKind::DecideToolRequest => "decide_tool_request",
+        DurableCommandKind::OverrideDeniedToolRequest => "override_denied_tool_request",
         DurableCommandKind::ReviewWorkflow => "review_workflow",
         DurableCommandKind::ReviewOrchestration => "review_orchestration",
         DurableCommandKind::CompactSession => "compact_session",
@@ -753,6 +820,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "replace_session_metadata" => Some(DurableCommandKind::ReplaceSessionMetadata),
         "submit_input" => Some(DurableCommandKind::SubmitInput),
         "decide_tool_request" => Some(DurableCommandKind::DecideToolRequest),
+        "override_denied_tool_request" => Some(DurableCommandKind::OverrideDeniedToolRequest),
         "review_workflow" => Some(DurableCommandKind::ReviewWorkflow),
         "review_orchestration" => Some(DurableCommandKind::ReviewOrchestration),
         "compact_session" => Some(DurableCommandKind::CompactSession),
@@ -1130,6 +1198,29 @@ pub(crate) const fn repo_watch_event_target_to_str(
     match value {
         RepoWatchEventTargetStorageKind::PullRequest => "pull_request",
         RepoWatchEventTargetStorageKind::Branch => "branch",
+    }
+}
+
+/// Which producer recorded one repository-watch event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchEventProducerStorageKind {
+    Poll,
+}
+
+pub(crate) const fn repo_watch_event_producer_to_str(
+    value: RepoWatchEventProducerStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchEventProducerStorageKind::Poll => "poll",
+    }
+}
+
+pub(crate) fn repo_watch_event_producer_from_str(
+    value: &str,
+) -> Option<RepoWatchEventProducerStorageKind> {
+    match value {
+        "poll" => Some(RepoWatchEventProducerStorageKind::Poll),
+        _ => None,
     }
 }
 
@@ -2211,12 +2302,13 @@ mod tests {
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
         DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
-        PlanEventStorageKind, PositiveOrdinalMappingError, RepoWatchEvaluationOutcomeStorageKind,
-        RepoWatchLifecycleCutoffDispositionStorageKind, RepoWatchObligationSettlementStorageKind,
-        RunnerLossPropagationStateStorageKind, SessionCreationCauseStorageKind,
-        SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
-        StoredModelSettingsError, ToolApprovalDecisionSourceStorageKind,
-        ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        EvaluationCorpusSourceStorageKind, PlanEventStorageKind, PositiveOrdinalMappingError,
+        RepoWatchEvaluationOutcomeStorageKind, RepoWatchLifecycleCutoffDispositionStorageKind,
+        RepoWatchObligationSettlementStorageKind, RunnerLossPropagationStateStorageKind,
+        SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
+        SessionPlacementResultStorageKind, StoredModelSettingsError,
+        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
+        accepted_input_id_from_uuid, accepted_input_id_to_uuid,
         approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
         approval_judge_state_from_str, approval_judge_state_to_str,
         approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
@@ -2232,7 +2324,8 @@ mod tests {
         delegation_wake_subject_from_str, delegation_wake_subject_to_str,
         dispatched_runner_state_from_str, dispatched_runner_state_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, durable_command_kind_from_str,
-        durable_command_kind_to_str, input_position_from_numeric, input_position_to_numeric,
+        durable_command_kind_to_str, evaluation_corpus_source_from_str,
+        evaluation_corpus_source_to_str, input_position_from_numeric, input_position_to_numeric,
         model_change_adjustments_from_json, model_change_adjustments_to_json,
         model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
         plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
@@ -2259,6 +2352,29 @@ mod tests {
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
         turn_id_to_uuid,
     };
+
+    #[test]
+    fn evaluation_corpus_source_mapping_is_closed() {
+        assert_eq!(
+            evaluation_corpus_source_from_str(evaluation_corpus_source_to_str(
+                EvaluationCorpusSourceStorageKind::Repository,
+            )),
+            Some(EvaluationCorpusSourceStorageKind::Repository)
+        );
+        assert_eq!(
+            evaluation_corpus_source_from_str(evaluation_corpus_source_to_str(
+                EvaluationCorpusSourceStorageKind::DatabaseNative,
+            )),
+            Some(EvaluationCorpusSourceStorageKind::DatabaseNative)
+        );
+        assert_eq!(
+            evaluation_corpus_source_from_str(evaluation_corpus_source_to_str(
+                EvaluationCorpusSourceStorageKind::BlobReference,
+            )),
+            Some(EvaluationCorpusSourceStorageKind::BlobReference)
+        );
+        assert_eq!(evaluation_corpus_source_from_str("unknown"), None);
+    }
 
     #[test]
     fn runner_loss_propagation_state_mapping_is_closed() {

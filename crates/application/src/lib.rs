@@ -4,6 +4,7 @@
 //! depending inward on `signalbox-domain`.
 
 mod approval_judge;
+mod commissioned_dispatch;
 mod conversation_import;
 mod create_session;
 mod create_session_from_imported_frontier;
@@ -13,6 +14,7 @@ mod model_execution;
 mod operator_failure;
 mod replace_session_defaults;
 mod repo_watch;
+mod repo_watch_webhook;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
@@ -26,9 +28,20 @@ mod tool_dispatch_gate;
 mod tool_execution_test_support;
 mod tool_loop;
 mod tool_loop_ports;
+mod turn_liveness;
 mod update_session_placement;
 
-pub use approval_judge::ApprovalJudgeAuthorization;
+pub use approval_judge::{
+    ApprovalJudgeAuthorization, ApprovalJudgeBranchAuthority, ApprovalJudgeBranchAuthorityInput,
+    ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
+    ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority,
+    ApprovalJudgePullRequestAuthorityInput,
+};
+pub use commissioned_dispatch::{
+    CommissionDispatchPreparationError, CommissionDispatchRequest, CommissionedDispatchFence,
+    CommissionedDispatchIdGenerator, PreparedCommissionedDispatch,
+    UuidV7CommissionedDispatchIdGenerator,
+};
 pub use conversation_import::{
     ImportConversationError, ImportConversationOutcome, ImportConversationReport,
     ImportConversationService, ImportedConversationConversionReport, ImportedConversationConverter,
@@ -63,10 +76,10 @@ pub use model_execution::{
     ModelCallInputTokenCounter, ModelCallObservationCommitOutcome, ModelCallProvider,
     ModelCallTerminalIdentityCandidates, ModelConversationMessage, ModelFrontierRenderingError,
     ModelToolResultContent, PrepareModelCallOutcome, PrepareModelCallTransaction,
-    PreparedModelCallFailureCause, PreparedModelOperation, RetainedCapabilityFailureStatus,
-    RetainedModelCallExecutionState, RetainedModelCallObservationStatus,
-    ScriptedModelCallCapability, ScriptedModelCallError, ScriptedModelCallProvider,
-    ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
+    PreparedModelCallFailureCause, PreparedModelOperation, RetainedModelCallExecutionState,
+    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus, ScriptedModelCallCapability,
+    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
+    UuidV7ModelCallExecutionIdGenerator,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{
@@ -76,16 +89,30 @@ pub use replace_session_defaults::{
 pub use repo_watch::{
     RepoWatchBranchHead, RepoWatchCheckCompletionGeneration,
     RepoWatchCheckCompletionGenerationError, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchDifferError, RepoWatchDispatchIdGenerator,
-    RepoWatchDispatchPreparationError, RepoWatchDispatchService, RepoWatchDispatchServiceError,
-    RepoWatchDispatchTransaction, RepoWatchEventIdGenerator, RepoWatchObservation,
-    RepoWatchPreparedDispatchAction, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateError, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
-    RepoWatchReviewObservation, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchSingletonKey, RepoWatchTemplateResolver, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    RepoWatchCheckSuiteObservation, RepoWatchDifferError, RepoWatchDifferFailureKind,
+    RepoWatchDispatchIdGenerator, RepoWatchDispatchPreparationError, RepoWatchDispatchService,
+    RepoWatchDispatchServiceError, RepoWatchDispatchTransaction, RepoWatchEventContentIdentityV1,
+    RepoWatchEventIdGenerator, RepoWatchEventIdentityFrontierEntryV1,
+    RepoWatchEventIdentityFrontierError, RepoWatchEventIdentityFrontierV1,
+    RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPreparedDispatchAction,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
+    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewObservation,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchSingletonKey,
+    RepoWatchTemplateResolver, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
     UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    repo_watch_events_have_equal_identified_content,
+};
+pub use repo_watch_webhook::{
+    RepoWatchBranchHeadPreviousV1, RepoWatchObservationApplyV1, RepoWatchObservationChangeV1,
+    RepoWatchObservationPatchV1, RepoWatchPullRequestHeadGuardV1,
+    RepoWatchPullRequestMissingPolicyV1, RepoWatchTargetedRefreshCoalescerV1,
+    RepoWatchTargetedRefreshV1, RepoWatchWebhookApplyError, RepoWatchWebhookBodyReferenceV1,
+    RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
+    RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
+    RepoWatchWebhookPullRequestContextV1, RepoWatchWebhookPullRequestContextV1Input,
+    apply_repo_watch_observation_patch_v1, map_repo_watch_webhook_delivery_v1,
 };
 pub use review_orchestration::{
     ReviewConcernClaim, ReviewConcernOutcome, ReviewConcernSpec, ReviewConcernSuccess,
@@ -111,7 +138,7 @@ pub use scheduler::{
     EligibilitySweepBatch, EligibilityWorkSource, GoalAwareEligibilityPass,
     GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityNudge,
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
-    ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
+    ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit, scheduler_pass_admission_cap,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{
@@ -143,16 +170,22 @@ pub use tool_execution_test_support::{
 pub use tool_loop::{
     CompiledTool, CompiledToolCatalog, CorrelatedDurableChildWait, CorrelatedDurableToolCompletion,
     CorrelatedToolExecutorEvidence, DecideToolRequestService, DuplicateToolDefinition,
-    NoToolCatalog, RetainedToolExecutionState, ToolApprovalIdGenerator, ToolArgumentValidator,
-    ToolCatalog, ToolCatalogValidationFailure, ToolDefinition, ToolExecutionIdGenerator,
-    ToolExecutionInvocation, ToolExecutionService, ToolExecutionServiceError,
-    ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorDisposition, ToolExecutorEvidence,
-    ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure, UuidV7ToolLoopIdGenerator,
+    NoToolCatalog, OverrideDeniedToolRequestService, RetainedToolExecutionState,
+    ToolApprovalIdGenerator, ToolArgumentValidator, ToolCatalog, ToolCatalogValidationFailure,
+    ToolDefinition, ToolExecutionIdGenerator, ToolExecutionInvocation, ToolExecutionService,
+    ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorDisposition,
+    ToolExecutorEvidence, ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure,
+    UuidV7ToolLoopIdGenerator,
 };
 pub use tool_loop_ports::{
-    DecideToolRequestTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
+    DecideToolRequestTransaction, OverrideDeniedToolRequestTransaction,
+    PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
     RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
     ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+};
+pub use turn_liveness::{
+    StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessBoundError,
+    TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
