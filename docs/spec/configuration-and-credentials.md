@@ -15,7 +15,9 @@ The usable context-ceiling definition and Codex CLI catalog values are
 re-verified against this PR (`agent/daemon-live-codex-effective-window`).
 
 The required numeric-bound configuration grammar and scheduler admission policy
-are verified against this PR (`agent/bounds-required-config-protocol`).
+are verified against this PR (`agent/bounds-required-config-protocol`). The
+fenced PostgreSQL prewarm policy is verified against this PR
+(`agent/daemon-live-configured-pool-prewarm`).
 
 The delegated tool-approval posture, judge selection, and daemon composition are
 verified against the implementing stack through this PR
@@ -644,6 +646,12 @@ authoritative session execution while the scheduler task and the daemon's
 ingestion and process services remain live; `"none"` admits every currently
 eligible session. The retired optional `[scheduler]` table is an unknown root
 field.
+
+The required `numeric_bounds.fenced_pool_min_connections` policy controls how
+many fenced PostgreSQL sessions are established before daemon work begins;
+`"none"` preserves SQLx's zero-session floor. A finite value above the daemon's
+compiled pool ceiling is rejected during configuration rather than silently
+clamped.
 
 The optional `[model_settings]` table supplies the deployment-global settings
 overlay. Each `[[model_settings_profiles]]` entry gives an exact unique `name`

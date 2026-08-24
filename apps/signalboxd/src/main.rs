@@ -42,6 +42,7 @@ use signalbox_model_runtime_anthropic::{
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 use signalbox_persistence::{
     conversation_import::backfill_imported_conversation_display_titles,
+    hub_fence::FENCED_POOL_MAX_CONNECTIONS,
     migrate,
     model_execution::PostgresModelCallRepository,
     repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
@@ -102,6 +103,10 @@ fn graceful_shutdown_window(
     model_exchange_timeout
         .zip(cleanup_window)
         .map(|(exchange, cleanup)| exchange.saturating_add(cleanup))
+}
+
+fn validate_fenced_pool_min_connections(minimum: Option<u32>) -> Option<Option<u32>> {
+    (!minimum.is_some_and(|minimum| minimum > FENCED_POOL_MAX_CONNECTIONS)).then_some(minimum)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1203,6 +1208,14 @@ async fn run_hub(
             })
     };
     let model_exchange_timeout = configured_duration("model_exchange_timeout");
+    let fenced_pool_min_connections =
+        validate_fenced_pool_min_connections(configured_u32("fenced_pool_min_connections")?)
+            .ok_or_else(|| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("invalid_fenced_pool_min_connections"),
+                )
+            })?;
     let scheduler_pass_occupancy_bound = configured_duration("scheduler_pass_occupancy_bound")
         .map(SchedulerPassOccupancyBound::try_new)
         .transpose()
@@ -1521,19 +1534,22 @@ async fn run_hub(
         diagnostic_model_identity_limit,
     );
     let model_targets = model_configuration.target_catalog();
-    let mut database = FencedHubDatabase::connect_production(configuration.database_url())
-        .await
-        .map_err(|error| {
-            let phase = match &error {
-                FencedHubDatabaseError::InitializeFence(_) => RuntimePhase::Migration,
-                FencedHubDatabaseError::ParseOptions(_)
-                | FencedHubDatabaseError::ConnectBootstrap(_)
-                | FencedHubDatabaseError::AcquireGuard(_)
-                | FencedHubDatabaseError::AdvanceFence(_)
-                | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
-            };
-            erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
-        })?;
+    let mut database = FencedHubDatabase::connect_production(
+        configuration.database_url(),
+        fenced_pool_min_connections,
+    )
+    .await
+    .map_err(|error| {
+        let phase = match &error {
+            FencedHubDatabaseError::InitializeFence(_) => RuntimePhase::Migration,
+            FencedHubDatabaseError::ParseOptions(_)
+            | FencedHubDatabaseError::ConnectBootstrap(_)
+            | FencedHubDatabaseError::AcquireGuard(_)
+            | FencedHubDatabaseError::AdvanceFence(_)
+            | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
+        };
+        erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
+    })?;
     let pool = database.pool().clone();
     let tools = match daemon_tool_configuration {
         Some(tool_configuration) => DaemonTools::try_new_production(
@@ -2542,24 +2558,38 @@ mod tests {
 
     use super::{
         AnthropicConstructionError, BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT,
-        GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError,
-        HubConfigurationValues, HubRuntimeError, MODEL_CONFIGURATION_FILE_ENVIRONMENT,
-        OpenAiConstructionError, OperatorFilterDisposition, PROCESS_SOCKET_PATH_ENVIRONMENT,
-        ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RepositoryWatchRuntimeError,
-        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
-        RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause,
-        ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
-        anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
-        credential_files_conflict, database_close_failure_outcome, drain_runtime_tasks,
-        erase_startup_cause, graceful_shutdown_window, migrate_scan_then_schedule,
-        openai_construction_cause, operator_filter, process_runtime_failure_class,
-        report_database_close_failure, repository_watch_rule_configuration_error,
-        run_scheduler_until_shutdown, runner_lifecycle_failure_class, should_close_pool,
-        staging_sweep_failure_outcome,
+        FENCED_POOL_MAX_CONNECTIONS, GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration,
+        HubConfigurationError, HubConfigurationValues, HubRuntimeError,
+        MODEL_CONFIGURATION_FILE_ENVIRONMENT, OpenAiConstructionError, OperatorFilterDisposition,
+        PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
+        RepositoryWatchRuntimeError, RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase,
+        RuntimeStopCause, RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause,
+        SchedulerStopCause, ShutdownOutcome, SingleHubGuardError,
+        TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
+        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
+        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
+        graceful_shutdown_window, migrate_scan_then_schedule, openai_construction_cause,
+        operator_filter, process_runtime_failure_class, report_database_close_failure,
+        repository_watch_rule_configuration_error, run_scheduler_until_shutdown,
+        runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
+        validate_fenced_pool_min_connections,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
     const BRAVE_KEY_FILE_FIXTURE: &str = "brave-key";
+
+    #[test]
+    fn fenced_pool_prewarm_cannot_exceed_the_compiled_capacity() {
+        assert_eq!(
+            validate_fenced_pool_min_connections(Some(FENCED_POOL_MAX_CONNECTIONS)),
+            Some(Some(FENCED_POOL_MAX_CONNECTIONS))
+        );
+        assert_eq!(
+            validate_fenced_pool_min_connections(Some(FENCED_POOL_MAX_CONNECTIONS + 1)),
+            None
+        );
+        assert_eq!(validate_fenced_pool_min_connections(None), Some(None));
+    }
 
     fn hub_configuration_values() -> HubConfigurationValues {
         HubConfigurationValues {

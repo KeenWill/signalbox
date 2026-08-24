@@ -89,7 +89,7 @@ async fn single_hub_guard_loss_is_observable() -> Result<(), Box<dyn Error>> {
 async fn fenced_database_close_drains_pool_before_guard_release() -> Result<(), Box<dyn Error>> {
     let (container, control_pool, database_url) = postgres().await?;
     let options = local_test_connection_options(&database_url)?;
-    let database = FencedHubDatabase::connect_with(options).await?;
+    let database = FencedHubDatabase::connect_with(options, None).await?;
     let pool = database.pool().clone();
     let checkout_a = pool.acquire().await?;
     let checkout_b = pool.acquire().await?;
@@ -134,7 +134,7 @@ async fn fenced_database_close_drains_pool_before_guard_release() -> Result<(), 
 async fn fenced_database_close_waits_for_a_detached_pool_session() -> Result<(), Box<dyn Error>> {
     let (container, control_pool, database_url) = postgres().await?;
     let options = local_test_connection_options(&database_url)?;
-    let database = FencedHubDatabase::connect_with(options).await?;
+    let database = FencedHubDatabase::connect_with(options, None).await?;
     let detached = database.pool().acquire().await?.detach();
     let close = database.close();
     tokio::pin!(close);
@@ -165,7 +165,7 @@ async fn fenced_database_close_waits_for_a_detached_pool_session() -> Result<(),
 async fn implicit_fenced_database_drop_retains_guard() -> Result<(), Box<dyn Error>> {
     let (container, control_pool, database_url) = postgres().await?;
     let options = local_test_connection_options(&database_url)?;
-    let database = FencedHubDatabase::connect_with(options).await?;
+    let database = FencedHubDatabase::connect_with(options, None).await?;
     let escaped_pool = database.pool().clone();
     let checkout = escaped_pool.acquire().await?;
 
@@ -194,7 +194,7 @@ async fn implicit_fenced_database_drop_retains_guard() -> Result<(), Box<dyn Err
 async fn successor_waits_for_every_prior_fenced_pool_session() -> Result<(), Box<dyn Error>> {
     let (container, control_pool, database_url) = postgres().await?;
     let options = local_test_connection_options(&database_url)?;
-    let first = FencedHubDatabase::connect_with(options.clone()).await?;
+    let first = FencedHubDatabase::connect_with(options.clone(), None).await?;
     assert_eq!(first.generation().get(), 2);
     let prior_pool = first.pool().clone();
     let mut prior_checkout_a = prior_pool.acquire().await?;
@@ -224,7 +224,7 @@ async fn successor_waits_for_every_prior_fenced_pool_session() -> Result<(), Box
         .await?;
     assert!(terminated);
 
-    let successor = FencedHubDatabase::connect_with(options);
+    let successor = FencedHubDatabase::connect_with(options, None);
     tokio::pin!(successor);
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(100), &mut successor)
