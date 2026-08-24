@@ -193,7 +193,9 @@ const schemas = {
           "current_turn_id": {
             "anyOf": [
               {
-                "$ref": "#/$defs/WebTurnId"
+                "description": "Checked canonical UUID used for browser-visible turn identities.",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "type": "string"
               },
               {
                 "type": "null"
@@ -240,6 +242,7 @@ const schemas = {
           "session_id",
           "title_truncated",
           "archived",
+          "current_turn_id",
           "active_turn_count",
           "queued_turn_count",
           "state",
@@ -250,11 +253,6 @@ const schemas = {
       },
       "WebSessionId": {
         "description": "Checked canonical UUID used for browser-visible session identities.",
-        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-        "type": "string"
-      },
-      "WebTurnId": {
-        "description": "Checked canonical UUID used for browser-visible turn identities.",
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         "type": "string"
       },
@@ -555,7 +553,9 @@ const schemas = {
           "current_turn_id": {
             "anyOf": [
               {
-                "$ref": "#/$defs/WebTurnId"
+                "description": "Checked canonical UUID used for browser-visible turn identities.",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "type": "string"
               },
               {
                 "type": "null"
@@ -602,6 +602,7 @@ const schemas = {
           "session_id",
           "title_truncated",
           "archived",
+          "current_turn_id",
           "active_turn_count",
           "queued_turn_count",
           "state",
@@ -612,11 +613,6 @@ const schemas = {
       },
       "WebSessionId": {
         "description": "Checked canonical UUID used for browser-visible session identities.",
-        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-        "type": "string"
-      },
-      "WebTurnId": {
-        "description": "Checked canonical UUID used for browser-visible turn identities.",
         "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
         "type": "string"
       },
@@ -1627,6 +1623,22 @@ function fail(path, expected) {
   throw new TypeError(`${path} must be ${expected}`);
 }
 
+function isWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        return false;
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function resolveReference(root, reference) {
   const prefix = "#/$defs/";
   if (!reference.startsWith(prefix)) {
@@ -1757,6 +1769,9 @@ function assertSchema(root, schema, value, path) {
   if (typeof value !== schema.type) {
     fail(path, schema.type);
   }
+  if (schema.type === "string" && !isWellFormedUnicode(value)) {
+    fail(path, "well-formed Unicode text");
+  }
   if (
     schema.type === "string" &&
     schema.maxLength !== undefined &&
@@ -1849,7 +1864,8 @@ export function decodeWebSessionLiveStreamEvent(value) {
 
 function assertLiveSnapshot(snapshot, path) {
   const queuedTurnCount = BigInt(snapshot.queued_turn_count);
-  const expectedPreviewLength = queuedTurnCount > 32n ? 32n : queuedTurnCount;
+  const previewLimit = BigInt(32);
+  const expectedPreviewLength = queuedTurnCount > previewLimit ? previewLimit : queuedTurnCount;
   if (BigInt(snapshot.queued_turn_ids.length) !== expectedPreviewLength) {
     fail(
       `${path}.queued_turn_ids`,
@@ -1917,5 +1933,8 @@ function assertAttentionSummary(summary, path) {
   const hasGoalBlock = Object.hasOwn(summary, "goal_block") && summary.goal_block !== null;
   if ((summary.state === "blocked") !== hasGoalBlock) {
     fail(`${path}.goal_block`, "present exactly for blocked state");
+  }
+  if (summary.title_summary === null && summary.title_truncated) {
+    fail(`${path}.title_truncated`, "false when title_summary is null");
   }
 }

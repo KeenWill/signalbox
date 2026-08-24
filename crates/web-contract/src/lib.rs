@@ -4,7 +4,7 @@
 //! these serde and JSON Schema definitions. Browser DTOs deliberately remain
 //! distinct from domain, persistence, and local process-protocol values.
 
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt, num::NonZeroU64};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, de};
@@ -325,9 +325,8 @@ pub struct WebPositiveU64(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String)
 impl WebPositiveU64 {
     /// Encodes one domain-validated positive value in canonical decimal form.
     #[must_use]
-    pub fn from_u64(value: u64) -> Self {
-        debug_assert!(value > 0, "positive wire values cannot encode zero");
-        Self(value.to_string())
+    pub fn from_nonzero(value: NonZeroU64) -> Self {
+        Self(value.get().to_string())
     }
 }
 
@@ -527,7 +526,6 @@ pub struct WebSessionLiveSnapshot {
     pub observed_through: WebPositiveU64,
     pub active: Option<WebSessionLiveActiveTurn>,
     pub queued_turn_count: WebU64,
-    #[schemars(length(max = 32))]
     pub queued_turn_ids: Vec<WebTurnId>,
     pub reconciliation: Option<WebSessionLiveReconciliation>,
     pub runner: Option<WebSessionLiveRunner>,
@@ -669,6 +667,8 @@ pub struct WebAttentionSummary {
     pub title_summary: Option<String>,
     pub title_truncated: bool,
     pub archived: bool,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub current_turn_id: Option<WebTurnId>,
     pub active_turn_count: WebU64,
     pub queued_turn_count: WebU64,
@@ -796,8 +796,21 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     make_property_nullable(&mut schemas.window, "continuation_after")?;
     make_property_nullable(&mut schemas.attention_snapshot, "continuation")?;
     make_pointer_nullable(
+        &mut schemas.attention_snapshot,
+        "/$defs/WebAttentionSummary/properties/current_turn_id",
+    )?;
+    make_pointer_nullable(
         &mut schemas.attention_event,
         "/$defs/WebAttentionSnapshot/properties/continuation",
+    )?;
+    make_pointer_nullable(
+        &mut schemas.attention_event,
+        "/$defs/WebAttentionSummary/properties/current_turn_id",
+    )?;
+    set_array_max_items(
+        &mut schemas.live_event,
+        "/$defs/WebSessionLiveSnapshot/properties/queued_turn_ids",
+        u64::from(max_session_live_queued_turns()),
     )?;
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
@@ -850,6 +863,19 @@ fn make_pointer_nullable(
     Ok(())
 }
 
+fn set_array_max_items(
+    schema: &mut Value,
+    pointer: &str,
+    maximum: u64,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(pointer)
+        .and_then(Value::as_object_mut)
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    property.insert("maxItems".to_owned(), Value::from(maximum));
+    Ok(())
+}
+
 fn runtime_module(schemas: &GeneratedSchemas) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
         "WebContractBootstrap": schemas.bootstrap,
@@ -872,6 +898,22 @@ const schemas = {schemas};
 
 function fail(path, expected) {{
   throw new TypeError(`${{path}} must be ${{expected}}`);
+}}
+
+function isWellFormedUnicode(value) {{
+  for (let index = 0; index < value.length; index += 1) {{
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {{
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {{
+        return false;
+      }}
+      index += 1;
+    }} else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {{
+      return false;
+    }}
+  }}
+  return true;
 }}
 
 function resolveReference(root, reference) {{
@@ -1004,6 +1046,9 @@ function assertSchema(root, schema, value, path) {{
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
   }}
+  if (schema.type === "string" && !isWellFormedUnicode(value)) {{
+    fail(path, "well-formed Unicode text");
+  }}
   if (
     schema.type === "string" &&
     schema.maxLength !== undefined &&
@@ -1096,7 +1141,8 @@ export function decodeWebSessionLiveStreamEvent(value) {{
 
 function assertLiveSnapshot(snapshot, path) {{
   const queuedTurnCount = BigInt(snapshot.queued_turn_count);
-  const expectedPreviewLength = queuedTurnCount > 32n ? 32n : queuedTurnCount;
+  const previewLimit = BigInt({live_preview_limit});
+  const expectedPreviewLength = queuedTurnCount > previewLimit ? previewLimit : queuedTurnCount;
   if (BigInt(snapshot.queued_turn_ids.length) !== expectedPreviewLength) {{
     fail(
       `${{path}}.queued_turn_ids`,
@@ -1165,10 +1211,14 @@ function assertAttentionSummary(summary, path) {{
   if ((summary.state === "blocked") !== hasGoalBlock) {{
     fail(`${{path}}.goal_block`, "present exactly for blocked state");
   }}
+  if (summary.title_summary === null && summary.title_truncated) {{
+    fail(`${{path}}.title_truncated`, "false when title_summary is null");
+  }}
 }}
 "##,
         contract_name = WEB_CONTRACT_NAME,
         contract_version = WEB_CONTRACT_VERSION,
+        live_preview_limit = max_session_live_queued_turns(),
     ))
 }
 

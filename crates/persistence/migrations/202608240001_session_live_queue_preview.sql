@@ -7,7 +7,7 @@ CREATE TABLE session_live_queued_turn (
     PRIMARY KEY (session_id, acceptance_position),
     FOREIGN KEY (turn_id, session_id, acceptance_position)
         REFERENCES turn_lifecycle (turn_id, session_id, acceptance_position)
-        ON UPDATE RESTRICT ON DELETE RESTRICT
+        ON UPDATE CASCADE ON DELETE CASCADE
 );
 
 INSERT INTO session_live_queued_turn (session_id, turn_id, acceptance_position)

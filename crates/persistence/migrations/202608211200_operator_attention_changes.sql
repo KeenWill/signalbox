@@ -60,13 +60,31 @@ ALTER TABLE session_timeline_fact
             AND attention_turn_state_kind IS NOT NULL)
     );
 
+-- Keep queued goal eligibility indexable for repeated attention-fact refreshes.
+-- Historical goal turns remain immutable; this observation-only bit changes
+-- only when the owning goal history advances.
+ALTER TABLE turn_lifecycle
+    ADD COLUMN attention_queue_relevant boolean NOT NULL DEFAULT true;
+
+UPDATE turn_lifecycle AS lifecycle
+   SET attention_queue_relevant = false
+ WHERE lifecycle.state_kind = 'queued'
+   AND NOT goal_turn_is_runtime_relevant(
+       lifecycle.session_id, lifecycle.turn_id
+   );
+
+CREATE INDEX goal_turn_attention_generation
+    ON goal_turn (session_id, goal_generation, turn_id);
+
 CREATE INDEX turn_lifecycle_attention_active
     ON turn_lifecycle (session_id, acceptance_position DESC)
     WHERE state_kind = 'active' AND NOT delegation_runtime_terminal;
 
 CREATE INDEX turn_lifecycle_attention_queued
     ON turn_lifecycle (session_id, acceptance_position DESC)
-    WHERE state_kind = 'queued' AND NOT delegation_runtime_terminal;
+    WHERE state_kind = 'queued'
+      AND NOT delegation_runtime_terminal
+      AND attention_queue_relevant;
 
 CREATE INDEX turn_lifecycle_attention_terminal
     ON turn_lifecycle (session_id, acceptance_position DESC)
@@ -78,7 +96,10 @@ WITH attention_turn AS (
            lifecycle.active_phase_kind, lifecycle.terminal_disposition_kind
       FROM turn_lifecycle AS lifecycle
      WHERE NOT lifecycle.delegation_runtime_terminal
-       AND goal_turn_is_runtime_relevant(lifecycle.session_id, lifecycle.turn_id)
+       AND (
+           lifecycle.state_kind <> 'queued'
+           OR lifecycle.attention_queue_relevant
+       )
      ORDER BY lifecycle.session_id,
               CASE lifecycle.state_kind
                   WHEN 'active' THEN 0
@@ -120,9 +141,6 @@ BEGIN
                   WHERE lifecycle.session_id = checked_session
                     AND lifecycle.state_kind = 'active'
                     AND NOT lifecycle.delegation_runtime_terminal
-                    AND goal_turn_is_runtime_relevant(
-                        lifecycle.session_id, lifecycle.turn_id
-                    )
                   ORDER BY lifecycle.acceptance_position DESC
                   LIMIT 1)
                 UNION ALL
@@ -133,9 +151,7 @@ BEGIN
                   WHERE lifecycle.session_id = checked_session
                     AND lifecycle.state_kind = 'queued'
                     AND NOT lifecycle.delegation_runtime_terminal
-                    AND goal_turn_is_runtime_relevant(
-                        lifecycle.session_id, lifecycle.turn_id
-                    )
+                    AND lifecycle.attention_queue_relevant
                   ORDER BY lifecycle.acceptance_position DESC
                   LIMIT 1)
                 UNION ALL
@@ -146,9 +162,6 @@ BEGIN
                   WHERE lifecycle.session_id = checked_session
                     AND lifecycle.state_kind = 'terminal'
                     AND NOT lifecycle.delegation_runtime_terminal
-                    AND goal_turn_is_runtime_relevant(
-                        lifecycle.session_id, lifecycle.turn_id
-                    )
                   ORDER BY lifecycle.acceptance_position DESC
                   LIMIT 1)
             ) AS candidate
@@ -265,6 +278,30 @@ LANGUAGE plpgsql
 AS $$
 BEGIN
     PERFORM serialize_operator_attention_change();
+    UPDATE turn_lifecycle AS lifecycle
+       SET attention_queue_relevant = false
+     WHERE lifecycle.session_id = NEW.session_id
+       AND lifecycle.state_kind = 'queued'
+       AND lifecycle.attention_queue_relevant
+       AND EXISTS (
+           SELECT 1
+             FROM goal_turn AS goal
+            WHERE goal.session_id = lifecycle.session_id
+              AND goal.turn_id = lifecycle.turn_id
+       );
+    UPDATE turn_lifecycle AS lifecycle
+       SET attention_queue_relevant = true
+      FROM goal_turn AS goal
+     WHERE lifecycle.session_id = NEW.session_id
+       AND lifecycle.state_kind = 'queued'
+       AND lifecycle.session_id = goal.session_id
+       AND lifecycle.turn_id = goal.turn_id
+       AND goal.goal_generation = CASE NEW.event_kind
+           WHEN 'commissioned' THEN NEW.generation
+           WHEN 'resumed' THEN NEW.generation
+           WHEN 'superseded' THEN NEW.generation + 1
+           ELSE NULL
+       END;
     PERFORM refresh_operator_attention_turn_fact(NEW.session_id);
     INSERT INTO operator_attention_change (session_id, fact_kind)
     VALUES (NEW.session_id, 'goal');

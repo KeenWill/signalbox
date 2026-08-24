@@ -500,6 +500,43 @@ test("generated attention decoder validates decimals and identities", () => {
   );
 });
 
+test("generated attention decoder requires the nullable current turn field", () => {
+  const withoutCurrentTurn = attentionSummary();
+  delete withoutCurrentTurn.current_turn_id;
+
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({ summaries: [withoutCurrentTurn] }),
+      ),
+    /current_turn_id must be present/,
+  );
+});
+
+test("generated attention decoder rejects contradictory title truncation", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ title_truncated: true })],
+        }),
+      ),
+    /title_truncated must be false when title_summary is null/,
+  );
+});
+
+test("generated attention decoder rejects unpaired text surrogates", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ title_summary: "\ud800" })],
+        }),
+      ),
+    /well-formed Unicode text/,
+  );
+});
+
 test("generated attention decoder rejects unknown envelope fields", () => {
   assert.throws(
     () =>

@@ -948,7 +948,10 @@ fn next_web_text_fragment(
 fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
     WebSessionLiveSnapshot {
         session_id: WebSessionId::from_uuid_bytes(snapshot.session.into_uuid().into_bytes()),
-        observed_through: WebPositiveU64::from_u64(snapshot.observed_through),
+        observed_through: WebPositiveU64::from_nonzero(
+            std::num::NonZeroU64::new(snapshot.observed_through)
+                .expect("live snapshot observation cursors are positive"),
+        ),
         active: snapshot.active.map(|active| WebSessionLiveActiveTurn {
             turn_id: WebTurnId::from_uuid_bytes(active.turn.into_uuid().into_bytes()),
             state: match active.state {
@@ -995,7 +998,10 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                     placement_revision,
                 } => WebSessionLiveActiveState::AwaitingRunnerRecovery {
                     runner_id: WebLiveResourceId::from_uuid_bytes(runner.into_uuid().into_bytes()),
-                    placement_revision: WebPositiveU64::from_u64(placement_revision),
+                    placement_revision: WebPositiveU64::from_nonzero(
+                        std::num::NonZeroU64::new(placement_revision)
+                            .expect("runner placement revisions are positive"),
+                    ),
                 },
             },
         }),
@@ -1026,7 +1032,10 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                 }
             }),
         runner: snapshot.runner.and_then(|runner| {
-            let placement_revision = WebPositiveU64::from_u64(runner.placement_revision);
+            let placement_revision = WebPositiveU64::from_nonzero(
+                std::num::NonZeroU64::new(runner.placement_revision)
+                    .expect("runner placement revisions are positive"),
+            );
             match (runner.state, runner.runner, runner.connection_health) {
                 (SessionLiveRunnerState::Unpinned, None, None) => {
                     Some(WebSessionLiveRunner::Unpinned { placement_revision })
@@ -1270,7 +1279,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
             cursor,
             AttentionFollowDisposition::Continue,
         ),
-        |(repository, mut pending, cursor, disposition)| async move {
+        |(repository, mut pending, mut cursor, disposition)| async move {
             if let Some((event, emitted_cursor)) = pending.pop_front() {
                 return Some((
                     event,
@@ -1288,7 +1297,12 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
             loop {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 match repository.changes_after(cursor).await {
-                    Ok(AttentionChanges::Updated { summaries, .. }) if summaries.is_empty() => {}
+                    Ok(AttentionChanges::Updated {
+                        cursor: next,
+                        summaries,
+                    }) if summaries.is_empty() => {
+                        cursor = next;
+                    }
                     Ok(AttentionChanges::Updated {
                         cursor: next,
                         summaries,

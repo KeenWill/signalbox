@@ -56,7 +56,7 @@ type WebAttentionSummary = {
   readonly action?: WebAttentionAction | null;
   readonly active_turn_count: WebU64;
   readonly archived: boolean;
-  readonly current_turn_id?: WebTurnId | null;
+  readonly current_turn_id: string | null;
   readonly goal_block?: WebAttentionGoalBlock | null;
   readonly judge: WebAttentionJudgeFacts;
   readonly last_activity: WebAttentionActivity;
