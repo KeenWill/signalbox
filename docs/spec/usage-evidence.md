@@ -18,10 +18,13 @@ most 256 UTF-8 bytes. References of at most 250 bytes use an `exact:` label,
 while longer references receive a stable projection-owned `mapped:` identity.
 The exact-to-bounded mapping is unique, so distinct oversized references cannot
 collide, and the discriminators keep mapped identities disjoint from literal
-names. Exact canonical references remain a private grouping dimension. Each
-physical token axis is either absent or an exact integer in the `u64` domain.
-Aggregate token sums use `u128`, so every sum admitted by the bounded
-source-call ceiling remains exact.
+names. A bounded digest lookup serializes each mapping bucket, while exact
+comparison resolves digest collisions without indexing or bounding the canonical
+reference. The exact reference is retained once in that mapping and is not
+copied into each projected call; reads and aggregates use only its bounded,
+collision-free profile label. Each physical token axis is either absent or an
+exact integer in the `u64` domain. Aggregate token sums use `u128`, so every sum
+admitted by the bounded source-call ceiling remains exact.
 
 ## Compatibility grouping
 

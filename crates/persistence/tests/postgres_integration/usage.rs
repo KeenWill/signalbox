@@ -484,6 +484,38 @@ async fn oversized_credential_references_receive_bounded_distinct_usage_labels()
         .fetch_one(&pool)
         .await?;
     assert_ne!(mapped_label, exact_label);
+    let incompressible = (0..4_096_u32)
+        .map(|value| format!("{value:08x}"))
+        .collect::<String>();
+    let incompressible_label: String = sqlx::query_scalar("SELECT bounded_web_usage_profile($1)")
+        .bind(&incompressible)
+        .fetch_one(&pool)
+        .await?;
+    assert!(incompressible_label.starts_with("mapped:"));
+    let mapping_indexes: Vec<String> = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_oversized_profile_identity'",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert!(
+        mapping_indexes
+            .iter()
+            .all(|index| !index.contains("exact_reference"))
+    );
+    let projection_retains_exact_reference: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1
+               FROM information_schema.columns
+              WHERE table_schema = current_schema()
+                AND table_name = 'web_usage_call_projection'
+                AND column_name = 'credential_reference'
+         )",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!projection_retains_exact_reference);
 
     pool.close().await;
     drop(container);

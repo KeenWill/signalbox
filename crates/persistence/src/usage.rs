@@ -66,13 +66,13 @@ SELECT call_kind, resolved_provider_model_identity_id,
        bounded_state.calls_truncated
   FROM bounded_calls
  CROSS JOIN bounded_state
- GROUP BY call_kind, resolved_provider_model_identity_id, credential_reference,
+ GROUP BY call_kind, resolved_provider_model_identity_id,
           credential_profile_label, usage_provenance_kind,
           usage_input_includes_cache_tokens,
           input_tokens IS NOT NULL, output_tokens IS NOT NULL,
           cache_creation_input_tokens IS NOT NULL,
           cache_read_input_tokens IS NOT NULL, bounded_state.calls_truncated
- ORDER BY call_kind, resolved_provider_model_identity_id, credential_reference,
+ ORDER BY call_kind, resolved_provider_model_identity_id, credential_profile_label,
           usage_provenance_kind, usage_input_includes_cache_tokens NULLS FIRST,
           input_tokens IS NOT NULL, output_tokens IS NOT NULL,
           cache_creation_input_tokens IS NOT NULL,
