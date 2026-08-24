@@ -273,31 +273,32 @@ impl RepositoryWatchRuntime {
             return Ok(());
         }
         let mut tasks = JoinSet::new();
+        let (task_shutdown_sender, task_shutdown) = watch::channel(*shutdown.borrow());
         let mut pollers = Vec::with_capacity(self.tasks.len());
         for task in self.tasks {
             if task.webhook_work.is_some() {
                 let repository = task.repository.clone();
                 let store = task.webhook_store.clone();
-                let monitor_shutdown = shutdown.clone();
+                let monitor_shutdown = task_shutdown.clone();
                 tasks.spawn(async move {
                     monitor_webhook_drain(repository, store, monitor_shutdown).await;
                     RepositoryWatchChildExit::WebhookMonitor
                 });
             }
             pollers.push(Arc::clone(&task.poller));
-            let task_shutdown = shutdown.clone();
+            let repository_shutdown = task_shutdown.clone();
             tasks.spawn(async move {
-                task.run(task_shutdown).await;
+                task.run(repository_shutdown).await;
                 RepositoryWatchChildExit::Repository
             });
         }
         if let Some(webhook) = self.webhook {
-            let webhook_shutdown = shutdown.clone();
+            let webhook_shutdown = task_shutdown.clone();
             tasks.spawn(async move {
                 RepositoryWatchChildExit::Webhook(webhook.run(webhook_shutdown).await)
             });
         }
-        supervise_repository_tasks(tasks, pollers, shutdown).await
+        supervise_repository_tasks(tasks, pollers, shutdown, task_shutdown_sender).await
     }
 }
 
@@ -311,9 +312,11 @@ async fn supervise_repository_tasks(
     mut tasks: JoinSet<RepositoryWatchChildExit>,
     pollers: Vec<Arc<GitHubRepositoryPoller>>,
     mut shutdown: watch::Receiver<bool>,
+    task_shutdown: watch::Sender<bool>,
 ) -> Result<(), RepositoryWatchRuntimeError> {
     let result = async {
         if *shutdown.borrow() {
+            let _ = task_shutdown.send(true);
             while let Some(result) = tasks.join_next().await {
                 result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
             }
@@ -324,6 +327,7 @@ async fn supervise_repository_tasks(
                 biased;
                 changed = shutdown.changed() => {
                     if changed.is_err() || *shutdown.borrow() {
+                        let _ = task_shutdown.send(true);
                         while let Some(result) = tasks.join_next().await {
                             result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
                         }
@@ -333,6 +337,7 @@ async fn supervise_repository_tasks(
                 completed = tasks.join_next() => {
                     return match completed {
                         Some(Ok(_)) if *shutdown.borrow() => {
+                            let _ = task_shutdown.send(true);
                             while let Some(result) = tasks.join_next().await {
                                 result.map_err(|_| RepositoryWatchRuntimeError::RepositoryTaskPanicked)?;
                             }
@@ -359,7 +364,10 @@ async fn supervise_repository_tasks(
     }
     .await;
 
-    tasks.abort_all();
+    // Unexpected sibling exit uses the same cleanup path as operator shutdown,
+    // allowing repository tasks to settle retained targeted completions before
+    // the supervisor returns the lifecycle error.
+    let _ = task_shutdown.send(true);
     while tasks.join_next().await.is_some() {}
     for poller in &pollers {
         poller.drain_fetches().await;
@@ -5799,21 +5807,21 @@ mod tests {
     }
 
     async fn wait_for_webhook_projection_wedge(store: &PostgresRepoWatchWebhookStore) {
-        let wait = async {
-            loop {
-                if store
-                    .projection_wedge_is_reached()
-                    .await
-                    .expect("the fixture can inspect the wedge")
-                {
-                    return;
-                }
-                sleep(Duration::from_millis(10)).await;
+        let deadline = std::time::Instant::now() + SCRIPTED_SERVER_TIMEOUT;
+        loop {
+            if store
+                .projection_wedge_is_reached()
+                .await
+                .expect("the fixture can inspect the wedge")
+            {
+                return;
             }
-        };
-        tokio::time::timeout(SCRIPTED_SERVER_TIMEOUT, wait)
-            .await
-            .expect("the first webhook projection reaches its deliberate wedge");
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the first webhook projection reaches its deliberate wedge"
+            );
+            tokio::task::yield_now().await;
+        }
     }
 
     fn keep_paused_clock_runnable() -> JoinHandle<()> {
@@ -8146,7 +8154,8 @@ mod tests {
             exit.notify_one();
         });
 
-        let result = supervise_repository_tasks(tasks, Vec::new(), receiver).await;
+        let (task_shutdown, _task_shutdown_receiver) = watch::channel(false);
+        let result = supervise_repository_tasks(tasks, Vec::new(), receiver, task_shutdown).await;
         trigger.await.expect("fixture race trigger completes");
 
         assert_eq!(result, Ok(()));
@@ -8187,9 +8196,15 @@ mod tests {
         server.request_in_flight().await;
         tasks.spawn(async { panic!("fixture repository task panics") });
         let (_sender, receiver) = watch::channel(false);
+        let (task_shutdown, _task_shutdown_receiver) = watch::channel(false);
 
-        let result =
-            supervise_repository_tasks(tasks, vec![Arc::clone(&fixture.poller)], receiver).await;
+        let result = supervise_repository_tasks(
+            tasks,
+            vec![Arc::clone(&fixture.poller)],
+            receiver,
+            task_shutdown,
+        )
+        .await;
 
         assert_eq!(
             result,
@@ -8237,9 +8252,15 @@ mod tests {
         server.request_in_flight().await;
         tasks.spawn(async { panic!("fixture repository task panics during shutdown") });
         let (_sender, receiver) = watch::channel(true);
+        let (task_shutdown, _task_shutdown_receiver) = watch::channel(true);
 
-        let result =
-            supervise_repository_tasks(tasks, vec![Arc::clone(&fixture.poller)], receiver).await;
+        let result = supervise_repository_tasks(
+            tasks,
+            vec![Arc::clone(&fixture.poller)],
+            receiver,
+            task_shutdown,
+        )
+        .await;
 
         assert_eq!(
             result,
