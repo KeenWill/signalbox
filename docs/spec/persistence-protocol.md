@@ -241,7 +241,11 @@ the exact inactive census dispatch and session through the parked-target
 operator view, including repository-watch sessions not dispatched by the sweep.
 Migration `202608210404_convergence_sweep_immutable_parked_session.sql` persists
 that selected identity and timestamp in the guarded parking transition, so later
-censuses cannot change the operator-visible parked session.
+censuses cannot change the operator-visible parked session. Its two check
+constraints are validated rather than declared `NOT VALID`: the whole
+`202608210400`–`202608210404` block lands together, so no database has held an
+inactivity park without those columns, and the schema asserts unconditionally
+that every such park carries an operator-visible dispatch identity.
 
 ## Relational representation
 

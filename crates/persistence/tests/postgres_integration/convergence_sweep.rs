@@ -104,6 +104,32 @@ async fn record_zero_delay_facts_failure(
     Ok(())
 }
 
+/// Records one facts-fetch failure under the capped retry policy and returns
+/// the disposition the store chose for it.
+///
+/// The cap only binds from the second delay on, so the saturation test needs
+/// several attempts; naming the transition keeps that test body straight-line,
+/// so a disposition that comes back wrong is reported at the call site of the
+/// retry ordinal that produced it rather than at one shared loop.
+async fn record_capped_backoff_attempt(
+    store: &PostgresConvergenceSweepStore,
+    event_id: Uuid,
+    repository: &RepositorySlug,
+    observation: &ConvergenceSweepObservation,
+    policy: ConvergenceSweepRetryPolicy,
+) -> Result<ConvergenceSweepFailureDisposition, Box<dyn Error>> {
+    Ok(store
+        .record_failure(
+            event_id,
+            repository,
+            pull_request(),
+            Some(observation),
+            ConvergenceSweepFailureKind::FactsFetch,
+            policy,
+        )
+        .await?)
+}
+
 fn credential_pin() -> SessionCredentialPin {
     SessionCredentialPin::try_new(vec![SessionModelCredential::new(
         "fixture-family",
@@ -368,22 +394,42 @@ async fn retry_backoff_saturates_at_the_configured_cap() -> Result<(), Box<dyn E
         backoff_cap: Duration::from_secs(BINDING_RETRY_DELAY_CAP_SECONDS),
     };
 
-    for attempt in 1..RETRY_BUDGET {
-        let disposition = store
-            .record_failure(
-                Uuid::from_u128(u128::from(attempt.unsigned_abs())),
-                &repository,
-                pull_request(),
-                Some(&observation),
-                ConvergenceSweepFailureKind::FactsFetch,
-                policy,
-            )
-            .await?;
-        assert_eq!(
-            disposition,
-            ConvergenceSweepFailureDisposition::RetryScheduled
-        );
-    }
+    let first = record_capped_backoff_attempt(
+        &store,
+        Uuid::from_u128(1),
+        &repository,
+        &observation,
+        policy,
+    )
+    .await?;
+    let second = record_capped_backoff_attempt(
+        &store,
+        Uuid::from_u128(2),
+        &repository,
+        &observation,
+        policy,
+    )
+    .await?;
+    let third = record_capped_backoff_attempt(
+        &store,
+        Uuid::from_u128(3),
+        &repository,
+        &observation,
+        policy,
+    )
+    .await?;
+    let fourth = record_capped_backoff_attempt(
+        &store,
+        Uuid::from_u128(4),
+        &repository,
+        &observation,
+        policy,
+    )
+    .await?;
+    assert_eq!(first, ConvergenceSweepFailureDisposition::RetryScheduled);
+    assert_eq!(second, ConvergenceSweepFailureDisposition::RetryScheduled);
+    assert_eq!(third, ConvergenceSweepFailureDisposition::RetryScheduled);
+    assert_eq!(fourth, ConvergenceSweepFailureDisposition::RetryScheduled);
 
     let retry_delays: Vec<i64> = sqlx::query_scalar(
         "SELECT round(EXTRACT(EPOCH FROM (retry_not_before - recorded_at)))::bigint

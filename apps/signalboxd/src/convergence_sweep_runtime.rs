@@ -801,6 +801,65 @@ impl ConvergenceSweepRuntime {
             )?);
             thread_page = page_info(connection.get("pageInfo"))?;
         }
+        let mut check_pages = 1usize;
+        while check_page.has_next {
+            check_pages += 1;
+            if check_pages > MAX_CONNECTION_PAGES {
+                return Err(CensusError::Pagination);
+            }
+            let mut next = variables.clone();
+            next["after"] = Value::String(check_page.cursor.ok_or(CensusError::Shape)?);
+            let page = self.graphql(CHECKS_QUERY, next, &authorization).await?;
+            let connection = checks_page(&page, &head_sha, &head_branch, &base_branch, &base_sha)?;
+            checks.extend(decode_checks(
+                connection
+                    .get("nodes")
+                    .and_then(Value::as_array)
+                    .ok_or(CensusError::Shape)?,
+            )?);
+            check_page = page_info(connection.get("pageInfo"))?;
+        }
+        // A paginated census assembles its snapshot from a traversal that spans
+        // many responses, so the fence below and the revalidation traversals
+        // after it bound the whole window in one direction: the details reread
+        // proves the refs, mergeable state, draft state, and head repository
+        // still hold, and the re-traversals that follow it prove every page of
+        // both connections still holds. Revalidating a connection before the
+        // fence instead would leave a gap — a thread or check on the second or
+        // later page could change after its own reread but before the fence,
+        // and because the fence compares only the initial pages, refs, and page
+        // information, all of which can be identical across that change, the
+        // stale buffers would be accepted.
+        if thread_pages > 1 || check_pages > 1 {
+            let revalidated = self
+                .graphql(DETAILS_QUERY, variables.clone(), &authorization)
+                .await?;
+            let revalidated_pull = revalidated
+                .pointer("/data/repository/pullRequest")
+                .ok_or(CensusError::Shape)?;
+            validate_paginated_pull(
+                revalidated_pull,
+                &head_sha,
+                &head_branch,
+                &base_branch,
+                &base_sha,
+            )?;
+            if mergeable_state_at(revalidated_pull)? != mergeable_state {
+                return Err(CensusError::State);
+            }
+            ensure_draft_state_stable(draft_state, draft_state_at(revalidated_pull)?)?;
+            ensure_head_repository_stable(
+                &head_repository,
+                &head_repository_at(revalidated_pull)?,
+            )?;
+            ensure_final_connections_stable(
+                revalidated_pull,
+                &initial_thread_states,
+                &initial_thread_page,
+                &initial_checks,
+                &initial_check_page,
+            )?;
+        }
         if thread_pages > 1 {
             let mut next = variables.clone();
             next["after"] = Value::Null;
@@ -834,25 +893,6 @@ impl ConvergenceSweepRuntime {
             }
             ensure_threads_stable(&thread_states, &revalidated)?;
         }
-        let unresolved = unresolved_threads(&thread_states);
-        let mut check_pages = 1usize;
-        while check_page.has_next {
-            check_pages += 1;
-            if check_pages > MAX_CONNECTION_PAGES {
-                return Err(CensusError::Pagination);
-            }
-            let mut next = variables.clone();
-            next["after"] = Value::String(check_page.cursor.ok_or(CensusError::Shape)?);
-            let page = self.graphql(CHECKS_QUERY, next, &authorization).await?;
-            let connection = checks_page(&page, &head_sha, &head_branch, &base_branch, &base_sha)?;
-            checks.extend(decode_checks(
-                connection
-                    .get("nodes")
-                    .and_then(Value::as_array)
-                    .ok_or(CensusError::Shape)?,
-            )?);
-            check_page = page_info(connection.get("pageInfo"))?;
-        }
         if checks_require_revalidation(thread_pages, check_pages) {
             let mut next = variables.clone();
             next["after"] = Value::Null;
@@ -880,36 +920,7 @@ impl ConvergenceSweepRuntime {
             }
             ensure_checks_stable(&checks, &revalidated)?;
         }
-        if thread_pages > 1 || check_pages > 1 {
-            let revalidated = self
-                .graphql(DETAILS_QUERY, variables.clone(), &authorization)
-                .await?;
-            let revalidated_pull = revalidated
-                .pointer("/data/repository/pullRequest")
-                .ok_or(CensusError::Shape)?;
-            validate_paginated_pull(
-                revalidated_pull,
-                &head_sha,
-                &head_branch,
-                &base_branch,
-                &base_sha,
-            )?;
-            if mergeable_state_at(revalidated_pull)? != mergeable_state {
-                return Err(CensusError::State);
-            }
-            ensure_draft_state_stable(draft_state, draft_state_at(revalidated_pull)?)?;
-            ensure_head_repository_stable(
-                &head_repository,
-                &head_repository_at(revalidated_pull)?,
-            )?;
-            ensure_final_connections_stable(
-                revalidated_pull,
-                &initial_thread_states,
-                &initial_thread_page,
-                &initial_checks,
-                &initial_check_page,
-            )?;
-        }
+        let unresolved = unresolved_threads(&thread_states);
         Ok(FetchedPullRequest {
             base_branch,
             head_branch,
@@ -1427,9 +1438,9 @@ fn blocker_text(blocker: &PullRequestConvergenceBlocker) -> String {
 mod tests {
     use signalbox_application::InProcessEligibilityWorkSource;
     use signalbox_persistence::{
-        disposable_postgres_server_args, disposable_postgres_state_tmpfs,
-        disposable_test_container_labels, local_test_connection_options, migrate,
-        scheduler::PostgresEligibilitySweep,
+        convergence_sweep::ConvergenceSweepFailureDisposition, disposable_postgres_server_args,
+        disposable_postgres_state_tmpfs, disposable_test_container_labels,
+        local_test_connection_options, migrate, scheduler::PostgresEligibilitySweep,
     };
     use sqlx::postgres::PgPoolOptions;
     use testcontainers_modules::{
@@ -1978,7 +1989,6 @@ mod tests {
     const FIXTURE_BASE_BRANCH: &str = "main";
     const FIXTURE_TEMPLATE: &str = "review-response";
     const FIXTURE_UNRESOLVED_THREADS: u64 = 3;
-    const FIXTURE_RETRY_BUDGET: usize = 5;
 
     async fn migrated_postgres()
     -> Result<(testcontainers::ContainerAsync<TestPostgres>, PgPool), Box<dyn Error>> {
@@ -2091,6 +2101,33 @@ mod tests {
         .await?)
     }
 
+    /// Records one facts-fetch failure against the fixture target and returns
+    /// the disposition the store chose for it.
+    ///
+    /// Driving a target to its parked state needs several identical
+    /// transitions; naming the transition keeps the test bodies straight-line,
+    /// so a disposition that comes back wrong is reported at the call site of
+    /// the attempt that produced it rather than at one shared loop.
+    async fn record_facts_fetch_failure(
+        runtime: &ConvergenceSweepRuntime,
+        target: &SweepTarget,
+    ) -> Result<ConvergenceSweepFailureDisposition, Box<dyn Error>> {
+        Ok(runtime
+            .state
+            .record_failure(
+                uuid::Uuid::now_v7(),
+                &target.repository,
+                target.pull_request,
+                Some(&fixture_observation()),
+                ConvergenceSweepFailureKind::FactsFetch,
+                ConvergenceSweepRetryPolicy {
+                    backoff_base: RETRY_BACKOFF_BASE,
+                    backoff_cap: RETRY_BACKOFF_CAP,
+                },
+            )
+            .await?)
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn a_census_failure_schedules_a_retry_for_the_target() -> Result<(), Box<dyn Error>> {
@@ -2155,22 +2192,16 @@ mod tests {
         let (_container, pool) = migrated_postgres().await?;
         let (runtime, _work_source) = fixture_runtime(&pool, Duration::from_secs(60))?;
         let target = fixture_target();
-        for _ in 0..FIXTURE_RETRY_BUDGET {
-            runtime
-                .state
-                .record_failure(
-                    uuid::Uuid::now_v7(),
-                    &target.repository,
-                    target.pull_request,
-                    Some(&fixture_observation()),
-                    ConvergenceSweepFailureKind::FactsFetch,
-                    ConvergenceSweepRetryPolicy {
-                        backoff_base: RETRY_BACKOFF_BASE,
-                        backoff_cap: RETRY_BACKOFF_CAP,
-                    },
-                )
-                .await?;
-        }
+        let first = record_facts_fetch_failure(&runtime, &target).await?;
+        let second = record_facts_fetch_failure(&runtime, &target).await?;
+        let third = record_facts_fetch_failure(&runtime, &target).await?;
+        let fourth = record_facts_fetch_failure(&runtime, &target).await?;
+        let fifth = record_facts_fetch_failure(&runtime, &target).await?;
+        assert_eq!(first, ConvergenceSweepFailureDisposition::RetryScheduled);
+        assert_eq!(second, ConvergenceSweepFailureDisposition::RetryScheduled);
+        assert_eq!(third, ConvergenceSweepFailureDisposition::RetryScheduled);
+        assert_eq!(fourth, ConvergenceSweepFailureDisposition::RetryScheduled);
+        assert_eq!(fifth, ConvergenceSweepFailureDisposition::Parked);
         let before = recorded_events(&pool).await?;
         assert_eq!(target_state(&pool).await?.0, "parked");
 

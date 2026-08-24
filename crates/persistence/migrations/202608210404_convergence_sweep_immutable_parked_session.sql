@@ -5,32 +5,12 @@ ALTER TABLE convergence_sweep_target
     ADD COLUMN parked_session_id uuid,
     ADD COLUMN parked_dispatched_at timestamptz;
 
-UPDATE convergence_sweep_target AS target
-   SET parked_dispatch_id = coalesce(
-           target.census_dispatch_id, target.last_dispatch_id
-       ),
-       parked_session_id = coalesce(
-           target.census_session_id, target.last_session_id
-       ),
-       parked_dispatched_at = coalesce((
-           SELECT source.recorded_at
-             FROM (
-                  SELECT dispatch.recorded_at
-                    FROM commissioned_dispatch AS dispatch
-                   WHERE dispatch.dispatch_id = target.census_dispatch_id
-                     AND dispatch.session_id = target.census_session_id
-                  UNION ALL
-                  SELECT action.recorded_at
-                    FROM repo_watch_dispatch_action AS action
-                   WHERE action.dispatch_id = target.census_dispatch_id
-                     AND action.session_id = target.census_session_id
-             ) AS source
-            ORDER BY source.recorded_at DESC
-            LIMIT 1
-       ), target.last_dispatched_at)
- WHERE target.state_kind = 'parked'
-   AND target.failure_kind = 'no_model_activity';
-
+-- 202608210400 through 202608210404 all land in the same unmerged slice, so no
+-- database has ever held a convergence sweep target parked without these
+-- columns: the shape below is the schema's only shape, and both constraints are
+-- validated. Backfilling the columns, or admitting an unvalidated arm for rows
+-- an intermediate 0400-0403 database could have held, would be data-upgrade
+-- scaffolding for a schema that was never deployed.
 ALTER TABLE convergence_sweep_target
     ADD CONSTRAINT convergence_sweep_parked_dispatch_shape CHECK (
         (parked_dispatch_id IS NULL
@@ -43,19 +23,13 @@ ALTER TABLE convergence_sweep_target
             AND parked_session_id IS NOT NULL
             AND parked_dispatched_at IS NOT NULL)
     ),
-    -- NOT VALID: the backfill above cannot fill a target that was parked as
-    -- 'no_model_activity' on an external session, which sets neither
-    -- census_dispatch_id nor last_dispatch_id. 202608210400's parked arm
-    -- permits exactly that row, so a database that already applied 0400-0403
-    -- can hold one and a validating constraint would abort this migration.
-    -- The constraint is enforced for every row written from here on; the
-    -- runtime never re-parks an already-parked target, so no legacy row is
-    -- rewritten through it.
+    -- Every inactivity park carries an operator-visible dispatch identity, so
+    -- the parked-target view never projects a null identity for one.
     ADD CONSTRAINT convergence_sweep_inactivity_park_has_dispatch CHECK (
         state_kind <> 'parked'
         OR failure_kind <> 'no_model_activity'
         OR parked_dispatch_id IS NOT NULL
-    ) NOT VALID;
+    );
 
 CREATE OR REPLACE VIEW convergence_sweep_parked_target AS
 SELECT target.repository,
