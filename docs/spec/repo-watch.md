@@ -29,16 +29,17 @@ completion generations are verified against PR #541
 (`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
 PR #886 (`agent/eager-merge-forward`). Requeue after non-converged dispatch
 termination is verified against PR #894
-(`agent/dispatch-requeue-on-invalidation`). The dispatch attempt budget, the
-delay between attempts, the parked state, and both ways out of it are verified
-against PR #980 (`agent/dispatch-retry-budget`). Safe rule revision admission
-and configuration diagnostics are verified against PR #863
-(`agent/repo-watch-rule-robustness`). The source-independent event occurrence
-identity, its durable frontier, the commit-time coalescing of a restated
-occurrence, and the storage migration are verified against PR #870
-(`agent/repo-watch-content-identity`). The authenticated webhook intake, its
-ingress ceilings, shadow projection, parity view and causes, and targeted
-refresh behavior are verified against this PR
+(`agent/dispatch-requeue-on-invalidation`). Exact-head convergence assessment
+and cutoff are verified against this PR (`agent/dispatch-autonomy-convergence`).
+The dispatch attempt budget, the delay between attempts, the parked state, and
+both ways out of it are verified against PR #980
+(`agent/dispatch-retry-budget`). Safe rule revision admission and configuration
+diagnostics are verified against PR #863 (`agent/repo-watch-rule-robustness`).
+The source-independent event occurrence identity, its durable frontier, the
+commit-time coalescing of a restated occurrence, and the storage migration are
+verified against PR #870 (`agent/repo-watch-content-identity`). The
+authenticated webhook intake, its ingress ceilings, shadow projection, parity
+view and causes, and targeted refresh behavior are verified against this PR
 (`agent/repo-watch-webhook-receiver`). The projection coverage enumeration,
 pull-request issue-comment behavior, per-page hydration coalescing, and
 workflow-run branch symmetry below are verified against PR #891
@@ -904,6 +905,63 @@ savepoint but does not roll back the cutoff: the terminal event remains durably
 dispositioned, healthy commissioned goals are stopped, and later cutoffs remain
 eligible for processing.
 
+**Implemented behavior.** Every completed poll atomically commits its cursor,
+events, and durable convergence evidence for each pull request at the exact head
+and base revision in that cursor. Evidence identical to that identity's latest
+assessment is an idempotent replay; changed evidence appends a new assessment.
+The assessment follows the repository's operational status rule: every review
+thread must be resolved, without filtering by author or outdated state; at least
+one gating check must exist and every gating check on the exact current commit
+must be green; the pull request must be settled with known `mergeable`
+mergeability; and the aggregate review decision must not be `changes_requested`.
+The filtered gating-check inventory is settled only after the same inventory is
+observed in two consecutive committed polls for the unchanged exact head, so a
+fast check cannot permanently seal the head before a later workflow registers.
+Check runs are green only when completed with `success`, `skipped`, or
+`neutral`, and status contexts are green only at `success`. Pending, incomplete,
+missing-conclusion, and other terminal results are not green. Check names
+containing `report only`, `CodeRabbit`, `codecov/project`, or `codecov/patch`,
+compared case-insensitively, are non-gating. The GraphQL check-rollup and
+review-thread connections are read through every bounded page. The head, check,
+and aggregate-review evidence is read before the thread inventory, matching the
+operational reference's ordering so a review thread opened between those reads
+cannot be hidden by an earlier thread snapshot. The branch-head snapshot is read
+before pull-request hydration and supplies the assessed base revision committed
+in the cursor. The rollup's commit, head, and base-branch evidence must agree
+with the REST pull-request projection and cursor generation or the poll fails
+without recording an assessment; independently sampled REST and GraphQL
+mergeability values need not be equal while GitHub settles them.
+
+**Implemented behavior.** A passing assessment for a pull request based on
+`main` is `merge_ready`. A passing assessment based on another branch is
+`internally_converged`, not merge-ready; both classifications end autonomous
+work on that exact head. Every assessment is append-only evidence. An
+append-only cursor-generation identity advances the current projection when an
+A→B→A return reuses A's unchanged evidence, while an exact replay superseded by
+a later generation cannot append evidence or advance that identity.
+`repo_watch_current_pull_request_convergence` exposes the current identity's
+evidence, derived verdict, and any exact-head seal. The first passing assessment
+also creates one monotonic seal for the repository, pull request, exact head
+SHA, and exact base revision. Later checks or reviews on the same sealed
+identity remain visible as newer assessment evidence but cannot reopen dispatch,
+so a session does not revisit threads it already resolved on that unchanged
+identity. A different head SHA or base revision has no inherited seal and is
+assessed and dispatched afresh; convergence therefore terminates unchanged-head
+review cycles without treating a new revision as already finished.
+
+**Implemented behavior.** Repository watch records one convergence cutoff only
+when a seal's head and base revision are the latest assessed identity. Stale
+seals remain pending and become eligible if their identity becomes current
+again. Each transition that makes a sealed identity current records its own
+cutoff application, so work commissioned while another identity was current is
+also stopped when the sealed identity returns. The cutoff applies the ordinary
+parent-only stop to every generation-one goal repository watch commissioned for
+the pull request, with the same provenance limits as a lifecycle cutoff.
+Dispatch admission rechecks the seal under the repository lock: a stale match or
+collapsed obligation settles as `target_converged` only when its head is the
+latest assessed identity and that identity's head and base revision are sealed.
+An older identity cannot stop current work.
+
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
 pull request, rule, singleton key, sessions, and held-since time; states each
@@ -934,44 +992,46 @@ starts no watch runtime or polling task. It first validates the whole set in one
 transaction it discards, in the Configuration phase before either local socket
 binds, so every refusal is reported there against untouched history. It then
 commits the deactivations and activations in one transaction after every
-remaining fallible startup step succeeds and before any watch task starts. A
-refusal anywhere in the set, and any startup failure before that commit,
-therefore leaves no deactivation and no activation behind: a configuration that
-never started consumes no revision, and restoring the previous configuration is
-admitted rather than refused as reuse. A lost commit response is resolved by
-rereading the durable active set rather than assuming an outcome. That reread
-commits nothing, so it cannot itself become ambiguous, and it answers the only
-question the outcome turned on: either the active set already equals the
-configured admission, so the commit won and startup proceeds, or it does not, so
-the commit never landed, no revision was consumed, and startup fails against
-untouched history with the previous configuration still admissible. Startup does
-not attempt the admission a second time in that failing case; the next start
-admits the same configuration from that untouched history, and only an
-unreachable database defeats the reread. Configuration reconciliation and
-evaluation are serialized per repository: an evaluation already committed may
-replay, but an already-loaded event cannot create a dispatch after deactivation
-commits. Activation stores a digest of the complete versioned matcher, ordered
-action list, singleton scope, and cooldown, plus content-free fingerprints
-labeled with the exact configuration fields they represent. Changing any of
-those semantics while retaining the same rule ID and revision fails in the
-Configuration phase before either local socket binds. The diagnostic names the
-rule and changed field and directs the operator to increment `version`; when
-multiple fields changed, it names the first changed TOML field in canonical
-fingerprint order. It never first appears as a repository-task runtime death. An
-activation recorded before field fingerprints existed cannot produce them from
-its aggregate digest, so the one-time migration introducing fingerprints retires
-every such activation. No active activation lacks fingerprints and the daemon
-carries no path for that shape; a missing fingerprint under any non-deactivated
-activation is storage corruption, checked before reconciliation compares that
-activation against configuration, retires it as an unconfigured rule, or retires
-it because its whole repository left configuration. Retiring an activation
-retires its `(rule ID, revision)` pair, so the first boot after that migration
-refuses every configured rule at its recorded revision as identity reuse,
-including every rule whose semantics did not change, and fails in the
-Configuration phase before either local socket binds. The operator increments
-`version` once for each configured rule on that first upgraded boot; no
-fingerprint backfill can stand in for the bump, because the retained aggregate
-digest does not carry the per-field digests the new revision records.
+remaining fallible startup step succeeds. Before admission commits, startup
+drains both pending lifecycle cutoffs and eligible convergence cutoffs before
+any watch task starts. A refusal anywhere in the set, and any startup failure
+before that commit, therefore leaves no deactivation and no activation behind: a
+configuration that never started consumes no revision, and restoring the
+previous configuration is admitted rather than refused as reuse. A lost commit
+response is resolved by rereading the durable active set rather than assuming an
+outcome. That reread commits nothing, so it cannot itself become ambiguous, and
+it answers the only question the outcome turned on: either the active set
+already equals the configured admission, so the commit won and startup proceeds,
+or it does not, so the commit never landed, no revision was consumed, and
+startup fails against untouched history with the previous configuration still
+admissible. Startup does not attempt the admission a second time in that failing
+case; the next start admits the same configuration from that untouched history,
+and only an unreachable database defeats the reread. Configuration
+reconciliation and evaluation are serialized per repository: an evaluation
+already committed may replay, but an already-loaded event cannot create a
+dispatch after deactivation commits. Activation stores a digest of the complete
+versioned matcher, ordered action list, singleton scope, and cooldown, plus
+content-free fingerprints labeled with the exact configuration fields they
+represent. Changing any of those semantics while retaining the same rule ID and
+revision fails in the Configuration phase before either local socket binds. The
+diagnostic names the rule and changed field and directs the operator to
+increment `version`; when multiple fields changed, it names the first changed
+TOML field in canonical fingerprint order. It never first appears as a
+repository-task runtime death. An activation recorded before field fingerprints
+existed cannot produce them from its aggregate digest, so the one-time migration
+introducing fingerprints retires every such activation. No active activation
+lacks fingerprints and the daemon carries no path for that shape; a missing
+fingerprint under any non-deactivated activation is storage corruption, checked
+before reconciliation compares that activation against configuration, retires it
+as an unconfigured rule, or retires it because its whole repository left
+configuration. Retiring an activation retires its `(rule ID, revision)` pair, so
+the first boot after that migration refuses every configured rule at its
+recorded revision as identity reuse, including every rule whose semantics did
+not change, and fails in the Configuration phase before either local socket
+binds. The operator increments `version` once for each configured rule on that
+first upgraded boot; no fingerprint backfill can stand in for the bump, because
+the retained aggregate digest does not carry the per-field digests the new
+revision records.
 
 **Implemented behavior.** A higher revision under the same rule ID is a
 replacement. Reconciliation appends deactivation of the active old revision and
