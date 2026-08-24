@@ -436,6 +436,7 @@ async fn inspect_bounded(
         return Ok(malformed_validation());
     };
     let mut cached_object_stream = None;
+    let mut cached_uncompressed_range = None;
     let catalog = match root_location {
         XrefLocation::Uncompressed(root_offset) => {
             let root_length = budget
@@ -450,6 +451,7 @@ async fn inspect_bounded(
             let Some(catalog) = catalog_facts(&root_bytes, root) else {
                 return Ok(malformed_validation());
             };
+            cached_uncompressed_range = Some((root_offset, root_bytes));
             catalog
         }
         XrefLocation::Compressed {
@@ -547,12 +549,27 @@ async fn inspect_bounded(
                     (bytes.as_slice(), *limit, *length)
                 }
                 _ => {
-                    let stream_length = budget.remaining_bytes.min(source_length - stream_offset);
-                    if !budget.can_read(stream_length) {
+                    let cached_stream =
+                        cached_uncompressed_range
+                            .as_ref()
+                            .and_then(|(cached_offset, bytes)| {
+                                let relative = stream_offset.checked_sub(*cached_offset)?;
+                                bytes.get(usize::try_from(relative).ok()?..)
+                            });
+                    let stream_length = cached_stream.map_or_else(
+                        || budget.remaining_bytes.min(source_length - stream_offset),
+                        |bytes| bytes.len() as u64,
+                    );
+                    if cached_stream.is_none() && !budget.can_read(stream_length) {
                         return Ok(malformed_validation());
                     }
-                    owned_stream =
-                        read_validation_range(source, budget, stream_offset, stream_length).await?;
+                    owned_stream = match cached_stream {
+                        Some(bytes) => bytes.to_vec(),
+                        None => {
+                            read_validation_range(source, budget, stream_offset, stream_length)
+                                .await?
+                        }
+                    };
                     let limit = usize::try_from(stream_length)
                         .map_err(|_| FileMediaProviderFailure::Failed)?;
                     let length = resolve_object_stream_length(
@@ -735,11 +752,11 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
         .get(b"Pages")
         .and_then(lopdf::Object::as_reference)
         .map_err(|_| PageCollectionError::Malformed)?;
-    let mut pending = vec![(pages_root, false)];
+    let mut pending = vec![(pages_root, false, None)];
     let mut visited = BTreeSet::new();
     let mut subtree_counts = std::collections::BTreeMap::new();
     let mut pages = Vec::new();
-    while let Some((object_id, exiting)) = pending.pop() {
+    while let Some((object_id, exiting, expected_parent)) = pending.pop() {
         if exiting {
             let dictionary = document
                 .get_dictionary(object_id)
@@ -780,6 +797,15 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
             .get(b"Type")
             .and_then(lopdf::Object::as_name)
             .map_err(|_| PageCollectionError::Malformed)?;
+        if let Some(expected_parent) = expected_parent {
+            let parent = dictionary
+                .get(b"Parent")
+                .and_then(lopdf::Object::as_reference)
+                .map_err(|_| PageCollectionError::Malformed)?;
+            if parent != expected_parent {
+                return Err(PageCollectionError::Malformed);
+            }
+        }
         match node_type {
             b"Pages" => {
                 let count = dictionary
@@ -804,12 +830,13 @@ fn collect_pages(document: &Document) -> Result<Vec<(u32, lopdf::ObjectId)>, Pag
                 {
                     return Err(PageCollectionError::Limit);
                 }
-                pending.push((object_id, true));
+                pending.push((object_id, true, expected_parent));
                 for kid in kids.iter().rev() {
                     pending.push((
                         kid.as_reference()
                             .map_err(|_| PageCollectionError::Malformed)?,
                         false,
+                        Some(object_id),
                     ));
                 }
             }
@@ -948,7 +975,24 @@ fn startxref_offset(bytes: &[u8]) -> Option<u64> {
     let mut cursor = marker.checked_add(b"startxref".len())?;
     skip_pdf_space_and_comments(bytes, &mut cursor);
     let offset = parse_unsigned(bytes, &mut cursor)?;
-    skip_pdf_whitespace(bytes, &mut cursor);
+    loop {
+        skip_pdf_whitespace(bytes, &mut cursor);
+        if bytes
+            .get(cursor..)
+            .is_some_and(|remaining| remaining.starts_with(b"%%EOF"))
+        {
+            break;
+        }
+        if bytes.get(cursor) != Some(&b'%') {
+            return None;
+        }
+        while bytes
+            .get(cursor)
+            .is_some_and(|byte| *byte != b'\n' && *byte != b'\r')
+        {
+            cursor += 1;
+        }
+    }
     if !consume_keyword(bytes, &mut cursor, b"%%EOF") {
         return None;
     }
@@ -1008,6 +1052,10 @@ fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
     }
     let (facts, _) = parse_trailer_dictionary(bytes, cursor)?;
     let facts = valid_trailer_facts(facts, false)?;
+    let size = facts.size?;
+    if declared_objects.iter().any(|object| *object >= size) {
+        return None;
+    }
     Some(ParsedXref {
         facts,
         live_entries,
@@ -1059,8 +1107,12 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
         facts.decode_parameters.as_deref(),
         decoded_length,
     )?;
-    let (mut live_entries, mut declared_objects, object_limit_exceeded) =
+    let (mut live_entries, mut declared_objects, mut object_limit_exceeded) =
         parse_xref_stream_entries(&stream, widths, &indexes)?;
+    let size = facts.size?;
+    if declared_objects.iter().any(|object| *object >= size) || xref_object >= size {
+        return None;
+    }
     declared_objects.insert(xref_object);
     let xref_reference = IndirectReference {
         object_number: xref_object,
@@ -1071,10 +1123,14 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
             .iter()
             .all(|entry| entry.reference != xref_reference)
     {
-        live_entries.push(LiveXrefEntry {
-            reference: xref_reference,
-            location: XrefLocation::Uncompressed(0),
-        });
+        if live_entries.len() >= MAX_OBJECTS {
+            object_limit_exceeded = true;
+        } else {
+            live_entries.push(LiveXrefEntry {
+                reference: xref_reference,
+                location: XrefLocation::Uncompressed(0),
+            });
+        }
     }
     Some(ParsedXref {
         facts,
@@ -1478,7 +1534,7 @@ fn merge_supplemental_xref(current: &mut ParsedXref, supplemental: ParsedXref) {
             .declared_objects
             .contains(&entry.reference.object_number)
         {
-            if current.live_entries.len() == MAX_OBJECTS {
+            if current.live_entries.len() >= MAX_OBJECTS {
                 current.object_limit_exceeded = true;
                 break;
             }
@@ -1502,7 +1558,7 @@ fn merge_previous_xref(current: &mut ParsedXref, previous: ParsedXref) {
             .declared_objects
             .contains(&entry.reference.object_number)
         {
-            if current.live_entries.len() == MAX_OBJECTS {
+            if current.live_entries.len() >= MAX_OBJECTS {
                 current.object_limit_exceeded = true;
                 break;
             }
@@ -1965,8 +2021,18 @@ fn parse_catalog_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(CatalogF
             pages = Some(parse_indirect_reference(bytes, &mut value_cursor)?);
         } else if key == b"Version" {
             let mut value_cursor = value_start;
-            let value = parse_name(bytes, &mut value_cursor)?;
-            version = std::str::from_utf8(&value).ok().map(sanitized_version);
+            if consume_keyword(bytes, &mut value_cursor, b"null") {
+                if value_cursor != cursor {
+                    return None;
+                }
+                version = None;
+            } else {
+                let value = parse_name(bytes, &mut value_cursor)?;
+                if value_cursor != cursor {
+                    return None;
+                }
+                version = std::str::from_utf8(&value).ok().map(sanitized_version);
+            }
         }
     }
 }
@@ -2360,6 +2426,14 @@ mod tests {
     fn startxref_accepts_a_comment_before_the_offset() {
         assert_eq!(
             startxref_offset(b"startxref % offset comment\n42\n%%EOF"),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn startxref_accepts_a_comment_after_the_offset() {
+        assert_eq!(
+            startxref_offset(b"startxref\n42 % offset comment\n%%EOF"),
             Some(42)
         );
     }
