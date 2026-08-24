@@ -66,6 +66,7 @@ export const synchronizeAttention = async ({
   onProjection: (snapshot: WebAttentionSnapshot) => AttentionProjectionAcceptance
 }): Promise<void> => {
   let resyncs = 0
+  let resyncCursorFloor: bigint | undefined
   let projection: WebAttentionSnapshot | undefined
   let phase: AttentionSyncPhase = 'idle'
   const transition = (next: AttentionSyncPhase) => {
@@ -90,7 +91,19 @@ export const synchronizeAttention = async ({
         firstEvent = false
         const cursorBeforeReduction = projection?.cursor
         const reduction = reduceAttentionEvent(projection, event)
-        if (reduction.kind === 'resync') {
+        // A projection below the last advertised resync cursor omits a known journal
+        // interval, so it is never installed as authority.
+        const belowResyncCursorFloor =
+          reduction.kind === 'projection' &&
+          resyncCursorFloor !== undefined &&
+          BigInt(reduction.snapshot.cursor) < resyncCursorFloor
+        if (reduction.kind === 'resync' || belowResyncCursorFloor) {
+          if (event.kind !== 'snapshot') {
+            const advertised = BigInt(event.cursor)
+            if (resyncCursorFloor === undefined || advertised > resyncCursorFloor) {
+              resyncCursorFloor = advertised
+            }
+          }
           resyncs += 1
           if (resyncs > MAX_IMMEDIATE_RESYNCS) {
             transition('failed')

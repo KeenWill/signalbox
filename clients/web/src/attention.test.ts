@@ -250,6 +250,52 @@ describe('attention projection recovery', () => {
     expect(phases.at(-1)).toBe('stale')
   })
 
+  it('rejects reconnect snapshots below the advertised resync cursor', async () => {
+    const phases: string[] = []
+    const projections: WebAttentionSnapshot[] = []
+    const partialRecovery = [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '20' } }] as const
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [
+          { kind: 'snapshot', snapshot },
+          { kind: 'resync_required', cursor: '50' },
+        ],
+        partialRecovery,
+        partialRecovery,
+        partialRecovery,
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: (projection) => {
+        projections.push(projection)
+        return { snapshot: projection, accepted: true }
+      },
+    })
+
+    expect(phases.at(-1)).toBe('failed')
+    expect(projections).toEqual([snapshot])
+  })
+
+  it('accepts a reconnect snapshot at the advertised resync cursor', async () => {
+    const phases: string[] = []
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [
+          { kind: 'snapshot', snapshot },
+          { kind: 'resync_required', cursor: '50' },
+        ],
+        [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '50' } }],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
+    })
+
+    expect(phases).toEqual(['connecting', 'live', 'resyncing', 'live', 'stale'])
+  })
+
   it('preserves the immediate resync budget across replacement snapshots', async () => {
     const phases: string[] = []
     const resync = { kind: 'resync_required', cursor: '18' } as const
