@@ -90,6 +90,6 @@ describe('Session Workspace projection', () => {
   })
 
   it('falls back to the raw value outside the JavaScript Date range', () => {
-    expect(activityLabel('9000000000000000')).toBe('9000000000000000')
+    expect(activityLabel('9000000000000000000')).toBe('9000000000000000000')
   })
 })

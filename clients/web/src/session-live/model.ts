@@ -358,6 +358,7 @@ export const applyLiveEvent = (
   current: LivePresentation,
   event: WebSessionLiveStreamEvent,
   expectedSessionId: string,
+  historicalEventSequences?: ReadonlySet<string>,
 ): LivePresentation => {
   if (event.kind === 'snapshot') {
     if (event.snapshot.session_id !== expectedSessionId) {
@@ -367,7 +368,10 @@ export const applyLiveEvent = (
     return {
       snapshot: event.snapshot,
       durable: current.durable.filter(
-        (item) => BigInt(item.address.event_sequence) > observedThrough,
+        (item) =>
+          BigInt(item.address.event_sequence) > observedThrough ||
+          (historicalEventSequences !== undefined &&
+            !historicalEventSequences.has(item.address.event_sequence)),
       ),
       drafts: [],
       durableGap: false,
@@ -397,6 +401,9 @@ export const applyLiveEvent = (
       durable: durable.slice(-MAX_LIVE_DURABLE_ITEMS),
       durableGap: current.durableGap || durable.length > MAX_LIVE_DURABLE_ITEMS,
     }
+  }
+  if (current.snapshot === null) {
+    throw new Error('session live provider delta arrived before the initial snapshot')
   }
   const key = draftKey(event)
   const existing = current.drafts.find((draft) => draft.key === key)

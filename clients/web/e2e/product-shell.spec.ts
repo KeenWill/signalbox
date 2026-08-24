@@ -5,16 +5,18 @@ const sessionWorkspaceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
   firstAddress: '41',
   latestAddress: '43',
-  itemCount: '1000000',
+  itemCount: '3',
   projectedBytes: 234,
 } as const
 
 const sessionCatalogSummary = {
+  action: null,
   active_turn_count: '1',
   archived: false,
   current_turn_id: '00000000-0000-0000-0000-000000000041',
+  goal_block: null,
   judge: { actionable: '0', completed: '0', escalated: '0', failed: '0' },
-  last_activity: { kind: 'turn', unix_milliseconds: '1787400000000' },
+  last_activity: { kind: 'turn', unix_microseconds: '1787400000000000' },
   queued_turn_count: '2',
   session_id: sessionWorkspaceFixture.id,
   state: 'active',
@@ -150,7 +152,7 @@ const useDeterministicSession = async (page: Page) => {
         sizes: {
           item_count: sessionWorkspaceFixture.itemCount,
           projected_text_bytes: '0',
-          projected_structured_bytes: '96000000',
+          projected_structured_bytes: String(sessionWorkspaceFixture.projectedBytes),
           referenced_blob_count: '0',
           referenced_blob_bytes: '0',
         },

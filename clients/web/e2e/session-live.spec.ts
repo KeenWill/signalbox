@@ -16,11 +16,32 @@ const summary = (
     | 'runner_lost'
     | 'idle' = 'idle',
 ) => ({
+  action:
+    state === 'blocked'
+      ? ('provide_goal_need' as const)
+      : state === 'awaiting_approval'
+        ? ('decide_approval' as const)
+        : state === 'ambiguous' || state === 'awaiting_reconciliation'
+          ? ('reconcile_turn' as const)
+          : state === 'runner_lost'
+            ? ('restore_runner' as const)
+            : null,
   active_turn_count: state === 'active' ? '1' : '0',
   archived: false,
   current_turn_id: state === 'idle' ? null : sessionId(20_000 + index),
+  goal_block:
+    state === 'blocked'
+      ? {
+          generation: '1',
+          need_summary: 'Operator input required',
+          reason: 'user_input_required' as const,
+        }
+      : null,
   judge: { actionable: '0', completed: '0', escalated: '0', failed: '0' },
-  last_activity: { kind: 'turn' as const, unix_milliseconds: String(1_787_400_000_000 - index) },
+  last_activity: {
+    kind: 'turn' as const,
+    unix_microseconds: String((1_787_400_000_000 - index) * 1000),
+  },
   queued_turn_count: state === 'queued' ? '2' : '0',
   session_id: sessionId(index),
   state,
@@ -31,7 +52,7 @@ const summary = (
 const catalogPage = (start: number, search: string | null) => {
   const summaries = search
     ? [summary(900, 'blocked')]
-    : Array.from({ length: 128 }, (_, offset) => summary(start + offset))
+    : Array.from({ length: 32 }, (_, offset) => summary(start + offset))
   const last = summaries.at(-1)
   return {
     continuation:
@@ -40,7 +61,7 @@ const catalogPage = (start: number, search: string | null) => {
         : {
             kind: 'last_activity' as const,
             session_id: last.session_id,
-            unix_microseconds: `${BigInt(last.last_activity.unix_milliseconds) * 1000n}`,
+            unix_microseconds: last.last_activity.unix_microseconds,
           },
     cursor: '42',
     sort: 'last_activity_descending' as const,
@@ -112,9 +133,9 @@ const installTimeline = (page: Page, id: string) =>
             json: {
               session_id: requestedSession,
               sizes: {
-                item_count: '1000000',
+                item_count: '42',
                 projected_text_bytes: '48000000',
-                projected_structured_bytes: '96000000',
+                projected_structured_bytes: '3276',
                 referenced_blob_count: '24000',
                 referenced_blob_bytes: '96000000000',
               },
@@ -149,6 +170,13 @@ const deferred = (resolved = false): Deferred => {
   return { promise, resolve }
 }
 
+const loadCatalogToRetainedCount = async (page: Page, target: number) => {
+  for (let retained = 32; retained < target; retained += 32) {
+    await page.getByRole('button', { name: 'Load more' }).click()
+    await expect(page.getByText(`${retained + 32} retained`)).toBeVisible()
+  }
+}
+
 test('pages and searches one thousand sessions while retaining a virtualized client window', async ({
   page,
 }) => {
@@ -175,13 +203,8 @@ test('pages and searches one thousand sessions while retaining a virtualized cli
   })
   await page.goto('/sessions')
 
-  await expect(page.getByText('128 retained')).toBeVisible()
-  await page.getByRole('button', { name: 'Load more' }).click()
-  await expect(page.getByText('256 retained')).toBeVisible()
-  await page.getByRole('button', { name: 'Load more' }).click()
-  await expect(page.getByText('384 retained')).toBeVisible()
-  await page.getByRole('button', { name: 'Load more' }).click()
-  await expect(page.getByText('512 retained')).toBeVisible()
+  await expect(page.getByText('32 retained')).toBeVisible()
+  await loadCatalogToRetainedCount(page, 512)
   expect(await page.getByRole('option').count()).toBeLessThan(40)
   await page.keyboard.press('/')
   await expect(page.getByRole('searchbox')).toBeFocused()

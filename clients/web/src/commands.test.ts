@@ -84,4 +84,30 @@ describe('command registry', () => {
 
     expect(calls).toEqual(['search', 'sort', 'more', 'select:1', 'open', 'switch:-1'])
   })
+
+  it('routes settings choices through registered commands', () => {
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+    }
+
+    invokeCommand('layout.focus', context)
+    invokeCommand('density.compact', context)
+    invokeCommand('detail.results', context)
+    invokeCommand('theme.light', context)
+    invokeCommand('preferences.panes.set', {
+      ...context,
+      preferencePaneSizes: { navigation: 240, inspector: 360 },
+    })
+
+    expect(selectApp(store.getState())).toMatchObject({
+      layout: 'focus',
+      density: 'compact',
+      detail: 'results',
+      theme: 'light',
+      paneSizes: { navigation: 240, inspector: 360 },
+    })
+  })
 })

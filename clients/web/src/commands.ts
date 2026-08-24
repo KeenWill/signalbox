@@ -21,6 +21,7 @@ export interface CommandContext {
   selectSession?: (offset: -1 | 1) => void
   switchSession?: (offset: -1 | 1) => void
   openSelectedSession?: () => void
+  preferencePaneSizes?: RootState['app']['paneSizes']
 }
 
 export interface CommandBinding {
@@ -382,6 +383,82 @@ export const commandRegistry = [
     bindings: [],
     available: always,
     run: (context) => context.dispatch(actions.detailSet('results')),
+  },
+  {
+    id: 'layout.workbench',
+    title: 'Use workbench layout',
+    description: 'Show navigation, the primary surface, and the contextual inspector.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.layoutSet('workbench')),
+  },
+  {
+    id: 'layout.focus',
+    title: 'Use focus layout',
+    description: 'Show a quiet primary surface without secondary panes.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.layoutSet('focus')),
+  },
+  {
+    id: 'density.compact',
+    title: 'Use compact density',
+    description: 'Use dense rows for high-volume operator work.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.densitySet('compact')),
+  },
+  {
+    id: 'density.comfortable',
+    title: 'Use comfortable density',
+    description: 'Use more separation without changing information detail.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.densitySet('comfortable')),
+  },
+  {
+    id: 'theme.dark',
+    title: 'Use dark theme',
+    description: 'Use the dark CSS-variable theme.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.themeSet('dark')),
+  },
+  {
+    id: 'theme.light',
+    title: 'Use light theme',
+    description: 'Use the light CSS-variable theme.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.themeSet('light')),
+  },
+  {
+    id: 'preferences.panes.set',
+    title: 'Set workbench pane sizes',
+    description: 'Apply browser-local navigation and inspector widths.',
+    category: 'View',
+    bindings: [],
+    available: (context) => context.preferencePaneSizes !== undefined,
+    run: (context) => {
+      if (context.preferencePaneSizes) {
+        context.dispatch(actions.paneSizesSet(context.preferencePaneSizes))
+      }
+    },
+  },
+  {
+    id: 'preferences.reset',
+    title: 'Restore preference defaults',
+    description: 'Restore all browser-local workstation preferences.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.preferencesReset()),
   },
 ] as const satisfies readonly CommandDefinitionShape[]
 

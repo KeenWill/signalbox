@@ -26,15 +26,17 @@ const bootstrapFixture = {
 
 const sessionEvidenceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
-  itemCount: '1000000',
+  itemCount: '3',
 } as const
 
 const sessionEvidenceSummary = {
+  action: 'decide_approval',
   active_turn_count: '1',
   archived: false,
   current_turn_id: '00000000-0000-0000-0000-000000000041',
+  goal_block: null,
   judge: { actionable: '0', completed: '0', escalated: '0', failed: '0' },
-  last_activity: { kind: 'turn', unix_milliseconds: '1787400000000' },
+  last_activity: { kind: 'turn', unix_microseconds: '1787400000000000' },
   queued_turn_count: '4',
   session_id: sessionEvidenceFixture.id,
   state: 'awaiting_approval',
@@ -194,12 +196,12 @@ const useDeterministicSession = async (page: Page) => {
         session_id: sessionEvidenceFixture.id,
         sizes: {
           item_count: sessionEvidenceFixture.itemCount,
-          projected_text_bytes: '48000000',
-          projected_structured_bytes: '96000000',
+          projected_text_bytes: '0',
+          projected_structured_bytes: '241',
           referenced_blob_count: '24000',
           referenced_blob_bytes: '96000000000',
         },
-        first_address: { event_sequence: '1' },
+        first_address: { event_sequence: '999998' },
         latest_address: { event_sequence: '1000000' },
         work: { active_turn_count: '1', queued_turn_count: '4' },
         observed_through: '1000037',

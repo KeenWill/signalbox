@@ -34,6 +34,7 @@ import {
   EMPTY_CATALOG_PRESENTATION,
   EMPTY_LIVE_PRESENTATION,
   HttpSessionProjectionSource,
+  type LivePresentation,
   MAX_CATALOG_ROWS,
   replaceCatalog,
   SessionProjectionSynchronizer,
@@ -84,22 +85,22 @@ export interface SessionCommandControls {
   openSelected: () => void
 }
 
-const validActivityDate = (unixMilliseconds: string): Date | null => {
-  const milliseconds = Number(unixMilliseconds)
-  if (!Number.isSafeInteger(milliseconds)) return null
-  const date = new Date(milliseconds)
+const validActivityDate = (unixMicroseconds: string): Date | null => {
+  const microseconds = Number(unixMicroseconds)
+  if (!Number.isSafeInteger(microseconds)) return null
+  const date = new Date(microseconds / 1000)
   return Number.isNaN(date.getTime()) ? null : date
 }
 
-export const activityLabel = (unixMilliseconds: string) => {
-  const date = validActivityDate(unixMilliseconds)
+export const activityLabel = (unixMicroseconds: string) => {
+  const date = validActivityDate(unixMicroseconds)
   return date
     ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
-    : unixMilliseconds
+    : unixMicroseconds
 }
 
-const activityDateTime = (unixMilliseconds: string) => {
-  const date = validActivityDate(unixMilliseconds)
+const activityDateTime = (unixMicroseconds: string) => {
+  const date = validActivityDate(unixMicroseconds)
   return date?.toISOString()
 }
 
@@ -212,6 +213,7 @@ export function SessionWorkspaceSurface({
   const [refetchRequest, setRefetchRequest] = useState(0)
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const [livePresentation, setLivePresentation] = useState(EMPTY_LIVE_PRESENTATION)
+  const livePresentationRef = useRef(EMPTY_LIVE_PRESENTATION)
   const [liveConnection, setLiveConnection] = useState<'idle' | 'connecting' | 'live' | 'retrying'>(
     'idle',
   )
@@ -224,7 +226,17 @@ export function SessionWorkspaceSurface({
   const catalogRetainedTarget = useRef(0)
   const catalogRefreshInFlight = useRef(false)
   const catalogRefreshPending = useRef(false)
+  const catalogRefreshAbort = useRef<AbortController | null>(null)
   const refreshCatalogRef = useRef<() => Promise<void>>(async () => undefined)
+  const catalogQueryGeneration = useRef(0)
+  const updateLivePresentation = useCallback(
+    (update: (current: LivePresentation) => LivePresentation) => {
+      const next = update(livePresentationRef.current)
+      livePresentationRef.current = next
+      setLivePresentation(next)
+    },
+    [],
+  )
   const catalog = useQuery({
     queryKey: ['production', 'session-catalog', search, sort],
     queryFn: ({ signal }) => source.catalogPage({ search, sort }, undefined, signal),
@@ -314,24 +326,40 @@ export function SessionWorkspaceSurface({
     )
   }, [catalog.data])
   const refreshCatalog = useCallback(async () => {
+    const generation = catalogQueryGeneration.current
     if (catalogRefreshInFlight.current) {
       catalogRefreshPending.current = true
       return
     }
     catalogRefreshInFlight.current = true
+    const controller = new AbortController()
+    catalogRefreshAbort.current = controller
     try {
       do {
         catalogRefreshPending.current = false
+        if (generation !== catalogQueryGeneration.current) return
         const retainedTarget = Math.max(catalogRetainedTarget.current, 1)
-        let refreshed = replaceCatalog(await source.catalogPage({ search, sort }))
+        let refreshed = replaceCatalog(
+          await source.catalogPage({ search, sort }, undefined, controller.signal),
+        )
+        let pageRequests = 1
         while (
           refreshed.summaries.length < retainedTarget &&
           refreshed.snapshot?.continuation &&
-          refreshed.summaries.length < MAX_CATALOG_ROWS
+          refreshed.summaries.length < MAX_CATALOG_ROWS &&
+          pageRequests < MAX_CATALOG_ROWS
         ) {
-          const page = await source.catalogPage({ search, sort }, refreshed.snapshot.continuation)
-          refreshed = appendCatalog(refreshed, page)
+          const continuation = refreshed.snapshot.continuation
+          const retainedBefore = refreshed.summaries.length
+          const page = await source.catalogPage({ search, sort }, continuation, controller.signal)
+          const next = appendCatalog(refreshed, page)
+          pageRequests += 1
+          if (next.summaries.length <= retainedBefore) {
+            throw new Error('session catalog refresh made no pagination progress')
+          }
+          refreshed = next
         }
+        if (generation !== catalogQueryGeneration.current) return
         setCatalogPageError(false)
         setCatalogPresentation(refreshed)
         setSelectedCatalogId((current) =>
@@ -339,11 +367,16 @@ export function SessionWorkspaceSurface({
             ? current
             : (refreshed.summaries[0]?.session_id ?? null),
         )
-      } while (catalogRefreshPending.current)
+      } while (catalogRefreshPending.current && generation === catalogQueryGeneration.current)
     } catch {
-      setCatalogPageError(true)
+      if (generation === catalogQueryGeneration.current) setCatalogPageError(true)
     } finally {
+      if (catalogRefreshAbort.current === controller) catalogRefreshAbort.current = null
       catalogRefreshInFlight.current = false
+      if (catalogRefreshPending.current) {
+        catalogRefreshPending.current = false
+        void refreshCatalogRef.current()
+      }
     }
   }, [search, sort, source])
   refreshCatalogRef.current = refreshCatalog
@@ -357,13 +390,14 @@ export function SessionWorkspaceSurface({
   useEffect(() => {
     if (sessionId === null || timelineCapability !== 'available') {
       setLiveConnection('idle')
-      setLivePresentation(EMPTY_LIVE_PRESENTATION)
+      updateLivePresentation(() => EMPTY_LIVE_PRESENTATION)
       return
     }
-    setLivePresentation(EMPTY_LIVE_PRESENTATION)
+    updateLivePresentation(() => EMPTY_LIVE_PRESENTATION)
     let disposed = false
     let refreshInFlight = false
     let refreshPending = false
+    let refreshRetry: number | undefined
     const refreshSessionFacts = async () => {
       if (refreshInFlight) {
         refreshPending = true
@@ -373,15 +407,41 @@ export function SessionWorkspaceSurface({
       try {
         do {
           refreshPending = false
-          const [, snapshot] = await Promise.all([refetchSession(), source.liveSnapshot(sessionId)])
+          const [sessionResult, snapshot] = await Promise.all([
+            refetchSession(),
+            source.liveSnapshot(sessionId),
+          ])
+          if (!sessionResult.isSuccess || sessionResult.data === undefined) {
+            throw new Error('session history refresh failed')
+          }
           if (!disposed) {
-            setLivePresentation((current) =>
-              applyLiveEvent(current, { kind: 'snapshot', snapshot }, sessionId),
+            if (refreshRetry !== undefined) {
+              window.clearTimeout(refreshRetry)
+              refreshRetry = undefined
+            }
+            const historicalEventSequences = new Set(
+              sessionResult.data.window.items.map((item) => item.address.event_sequence),
+            )
+            updateLivePresentation((current) =>
+              applyLiveEvent(
+                current,
+                { kind: 'snapshot', snapshot },
+                sessionId,
+                historicalEventSequences,
+              ),
             )
           }
         } while (refreshPending && !disposed)
       } catch {
-        if (!disposed) setLivePresentation(beginLiveResync)
+        if (!disposed) {
+          updateLivePresentation(beginLiveResync)
+          if (refreshRetry === undefined) {
+            refreshRetry = window.setTimeout(() => {
+              refreshRetry = undefined
+              void refreshSessionFacts()
+            }, 250)
+          }
+        }
       } finally {
         refreshInFlight = false
       }
@@ -389,19 +449,20 @@ export function SessionWorkspaceSurface({
     const stop = synchronizer.followSession(
       sessionId,
       (event) => {
-        setLivePresentation((current) => applyLiveEvent(current, event, sessionId))
+        updateLivePresentation((current) => applyLiveEvent(current, event, sessionId))
         if (event.kind === 'durable') void refreshSessionFacts()
       },
       (state) => {
         setLiveConnection(state)
-        if (state === 'retrying') setLivePresentation(beginLiveResync)
+        if (state === 'retrying') updateLivePresentation(beginLiveResync)
       },
     )
     return () => {
       disposed = true
+      if (refreshRetry !== undefined) window.clearTimeout(refreshRetry)
       stop()
     }
-  }, [refetchSession, sessionId, source, synchronizer, timelineCapability])
+  }, [refetchSession, sessionId, source, synchronizer, timelineCapability, updateLivePresentation])
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => {
@@ -476,10 +537,11 @@ export function SessionWorkspaceSurface({
       manualAnchorRef.current = null
       setExpanded(new Set())
       dispatch(actions.timelineSelected(null))
+      updateLivePresentation(() => EMPTY_LIVE_PRESENTATION)
       setSessionId(candidate)
       if (reopeningCurrentSession) setRefetchRequest((current) => current + 1)
     },
-    [app.lastLogicalPositions, dispatch, sessionId, timelineCapability],
+    [app.lastLogicalPositions, dispatch, sessionId, timelineCapability, updateLivePresentation],
   )
   const selectRelativeSession = useCallback(
     (offset: -1 | 1) => {
@@ -512,6 +574,9 @@ export function SessionWorkspaceSurface({
   const applySearch = useCallback(() => {
     const nextSearch = searchDraft.trim()
     if (nextSearch === search) return
+    catalogQueryGeneration.current += 1
+    catalogRefreshAbort.current?.abort()
+    catalogRefreshAbort.current = null
     catalogPageAbort.current?.abort()
     catalogPageAbort.current = null
     catalogPageRequest.current += 1
@@ -521,6 +586,9 @@ export function SessionWorkspaceSurface({
     setSearch(nextSearch)
   }, [search, searchDraft])
   const toggleSort = useCallback(() => {
+    catalogQueryGeneration.current += 1
+    catalogRefreshAbort.current?.abort()
+    catalogRefreshAbort.current = null
     catalogPageAbort.current?.abort()
     catalogPageAbort.current = null
     catalogPageRequest.current += 1
@@ -565,6 +633,7 @@ export function SessionWorkspaceSurface({
   ])
   useEffect(
     () => () => {
+      catalogRefreshAbort.current?.abort()
       catalogPageAbort.current?.abort()
     },
     [],
@@ -777,8 +846,8 @@ export function SessionWorkspaceSurface({
                       <span>
                         {summary.active_turn_count} active · {summary.queued_turn_count} queued
                       </span>
-                      <time dateTime={activityDateTime(summary.last_activity.unix_milliseconds)}>
-                        {activityLabel(summary.last_activity.unix_milliseconds)}
+                      <time dateTime={activityDateTime(summary.last_activity.unix_microseconds)}>
+                        {activityLabel(summary.last_activity.unix_microseconds)}
                       </time>
                     </div>
                   )

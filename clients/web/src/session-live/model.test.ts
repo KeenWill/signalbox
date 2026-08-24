@@ -26,7 +26,7 @@ const summary = (sessionId: string, title = sessionId) => ({
   archived: false,
   current_turn_id: null,
   judge: { actionable: '0', completed: '0', escalated: '0', failed: '0' },
-  last_activity: { kind: 'session' as const, unix_milliseconds: '41' },
+  last_activity: { kind: 'session' as const, unix_microseconds: '41000' },
   queued_turn_count: '0',
   session_id: sessionId,
   state: 'idle' as const,
@@ -86,11 +86,16 @@ const draftPresentation = (count: number) => {
     part_index: index,
     turn_id: 'turn-1',
   }))
+  const initial = applyLiveEvent(
+    EMPTY_LIVE_PRESENTATION,
+    { kind: 'snapshot', snapshot: liveSnapshot },
+    liveSnapshot.session_id,
+  )
   return {
     events,
     presentation: events.reduce(
       (current, event) => applyLiveEvent(current, event, liveSnapshot.session_id),
-      EMPTY_LIVE_PRESENTATION,
+      initial,
     ),
   }
 }
@@ -200,9 +205,48 @@ describe('session live projection', () => {
     expect(result.snapshot?.active?.state.kind).toBe('awaiting_tool_approval')
   })
 
-  it('discards all transient presentation while a lagged stream resynchronizes', () => {
-    const current = applyLiveEvent(
+  it('retains a durable header until the refreshed historical window contains it', () => {
+    const initial = applyLiveEvent(
       EMPTY_LIVE_PRESENTATION,
+      { kind: 'snapshot', snapshot: liveSnapshot },
+      liveSnapshot.session_id,
+    )
+    const withDurable = applyLiveEvent(
+      initial,
+      {
+        address: { event_sequence: '43' },
+        cursor: '43',
+        event_kind: 'turn_completed',
+        kind: 'durable',
+      },
+      liveSnapshot.session_id,
+    )
+
+    const absent = applyLiveEvent(
+      withDurable,
+      { kind: 'snapshot', snapshot: { ...liveSnapshot, observed_through: '43' } },
+      liveSnapshot.session_id,
+      new Set(['41', '42']),
+    )
+    const present = applyLiveEvent(
+      absent,
+      { kind: 'snapshot', snapshot: { ...liveSnapshot, observed_through: '43' } },
+      liveSnapshot.session_id,
+      new Set(['41', '42', '43']),
+    )
+
+    expect(absent.durable).toHaveLength(1)
+    expect(present.durable).toEqual([])
+  })
+
+  it('discards all transient presentation while a lagged stream resynchronizes', () => {
+    const initial = applyLiveEvent(
+      EMPTY_LIVE_PRESENTATION,
+      { kind: 'snapshot', snapshot: liveSnapshot },
+      liveSnapshot.session_id,
+    )
+    const current = applyLiveEvent(
+      initial,
       {
         content: 'non-authoritative',
         kind: 'provider_text_delta',
@@ -251,6 +295,22 @@ describe('session live projection', () => {
     expect(() => applyLiveEvent(initial, durable, liveSnapshot.session_id)).toThrow(
       'did not advance monotonically',
     )
+  })
+
+  it('rejects provider deltas before the initial snapshot', () => {
+    expect(() =>
+      applyLiveEvent(
+        EMPTY_LIVE_PRESENTATION,
+        {
+          content: 'unscoped draft',
+          kind: 'provider_text_delta',
+          model_call_id: 'call-1',
+          part_index: 0,
+          turn_id: 'turn-1',
+        },
+        liveSnapshot.session_id,
+      ),
+    ).toThrow('before the initial snapshot')
   })
 
   it('bounds retained provider draft parts', () => {
