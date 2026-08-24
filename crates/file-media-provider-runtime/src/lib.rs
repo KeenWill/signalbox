@@ -51,8 +51,36 @@ impl<Source> ResolvedFileUse<Source> {
 }
 
 /// Boxed future returned by a rendered-frontier resolver.
-pub type FileUseResolverFuture<'a, Source> =
-    Pin<Box<dyn Future<Output = Result<ResolvedFileUse<Source>, FileMediaFailure>> + Send + 'a>>;
+pub type FileUseResolverFuture<'a, Source> = Pin<
+    Box<dyn Future<Output = Result<ResolvedFileUse<Source>, FileUseResolutionError>> + Send + 'a>,
+>;
+
+/// Closed failure algebra owned by rendered-frontier resolution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileUseResolutionError {
+    /// Digest is outside the rendered-frontier allow-set.
+    BlobNotVisible,
+    /// Blob catalog identity is absent.
+    BlobMissing,
+    /// Every replica contradicted exact bytes.
+    BlobCorrupt,
+    /// Blob access is temporarily unavailable.
+    BlobUnavailable,
+    /// Resolver authority or evidence was internally inconsistent.
+    Internal,
+}
+
+impl From<FileUseResolutionError> for FileMediaFailure {
+    fn from(value: FileUseResolutionError) -> Self {
+        match value {
+            FileUseResolutionError::BlobNotVisible => Self::BlobNotVisible,
+            FileUseResolutionError::BlobMissing => Self::BlobMissing,
+            FileUseResolutionError::BlobCorrupt => Self::BlobCorrupt,
+            FileUseResolutionError::BlobUnavailable => Self::BlobUnavailable,
+            FileUseResolutionError::Internal => Self::ProcessorFailed,
+        }
+    }
+}
 
 /// Resolves exactly one visible use and ends catalog work before source I/O.
 pub trait FileUseResolver: Send {
@@ -113,10 +141,14 @@ where
         Box::pin(async move {
             let requested_digest = request.digest();
             let visible_part = request.visible_part().cloned();
-            let resolved = self.resolver.resolve(request).await?;
+            let resolved = self
+                .resolver
+                .resolve(request)
+                .await
+                .map_err(FileMediaFailure::from)?;
             let (file_use, source) = resolved.into_parts();
             if file_use.digest() != requested_digest {
-                return Err(FileMediaFailure::BlobNotVisible);
+                return Err(FileMediaFailure::ProcessorFailed);
             }
             self.registry
                 .inspect(
@@ -140,13 +172,17 @@ where
             let requested_digest = request.target().digest();
             let visible_part = request.target().visible_part().cloned();
             let view = request.view().clone();
-            let options = request.options().clone().into_iter().collect();
+            let input = request.clone().into_runtime_input();
             let target =
                 FileInspectServiceRequest::from_parts(requested_digest, visible_part.clone());
-            let resolved = self.resolver.resolve(target).await?;
+            let resolved = self
+                .resolver
+                .resolve(target)
+                .await
+                .map_err(FileMediaFailure::from)?;
             let (file_use, source) = resolved.into_parts();
             if file_use.digest() != requested_digest {
-                return Err(FileMediaFailure::BlobNotVisible);
+                return Err(FileMediaFailure::ProcessorFailed);
             }
             self.registry
                 .read(
@@ -157,7 +193,7 @@ where
                             visible_part,
                         },
                         view,
-                        options: serde_json::Value::Object(options),
+                        input,
                     },
                     &source,
                     &self.cancellation,

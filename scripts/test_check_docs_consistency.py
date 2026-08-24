@@ -67,7 +67,7 @@ def write_manifest_workflow(root: Path, *names: str) -> None:
     workflow.write_text(
         "jobs:\n"
         "  postgres-integration-run:\n"
-        "    runs-on: ubuntu-latest\n"
+        "    runs-on: signalbox-docker\n"
         "    steps:\n"
         "      - env:\n"
         "          SUITE: ${{ matrix.suite }}\n"
@@ -78,7 +78,7 @@ def write_manifest_workflow(root: Path, *names: str) -> None:
         ' --partition "count:$PARTITION/$PARTITIONS"'
         ' --run-ignored only -E "$FILTER"\n'
         "  postgres-integration-build:\n"
-        "    runs-on: ubuntu-latest\n"
+        "    runs-on: signalbox-docker\n"
         "    steps:\n"
         "      - run: python3 scripts/postgres_integration_suites.py --matrix\n"
         "      - run: python3 scripts/postgres_integration_suites.py"
@@ -165,6 +165,13 @@ def render_invariant_index(root: Path) -> str:
     """Track intended fixture edits before rendering its invariant index."""
     run_git(root, "add", "-A")
     return render_generated_invariant_index(root)
+
+
+def ignored_test_packages(root: Path) -> list[str]:
+    """Project packages credited with authoritative ignored-test execution."""
+    return [
+        run.package for run in check_docs_consistency.workflow_ignored_test_runs(root)
+    ]
 
 
 def orphan_invariant_references(root: Path) -> dict[str, tuple[str, ...]]:
@@ -946,7 +953,7 @@ class DocsConsistencyTests(unittest.TestCase):
         workflow.write_text(
             "jobs:\n"
             "  postgres-integration-run:\n"
-            "    runs-on: ubuntu-latest\n"
+            "    runs-on: signalbox-docker\n"
             "    steps:\n"
             "      - env:\n"
             "          SUITE: ${{ matrix.suite }}\n"
@@ -957,7 +964,7 @@ class DocsConsistencyTests(unittest.TestCase):
             ' --partition "count:$PARTITION/$PARTITIONS"'
             ' --run-ignored only -E "$FILTER"\n'
             "  postgres-integration-build:\n"
-            "    runs-on: ubuntu-latest\n"
+            "    runs-on: signalbox-docker\n"
             "    steps:\n"
             "      - uses: actions/upload-artifact@v7\n"
             "        with:\n"
@@ -1010,7 +1017,44 @@ class DocsConsistencyTests(unittest.TestCase):
         self.assertEqual(failure_categories(failures), ["suite-manifest"])
         self.assertIn("outside", failures[0].message)
 
-    def test_workflow_leaving_ubuntu_fails(self) -> None:
+    def test_exact_isolation_command_is_credited_as_ignored_enforcement(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root, 'name = "fixture"\npackage = "fixture"\nshards = 1\n'
+        )
+        write_manifest_workflow(self.root, "fixture")
+        workflow = self.root / ".github/workflows/rust.yml"
+        workflow.write_text(
+            workflow.read_text(encoding="utf-8")
+            + "      - run: cargo test --no-fail-fast "
+            "-p signalbox-file-media-processor-runtime "
+            "--features test-worker --test isolation -- --ignored\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(
+            ignored_test_packages(self.root),
+            ["fixture", "signalbox-file-media-processor-runtime"],
+        )
+
+    def test_split_isolation_fragments_are_not_credited_as_enforcement(self) -> None:
+        self.declare_fixture_package()
+        write_suite_manifest(
+            self.root, 'name = "fixture"\npackage = "fixture"\nshards = 1\n'
+        )
+        write_manifest_workflow(self.root, "fixture")
+        workflow = self.root / ".github/workflows/rust.yml"
+        workflow.write_text(
+            workflow.read_text(encoding="utf-8")
+            + "      - run: echo cargo test --no-fail-fast "
+            "-p signalbox-file-media-processor-runtime\n"
+            "      - run: echo --features test-worker --test isolation -- --ignored\n",
+            encoding="utf-8",
+        )
+
+        self.assertEqual(ignored_test_packages(self.root), ["fixture"])
+
+    def test_run_job_leaving_signalbox_docker_fails(self) -> None:
         self.declare_fixture_package()
         write_suite_manifest(
             self.root, 'name = "fixture"\npackage = "fixture"\nshards = 1\n'
@@ -1019,7 +1063,10 @@ class DocsConsistencyTests(unittest.TestCase):
         workflow = self.root / ".github/workflows/rust.yml"
         workflow.write_text(
             workflow.read_text(encoding="utf-8").replace(
-                "ubuntu-latest", "macos-latest"
+                "  postgres-integration-run:\n"
+                "    runs-on: signalbox-docker\n",
+                "  postgres-integration-run:\n"
+                "    runs-on: macos-latest\n",
             ),
             encoding="utf-8",
         )
