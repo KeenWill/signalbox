@@ -172,39 +172,45 @@ CREATE TRIGGER turn_lifecycle_updates_timeline_fact
 AFTER INSERT OR UPDATE OF state_kind, delegation_runtime_terminal ON turn_lifecycle
 FOR EACH ROW EXECUTE FUNCTION update_session_timeline_work_fact();
 
-CREATE FUNCTION retire_session_timeline_goal_work_fact()
+-- Goal events change which queued turns count as pursued work, so this
+-- recomputes the session's queued total from the one predicate the backfill
+-- above uses rather than applying a per-event delta.
+--
+-- A delta cannot be made to agree with that backfill. Relevance is decided by
+-- the session's single latest goal event, so `blocked` and `achieved` retire a
+-- generation's queued turns exactly as `user_stopped` and `superseded` do, and
+-- a later `resumed` restores them. A trigger that subtracted only on the
+-- retiring pair therefore read high against a blocked or achieved generation,
+-- and the divergence was not merely cosmetic: `blocked` may be followed by
+-- `user_stopped` at that same generation, so a database backfilled while the
+-- goal sat blocked had already excluded those turns, and the later subtraction
+-- drove the count to -1, tripping `CHECK (queued_turn_count >= 0)` and
+-- aborting the writing transaction instead of failing closed on read.
+--
+-- Recomputing keeps one definition of the count in this file: whatever
+-- `goal_turn_is_runtime_relevant` admits, for every event kind, with no
+-- dependency on which transitions the goal continuity rules currently permit.
+CREATE FUNCTION reconcile_session_timeline_goal_work_fact()
 RETURNS trigger LANGUAGE plpgsql
 SET search_path FROM CURRENT AS $$
-DECLARE
-    retired_queued_count numeric(20, 0);
 BEGIN
-    IF NEW.event_kind NOT IN ('user_stopped', 'superseded') THEN
-        RETURN NULL;
-    END IF;
-
-    SELECT count(*)::numeric
-      INTO retired_queued_count
-      FROM goal_turn AS goal
-      JOIN turn_lifecycle AS lifecycle
-        ON lifecycle.session_id = goal.session_id
-       AND lifecycle.turn_id = goal.turn_id
-     WHERE goal.session_id = NEW.session_id
-       AND goal.goal_generation = NEW.generation
-       AND lifecycle.state_kind = 'queued'
-       AND NOT lifecycle.delegation_runtime_terminal;
-
-    IF retired_queued_count > 0 THEN
-        -- Goal retirement later appends an outbox event. Preserve the same
-        -- allocator-then-fact lock order used by every other fact update.
-        PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
-        UPDATE session_timeline_fact
-           SET queued_turn_count = queued_turn_count - retired_queued_count
-         WHERE session_id = NEW.session_id;
-    END IF;
+    -- Goal retirement later appends an outbox event. Preserve the same
+    -- allocator-then-fact lock order used by every other fact update.
+    PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
+    UPDATE session_timeline_fact
+       SET queued_turn_count = (
+               SELECT count(*)::numeric
+                 FROM turn_lifecycle AS turn
+                WHERE turn.session_id = NEW.session_id
+                  AND turn.state_kind = 'queued'
+                  AND NOT turn.delegation_runtime_terminal
+                  AND goal_turn_is_runtime_relevant(turn.session_id, turn.turn_id)
+           )
+     WHERE session_id = NEW.session_id;
     RETURN NULL;
 END
 $$;
 
-CREATE TRIGGER goal_event_retires_timeline_work_fact
+CREATE TRIGGER goal_event_reconciles_timeline_work_fact
 AFTER INSERT ON goal_event
-FOR EACH ROW EXECUTE FUNCTION retire_session_timeline_goal_work_fact();
+FOR EACH ROW EXECUTE FUNCTION reconcile_session_timeline_goal_work_fact();

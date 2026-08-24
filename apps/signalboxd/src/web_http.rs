@@ -1287,6 +1287,84 @@ mod tests {
         assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
     }
 
+    /// Drives a session read at the loopback gate and reports only the status.
+    ///
+    /// The query is deliberately malformed, which separates the gate from
+    /// everything behind it: `FORBIDDEN` means the gate rejected the
+    /// authority, while `BAD_REQUEST` comes from the handler and is therefore
+    /// reachable only once the gate has admitted the request.
+    async fn session_read_status_for_host(host: &str) -> StatusCode {
+        let request = Request::get(
+            "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?max_items=nope",
+        )
+        .header(header::HOST, host)
+        .body(Body::empty())
+        .expect("the request is valid");
+        production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn session_reads_admit_loopback_authorities_including_ip_literals() {
+        // `127.0.0.1` is the daemon's own DEFAULT_WEB_BIND_ADDRESS, so a
+        // regression that tightened this branch would 403 the default
+        // deployment. `[::1]` exercises the bracket strip that precedes the
+        // parse, and `127.5.6.7` covers the whole 127.0.0.0/8 loopback range
+        // rather than only the canonical address.
+        for host in [
+            "localhost",
+            "localhost:37231",
+            "LocalHost",
+            "127.0.0.1",
+            "127.0.0.1:37231",
+            "127.5.6.7",
+            "[::1]",
+            "[::1]:37231",
+        ] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::BAD_REQUEST,
+                "`{host}` is a loopback authority and must reach the handler",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_non_loopback_ip_literal_authorities() {
+        // Every authority here parses as an address, so `is_loopback` — not
+        // the `parse::<IpAddr>()` that already turns hostnames away — is what
+        // has to reject them. A regression that loosened the branch to accept
+        // any parseable address would expose session history to any host that
+        // can reach the port.
+        for host in [
+            "10.0.0.5",
+            "10.0.0.5:37231",
+            "192.168.1.20",
+            "[2001:db8::1]",
+            "[2001:db8::1]:37231",
+        ] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "`{host}` parses as a non-loopback address and must be rejected",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_authorities_that_are_neither_localhost_nor_literals() {
+        for host in ["attacker.example", "localhost.attacker.example"] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "`{host}` is neither localhost nor a loopback literal",
+            );
+        }
+    }
+
     #[test]
     fn timeline_addresses_require_canonical_positive_decimal() {
         assert!(super::parse_window_anchor("after", Some("+5")).is_err());
