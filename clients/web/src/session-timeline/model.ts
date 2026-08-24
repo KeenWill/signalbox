@@ -43,6 +43,17 @@ const MAX_TIMELINE_RESPONSE_BYTES = 1024 * 1024
 export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024
 const MAX_ERROR_RESPONSE_BYTES = MAX_BOOTSTRAP_RESPONSE_BYTES
 
+// The wire contract fixes these bounds (docs/spec/sessions-and-transcript.md): every timeline
+// request carries max_items 1..256 and max_bytes 256..65,536, and each item's projected charge
+// is a fixed 64-byte envelope plus its UTF-8 event-kind spelling.
+const MAX_TIMELINE_WINDOW_ITEMS_CEILING = 256
+const MIN_TIMELINE_WINDOW_BYTES = 256
+const MAX_TIMELINE_WINDOW_BYTES_CEILING = 64 * 1024
+const PROJECTED_ITEM_ENVELOPE_BYTES = 64
+const FUTURE_ITEM_MESSAGE = 'timeline window contains an item above the described latest address'
+
+const utf8 = new TextEncoder()
+
 export const readBoundedJson = async (
   response: Response,
   maximumBytes: number,
@@ -144,6 +155,15 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     if (!bootstrap.capabilities.bounded_session_timeline) {
       throw new TypeError('bounded session timeline capability is unavailable')
     }
+    const advertised = bootstrap.limits
+    if (
+      advertised.max_timeline_window_items < 1 ||
+      advertised.max_timeline_window_items > MAX_TIMELINE_WINDOW_ITEMS_CEILING ||
+      advertised.max_timeline_window_bytes < MIN_TIMELINE_WINDOW_BYTES ||
+      advertised.max_timeline_window_bytes > MAX_TIMELINE_WINDOW_BYTES_CEILING
+    ) {
+      throw new TypeError('bootstrap advertises unusable timeline limits')
+    }
     return new HttpSessionTimelineSource(bootstrap.limits, request)
   }
 
@@ -215,7 +235,15 @@ export class BoundedSessionHistory {
     if (firstAddress > latestAddress || latestAddress > observedThrough) {
       throw new TypeError('timeline descriptor carries contradictory bounds')
     }
-    if (decimalU64(descriptor.sizes.item_count) === 0n) {
+    // Distinct bounds prove at least the two boundary events, and a session's durable events are
+    // a subset of the inclusive global address span between them.
+    const itemCount = decimalU64(descriptor.sizes.item_count)
+    const addressSpan = latestAddress - firstAddress + 1n
+    if (
+      itemCount === 0n ||
+      itemCount > addressSpan ||
+      (firstAddress !== latestAddress && itemCount < 2n)
+    ) {
       throw new TypeError('timeline descriptor item count contradicts its durable bounds')
     }
     decimalU64(descriptor.sizes.projected_text_bytes)
@@ -235,6 +263,27 @@ export class BoundedSessionHistory {
   ): Promise<WebSessionTimelineWindow> {
     if ('eventSequence' in anchor) decimalAddress(anchor.eventSequence)
     const bounded = boundedLimits(limits, this.source.limits)
+    try {
+      return await this.loadWindow(anchor, bounded, signal)
+    } catch (error) {
+      // An active session may durably append between the descriptor snapshot and the window
+      // read; the HTTP API shares no snapshot between them, so refresh the descriptor and
+      // re-read once before treating a future address as fabrication.
+      const staleDescriptor =
+        error instanceof TypeError &&
+        error.message === FUTURE_ITEM_MESSAGE &&
+        this.descriptorValue !== undefined
+      if (!staleDescriptor) throw error
+      await this.describe(signal)
+      return await this.loadWindow(anchor, bounded, signal)
+    }
+  }
+
+  private async loadWindow(
+    anchor: SessionWindowAnchor,
+    bounded: SessionWindowLimits,
+    signal?: AbortSignal,
+  ): Promise<WebSessionTimelineWindow> {
     const window = await this.source.readWindow(this.sessionId, anchor, bounded, signal)
     if (canonicalSessionId(window.session_id) !== this.sessionId)
       throw new TypeError('timeline window session mismatch')
@@ -266,11 +315,15 @@ export class BoundedSessionHistory {
     for (const item of window.items) {
       const address = item.address.event_sequence
       const parsedAddress = decimalAddress(address)
+      const expectedCharge = PROJECTED_ITEM_ENVELOPE_BYTES + utf8.encode(item.kind).byteLength
+      if (item.projected_structured_bytes !== expectedCharge) {
+        throw new TypeError('timeline item byte charge contradicts the projection contract')
+      }
       if (knownFirstAddress !== null && parsedAddress < knownFirstAddress) {
         throw new TypeError('timeline window contains an item below the immutable first address')
       }
       if (knownLatestAddress !== null && parsedAddress > knownLatestAddress) {
-        throw new TypeError('timeline window contains an item above the described latest address')
+        throw new TypeError(FUTURE_ITEM_MESSAGE)
       }
       if (previousAddress !== undefined && parsedAddress <= previousAddress) {
         throw new TypeError('timeline window items are not strictly ordered')
@@ -317,6 +370,9 @@ export class BoundedSessionHistory {
     if (this.descriptorValue && firstAddress !== undefined && lastAddress !== undefined) {
       const descriptorFirst = decimalAddress(this.descriptorValue.first_address.event_sequence)
       const descriptorLatest = decimalAddress(this.descriptorValue.latest_address.event_sequence)
+      if (anchor.kind === 'first' && decimalAddress(firstAddress) !== descriptorFirst) {
+        throw new TypeError('timeline first window does not start at the immutable first address')
+      }
       if (decimalAddress(firstAddress) > descriptorFirst && !window.continuation_before) {
         throw new TypeError('timeline window omits a required continuation before')
       }
@@ -340,7 +396,20 @@ export class BoundedSessionHistory {
 
 const SCENARIO_SESSION_ID = '00000000-0000-0000-0000-000000000991'
 export const SESSION_FOUNDATION_TOTAL = 1_000_000
-const SCENARIO_ITEM_BYTES = 96
+const SCENARIO_EVENT_KINDS = [
+  'input_accepted',
+  'turn_activated',
+  'model_call_transition',
+  'tool_batch_transition',
+  'turn_completed',
+] as const
+const scenarioItemCharge = (kind: (typeof SCENARIO_EVENT_KINDS)[number]): number =>
+  PROJECTED_ITEM_ENVELOPE_BYTES + utf8.encode(kind).byteLength
+const SCENARIO_MAX_ITEM_BYTES = Math.max(...SCENARIO_EVENT_KINDS.map(scenarioItemCharge))
+// Exact per-cycle charge over the five scenario kinds, applied to the whole million-event span.
+const SCENARIO_TOTAL_STRUCTURED_BYTES =
+  (SESSION_FOUNDATION_TOTAL / SCENARIO_EVENT_KINDS.length) *
+  SCENARIO_EVENT_KINDS.map(scenarioItemCharge).reduce((total, charge) => total + charge, 0)
 const SCENARIO_TIMELINE_LIMITS: TimelineContractLimits = {
   max_timeline_window_items: 256,
   max_timeline_window_bytes: 64 * 1024,
@@ -355,7 +424,7 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
       sizes: {
         item_count: String(SESSION_FOUNDATION_TOTAL),
         projected_text_bytes: '48000000',
-        projected_structured_bytes: String(SESSION_FOUNDATION_TOTAL * SCENARIO_ITEM_BYTES),
+        projected_structured_bytes: String(SCENARIO_TOTAL_STRUCTURED_BYTES),
         referenced_blob_count: '24000',
         referenced_blob_bytes: '96000000000',
       },
@@ -372,7 +441,7 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
     limits: SessionWindowLimits,
   ): Promise<WebSessionTimelineWindow> {
     const bounded = boundedLimits(limits, this.limits)
-    const count = Math.min(bounded.maxItems, Math.floor(bounded.maxBytes / SCENARIO_ITEM_BYTES))
+    const count = Math.min(bounded.maxItems, Math.floor(bounded.maxBytes / SCENARIO_MAX_ITEM_BYTES))
     const addressed = 'eventSequence' in anchor ? Number(decimalAddress(anchor.eventSequence)) : 0
     const initialStart = (() => {
       switch (anchor.kind) {
@@ -398,17 +467,12 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
         ? []
         : Array.from({ length: end - start + 1 }, (_, offset) => {
             const sequence = start + offset
-            const kinds = [
-              'input_accepted',
-              'turn_activated',
-              'model_call_transition',
-              'tool_batch_transition',
-              'turn_completed',
-            ] as const
+            const kind =
+              SCENARIO_EVENT_KINDS[sequence % SCENARIO_EVENT_KINDS.length] ?? 'input_accepted'
             return {
               address: { event_sequence: String(sequence) },
-              kind: kinds[sequence % kinds.length],
-              projected_structured_bytes: SCENARIO_ITEM_BYTES,
+              kind,
+              projected_structured_bytes: scenarioItemCharge(kind),
             }
           })
     const firstItem = items[0]
@@ -416,7 +480,10 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
     return decodeWebSessionTimelineWindow({
       session_id: sessionId,
       items,
-      projected_structured_bytes: items.length * SCENARIO_ITEM_BYTES,
+      projected_structured_bytes: items.reduce(
+        (total, item) => total + item.projected_structured_bytes,
+        0,
+      ),
       continuation_before:
         firstItem && start > 1 ? { event_sequence: firstItem.address.event_sequence } : null,
       continuation_after:

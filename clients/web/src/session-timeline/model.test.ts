@@ -252,6 +252,7 @@ describe('BoundedSessionHistory', () => {
       readDescriptor: async () => ({
         ...descriptor,
         first_address: { event_sequence: '100' },
+        sizes: { ...descriptor.sizes, item_count: '999901' },
       }),
       readWindow: scenario.readWindow.bind(scenario),
     }
@@ -263,7 +264,7 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
-  it('rejects timeline items above the described latest address', async () => {
+  it('rejects timeline items above a latest address that a refresh reaffirms', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const descriptor = await scenario.readDescriptor(sessionId)
     const source: SessionTimelineSource = {
@@ -272,6 +273,7 @@ describe('BoundedSessionHistory', () => {
         ...descriptor,
         latest_address: { event_sequence: '2' },
         observed_through: '2',
+        sizes: { ...descriptor.sizes, item_count: '2' },
       }),
       readWindow: scenario.readWindow.bind(scenario),
     }
@@ -280,6 +282,112 @@ describe('BoundedSessionHistory', () => {
 
     await expect(history.load({ kind: 'first' }, { maxItems: 4, maxBytes: 1024 })).rejects.toThrow(
       'above the described latest address',
+    )
+  })
+
+  it('adopts events committed after the descriptor snapshot by refreshing it', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    let reads = 0
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => {
+        reads += 1
+        return reads === 1
+          ? {
+              ...descriptor,
+              latest_address: { event_sequence: '2' },
+              observed_through: '2',
+              sizes: { ...descriptor.sizes, item_count: '2' },
+            }
+          : descriptor
+      },
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    const window = await history.load({ kind: 'first' }, { maxItems: 4, maxBytes: 1024 })
+
+    expect(window.items.map((item) => item.address.event_sequence)).toEqual(['1', '2', '3', '4'])
+    expect(reads).toBe(2)
+  })
+
+  it('rejects a first window that omits the immutable first address', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (requestedSessionId, _anchor, limits) =>
+        scenario.readWindow(requestedSessionId, { kind: 'around', eventSequence: '500' }, limits),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.load({ kind: 'first' }, { maxItems: 4, maxBytes: 1024 })).rejects.toThrow(
+      'first window does not start at the immutable first address',
+    )
+  })
+
+  it('rejects an item whose byte charge contradicts the projection contract', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: scenario.readDescriptor.bind(scenario),
+      readWindow: async (requestedSessionId, anchor, limits) => {
+        const window = await scenario.readWindow(requestedSessionId, anchor, limits)
+        const [first, ...rest] = window.items
+        if (!first) throw new Error('scenario window must not be empty')
+        const tampered = {
+          ...first,
+          projected_structured_bytes: first.projected_structured_bytes - 1,
+        }
+        return {
+          ...window,
+          items: [tampered, ...rest],
+          projected_structured_bytes: window.projected_structured_bytes - 1,
+        }
+      },
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.load({ kind: 'first' }, { maxItems: 4, maxBytes: 1024 })).rejects.toThrow(
+      'byte charge contradicts the projection contract',
+    )
+  })
+
+  it('rejects a descriptor item count above its inclusive address span', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        sizes: { ...descriptor.sizes, item_count: '1000001' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+
+    await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
+      'item count contradicts its durable bounds',
+    )
+  })
+
+  it('rejects a single-item descriptor with distinct boundary addresses', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        sizes: { ...descriptor.sizes, item_count: '1' },
+      }),
+      readWindow: scenario.readWindow.bind(scenario),
+    }
+
+    await expect(new BoundedSessionHistory(sessionId, source).describe()).rejects.toThrow(
+      'item count contradicts its durable bounds',
     )
   })
 
@@ -309,6 +417,35 @@ describe('BoundedSessionHistory', () => {
 
     await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow(
       'timeline capability is unavailable',
+    )
+  })
+
+  it('rejects a bootstrap that advertises unusable timeline limits', async () => {
+    const request = async () =>
+      new Response(
+        JSON.stringify({
+          contract: { name: 'signalbox.web-http', version: '2' },
+          capabilities: {
+            bounded_json: true,
+            same_origin_json_mutations: true,
+            ndjson_streaming: true,
+            immutable_blob_content: false,
+            blob_derivations: false,
+            image_derivatives: false,
+            bounded_session_timeline: true,
+          },
+          limits: {
+            max_json_body_bytes: 1024,
+            max_ndjson_item_bytes: 1024,
+            max_timeline_window_items: 0,
+            max_timeline_window_bytes: 255,
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      )
+
+    await expect(HttpSessionTimelineSource.connect(request)).rejects.toThrow(
+      'unusable timeline limits',
     )
   })
 

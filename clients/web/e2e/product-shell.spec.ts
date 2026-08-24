@@ -1,12 +1,15 @@
 import { expect, type Page, test } from '@playwright/test'
 import { webContractBootstrapFixture } from '../src/product.fixture'
 
+// Item charges follow the wire contract: a 64-byte envelope plus the UTF-8 event-kind spelling
+// (all three kinds below spell 14 bytes), so each item projects 78 bytes and the window 234.
 const sessionWorkspaceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
   firstAddress: '41',
   latestAddress: '43',
-  itemCount: '1000000',
-  projectedBytes: 288,
+  itemCount: '3',
+  itemBytes: 78,
+  projectedBytes: 234,
 } as const
 
 const settingsPreferenceFixture = {
@@ -29,17 +32,17 @@ const useDeterministicSession = async (page: Page) => {
             {
               address: { event_sequence: '41' },
               kind: 'input_accepted',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: sessionWorkspaceFixture.itemBytes,
             },
             {
               address: { event_sequence: '42' },
               kind: 'turn_activated',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: sessionWorkspaceFixture.itemBytes,
             },
             {
               address: { event_sequence: '43' },
               kind: 'turn_completed',
-              projected_structured_bytes: 96,
+              projected_structured_bytes: sessionWorkspaceFixture.itemBytes,
             },
           ],
           projected_structured_bytes: sessionWorkspaceFixture.projectedBytes,
@@ -54,7 +57,7 @@ const useDeterministicSession = async (page: Page) => {
         sizes: {
           item_count: sessionWorkspaceFixture.itemCount,
           projected_text_bytes: '0',
-          projected_structured_bytes: '96000000',
+          projected_structured_bytes: String(sessionWorkspaceFixture.projectedBytes),
           referenced_blob_count: '0',
           referenced_blob_bytes: '0',
         },
@@ -338,6 +341,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
   const accepted = page.getByRole('button', { name: /41 input accepted/ })
+  const acceptedItem = page.getByRole('listitem').filter({ has: accepted })
   await accepted.focus()
   await page.keyboard.press('Enter')
   await expect(
@@ -361,7 +365,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await page.keyboard.press('g')
   await page.keyboard.press('g')
   await firstWindowRequest
-  await expect(completedItem).toHaveClass(/selected/)
+  await expect(acceptedItem).toHaveClass(/selected/)
 
   const latestWindowRequest = page.waitForRequest((request) => {
     const url = new URL(request.url())
@@ -369,6 +373,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   })
   await page.keyboard.press('Shift+G')
   await latestWindowRequest
+  await expect(completedItem).toHaveClass(/selected/)
 
   const reopenRequest = page.waitForRequest((request) =>
     new URL(request.url()).pathname.endsWith(`/api/sessions/${sessionWorkspaceFixture.id}`),
