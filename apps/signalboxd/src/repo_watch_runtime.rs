@@ -912,9 +912,11 @@ struct RepositoryWatchTask {
     webhook_nudge: Option<Arc<watch::Sender<()>>>,
     webhook_shadow: Option<WebhookShadowBaseline>,
     webhook_shadow_superseded: bool,
+    webhook_shadow_supersession_epoch: u64,
     webhook_projected_terminal_in_flight: bool,
+    webhook_dispatch_in_flight: bool,
     webhook_targeted_completion:
-        Option<JoinHandle<Result<WebhookShadowBaseline, RepositoryWatchAttemptError>>>,
+        Option<JoinHandle<Result<TargetedWebhookCompletion, TargetedWebhookCompletionError>>>,
     webhook_drain_first_failure: Option<RepositoryWatchAttemptError>,
     payload_purge: WebhookPayloadPurgeSchedule,
     rules_activated: bool,
@@ -995,7 +997,9 @@ impl RepositoryWatchTask {
             webhook_nudge,
             webhook_shadow: None,
             webhook_shadow_superseded: false,
+            webhook_shadow_supersession_epoch: 0,
             webhook_projected_terminal_in_flight: false,
+            webhook_dispatch_in_flight: false,
             webhook_targeted_completion: None,
             webhook_drain_first_failure: None,
             payload_purge,
@@ -1791,7 +1795,12 @@ impl RepositoryWatchTask {
                     cause_code = error.cause_code(),
                     "repository-watch webhook drain exceeded its attempt deadline"
                 );
-                WebhookDrainOutcome::ProjectionFailed(error)
+                if self.webhook_dispatch_in_flight {
+                    self.webhook_dispatch_in_flight = false;
+                    WebhookDrainOutcome::DispatchFailedAfterTerminal(error)
+                } else {
+                    WebhookDrainOutcome::ProjectionFailed(error)
+                }
             }
         }
     }
@@ -2059,7 +2068,10 @@ impl RepositoryWatchTask {
                             });
                             self.webhook_shadow_superseded = false;
                         }
-                        if let Err(error) = self.process_dispatches().await {
+                        self.webhook_dispatch_in_flight = true;
+                        let dispatch_result = self.process_dispatches().await;
+                        self.webhook_dispatch_in_flight = false;
+                        if let Err(error) = dispatch_result {
                             // Carries the identity here because this delivery
                             // is already terminal: it never reaches the drain
                             // page's deferral record, and the classified
@@ -2248,11 +2260,12 @@ impl RepositoryWatchTask {
             None,
         )
         .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        let supersession_epoch = self.webhook_shadow_supersession_epoch;
         self.webhook_targeted_completion = Some(tokio::spawn(async move {
             let outcome = store
                 .commit(&repository, request)
                 .await
-                .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+                .map_err(|_| TargetedWebhookCompletionError::Persistence)?;
             match outcome {
                 RepoWatchCommitOutcome::Committed(cursor)
                 | RepoWatchCommitOutcome::Replayed(cursor)
@@ -2260,11 +2273,16 @@ impl RepositoryWatchTask {
                     poller.publish_freshness(cursor.generation());
                 }
                 RepoWatchCommitOutcome::Conflict { current: _ } => {
-                    return Err(RepositoryWatchAttemptError::Persistence);
+                    return Err(TargetedWebhookCompletionError::Persistence);
                 }
             }
-            record_webhook_terminal_request(&webhook_store, key, &terminal).await?;
-            Ok(shadow)
+            record_webhook_terminal_request(&webhook_store, key, &terminal)
+                .await
+                .map_err(TargetedWebhookCompletionError::Terminal)?;
+            Ok(TargetedWebhookCompletion {
+                shadow,
+                supersession_epoch,
+            })
         }));
         self.settle_webhook_targeted_completion()
             .await
@@ -2283,16 +2301,26 @@ impl RepositoryWatchTask {
             let handle = self.webhook_targeted_completion.as_mut()?;
             handle
                 .await
-                .map_err(|_| RepositoryWatchAttemptError::Persistence)
+                .map_err(|_| TargetedWebhookCompletionError::Persistence)
                 .and_then(|result| result)
         };
         self.webhook_targeted_completion = None;
-        if let Ok(shadow) = result {
-            self.webhook_shadow = Some(shadow);
-            self.webhook_shadow_superseded = false;
-            Some(Ok(()))
-        } else {
-            Some(Err(RepositoryWatchAttemptError::Persistence))
+        match result {
+            Ok(completion) => {
+                self.webhook_shadow = Some(completion.shadow);
+                if self.webhook_shadow_supersession_epoch == completion.supersession_epoch {
+                    self.webhook_shadow_superseded = false;
+                }
+                Some(Ok(()))
+            }
+            Err(TargetedWebhookCompletionError::Terminal(
+                WebhookTerminalRecordError::Ambiguous,
+            )) => {
+                self.webhook_shadow = None;
+                self.webhook_shadow_superseded = false;
+                Some(Err(RepositoryWatchAttemptError::Persistence))
+            }
+            Err(_) => Some(Err(RepositoryWatchAttemptError::Persistence)),
         }
     }
 
@@ -2518,6 +2546,8 @@ impl RepositoryWatchTask {
                 // instead, where an empty page and the replacement are decided
                 // without an await between them.
                 self.webhook_shadow_superseded = true;
+                self.webhook_shadow_supersession_epoch =
+                    self.webhook_shadow_supersession_epoch.wrapping_add(1);
                 Ok(())
             }
             RepoWatchCommitOutcome::Conflict { current: _ } => {
@@ -2531,7 +2561,7 @@ async fn record_webhook_terminal_request(
     store: &PostgresRepoWatchWebhookStore,
     key: RepoWatchWebhookDeliveryKey,
     request: &RepoWatchWebhookTerminalRequest,
-) -> Result<(), RepositoryWatchAttemptError> {
+) -> Result<(), WebhookTerminalRecordError> {
     for attempt in 1..=MAX_WEBHOOK_TERMINAL_ATTEMPTS {
         match store.record_terminal(key, request).await {
             Ok(_) => return Ok(()),
@@ -2544,10 +2574,27 @@ async fn record_webhook_terminal_request(
                     Ok(false) | Err(_) => {}
                 }
             }
-            Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
+            Err(_) => return Err(WebhookTerminalRecordError::Persistence),
         }
     }
-    Err(RepositoryWatchAttemptError::Persistence)
+    Err(WebhookTerminalRecordError::Ambiguous)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookTerminalRecordError {
+    Persistence,
+    Ambiguous,
+}
+
+#[derive(Debug)]
+enum TargetedWebhookCompletionError {
+    Persistence,
+    Terminal(WebhookTerminalRecordError),
+}
+
+struct TargetedWebhookCompletion {
+    shadow: WebhookShadowBaseline,
+    supersession_epoch: u64,
 }
 
 /// One complete provider sweep derived against a durable cursor but not yet
@@ -5616,7 +5663,9 @@ mod tests {
                 webhook_nudge: None,
                 webhook_shadow: None,
                 webhook_shadow_superseded: false,
+                webhook_shadow_supersession_epoch: 0,
                 webhook_projected_terminal_in_flight: false,
+                webhook_dispatch_in_flight: false,
                 webhook_targeted_completion: None,
                 webhook_drain_first_failure: None,
                 repository,
