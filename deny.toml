@@ -52,7 +52,7 @@ exceptions = [
   { allow = ["CDLA-Permissive-2.0"], crate = "webpki-root-certs@1.0.9" },
   # serde_stacker's build-only native-stack helper uses the LLVM exception.
   # Pinning the crate version keeps that license unavailable to other crates.
-  { allow = ["Apache-2.0 WITH LLVM-exception"], crate = "ar_archive_writer@0.5.2" },
+  { allow = ["Apache-2.0 WITH LLVM-exception"], crate = "ar_archive_writer@0.5.3" },
   # deno_core's task-waker helper is file-level copyleft. Pinning the crate
   # version keeps MPL-2.0 unavailable to every other dependency.
   { allow = ["MPL-2.0"], crate = "cooked-waker@5.0.0" },
