@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { WebAttentionSnapshot, WebSessionLiveSnapshot } from '../generated/web-contract.mjs'
 import {
   appendCatalog,
@@ -9,6 +9,7 @@ import {
   MAX_CATALOG_ROWS,
   MAX_LIVE_DURABLE_ITEMS,
   MAX_PROVIDER_DRAFT_PARTS,
+  readBoundedJson,
   readBoundedNdjson,
   replaceCatalog,
 } from './model'
@@ -62,7 +63,13 @@ const durablePresentation = (count: number) => {
     event_kind: 'model_call_transition' as const,
     kind: 'durable' as const,
   }))
-  return { events, presentation: events.reduce(applyLiveEvent, EMPTY_LIVE_PRESENTATION) }
+  return {
+    events,
+    presentation: events.reduce(
+      (current, event) => applyLiveEvent(current, event, liveSnapshot.session_id),
+      EMPTY_LIVE_PRESENTATION,
+    ),
+  }
 }
 
 const draftPresentation = (count: number) => {
@@ -73,7 +80,13 @@ const draftPresentation = (count: number) => {
     part_index: index,
     turn_id: 'turn-1',
   }))
-  return { events, presentation: events.reduce(applyLiveEvent, EMPTY_LIVE_PRESENTATION) }
+  return {
+    events,
+    presentation: events.reduce(
+      (current, event) => applyLiveEvent(current, event, liveSnapshot.session_id),
+      EMPTY_LIVE_PRESENTATION,
+    ),
+  }
 }
 
 const liveSnapshot: WebSessionLiveSnapshot = {
@@ -138,21 +151,33 @@ describe('session catalog projection', () => {
 
 describe('session live projection', () => {
   it('replaces transient drafts on snapshot without discarding later durable headers', () => {
-    const withDraft = applyLiveEvent(EMPTY_LIVE_PRESENTATION, {
-      content: 'partial',
-      kind: 'provider_text_delta',
-      model_call_id: 'call-1',
-      part_index: 0,
-      turn_id: 'turn-1',
-    })
-    const withDurable = applyLiveEvent(withDraft, {
-      address: { event_sequence: '43' },
-      cursor: '43',
-      event_kind: 'turn_completed',
-      kind: 'durable',
-    })
+    const withDraft = applyLiveEvent(
+      EMPTY_LIVE_PRESENTATION,
+      {
+        content: 'partial',
+        kind: 'provider_text_delta',
+        model_call_id: 'call-1',
+        part_index: 0,
+        turn_id: 'turn-1',
+      },
+      liveSnapshot.session_id,
+    )
+    const withDurable = applyLiveEvent(
+      withDraft,
+      {
+        address: { event_sequence: '43' },
+        cursor: '43',
+        event_kind: 'turn_completed',
+        kind: 'durable',
+      },
+      liveSnapshot.session_id,
+    )
 
-    const result = applyLiveEvent(withDurable, { kind: 'snapshot', snapshot: liveSnapshot })
+    const result = applyLiveEvent(
+      withDurable,
+      { kind: 'snapshot', snapshot: liveSnapshot },
+      liveSnapshot.session_id,
+    )
 
     expect(result.drafts).toEqual([])
     expect(result.durable).toHaveLength(1)
@@ -160,15 +185,23 @@ describe('session live projection', () => {
   })
 
   it('discards all transient presentation while a lagged stream resynchronizes', () => {
-    const current = applyLiveEvent(EMPTY_LIVE_PRESENTATION, {
-      content: 'non-authoritative',
-      kind: 'provider_text_delta',
-      model_call_id: 'call-1',
-      part_index: 0,
-      turn_id: 'turn-1',
-    })
+    const current = applyLiveEvent(
+      EMPTY_LIVE_PRESENTATION,
+      {
+        content: 'non-authoritative',
+        kind: 'provider_text_delta',
+        model_call_id: 'call-1',
+        part_index: 0,
+        turn_id: 'turn-1',
+      },
+      liveSnapshot.session_id,
+    )
 
-    const result = applyLiveEvent(current, { cursor: '42', kind: 'resync_required' })
+    const result = applyLiveEvent(
+      current,
+      { cursor: '42', kind: 'resync_required' },
+      liveSnapshot.session_id,
+    )
 
     expect(result.drafts).toEqual([])
     expect(result.resyncing).toBe(true)
@@ -186,6 +219,33 @@ describe('session live projection', () => {
 
     expect(fixture.presentation.drafts).toHaveLength(MAX_PROVIDER_DRAFT_PARTS)
     expect(fixture.presentation.drafts[0]?.partIndex).toBe(fixture.events[1]?.part_index)
+  })
+
+  it('rejects a snapshot for a different selected session', () => {
+    expect(() =>
+      applyLiveEvent(
+        EMPTY_LIVE_PRESENTATION,
+        { kind: 'snapshot', snapshot: liveSnapshot },
+        '00000000-0000-0000-0000-000000000002',
+      ),
+    ).toThrow('session live snapshot identity does not match the selected session')
+  })
+})
+
+describe('bounded JSON', () => {
+  it('rejects and cancels a response that exceeds the configured ceiling', async () => {
+    const cancel = vi.fn()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"oversized":true}'))
+      },
+      cancel,
+    })
+
+    await expect(readBoundedJson(new Response(body), 8)).rejects.toThrow(
+      'session JSON response exceeds the byte limit',
+    )
+    expect(cancel).toHaveBeenCalledOnce()
   })
 })
 
@@ -205,11 +265,19 @@ describe('bounded NDJSON', () => {
     expect(records).toEqual([{ value: 1 }, { value: 2 }])
   })
 
-  it('rejects a record before retaining bytes beyond the configured ceiling', async () => {
-    const body = new Response('{"value":"oversized"}\n')
+  it('rejects and cancels a record before retaining bytes beyond the configured ceiling', async () => {
+    const cancel = vi.fn()
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{"value":"oversized"}\n'))
+      },
+      cancel,
+    })
+    const body = new Response(stream)
 
     await expect(collect(readBoundedNdjson(body, (value) => value, 8))).rejects.toThrow(
       'NDJSON record exceeds the byte limit',
     )
+    expect(cancel).toHaveBeenCalledOnce()
   })
 })

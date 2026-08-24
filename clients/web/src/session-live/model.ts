@@ -10,6 +10,7 @@ import {
 } from '../generated/web-contract.mjs'
 
 export const MAX_CATALOG_ROWS = 512
+export const MAX_JSON_BODY_BYTES = 65_536
 export const MAX_NDJSON_RECORD_BYTES = 65_536
 export const MAX_PROVIDER_DRAFT_BYTES = 65_536
 export const MAX_PROVIDER_DRAFT_PARTS = 32
@@ -75,14 +76,38 @@ export const catalogUrl = (
   return `/api/sessions?${params.toString()}`
 }
 
-const responseJson = async (response: Response): Promise<unknown> => {
+export const readBoundedJson = async (
+  response: Response,
+  maxBodyBytes = MAX_JSON_BODY_BYTES,
+): Promise<unknown> => {
   if (!response.ok) throw new Error(`session read failed with status ${response.status}`)
-  return response.json()
+  if (!response.body) throw new Error('session read response has no body')
+  const reader = response.body.getReader()
+  let body: Uint8Array<ArrayBufferLike> = new Uint8Array()
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (body.byteLength + value.byteLength > maxBodyBytes) {
+        throw new Error('session JSON response exceeds the byte limit')
+      }
+      body = appendBytes(body, value)
+    }
+    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(body))
+  } finally {
+    try {
+      await reader.cancel()
+    } catch {
+      // The transport may already be closed while the bounded reader unwinds.
+    }
+    reader.releaseLock()
+  }
 }
 
 export class HttpSessionProjectionSource {
   constructor(
     private readonly fetcher: typeof fetch = window.fetch.bind(window),
+    private readonly maxJsonBodyBytes = MAX_JSON_BODY_BYTES,
     private readonly maxNdjsonRecordBytes = MAX_NDJSON_RECORD_BYTES,
   ) {}
 
@@ -96,7 +121,7 @@ export class HttpSessionProjectionSource {
       headers: { accept: 'application/json' },
       signal,
     })
-    return decodeWebAttentionSnapshot(await responseJson(response))
+    return decodeWebAttentionSnapshot(await readBoundedJson(response, this.maxJsonBodyBytes))
   }
 
   async liveSnapshot(sessionId: string, signal?: AbortSignal): Promise<WebSessionLiveSnapshot> {
@@ -105,7 +130,13 @@ export class HttpSessionProjectionSource {
       headers: { accept: 'application/json' },
       signal,
     })
-    return decodeWebSessionLiveSnapshot(await responseJson(response))
+    const snapshot = decodeWebSessionLiveSnapshot(
+      await readBoundedJson(response, this.maxJsonBodyBytes),
+    )
+    if (snapshot.session_id !== sessionId) {
+      throw new Error('session live snapshot identity does not match the requested session')
+    }
+    return snapshot
   }
 
   async *attentionFollow(signal?: AbortSignal): AsyncGenerator<WebAttentionStreamEvent> {
@@ -175,7 +206,6 @@ export class SessionProjectionSynchronizer {
       let reachedLive = false
       while (!controller.signal.aborted) {
         if (!reachedLive) onConnection('connecting')
-        let failed = false
         try {
           for await (const event of open(controller.signal)) {
             reachedLive = true
@@ -185,13 +215,10 @@ export class SessionProjectionSynchronizer {
           }
         } catch {
           if (controller.signal.aborted) return
-          failed = true
         }
         if (controller.signal.aborted) return
-        if (failed) {
-          reachedLive = false
-          onConnection('retrying')
-        }
+        reachedLive = false
+        onConnection('retrying')
         await retryDelay(controller.signal)
       }
     }
@@ -224,28 +251,37 @@ export async function* readBoundedNdjson<T>(
   if (!response.body) throw new Error('session follow response has no body')
   const reader = response.body.getReader()
   let pending: Uint8Array<ArrayBufferLike> = new Uint8Array()
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    let lineStart = 0
-    for (let index = 0; index < value.byteLength; index += 1) {
-      if (value[index] !== 10) continue
-      const segment = value.subarray(lineStart, index)
-      if (pending.byteLength + segment.byteLength > maxRecordBytes) {
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      let lineStart = 0
+      for (let index = 0; index < value.byteLength; index += 1) {
+        if (value[index] !== 10) continue
+        const segment = value.subarray(lineStart, index)
+        if (pending.byteLength + segment.byteLength > maxRecordBytes) {
+          throw new Error('NDJSON record exceeds the byte limit')
+        }
+        const line = pending.byteLength === 0 ? segment : appendBytes(pending, segment)
+        yield decodeLine(line, decode)
+        pending = new Uint8Array()
+        lineStart = index + 1
+      }
+      const trailing = value.subarray(lineStart)
+      if (pending.byteLength + trailing.byteLength > maxRecordBytes) {
         throw new Error('NDJSON record exceeds the byte limit')
       }
-      const line = pending.byteLength === 0 ? segment : appendBytes(pending, segment)
-      yield decodeLine(line, decode)
-      pending = new Uint8Array()
-      lineStart = index + 1
+      if (trailing.byteLength > 0) pending = appendBytes(pending, trailing)
     }
-    const trailing = value.subarray(lineStart)
-    if (pending.byteLength + trailing.byteLength > maxRecordBytes) {
-      throw new Error('NDJSON record exceeds the byte limit')
+    if (pending.byteLength > 0) yield decodeLine(pending, decode)
+  } finally {
+    try {
+      await reader.cancel()
+    } catch {
+      // The transport may already be closed while the bounded reader unwinds.
     }
-    if (trailing.byteLength > 0) pending = appendBytes(pending, trailing)
+    reader.releaseLock()
   }
-  if (pending.byteLength > 0) yield decodeLine(pending, decode)
 }
 
 const uniqueSummaries = (
@@ -303,8 +339,12 @@ export const beginLiveResync = (current: LivePresentation): LivePresentation => 
 export const applyLiveEvent = (
   current: LivePresentation,
   event: WebSessionLiveStreamEvent,
+  expectedSessionId: string,
 ): LivePresentation => {
   if (event.kind === 'snapshot') {
+    if (event.snapshot.session_id !== expectedSessionId) {
+      throw new Error('session live snapshot identity does not match the selected session')
+    }
     const observedThrough = BigInt(event.snapshot.observed_through)
     return {
       snapshot: event.snapshot,

@@ -27,7 +27,6 @@ import type {
 } from './generated/web-contract.mjs'
 import {
   appendCatalog,
-  applyAttentionEvent,
   applyLiveEvent,
   beginLiveResync,
   type CatalogPresentation,
@@ -49,11 +48,15 @@ import { actions, selectApp, store, useAppDispatch, useAppSelector } from './sta
 const SESSION_WINDOW_ITEMS = 80
 const SESSION_WINDOW_BYTES = 64 * 1024
 type TimelineCapability = 'checking' | 'available' | 'unavailable'
+type SessionTimelinePresentationItem = Omit<
+  WebSessionTimelineWindow['items'][number],
+  'projected_structured_bytes'
+> & { projected_structured_bytes: number | null }
 export interface SessionSelectionEvidence {
   sessionId: string
   eventSequence: string
   kind: string
-  projectedStructuredBytes: number
+  projectedStructuredBytes: number | null
 }
 
 export const sessionWorkspaceQueryKey = (sessionId: string | null) =>
@@ -74,6 +77,7 @@ export interface SessionCommandControls {
   focusSearch: () => void
   applySearch: () => void
   loadMore: () => void
+  loadMoreAvailable: boolean
   toggleSort: () => void
   select: (offset: -1 | 1) => void
   switchSession: (offset: -1 | 1) => void
@@ -114,7 +118,7 @@ const activeStateLabel = (state: WebSessionLiveActiveState) => {
 }
 
 export const visibleSessionItems = (
-  items: WebSessionTimelineWindow['items'],
+  items: readonly SessionTimelinePresentationItem[],
   detail: 'full' | 'condensed' | 'results',
 ) =>
   detail === 'results'
@@ -150,6 +154,7 @@ export const pruneExpandedSessionItems = (
 }
 
 export function SessionWorkspaceSurface({
+  maxJsonBodyBytes,
   maxNdjsonRecordBytes,
   onCommandControls,
   onSelectionEvidence,
@@ -160,6 +165,7 @@ export function SessionWorkspaceSurface({
   timelineRef,
   windowRequest,
 }: {
+  maxJsonBodyBytes: number
   maxNdjsonRecordBytes: number
   onCommandControls: (controls: SessionCommandControls | null) => void
   onSelectionEvidence: (evidence: SessionSelectionEvidence | null) => void
@@ -173,8 +179,13 @@ export function SessionWorkspaceSurface({
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const source = useMemo(
-    () => new HttpSessionProjectionSource(window.fetch.bind(window), maxNdjsonRecordBytes),
-    [maxNdjsonRecordBytes],
+    () =>
+      new HttpSessionProjectionSource(
+        window.fetch.bind(window),
+        maxJsonBodyBytes,
+        maxNdjsonRecordBytes,
+      ),
+    [maxJsonBodyBytes, maxNdjsonRecordBytes],
   )
   const synchronizer = useMemo(() => new SessionProjectionSynchronizer(source), [source])
   const searchRef = useRef<HTMLInputElement>(null)
@@ -203,6 +214,8 @@ export function SessionWorkspaceSurface({
   const manualAnchorRef = useRef<SessionWindowAnchor | null>(null)
   const handledRefetchRequest = useRef(0)
   const boundaryRequest = useRef(0)
+  const catalogPageRequest = useRef(0)
+  const catalogPageAbort = useRef<AbortController | null>(null)
   const catalog = useQuery({
     queryKey: ['production', 'session-catalog', search, sort],
     queryFn: ({ signal }) => source.catalogPage({ search, sort }, undefined, signal),
@@ -239,7 +252,7 @@ export function SessionWorkspaceSurface({
     estimateSize: () => 70,
     overscan: 8,
   })
-  const combinedItems = useMemo(() => {
+  const combinedItems = useMemo<readonly SessionTimelinePresentationItem[]>(() => {
     const historical = session.data?.window.items ?? []
     const existing = new Set(historical.map((item) => item.address.event_sequence))
     const durable = livePresentation.durable
@@ -247,7 +260,7 @@ export function SessionWorkspaceSurface({
       .map((item) => ({
         address: item.address,
         kind: item.event_kind,
-        projected_structured_bytes: 0,
+        projected_structured_bytes: null,
       }))
     return [...historical, ...durable].sort((left, right) =>
       BigInt(left.address.event_sequence) < BigInt(right.address.event_sequence) ? -1 : 1,
@@ -278,6 +291,10 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => {
     if (!catalog.data) return
+    catalogPageAbort.current?.abort()
+    catalogPageAbort.current = null
+    catalogPageRequest.current += 1
+    setLoadingMore(false)
     setCatalogPresentation(replaceCatalog(catalog.data))
     setSelectedCatalogId((current) =>
       catalog.data.summaries.some((summary) => summary.session_id === current)
@@ -287,11 +304,8 @@ export function SessionWorkspaceSurface({
   }, [catalog.data])
   useEffect(() => {
     if (timelineCapability !== 'available') return
-    return synchronizer.followAttention(
-      (event) => setCatalogPresentation((current) => applyAttentionEvent(current, event)),
-      setCatalogFollowState,
-    )
-  }, [synchronizer, timelineCapability])
+    return synchronizer.followAttention(() => void catalog.refetch(), setCatalogFollowState)
+  }, [catalog.refetch, synchronizer, timelineCapability])
   useEffect(() => {
     if (sessionId === null || timelineCapability !== 'available') {
       setLiveConnection('idle')
@@ -302,7 +316,7 @@ export function SessionWorkspaceSurface({
     return synchronizer.followSession(
       sessionId,
       (event) => {
-        setLivePresentation((current) => applyLiveEvent(current, event))
+        setLivePresentation((current) => applyLiveEvent(current, event, sessionId))
         if (event.kind === 'durable') void session.refetch()
       },
       (state) => {
@@ -380,15 +394,13 @@ export function SessionWorkspaceSurface({
     (candidate: string) => {
       if (timelineCapability !== 'available') return
       const reopeningCurrentSession = candidate === sessionId
+      boundaryRequest.current += 1
       setOpeningPosition(app.lastLogicalPositions[candidate])
       manualAnchorRef.current = null
       setExpanded(new Set())
       dispatch(actions.timelineSelected(null))
       setSessionId(candidate)
-      if (reopeningCurrentSession) {
-        boundaryRequest.current += 1
-        setRefetchRequest((current) => current + 1)
-      }
+      if (reopeningCurrentSession) setRefetchRequest((current) => current + 1)
     },
     [app.lastLogicalPositions, dispatch, sessionId, timelineCapability],
   )
@@ -421,10 +433,18 @@ export function SessionWorkspaceSurface({
     [catalogRows, openSessionById, sessionId],
   )
   const applySearch = useCallback(() => {
+    catalogPageAbort.current?.abort()
+    catalogPageAbort.current = null
+    catalogPageRequest.current += 1
+    setLoadingMore(false)
     setCatalogPresentation(EMPTY_CATALOG_PRESENTATION)
     setSearch(searchDraft.trim())
   }, [searchDraft])
   const toggleSort = useCallback(() => {
+    catalogPageAbort.current?.abort()
+    catalogPageAbort.current = null
+    catalogPageRequest.current += 1
+    setLoadingMore(false)
     setCatalogPresentation(EMPTY_CATALOG_PRESENTATION)
     setSort((current) =>
       current === 'last_activity_desc' ? 'session_id_asc' : 'last_activity_desc',
@@ -433,13 +453,27 @@ export function SessionWorkspaceSurface({
   const loadMore = useCallback(() => {
     const continuation = catalogPresentation.snapshot?.continuation
     if (!continuation || loadingMore || catalogRows.length >= MAX_CATALOG_ROWS) return
+    const request = ++catalogPageRequest.current
+    const controller = new AbortController()
+    catalogPageAbort.current = controller
     setLoadingMore(true)
     setCatalogPageError(false)
     void source
-      .catalogPage({ search, sort }, continuation)
-      .then((page) => setCatalogPresentation((current) => appendCatalog(current, page)))
-      .catch(() => setCatalogPageError(true))
-      .finally(() => setLoadingMore(false))
+      .catalogPage({ search, sort }, continuation, controller.signal)
+      .then((page) => {
+        if (request === catalogPageRequest.current) {
+          setCatalogPresentation((current) => appendCatalog(current, page))
+        }
+      })
+      .catch(() => {
+        if (request === catalogPageRequest.current) setCatalogPageError(true)
+      })
+      .finally(() => {
+        if (request === catalogPageRequest.current) {
+          catalogPageAbort.current = null
+          setLoadingMore(false)
+        }
+      })
   }, [
     catalogPresentation.snapshot?.continuation,
     catalogRows.length,
@@ -448,6 +482,17 @@ export function SessionWorkspaceSurface({
     sort,
     source,
   ])
+  useEffect(
+    () => () => {
+      catalogPageAbort.current?.abort()
+    },
+    [],
+  )
+  const loadMoreAvailable =
+    catalogPresentation.snapshot?.continuation !== null &&
+    catalogPresentation.snapshot?.continuation !== undefined &&
+    !loadingMore &&
+    catalogRows.length < MAX_CATALOG_ROWS
   const controls = useMemo<SessionCommandControls>(
     () => ({
       catalogAvailable: catalogRows.length > 0,
@@ -455,6 +500,7 @@ export function SessionWorkspaceSurface({
       focusSearch: () => searchRef.current?.focus(),
       applySearch,
       loadMore,
+      loadMoreAvailable,
       toggleSort,
       select: selectRelativeSession,
       switchSession: switchRelativeSession,
@@ -464,6 +510,7 @@ export function SessionWorkspaceSurface({
       applySearch,
       catalogRows.length,
       loadMore,
+      loadMoreAvailable,
       openSelectedSession,
       selectRelativeSession,
       sessionId,
@@ -486,6 +533,7 @@ export function SessionWorkspaceSurface({
     focusSessionSearch: controls.focusSearch,
     applySessionSearch: controls.applySearch,
     loadMoreSessions: controls.loadMore,
+    loadMoreSessionsAvailable: controls.loadMoreAvailable,
     toggleSessionSort: controls.toggleSort,
     selectSession: controls.select,
     switchSession: controls.switchSession,
@@ -661,11 +709,7 @@ export function SessionWorkspaceSurface({
             <button
               type="button"
               onClick={() => invokeCommand('session.catalog.more', sessionCommandContext)}
-              disabled={
-                loadingMore ||
-                !catalogPresentation.snapshot?.continuation ||
-                catalogRows.length >= MAX_CATALOG_ROWS
-              }
+              disabled={!loadMoreAvailable}
             >
               {loadingMore ? 'Loading…' : 'Load more'}
             </button>
@@ -859,7 +903,11 @@ export function SessionWorkspaceSurface({
                       )}
                       <span className="session-address">{id}</span>
                       <strong>{item.kind.replaceAll('_', ' ')}</strong>
-                      <small>{item.projected_structured_bytes} B</small>
+                      <small>
+                        {item.projected_structured_bytes === null
+                          ? 'Size unavailable'
+                          : `${item.projected_structured_bytes} B`}
+                      </small>
                     </div>
                     {isExpanded && (
                       <dl id={`session-timeline-detail-${id}`} className="session-item-detail">

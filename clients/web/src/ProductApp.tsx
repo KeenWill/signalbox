@@ -434,6 +434,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       focusSessionSearch: surface === 'sessions' ? sessionControls?.focusSearch : undefined,
       applySessionSearch: surface === 'sessions' ? sessionControls?.applySearch : undefined,
       loadMoreSessions: surface === 'sessions' ? sessionControls?.loadMore : undefined,
+      loadMoreSessionsAvailable:
+        surface === 'sessions' && sessionControls?.loadMoreAvailable === true,
       toggleSessionSort: surface === 'sessions' ? sessionControls?.toggleSort : undefined,
       selectSession: surface === 'sessions' ? sessionControls?.select : undefined,
       switchSession: surface === 'sessions' ? sessionControls?.switchSession : undefined,
@@ -486,7 +488,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     ? 'checking'
     : bootstrap.isSuccess &&
         bootstrap.data.capabilities.bounded_session_timeline &&
-        bootstrap.data.capabilities.bounded_session_live
+        bootstrap.data.capabilities.bounded_session_live &&
+        bootstrap.data.capabilities.bounded_json &&
+        bootstrap.data.capabilities.ndjson_streaming
       ? 'available'
       : 'unavailable'
 
@@ -495,6 +499,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       <AttentionSurface />
     ) : surface === 'sessions' ? (
       <SessionWorkspaceSurface
+        maxJsonBodyBytes={bootstrap.data?.limits.max_json_body_bytes ?? 65_536}
         maxNdjsonRecordBytes={bootstrap.data?.limits.max_ndjson_item_bytes ?? 65_536}
         onCommandControls={setSessionControls}
         onSelectionEvidence={updateSelectionEvidence}
@@ -613,7 +618,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                 </div>
                 <div>
                   <dt>Projected bytes</dt>
-                  <dd>{selectionEvidence.projectedStructuredBytes}</dd>
+                  <dd>{selectionEvidence.projectedStructuredBytes ?? 'Unavailable'}</dd>
                 </div>
               </>
             )}

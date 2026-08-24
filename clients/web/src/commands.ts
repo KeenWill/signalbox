@@ -16,6 +16,7 @@ export interface CommandContext {
   focusSessionSearch?: () => void
   applySessionSearch?: () => void
   loadMoreSessions?: () => void
+  loadMoreSessionsAvailable?: boolean
   toggleSessionSort?: () => void
   selectSession?: (offset: -1 | 1) => void
   switchSession?: (offset: -1 | 1) => void
@@ -270,7 +271,7 @@ export const commandRegistry = [
     description: 'Read the next keyset page without scanning transcripts.',
     category: 'Surface',
     bindings: [],
-    available: (context) => context.loadMoreSessions !== undefined,
+    available: (context) => context.loadMoreSessionsAvailable === true,
     run: (context) => context.loadMoreSessions?.(),
   },
   {

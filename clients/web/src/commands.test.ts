@@ -7,6 +7,7 @@ describe('command registry', () => {
   it('omits scenario navigation from the product command registry', () => {
     const productCommandIds: readonly string[] = productCommandRegistry.map((command) => command.id)
     expect(productCommandIds).not.toContain('navigation.open')
+    expect(new Set(productCommandIds).size).toBe(productCommandIds.length)
   })
 
   it('selects the first timeline item when next starts from a missing selection', () => {
@@ -67,6 +68,7 @@ describe('command registry', () => {
       sessionWorkspaceAvailable: true,
       applySessionSearch: () => calls.push('search'),
       loadMoreSessions: () => calls.push('more'),
+      loadMoreSessionsAvailable: true,
       toggleSessionSort: () => calls.push('sort'),
       selectSession: (offset: -1 | 1) => calls.push(`select:${offset}`),
       switchSession: (offset: -1 | 1) => calls.push(`switch:${offset}`),

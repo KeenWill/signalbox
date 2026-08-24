@@ -295,9 +295,20 @@ test('gates Sessions on the validated bootstrap capability', async ({ page }) =>
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+const routeBootstrapRecovery = async (page: Page) => {
+  let attempts = 0
+  await page.route('**/api/bootstrap', (route) => {
+    attempts += 1
+    return attempts === 1
+      ? route.fulfill({ status: 503, body: 'temporarily unavailable' })
+      : route.fulfill({ json: webContractBootstrapFixture })
+  })
+  return () => attempts
+}
+
 test('retries a failed product bootstrap after the daemon recovers', async ({ page }) => {
   const problems = watchBrowser(page)
-  let attempts = 0
+  const bootstrapAttempts = await routeBootstrapRecovery(page)
   await page.route('**/api/sessions**', (route) =>
     new URL(route.request().url()).pathname === '/api/sessions'
       ? route.fulfill({
@@ -326,12 +337,6 @@ test('retries a failed product bootstrap after the daemon recovers', async ({ pa
       })}\n`,
     }),
   )
-  await page.route('**/api/bootstrap', (route) => {
-    attempts += 1
-    return attempts === 1
-      ? route.fulfill({ status: 503, body: 'temporarily unavailable' })
-      : route.fulfill({ json: webContractBootstrapFixture })
-  })
   await page.goto('/sessions')
 
   await expect(page.getByText('Transport unavailable')).toBeVisible()
@@ -343,7 +348,7 @@ test('retries a failed product bootstrap after the daemon recovers', async ({ pa
       `${webContractBootstrapFixture.contract.name} · ${webContractBootstrapFixture.contract.version}`,
     ),
   ).toBeVisible()
-  expect(attempts).toBe(2)
+  expect(bootstrapAttempts()).toBe(2)
   expect(problems.pageErrors).toEqual([])
   expect(
     problems.consoleErrors.every((message) =>
