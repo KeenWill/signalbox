@@ -6,6 +6,7 @@ import {
   applyLiveEvent,
   catalogUrl,
   EMPTY_LIVE_PRESENTATION,
+  HttpSessionProjectionSource,
   MAX_CATALOG_ROWS,
   MAX_LIVE_DURABLE_ITEMS,
   MAX_PROVIDER_DRAFT_PARTS,
@@ -63,11 +64,16 @@ const durablePresentation = (count: number) => {
     event_kind: 'model_call_transition' as const,
     kind: 'durable' as const,
   }))
+  const initial = applyLiveEvent(
+    EMPTY_LIVE_PRESENTATION,
+    { kind: 'snapshot', snapshot: { ...liveSnapshot, observed_through: '0' } },
+    liveSnapshot.session_id,
+  )
   return {
     events,
     presentation: events.reduce(
       (current, event) => applyLiveEvent(current, event, liveSnapshot.session_id),
-      EMPTY_LIVE_PRESENTATION,
+      initial,
     ),
   }
 }
@@ -151,8 +157,13 @@ describe('session catalog projection', () => {
 
 describe('session live projection', () => {
   it('replaces transient drafts on snapshot without discarding later durable headers', () => {
-    const withDraft = applyLiveEvent(
+    const initial = applyLiveEvent(
       EMPTY_LIVE_PRESENTATION,
+      { kind: 'snapshot', snapshot: liveSnapshot },
+      liveSnapshot.session_id,
+    )
+    const withDraft = applyLiveEvent(
+      initial,
       {
         content: 'partial',
         kind: 'provider_text_delta',
@@ -212,6 +223,29 @@ describe('session live projection', () => {
 
     expect(fixture.presentation.durable).toHaveLength(MAX_LIVE_DURABLE_ITEMS)
     expect(fixture.presentation.durable[0]).toBe(fixture.events[1])
+    expect(fixture.presentation.durableGap).toBe(true)
+  })
+
+  it('rejects durable records before a snapshot or without an advancing cursor', () => {
+    const durable = {
+      address: { event_sequence: '43' },
+      cursor: '42',
+      event_kind: 'turn_completed' as const,
+      kind: 'durable' as const,
+    }
+
+    expect(() => applyLiveEvent(EMPTY_LIVE_PRESENTATION, durable, liveSnapshot.session_id)).toThrow(
+      'before the initial snapshot',
+    )
+
+    const initial = applyLiveEvent(
+      EMPTY_LIVE_PRESENTATION,
+      { kind: 'snapshot', snapshot: liveSnapshot },
+      liveSnapshot.session_id,
+    )
+    expect(() => applyLiveEvent(initial, durable, liveSnapshot.session_id)).toThrow(
+      'did not advance monotonically',
+    )
   })
 
   it('bounds retained provider draft parts', () => {
@@ -246,6 +280,19 @@ describe('bounded JSON', () => {
       'session JSON response exceeds the byte limit',
     )
     expect(cancel).toHaveBeenCalledOnce()
+  })
+})
+
+describe('catalog response correlation', () => {
+  it('rejects a response whose sort differs from the request', async () => {
+    const fetcher = vi.fn(async () =>
+      Response.json({ ...catalog([]), sort: 'session_identity_ascending' }),
+    )
+    const source = new HttpSessionProjectionSource(fetcher as unknown as typeof fetch)
+
+    await expect(source.catalogPage({ search: '', sort: 'last_activity_desc' })).rejects.toThrow(
+      'does not match the requested sort',
+    )
   })
 })
 

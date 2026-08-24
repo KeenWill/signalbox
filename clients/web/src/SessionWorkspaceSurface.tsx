@@ -84,18 +84,23 @@ export interface SessionCommandControls {
   openSelected: () => void
 }
 
-const activityLabel = (unixMilliseconds: string) => {
+const validActivityDate = (unixMilliseconds: string): Date | null => {
   const milliseconds = Number(unixMilliseconds)
-  return Number.isSafeInteger(milliseconds)
-    ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(
-        new Date(milliseconds),
-      )
+  if (!Number.isSafeInteger(milliseconds)) return null
+  const date = new Date(milliseconds)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+export const activityLabel = (unixMilliseconds: string) => {
+  const date = validActivityDate(unixMilliseconds)
+  return date
+    ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' }).format(date)
     : unixMilliseconds
 }
 
 const activityDateTime = (unixMilliseconds: string) => {
-  const milliseconds = Number(unixMilliseconds)
-  return Number.isSafeInteger(milliseconds) ? new Date(milliseconds).toISOString() : undefined
+  const date = validActivityDate(unixMilliseconds)
+  return date?.toISOString()
 }
 
 const stateLabel = (state: WebAttentionSummary['state']) => state.replaceAll('_', ' ')
@@ -216,6 +221,11 @@ export function SessionWorkspaceSurface({
   const boundaryRequest = useRef(0)
   const catalogPageRequest = useRef(0)
   const catalogPageAbort = useRef<AbortController | null>(null)
+  const catalogRetainedTarget = useRef(0)
+  const catalogRefreshInFlight = useRef(false)
+  const catalogRefreshPending = useRef(false)
+  const timelineRefreshInFlight = useRef(false)
+  const timelineRefreshPending = useRef(false)
   const catalog = useQuery({
     queryKey: ['production', 'session-catalog', search, sort],
     queryFn: ({ signal }) => source.catalogPage({ search, sort }, undefined, signal),
@@ -246,6 +256,7 @@ export function SessionWorkspaceSurface({
     enabled: sessionId !== null && timelineCapability === 'available',
   })
   const catalogRows = catalogPresentation.summaries
+  catalogRetainedTarget.current = catalogRows.length
   const catalogVirtualizer = useVirtualizer({
     count: catalogRows.length,
     getScrollElement: () => catalogRef.current,
@@ -267,6 +278,21 @@ export function SessionWorkspaceSurface({
     )
   }, [livePresentation.durable, session.data?.window.items])
   const refetchSession = session.refetch
+  const refreshTimeline = useCallback(async () => {
+    if (timelineRefreshInFlight.current) {
+      timelineRefreshPending.current = true
+      return
+    }
+    timelineRefreshInFlight.current = true
+    try {
+      do {
+        timelineRefreshPending.current = false
+        await refetchSession()
+      } while (timelineRefreshPending.current)
+    } finally {
+      timelineRefreshInFlight.current = false
+    }
+  }, [refetchSession])
   const items = useMemo(
     () => visibleSessionItems(combinedItems, app.detail),
     [app.detail, combinedItems],
@@ -295,6 +321,7 @@ export function SessionWorkspaceSurface({
     catalogPageAbort.current = null
     catalogPageRequest.current += 1
     setLoadingMore(false)
+    setCatalogPageError(false)
     setCatalogPresentation(replaceCatalog(catalog.data))
     setSelectedCatalogId((current) =>
       catalog.data.summaries.some((summary) => summary.session_id === current)
@@ -302,10 +329,43 @@ export function SessionWorkspaceSurface({
         : (catalog.data.summaries[0]?.session_id ?? null),
     )
   }, [catalog.data])
+  const refreshCatalog = useCallback(async () => {
+    if (catalogRefreshInFlight.current) {
+      catalogRefreshPending.current = true
+      return
+    }
+    catalogRefreshInFlight.current = true
+    try {
+      do {
+        catalogRefreshPending.current = false
+        const retainedTarget = Math.max(catalogRetainedTarget.current, 1)
+        let refreshed = replaceCatalog(await source.catalogPage({ search, sort }))
+        while (
+          refreshed.summaries.length < retainedTarget &&
+          refreshed.snapshot?.continuation &&
+          refreshed.summaries.length < MAX_CATALOG_ROWS
+        ) {
+          const page = await source.catalogPage({ search, sort }, refreshed.snapshot.continuation)
+          refreshed = appendCatalog(refreshed, page)
+        }
+        setCatalogPageError(false)
+        setCatalogPresentation(refreshed)
+        setSelectedCatalogId((current) =>
+          refreshed.summaries.some((summary) => summary.session_id === current)
+            ? current
+            : (refreshed.summaries[0]?.session_id ?? null),
+        )
+      } while (catalogRefreshPending.current)
+    } catch {
+      setCatalogPageError(true)
+    } finally {
+      catalogRefreshInFlight.current = false
+    }
+  }, [search, sort, source])
   useEffect(() => {
     if (timelineCapability !== 'available') return
-    return synchronizer.followAttention(() => void catalog.refetch(), setCatalogFollowState)
-  }, [catalog.refetch, synchronizer, timelineCapability])
+    return synchronizer.followAttention(() => void refreshCatalog(), setCatalogFollowState)
+  }, [refreshCatalog, synchronizer, timelineCapability])
   useEffect(() => {
     if (sessionId === null || timelineCapability !== 'available') {
       setLiveConnection('idle')
@@ -317,14 +377,14 @@ export function SessionWorkspaceSurface({
       sessionId,
       (event) => {
         setLivePresentation((current) => applyLiveEvent(current, event, sessionId))
-        if (event.kind === 'durable') void session.refetch()
+        if (event.kind === 'durable') void refreshTimeline()
       },
       (state) => {
         setLiveConnection(state)
         if (state === 'retrying') setLivePresentation(beginLiveResync)
       },
     )
-  }, [session.refetch, sessionId, synchronizer, timelineCapability])
+  }, [refreshTimeline, sessionId, synchronizer, timelineCapability])
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => {
@@ -433,19 +493,23 @@ export function SessionWorkspaceSurface({
     [catalogRows, openSessionById, sessionId],
   )
   const applySearch = useCallback(() => {
+    const nextSearch = searchDraft.trim()
+    if (nextSearch === search) return
     catalogPageAbort.current?.abort()
     catalogPageAbort.current = null
     catalogPageRequest.current += 1
     setLoadingMore(false)
     setCatalogPresentation(EMPTY_CATALOG_PRESENTATION)
-    setSearch(searchDraft.trim())
-  }, [searchDraft])
+    setCatalogPageError(false)
+    setSearch(nextSearch)
+  }, [search, searchDraft])
   const toggleSort = useCallback(() => {
     catalogPageAbort.current?.abort()
     catalogPageAbort.current = null
     catalogPageRequest.current += 1
     setLoadingMore(false)
     setCatalogPresentation(EMPTY_CATALOG_PRESENTATION)
+    setCatalogPageError(false)
     setSort((current) =>
       current === 'last_activity_desc' ? 'session_id_asc' : 'last_activity_desc',
     )
@@ -810,8 +874,17 @@ export function SessionWorkspaceSurface({
                   {livePresentation.snapshot.runner.state.replaceAll('_', ' ')}
                 </span>
               )}
-              <span>{livePresentation.snapshot?.queued_turn_count ?? '0'} queued</span>
+              <span>
+                {livePresentation.snapshot?.queued_turn_count ??
+                  session.data.descriptor.work.queued_turn_count}{' '}
+                queued
+              </span>
             </div>
+            {livePresentation.durableGap && (
+              <p className="session-load-state" role="status">
+                Live timeline gap detected; bounded history is refreshing.
+              </p>
+            )}
             {livePresentation.drafts.length > 0 && (
               <section className="provider-drafts" aria-label="Non-authoritative provider draft">
                 <span>Streaming draft · discarded on resync</span>

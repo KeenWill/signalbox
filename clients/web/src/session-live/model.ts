@@ -40,6 +40,7 @@ export interface LivePresentation {
   snapshot: WebSessionLiveSnapshot | null
   durable: ReadonlyArray<Extract<WebSessionLiveStreamEvent, { kind: 'durable' }>>
   drafts: ReadonlyArray<ProviderDraft>
+  durableGap: boolean
   resyncing: boolean
 }
 
@@ -54,6 +55,7 @@ export const EMPTY_LIVE_PRESENTATION: LivePresentation = {
   snapshot: null,
   durable: [],
   drafts: [],
+  durableGap: false,
   resyncing: false,
 }
 
@@ -121,7 +123,24 @@ export class HttpSessionProjectionSource {
       headers: { accept: 'application/json' },
       signal,
     })
-    return decodeWebAttentionSnapshot(await readBoundedJson(response, this.maxJsonBodyBytes))
+    const snapshot = decodeWebAttentionSnapshot(
+      await readBoundedJson(response, this.maxJsonBodyBytes),
+    )
+    const expectedSort =
+      query.sort === 'last_activity_desc'
+        ? 'last_activity_descending'
+        : 'session_identity_ascending'
+    const expectedContinuationKind =
+      query.sort === 'last_activity_desc' ? 'last_activity' : 'session_identity'
+    if (
+      snapshot.sort !== expectedSort ||
+      (snapshot.continuation !== null &&
+        snapshot.continuation !== undefined &&
+        snapshot.continuation.kind !== expectedContinuationKind)
+    ) {
+      throw new Error('session catalog response does not match the requested sort')
+    }
+    return snapshot
   }
 
   async liveSnapshot(sessionId: string, signal?: AbortSignal): Promise<WebSessionLiveSnapshot> {
@@ -163,15 +182,13 @@ export class HttpSessionProjectionSource {
 
 const retryDelay = (signal: AbortSignal) =>
   new Promise<void>((resolve) => {
-    const timer = window.setTimeout(resolve, 250)
-    signal.addEventListener(
-      'abort',
-      () => {
-        window.clearTimeout(timer)
-        resolve()
-      },
-      { once: true },
-    )
+    const finish = () => {
+      window.clearTimeout(timer)
+      signal.removeEventListener('abort', finish)
+      resolve()
+    }
+    const timer = window.setTimeout(finish, 250)
+    signal.addEventListener('abort', finish, { once: true })
   })
 
 export class SessionProjectionSynchronizer {
@@ -333,6 +350,7 @@ export const beginLiveResync = (current: LivePresentation): LivePresentation => 
   ...current,
   durable: [],
   drafts: [],
+  durableGap: false,
   resyncing: true,
 })
 
@@ -352,6 +370,7 @@ export const applyLiveEvent = (
         (item) => BigInt(item.address.event_sequence) > observedThrough,
       ),
       drafts: [],
+      durableGap: false,
       resyncing: false,
     }
   }
@@ -359,12 +378,24 @@ export const applyLiveEvent = (
     return beginLiveResync(current)
   }
   if (event.kind === 'durable') {
+    if (current.snapshot === null) {
+      throw new Error('session live durable event arrived before the initial snapshot')
+    }
+    const cursor = BigInt(event.cursor)
+    const previousCursor = BigInt(
+      current.durable.at(-1)?.cursor ?? current.snapshot.observed_through,
+    )
+    if (cursor <= previousCursor) {
+      throw new Error('session live durable cursor did not advance monotonically')
+    }
     const withoutDuplicate = current.durable.filter(
       (item) => item.address.event_sequence !== event.address.event_sequence,
     )
+    const durable = [...withoutDuplicate, event]
     return {
       ...current,
-      durable: [...withoutDuplicate, event].slice(-MAX_LIVE_DURABLE_ITEMS),
+      durable: durable.slice(-MAX_LIVE_DURABLE_ITEMS),
+      durableGap: current.durableGap || durable.length > MAX_LIVE_DURABLE_ITEMS,
     }
   }
   const key = draftKey(event)

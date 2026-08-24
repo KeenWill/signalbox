@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
 import {
+  activityLabel,
   boundarySessionItemId,
   pruneExpandedSessionItems,
   reconcileVisibleSessionSelection,
@@ -86,5 +87,9 @@ describe('Session Workspace projection', () => {
     const expanded = new Set(['40', '41', '44', '45'])
 
     expect([...pruneExpandedSessionItems(expanded, fixture.items)]).toEqual(['41', '44'])
+  })
+
+  it('falls back to the raw value outside the JavaScript Date range', () => {
+    expect(activityLabel('9000000000000000')).toBe('9000000000000000')
   })
 })
