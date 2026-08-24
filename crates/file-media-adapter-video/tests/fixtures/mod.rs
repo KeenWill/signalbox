@@ -366,7 +366,7 @@ impl VideoFixture {
     }
 
     pub fn mp4_visual_sample_entry() -> Self {
-        let configuration = [0, 0, 0, 0, 0x03, 0x03, 0, 1, 0];
+        let configuration = esds_configuration();
         Self::new(
             FixtureKind::Mp4,
             mp4_bytes_with_sample_entry(
@@ -375,6 +375,29 @@ impl VideoFixture {
                 visual_sample_entry(*b"mp4v", *b"esds", &configuration),
             ),
         )
+    }
+
+    pub fn mp4v_with_missing_esds_descriptors() -> Self {
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(
+                MP4_TIMESCALE,
+                MP4_DURATION_UNITS,
+                visual_sample_entry(*b"mp4v", *b"esds", &[0, 0, 0, 0, 0x03, 3, 0, 1, 0]),
+            ),
+        )
+    }
+
+    pub fn mp4_with_nonzero_stsd_flags() -> Self {
+        let mut fixture = Self::ordinary_mp4();
+        if let Some(stsd) = fixture
+            .bytes
+            .windows(4)
+            .position(|window| window == b"stsd")
+        {
+            fixture.bytes[stsd + 7] = 1;
+        }
+        fixture
     }
 
     pub fn av1_mp4_with_reserved_configuration_bits() -> Self {
@@ -819,7 +842,10 @@ impl VideoFixture {
         let track = mp4_box(*b"trak", &[track_header, media].concat());
         let mut fragment_duration = vec![0_u8; 8];
         fragment_duration[4..8].copy_from_slice(&MP4_DURATION_UNITS.to_be_bytes());
-        let movie_extends = mp4_box(*b"mvex", &mp4_box(*b"mehd", &fragment_duration));
+        let movie_extends = mp4_box(
+            *b"mvex",
+            &[mp4_box(*b"mehd", &fragment_duration), trex(1)].concat(),
+        );
         let movie = mp4_box(
             *b"moov",
             &[mp4_box(*b"mvhd", &movie_header), track, movie_extends].concat(),
@@ -859,12 +885,56 @@ impl VideoFixture {
         );
         let track_header = tkhd(1);
         let track = mp4_box(*b"trak", &[track_header, media].concat());
-        let movie_extends = mp4_box(*b"mvex", &[]);
+        let movie_extends = mp4_box(*b"mvex", &trex(1));
         let movie = mp4_box(
             *b"moov",
             &[mp4_box(*b"mvhd", &movie_header), track, movie_extends].concat(),
         );
         Self::new(FixtureKind::Mp4, [ftyp(), movie].concat())
+    }
+
+    pub fn fragmented_mp4_without_track_extends() -> Self {
+        let mut fixture = Self::fragmented_mp4_without_movie_extends_duration();
+        if let Some(trex) = fixture
+            .bytes
+            .windows(4)
+            .position(|window| window == b"trex")
+        {
+            fixture.bytes[trex..trex + 4].copy_from_slice(b"free");
+        }
+        fixture
+    }
+
+    pub fn webm_with_undefined_track_type() -> Self {
+        let mut fixture = Self::ordinary_webm();
+        if let Some(track_type) = fixture
+            .bytes
+            .windows(3)
+            .position(|window| window == [0x83, 0x81, 0x01])
+        {
+            fixture.bytes[track_type + 2] = 4;
+        }
+        fixture
+    }
+
+    pub fn webm_with_reserved_element_id() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &webm_track_entry(ContentProtection::Clear),
+        );
+        let segment = ebml_element(
+            &[0x18, 0x53, 0x80, 0x67],
+            &[info, tracks, vec![0xff, 0x80]].concat(),
+        );
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn webm_duration_at_u64_boundary() -> Self {
+        Self::new(
+            FixtureKind::Webm,
+            webm_bytes(u64::MAX as f64, ContentProtection::Clear),
+        )
     }
 
     pub fn mp4_track_with_split_media_evidence() -> Self {
@@ -1225,6 +1295,21 @@ fn mdhd(timescale: u32) -> Vec<u8> {
     let mut payload = vec![0_u8; 24];
     payload[12..16].copy_from_slice(&timescale.to_be_bytes());
     mp4_box(*b"mdhd", &payload)
+}
+
+fn trex(track_id: u32) -> Vec<u8> {
+    let mut payload = vec![0_u8; 24];
+    payload[4..8].copy_from_slice(&track_id.to_be_bytes());
+    mp4_box(*b"trex", &payload)
+}
+
+fn esds_configuration() -> Vec<u8> {
+    let mut es_payload = vec![0, 1, 0, 0x04, 13];
+    es_payload.extend_from_slice(&[0_u8; 13]);
+    es_payload.extend_from_slice(&[0x06, 1, 2]);
+    let mut configuration = vec![0, 0, 0, 0, 0x03, es_payload.len() as u8];
+    configuration.extend_from_slice(&es_payload);
+    configuration
 }
 
 fn ftyp() -> Vec<u8> {

@@ -129,12 +129,12 @@ fn declaration_registers_mp4_and_webm_under_available_isolation() -> Result<(), 
     assert_eq!(mp4_probe.prefix_bytes(), 4 * 1024);
     assert_eq!(mp4_probe.suffix_bytes(), 0);
     assert_eq!(mp4_probe.range_count(), 4);
-    assert_eq!(mp4_probe.cumulative_bytes(), 256 * 1024);
+    assert_eq!(mp4_probe.cumulative_bytes(), 252 * 1024);
     let webm_probe = registry.providers()[0].readers()[1].probe();
     assert_eq!(webm_probe.prefix_bytes(), 4 * 1024);
     assert_eq!(webm_probe.suffix_bytes(), 0);
     assert_eq!(webm_probe.range_count(), 4);
-    assert_eq!(webm_probe.cumulative_bytes(), 256 * 1024);
+    assert_eq!(webm_probe.cumulative_bytes(), 252 * 1024);
     Ok(())
 }
 
@@ -424,6 +424,24 @@ async fn excessive_hevc_nal_entries_are_a_typed_bounded_failure() -> Result<(), 
 async fn recognized_mp4_box_in_invalid_scope_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_with_misplaced_track_box(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn mp4v_missing_mandatory_esds_descriptors_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4v_with_missing_esds_descriptors(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn nonzero_stsd_full_box_flags_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_nonzero_stsd_flags(),
         "malformed_video",
     )
     .await
@@ -787,6 +805,15 @@ async fn fragmented_mp4_without_movie_extends_duration_reports_unavailable_durat
 }
 
 #[tokio::test]
+async fn fragmented_mp4_without_track_extends_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::fragmented_mp4_without_track_extends(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn mp4_video_track_without_sample_description_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_video_track_without_sample_description(),
@@ -905,6 +932,33 @@ async fn validation_read_honors_the_effective_source_byte_ceiling() -> Result<()
 async fn duplicate_webm_tracks_elements_are_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::webm_with_duplicate_tracks_elements(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn undefined_webm_track_type_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_undefined_track_type(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn reserved_ebml_element_identifier_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_with_reserved_element_id(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn webm_duration_at_u64_boundary_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::webm_duration_at_u64_boundary(),
         "malformed_video",
     )
     .await

@@ -25,7 +25,7 @@ const PROBE_PREFIX_BYTES: u64 = 4 * 1024;
 // Four bounded follow-up ranges cover the remainder of the metadata window.
 const PROBE_RANGE_BYTES: u64 = 64 * 1024;
 const PROBE_RANGE_COUNT: u32 = 4;
-const PROBE_BYTES: u64 = METADATA_BYTES;
+const PROBE_ADDITIONAL_BYTES: u64 = METADATA_BYTES - PROBE_PREFIX_BYTES;
 const OUTPUT_BYTES: usize = 16 * 1024;
 // Hard safety ceiling: bounds adversarial recursive container descent.
 const MAX_DEPTH: usize = 32;
@@ -45,6 +45,7 @@ const MP4_STBL: [u8; 4] = *b"stbl";
 const MP4_STSD: [u8; 4] = *b"stsd";
 const MP4_MVEX: [u8; 4] = *b"mvex";
 const MP4_MEHD: [u8; 4] = *b"mehd";
+const MP4_TREX: [u8; 4] = *b"trex";
 
 const EBML_HEADER: u64 = 0x1a45dfa3;
 const EBML_HEADER_BYTES: [u8; 4] = [0x1a, 0x45, 0xdf, 0xa3];
@@ -110,7 +111,7 @@ impl FileMediaProvider for VideoProvider {
                 parse(kind, &bytes, source_bytes),
                 Ok(_) | Err(VideoIssue::Encrypted)
             ) && u64::try_from(bytes.len()).map_err(|_| FileMediaProviderFailure::Failed)?
-                < source_bytes.min(PROBE_BYTES)
+                < source_bytes.min(METADATA_BYTES)
             {
                 extend_probe_prefix(source, source_bytes, &mut bytes).await?;
                 require_active(cancellation)?;
@@ -227,7 +228,12 @@ fn reader_declaration(
         reader: FileReaderName::try_new(kind.reader())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(kind.media_type())?],
-        probe: ProbeDeclaration::new(PROBE_PREFIX_BYTES, 0, PROBE_RANGE_COUNT, PROBE_BYTES),
+        probe: ProbeDeclaration::new(
+            PROBE_PREFIX_BYTES,
+            0,
+            PROBE_RANGE_COUNT,
+            PROBE_ADDITIONAL_BYTES,
+        ),
         views: vec![metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
@@ -496,6 +502,7 @@ struct Mp4State {
     video_tracks: u64,
     video_track_declared: bool,
     track_ids: Vec<u32>,
+    track_extends_ids: Vec<u32>,
 }
 
 fn parse_mp4(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIssue> {
@@ -531,6 +538,15 @@ fn parse_mp4(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIssu
         })
         .transpose()?;
     if !state.movie_seen {
+        return Err(VideoIssue::Malformed);
+    }
+    if state.fragmented
+        && (state.track_extends_ids.len() != state.track_ids.len()
+            || state
+                .track_ids
+                .iter()
+                .any(|track_id| !state.track_extends_ids.contains(track_id)))
+    {
         return Err(VideoIssue::Malformed);
     }
     if state.video_tracks == 0 {
@@ -748,6 +764,7 @@ fn parse_mp4_boxes(
                 )?;
             }
             MP4_MEHD if scope == Mp4Scope::MovieExtends => parse_mehd(payload, state)?,
+            MP4_TREX if scope == Mp4Scope::MovieExtends => parse_trex(payload, state)?,
             _ if recognized_mp4_box(box_type) => return Err(VideoIssue::Malformed),
             _ => {}
         }
@@ -772,6 +789,7 @@ fn recognized_mp4_box(box_type: [u8; 4]) -> bool {
             | MP4_STSD
             | MP4_MVEX
             | MP4_MEHD
+            | MP4_TREX
     )
 }
 
@@ -1037,6 +1055,18 @@ fn parse_mehd(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
     Ok(())
 }
 
+fn parse_trex(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
+    if payload.len() != 24 || payload[..4] != [0, 0, 0, 0] {
+        return Err(VideoIssue::Malformed);
+    }
+    let track_id = read_u32(payload, 4)?;
+    if track_id == 0 || state.track_extends_ids.contains(&track_id) {
+        return Err(VideoIssue::Malformed);
+    }
+    state.track_extends_ids.push(track_id);
+    Ok(())
+}
+
 fn parse_handler(payload: &[u8]) -> Result<bool, VideoIssue> {
     if payload.len() < 24 {
         return Err(VideoIssue::Malformed);
@@ -1079,7 +1109,7 @@ fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, VideoIssue> {
 }
 
 fn parse_stsd(payload: &[u8], state: &mut Mp4State) -> Result<bool, VideoIssue> {
-    if payload.len() < 8 {
+    if payload.len() < 8 || payload[..4] != [0, 0, 0, 0] {
         return Err(VideoIssue::Malformed);
     }
     let entry_count = usize::try_from(read_u32(payload, 4)?).map_err(|_| VideoIssue::Structure)?;
@@ -1311,7 +1341,49 @@ fn validate_esds_configuration(configuration: &[u8]) -> Result<(), VideoIssue> {
     if descriptor_size < 3 || payload_end != configuration.len() {
         return Err(VideoIssue::Malformed);
     }
+    let payload = &configuration[payload_start..payload_end];
+    let flags = payload[2];
+    let mut cursor = 3_usize;
+    if flags & 0x80 != 0 {
+        cursor = cursor.checked_add(2).ok_or(VideoIssue::Structure)?;
+    }
+    if flags & 0x40 != 0 {
+        let url_length = usize::from(*payload.get(cursor).ok_or(VideoIssue::Malformed)?);
+        cursor = cursor
+            .checked_add(1)
+            .and_then(|offset| offset.checked_add(url_length))
+            .ok_or(VideoIssue::Structure)?;
+    }
+    if flags & 0x20 != 0 {
+        cursor = cursor.checked_add(2).ok_or(VideoIssue::Structure)?;
+    }
+    let decoder_end = consume_esds_descriptor(payload, cursor, 0x04, 13)?;
+    let sl_end = consume_esds_descriptor(payload, decoder_end, 0x06, 1)?;
+    if sl_end != payload.len() {
+        return Err(VideoIssue::Malformed);
+    }
     Ok(())
+}
+
+fn consume_esds_descriptor(
+    bytes: &[u8],
+    offset: usize,
+    expected_tag: u8,
+    minimum_payload: usize,
+) -> Result<usize, VideoIssue> {
+    if bytes.get(offset) != Some(&expected_tag) {
+        return Err(VideoIssue::Malformed);
+    }
+    let size_offset = offset.checked_add(1).ok_or(VideoIssue::Structure)?;
+    let (size_bytes, size) = parse_descriptor_size(bytes, size_offset)?;
+    if size < minimum_payload {
+        return Err(VideoIssue::Malformed);
+    }
+    size_offset
+        .checked_add(size_bytes)
+        .and_then(|start| start.checked_add(size))
+        .filter(|end| *end <= bytes.len())
+        .ok_or(VideoIssue::Malformed)
 }
 
 fn parse_descriptor_size(bytes: &[u8], offset: usize) -> Result<(usize, usize), VideoIssue> {
@@ -1448,7 +1520,7 @@ fn parse_webm(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIss
         .duration
         .map(|duration| duration * state.timecode_scale as f64 / 1_000_000.0)
         .map(|milliseconds| {
-            if !milliseconds.is_finite() || milliseconds < 0.0 || milliseconds > u64::MAX as f64 {
+            if !milliseconds.is_finite() || milliseconds < 0.0 || milliseconds >= u64::MAX as f64 {
                 return Err(VideoIssue::Malformed);
             }
             Ok(milliseconds.round() as u64)
@@ -1499,6 +1571,9 @@ fn parse_ebml_scope(
                 }
                 Err(issue) => return Err(issue),
             };
+        if scope != EbmlScope::Root && (id == EBML_HEADER || id == EBML_SEGMENT) {
+            return Err(VideoIssue::Recursive);
+        }
         let size_offset = cursor.checked_add(id_bytes).ok_or(VideoIssue::Structure)?;
         let (size, size_bytes, unknown) = match read_ebml_vint(
             bytes,
@@ -1879,9 +1954,12 @@ fn read_ebml_vint(
     for byte in &encoded[1..] {
         value = value.checked_shl(8).ok_or(VideoIssue::Structure)? | u64::from(*byte);
     }
-    let unknown = kind == EbmlVintKind::Size
-        && encoded[0] & (marker - 1) == marker - 1
-        && encoded[1..].iter().all(|byte| *byte == 0xff);
+    let reserved =
+        encoded[0] & (marker - 1) == marker - 1 && encoded[1..].iter().all(|byte| *byte == 0xff);
+    if kind == EbmlVintKind::Identifier && reserved {
+        return Err(VideoIssue::Malformed);
+    }
+    let unknown = kind == EbmlVintKind::Size && reserved;
     Ok((value, length, unknown))
 }
 
@@ -1908,7 +1986,8 @@ fn parse_ebml_track_type(payload: &[u8]) -> Result<EbmlTrackKind, VideoIssue> {
     match parse_ebml_uint(payload)? {
         1 => Ok(EbmlTrackKind::Video),
         2 => Ok(EbmlTrackKind::Audio),
-        _ => Ok(EbmlTrackKind::Other),
+        3 | 0x10 | 0x11 | 0x12 | 0x20 | 0x21 => Ok(EbmlTrackKind::Other),
+        _ => Err(VideoIssue::Malformed),
     }
 }
 
@@ -1987,7 +2066,7 @@ async fn extend_probe_prefix(
     source_bytes: u64,
     bytes: &mut Vec<u8>,
 ) -> Result<(), FileMediaProviderFailure> {
-    let total = source_bytes.min(PROBE_BYTES);
+    let total = source_bytes.min(METADATA_BYTES);
     let mut offset = u64::try_from(bytes.len()).map_err(|_| FileMediaProviderFailure::Failed)?;
     while offset < total {
         let length = (total - offset).min(PROBE_RANGE_BYTES);
