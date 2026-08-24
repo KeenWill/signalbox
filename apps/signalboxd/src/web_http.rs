@@ -225,7 +225,7 @@ impl WebHttpRuntime {
         pool: PgPool,
         model_configuration: HubModelConfiguration,
     ) -> Result<Self, WebHttpRuntimeError> {
-        let router = production_router_with_model_configuration(
+        let router = production_router(
             configuration.asset_root,
             Some(pool),
             Some(model_configuration),
@@ -271,11 +271,7 @@ impl WebHttpRuntime {
 }
 
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
-pub fn production_router(asset_root: Option<PathBuf>, pool: Option<PgPool>) -> Router {
-    production_router_with_model_configuration(asset_root, pool, None)
-}
-
-fn production_router_with_model_configuration(
+pub fn production_router(
     asset_root: Option<PathBuf>,
     pool: Option<PgPool>,
     model_configuration: Option<HubModelConfiguration>,
@@ -754,6 +750,7 @@ fn parse_usage_call_kind(value: &str) -> Option<UsageCallKind> {
     match value {
         "model_call" => Some(UsageCallKind::ModelCall),
         "approval_judge" => Some(UsageCallKind::ApprovalJudge),
+        "context_compaction" => Some(UsageCallKind::ContextCompaction),
         _ => None,
     }
 }
@@ -944,7 +941,9 @@ fn usage_aggregate_cost_dto(
             ProcessModelCallInputTokenSemantics::CacheInclusive
         }
     };
-    if !group.cache_normalization_safe {
+    if group.key.input_semantics == UsageInputTokenSemantics::CacheInclusive
+        && !group.cache_normalization_safe
+    {
         return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
     }
     let Some(cost) = configuration.derive_usage_aggregate_cost(
@@ -1703,7 +1702,7 @@ mod tests {
             .expect("the static index exists");
         let runtime = WebHttpRuntime::bind_router(
             loopback_ephemeral(),
-            production_router(Some(assets.path().to_path_buf()), None),
+            production_router(Some(assets.path().to_path_buf()), None, None),
         )
         .await
         .expect("the production test server binds");
@@ -1923,7 +1922,7 @@ mod tests {
         let request = Request::get("/api/not-a-route")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(Some(assets.path().to_path_buf()), None)
+        let response = production_router(Some(assets.path().to_path_buf()), None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -1943,7 +1942,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -1964,7 +1963,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -1982,7 +1981,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let unsupported = production_router(None, None)
+        let unsupported = production_router(None, None, None)
             .oneshot(unsupported)
             .await
             .expect("the production router responds");
@@ -2002,7 +2001,7 @@ mod tests {
                 .header(header::HOST, "localhost")
                 .body(Body::empty())
                 .expect("the request is valid");
-        let partial = production_router(None, None)
+        let partial = production_router(None, None, None)
             .oneshot(partial)
             .await
             .expect("the production router responds");
@@ -2022,7 +2021,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let oversized = production_router(None, None)
+        let oversized = production_router(None, None, None)
             .oneshot(oversized)
             .await
             .expect("the production router responds");
@@ -2039,7 +2038,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2054,12 +2053,12 @@ mod tests {
     #[tokio::test]
     async fn representable_usage_filters_are_parsed_before_projection_availability_is_reported() {
         let request = Request::get(
-            "/api/usage/calls?from_micros=0&to_micros=1777777777123456&provenance=estimated&call_kind=approval_judge&order=newest&max_items=100",
+            "/api/usage/calls?from_micros=0&to_micros=1777777777123456&provenance=estimated&call_kind=context_compaction&order=newest&max_items=100",
         )
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2079,7 +2078,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2098,7 +2097,7 @@ mod tests {
                 .header(header::HOST, "localhost")
                 .body(Body::empty())
                 .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2245,7 +2244,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None)
+        let response = production_router(None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");

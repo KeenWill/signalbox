@@ -1629,14 +1629,36 @@ export function decodeWebSearchPage(value) {
 export function decodeWebUsageSummary(value) {
   assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
   const encoder = new TextEncoder();
+  const compatibilityKeys = new Set();
+  let totalCallCount = 0n;
   value.groups.forEach((group, index) => {
+    const callCount = BigInt(group.call_count);
+    totalCallCount += callCount;
+    if (totalCallCount > 10000n) {
+      fail("usage_summary.groups", "at most 10000 represented calls");
+    }
     assertUsageEvidence(
       group.input_semantics,
       group.tokens,
       group.cost,
       `usage_summary.groups[${index}]`,
-      group.input_semantics === "cache_inclusive",
+      group.input_semantics === "cache_inclusive" && callCount > 1n,
     );
+    const compatibilityKey = JSON.stringify([
+      group.call_kind,
+      group.model_id,
+      group.profile_id,
+      group.provenance,
+      group.input_semantics,
+      group.coverage.input,
+      group.coverage.output,
+      group.coverage.cache_creation_input,
+      group.coverage.cache_read_input,
+    ]);
+    if (compatibilityKeys.has(compatibilityKey)) {
+      fail(`usage_summary.groups[${index}]`, "a unique compatibility key");
+    }
+    compatibilityKeys.add(compatibilityKey);
     const profileBytes = encoder.encode(group.profile_id).length;
     if (profileBytes === 0 || profileBytes > 256) {
       fail(`usage_summary.groups[${index}].profile_id`, "1 through 256 UTF-8 bytes");
@@ -1644,6 +1666,12 @@ export function decodeWebUsageSummary(value) {
     for (const axis of ["input", "output", "cache_creation_input", "cache_read_input"]) {
       if (group.coverage[axis] !== (group.tokens[axis] !== null)) {
         fail(`usage_summary.groups[${index}].coverage.${axis}`, "consistent with token evidence");
+      }
+      if (
+        group.tokens[axis] !== null &&
+        BigInt(group.tokens[axis]) > callCount * 18446744073709551615n
+      ) {
+        fail(`usage_summary.groups[${index}].tokens.${axis}`, "bounded by call_count times u64::MAX");
       }
     }
   });
@@ -1656,6 +1684,7 @@ export function decodeWebUsageCallPage(value, order) {
     fail("usage_call_page.order", "newest");
   }
   let previousKey = null;
+  const callIds = new Set();
   value.calls.forEach((call, index) => {
     assertUsageEvidence(
       call.input_semantics,
@@ -1672,6 +1701,10 @@ export function decodeWebUsageCallPage(value, order) {
       );
     }
     const key = { recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id };
+    if (callIds.has(call.call_id)) {
+      fail(`usage_call_page.calls[${index}].call_id`, "unique within the page");
+    }
+    callIds.add(call.call_id);
     if (previousKey !== null) {
       const comparison = key.recordedAt === previousKey.recordedAt
         ? key.callId < previousKey.callId ? -1 : key.callId > previousKey.callId ? 1 : 0

@@ -73,6 +73,40 @@ CREATE TABLE web_usage_oversized_profile_identity (
 CREATE INDEX web_usage_oversized_profile_by_digest
     ON web_usage_oversized_profile_identity (reference_digest);
 
+CREATE FUNCTION enforce_web_usage_oversized_profile_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    expected_digest text;
+BEGIN
+    expected_digest := md5(NEW.exact_reference);
+    IF NEW.reference_digest <> expected_digest THEN
+        RAISE EXCEPTION 'oversized usage profile digest must match its exact reference'
+            USING ERRCODE = '23514';
+    END IF;
+
+    -- Serialize the bounded digest bucket so exact-reference uniqueness does
+    -- not require an index over the unbounded canonical reference.
+    PERFORM pg_advisory_xact_lock(hashtextextended(expected_digest, 0));
+    IF EXISTS (
+        SELECT 1
+          FROM web_usage_oversized_profile_identity
+         WHERE reference_digest = expected_digest
+           AND exact_reference = NEW.exact_reference
+    ) THEN
+        RAISE EXCEPTION 'oversized usage profile reference already has an identity'
+            USING ERRCODE = '23505';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER web_usage_oversized_profile_identity_is_consistent
+BEFORE INSERT ON web_usage_oversized_profile_identity
+FOR EACH ROW
+EXECUTE FUNCTION enforce_web_usage_oversized_profile_identity();
+
 CREATE FUNCTION bounded_web_usage_profile(value text)
 RETURNS text
 LANGUAGE plpgsql
@@ -193,12 +227,19 @@ CREATE INDEX web_usage_by_session_model_recorded_call
 CREATE INDEX web_usage_by_turn_recorded_call
     ON web_usage_call_projection
        (turn_id, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_kind_recorded_call
+    ON web_usage_call_projection
+       (turn_id, call_kind, recorded_at DESC, model_call_id DESC);
 CREATE INDEX web_usage_by_model_recorded_call
     ON web_usage_call_projection
        (resolved_provider_model_identity_id, recorded_at DESC, model_call_id DESC);
 CREATE INDEX web_usage_by_model_provenance_recorded_call
     ON web_usage_call_projection
        (resolved_provider_model_identity_id, usage_provenance_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_model_kind_recorded_call
+    ON web_usage_call_projection
+       (resolved_provider_model_identity_id, call_kind,
         recorded_at DESC, model_call_id DESC);
 CREATE INDEX web_usage_by_provenance_recorded_call
     ON web_usage_call_projection

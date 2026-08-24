@@ -316,7 +316,7 @@ async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn incomplete_cache_inclusive_aggregates_are_not_normalization_safe()
+async fn incomplete_cache_inclusive_aggregates_preserve_independent_axes()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x95_100;
@@ -362,7 +362,7 @@ async fn incomplete_cache_inclusive_aggregates_are_not_normalization_safe()
         .await?;
 
     assert_eq!(report.groups.len(), 1);
-    assert!(!report.groups[0].cache_normalization_safe);
+    assert!(report.groups[0].cache_normalization_safe);
 
     pool.close().await;
     drop(container);
@@ -395,6 +395,18 @@ async fn usage_projection_has_combined_selection_indexes() -> Result<(), Box<dyn
         combined_index_definition
             .contains("session_id, call_kind, recorded_at DESC, model_call_id DESC")
     );
+    let turn_kind_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_turn_kind_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        turn_kind_index_definition
+            .contains("turn_id, call_kind, recorded_at DESC, model_call_id DESC")
+    );
     let session_model_index_definition: String = sqlx::query_scalar(
         "SELECT indexdef FROM pg_indexes
           WHERE schemaname = current_schema()
@@ -416,6 +428,17 @@ async fn usage_projection_has_combined_selection_indexes() -> Result<(), Box<dyn
     .await?;
     assert!(model_provenance_index_definition.contains(
         "resolved_provider_model_identity_id, usage_provenance_kind, recorded_at DESC, model_call_id DESC"
+    ));
+    let model_kind_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_model_kind_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(model_kind_index_definition.contains(
+        "resolved_provider_model_identity_id, call_kind, recorded_at DESC, model_call_id DESC"
     ));
 
     pool.close().await;
@@ -633,6 +656,57 @@ async fn oversized_credential_references_receive_bounded_distinct_usage_labels()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn oversized_profile_identity_enforces_digest_and_reference_uniqueness()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let reference = "table-boundary-profile".repeat(16);
+    let mismatched_digest_error = sqlx::query(
+        "INSERT INTO web_usage_oversized_profile_identity
+            (reference_digest, exact_reference)
+         VALUES ('00000000000000000000000000000000', $1)",
+    )
+    .bind(&reference)
+    .execute(&pool)
+    .await
+    .expect_err("table boundary must reject a digest unrelated to the reference");
+    assert_eq!(
+        mismatched_digest_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23514".into())
+    );
+
+    sqlx::query(
+        "INSERT INTO web_usage_oversized_profile_identity
+            (reference_digest, exact_reference)
+         VALUES (md5($1), $1)",
+    )
+    .bind(&reference)
+    .execute(&pool)
+    .await?;
+    let duplicate_error = sqlx::query(
+        "INSERT INTO web_usage_oversized_profile_identity
+            (reference_digest, exact_reference)
+         VALUES (md5($1), $1)",
+    )
+    .bind(&reference)
+    .execute(&pool)
+    .await
+    .expect_err("table boundary must reject a duplicate exact reference");
+    assert_eq!(
+        duplicate_error
+            .as_database_error()
+            .and_then(|error| error.code()),
+        Some("23505".into())
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn usage_projection_retains_only_bounded_credential_identity() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let projection_retains_exact_reference: bool = sqlx::query_scalar(
@@ -647,6 +721,20 @@ async fn usage_projection_retains_only_bounded_credential_identity() -> Result<(
     .fetch_one(&pool)
     .await?;
     assert!(!projection_retains_exact_reference);
+
+    let fixture = terminal_reported_usage_call(
+        &pool,
+        0x95_900,
+        ProviderReportedTokenUsage::unreported().with_input_tokens(Some(FIRST_INPUT_TOKENS)),
+    )
+    .await?;
+    let repository = UsageRepository::new(pool.clone());
+    let page = repository.calls(call_query(1, None)).await?;
+    let report = repository.aggregate(all_usage_query()).await?;
+
+    assert_eq!(page.calls[0].call, fixture.call);
+    assert_eq!(page.calls[0].credential_profile, "anthropic-primary");
+    assert_eq!(report.groups[0].key.credential_profile, "anthropic-primary");
 
     pool.close().await;
     drop(container);

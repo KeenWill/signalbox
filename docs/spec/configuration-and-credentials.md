@@ -227,33 +227,9 @@ use ordinary HTTP bodies rather than JSON wrapping.
 
 ### Bounded browser usage and cost reads
 
-`GET /api/usage/summary` reads the dedicated terminal-call usage projection and
-returns at most 256 compatibility-preserving groups. `GET /api/usage/calls`
-returns at most 100 individual calls in an explicit newest-first or oldest-first
-order with an exact terminal-microsecond and model-call UUID keyset cursor. Both
-routes accept the same optional half-open time range and exact session, turn,
-resolved-model, reported-versus-estimated provenance, and ordinary-versus-
-approval-judge call filters. Malformed bounds, closed values, UUIDs, or partial
-cursors are application errors; neither route scans or materializes transcript
-content.
-
-Every response retains independently nullable input, output, cache-creation, and
-cache-read axes. Summary rows additionally carry the exact presence shape,
-input-axis semantics, provenance, physical call class, resolved-model identity,
-and call count that make the aggregate compatible. The response says when the
-hard group ceiling truncated a summary rather than presenting it as complete.
-
-Dollar cost is never stored in the web projection. Signalboxd derives it at read
-time from the exact configured target rates and the call-pinned non-secret
-credential profile, using the same configuration-owned derivation as transcript
-snapshots. Each derived amount carries its rate version and either the `real` or
-`metered_equivalent` billing label. A result that cannot be derived instead
-carries one closed reason: no token evidence, unknown input semantics,
-incomplete cache axes, an invalid cache-inclusive breakdown, or unavailable
-configuration. The API does not sum across provenance, token coverage, input
-semantics, billing labels, rate versions, targets, credential partitions, or
-physical call classes; the browser therefore never receives an unlabeled blend
-of incompatible evidence.
+The bounded `/api/usage/summary` and newest-first `/api/usage/calls` routes,
+their filters, pagination, compatibility grouping, and read-time configured-cost
+semantics are owned by [Usage evidence](usage-evidence.md).
 
 `deterministic_test_router` supplies a database-free page plus bounded read,
 mutation, and two-item stream routes. It composes the same bootstrap, mutation

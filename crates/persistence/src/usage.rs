@@ -23,8 +23,16 @@ use crate::mapping::{
 
 const AGGREGATE_SQL: &str = "
 WITH candidate_calls AS MATERIALIZED (
-    SELECT *
-      FROM web_usage_call_projection
+    SELECT usage_call.*,
+           CASE
+               WHEN credential_profile_label LIKE 'exact:%'
+                   THEN substring(credential_profile_label FROM 7)
+               ELSE oversized_profile.exact_reference
+           END AS credential_reference
+      FROM web_usage_call_projection AS usage_call
+      LEFT JOIN web_usage_oversized_profile_identity AS oversized_profile
+        ON credential_profile_label NOT LIKE 'exact:%'
+       AND oversized_profile.profile_id::text = substring(credential_profile_label FROM 8)
      WHERE ($1::timestamptz IS NULL OR recorded_at >= $1)
        AND ($2::timestamptz IS NULL OR recorded_at < $2)
        AND ($3::uuid IS NULL OR session_id = $3)
@@ -58,18 +66,16 @@ SELECT call_kind, resolved_provider_model_identity_id,
        usage_input_includes_cache_tokens IS NOT NULL
        AND bool_and(
            usage_input_includes_cache_tokens IS DISTINCT FROM true
-           OR (
-               input_tokens IS NOT NULL
-               AND cache_creation_input_tokens IS NOT NULL
-               AND cache_read_input_tokens IS NOT NULL
-               AND input_tokens >= cache_creation_input_tokens + cache_read_input_tokens
-           )
+           OR input_tokens IS NULL
+           OR cache_creation_input_tokens IS NULL
+           OR cache_read_input_tokens IS NULL
+           OR input_tokens >= cache_creation_input_tokens + cache_read_input_tokens
        ) AS cache_normalization_safe,
        bounded_state.calls_truncated
   FROM bounded_calls
  CROSS JOIN bounded_state
  GROUP BY call_kind, resolved_provider_model_identity_id,
-          credential_profile_label, usage_provenance_kind,
+          credential_reference, credential_profile_label, usage_provenance_kind,
           usage_input_includes_cache_tokens,
           input_tokens IS NOT NULL, output_tokens IS NOT NULL,
           cache_creation_input_tokens IS NOT NULL,
@@ -84,12 +90,19 @@ SELECT call_kind, resolved_provider_model_identity_id,
 const CALLS_NEWEST_SQL: &str = "
 SELECT model_call_id, call_kind, session_id, turn_id,
        resolved_provider_model_identity_id,
-       credential_reference,
+       CASE
+           WHEN credential_profile_label LIKE 'exact:%'
+               THEN substring(credential_profile_label FROM 7)
+           ELSE oversized_profile.exact_reference
+       END AS credential_reference,
        credential_profile_label AS web_profile,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens, recorded_at
-  FROM web_usage_call_projection
+  FROM web_usage_call_projection AS usage_call
+  LEFT JOIN web_usage_oversized_profile_identity AS oversized_profile
+    ON credential_profile_label NOT LIKE 'exact:%'
+   AND oversized_profile.profile_id::text = substring(credential_profile_label FROM 8)
  WHERE ($1::timestamptz IS NULL OR recorded_at >= $1)
    AND ($2::timestamptz IS NULL OR recorded_at < $2)
    AND ($3::uuid IS NULL OR session_id = $3)
@@ -506,9 +519,11 @@ mod tests {
 
     #[test]
     fn usage_queries_retain_raw_and_bounded_profile_projections() {
-        assert!(AGGREGATE_SQL.contains("credential_reference,"));
+        assert!(AGGREGATE_SQL.contains("oversized_profile.exact_reference"));
+        assert!(AGGREGATE_SQL.contains("substring(credential_profile_label FROM 7)"));
         assert!(AGGREGATE_SQL.contains("credential_profile_label AS web_profile"));
-        assert!(CALLS_NEWEST_SQL.contains("credential_reference,"));
+        assert!(CALLS_NEWEST_SQL.contains("oversized_profile.exact_reference"));
+        assert!(CALLS_NEWEST_SQL.contains("substring(credential_profile_label FROM 7)"));
         assert!(CALLS_NEWEST_SQL.contains("credential_profile_label AS web_profile"));
     }
 

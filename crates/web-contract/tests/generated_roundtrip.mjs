@@ -426,6 +426,20 @@ test("generated usage decoder accepts an omitted optional continuation", () => {
   assert.equal(decodeWebUsageCallPage(page, "newest"), page);
 });
 
+test("generated usage decoder rejects repeated call identities", () => {
+  const first = usageCall();
+  const repeated = usageCall();
+  repeated.recorded_at_micros = "1777777777123455";
+
+  assert.throws(
+    () => decodeWebUsageCallPage(
+      { calls: [first, repeated], continuation: null },
+      "newest",
+    ),
+    /unique within the page/,
+  );
+});
+
 test("generated usage decoder rejects spurious invalid cache breakdowns", () => {
   const call = usageCall();
   call.cost = {
@@ -441,6 +455,7 @@ test("generated usage decoder rejects spurious invalid cache breakdowns", () => 
 
 test("generated usage summary preserves hidden constituent breakdown failures", () => {
   const group = usageGroup();
+  group.call_count = "2";
   group.input_semantics = "cache_inclusive";
   group.coverage.cache_creation_input = true;
   group.coverage.cache_read_input = true;
@@ -452,6 +467,54 @@ test("generated usage summary preserves hidden constituent breakdown failures", 
   assert.equal(
     decodeWebUsageSummary({ groups: [group], truncated: false }).groups[0],
     group,
+  );
+});
+
+test("generated usage summary rejects hidden breakdown failures for singletons", () => {
+  const group = usageGroup();
+  group.input_semantics = "cache_inclusive";
+  group.coverage.cache_creation_input = true;
+  group.coverage.cache_read_input = true;
+  group.tokens.cache_creation_input = "2";
+  group.tokens.cache_read_input = "0";
+  group.cost = { status: "unavailable", reason: "invalid_cache_breakdown" };
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /consistent with token evidence and input semantics/,
+  );
+});
+
+test("generated usage summary bounds totals by represented calls", () => {
+  const group = usageGroup();
+  group.tokens.input = "18446744073709551616";
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [group], truncated: false }),
+    /bounded by call_count times u64::MAX/,
+  );
+});
+
+test("generated usage summary rejects duplicate compatibility keys", () => {
+  const first = usageGroup();
+  const duplicate = structuredClone(first);
+  duplicate.call_count = "2";
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [first, duplicate], truncated: false }),
+    /unique compatibility key/,
+  );
+});
+
+test("generated usage summary caps represented calls across groups", () => {
+  const first = usageGroup();
+  first.call_count = "10000";
+  const second = usageGroup();
+  second.profile_id = "fixture-secondary";
+
+  assert.throws(
+    () => decodeWebUsageSummary({ groups: [first, second], truncated: false }),
+    /at most 10000 represented calls/,
   );
 });
 
