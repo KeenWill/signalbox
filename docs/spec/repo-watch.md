@@ -1137,10 +1137,9 @@ disposition and exact projections as the durable recovery handoff before its
 cursor write. If that cursor write conflicts with an intervening full poll, the
 delivery remains terminal and the in-memory shadow is handed over to the
 competing durable cursor before later pending receipts are projected. A
-webhook-enabled shadow wake may also
-preempt the read-only provider sweep of an in-flight complete poll, without
-resetting that poll's deadline, so the durable delivery drains before bounded
-reconciliation resumes.
+webhook-enabled shadow wake may also preempt the read-only provider sweep of an
+in-flight complete poll, without resetting that poll's deadline, so the durable
+delivery drains before bounded reconciliation resumes.
 
 **Implemented behavior.** A drain page attempts every loaded delivery even when
 one delivery fails. Each failure is logged at warning level with the delivery
