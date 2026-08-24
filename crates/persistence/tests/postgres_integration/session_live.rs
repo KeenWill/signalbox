@@ -54,10 +54,7 @@ fn corruption_field(error: SessionLiveRepositoryError) -> Option<&'static str> {
     }
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn snapshot_caps_queue_preview_and_tracks_activation() -> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
+async fn create_live_session(pool: &PgPool) -> Result<SessionId, Box<dyn Error>> {
     let session = SessionId::from_uuid(Uuid::from_u128(LIVE_SEED));
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(
@@ -68,8 +65,14 @@ async fn snapshot_caps_queue_preview_and_tracks_activation() -> Result<(), Box<d
             ))),
         ))
         .await?;
-    let repository = SessionLiveRepository::new(pool.clone());
-    let first_turn = TurnId::from_uuid(Uuid::from_u128(LIVE_SEED + 1));
+    Ok(session)
+}
+
+async fn submit_first_live_turn(
+    pool: &PgPool,
+    session: SessionId,
+) -> Result<TurnId, Box<dyn Error>> {
+    let turn = TurnId::from_uuid(Uuid::from_u128(LIVE_SEED + 1));
     SubmitInputRepository::new(pool.clone())
         .handle(
             start_input(
@@ -80,15 +83,15 @@ async fn snapshot_caps_queue_preview_and_tracks_activation() -> Result<(), Box<d
                 ModelSelectionOverride::UseSessionDefault,
             ),
             AcceptedInputId::from_uuid(Uuid::from_u128(LIVE_SEED + 0x200)),
-            Some(first_turn),
+            Some(turn),
         )
         .await?;
-    let queued = repository
-        .read_live_snapshot(session)
-        .await?
-        .expect("the created session has a live snapshot");
+    Ok(turn)
+}
+
+async fn activate_first_live_turn(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn Error>> {
     activate_earliest_queued_turn(
-        &pool,
+        pool,
         EarliestQueuedTurnActivation {
             session: session.into_uuid(),
             origin_entry: Uuid::from_u128(LIVE_SEED + 0x302),
@@ -97,36 +100,87 @@ async fn snapshot_caps_queue_preview_and_tracks_activation() -> Result<(), Box<d
         },
     )
     .await?;
-    let active = repository
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn live_snapshot_projects_the_initial_queue() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_live_session(&pool).await?;
+    let first_turn = submit_first_live_turn(&pool, session).await?;
+    let snapshot = SessionLiveRepository::new(pool.clone())
+        .read_live_snapshot(session)
+        .await?
+        .expect("the created session has a live snapshot");
+
+    assert_eq!(snapshot.queued_turn_count, 1);
+    assert_eq!(snapshot.queued_turns, [first_turn]);
+    assert_eq!(snapshot.active, None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn live_snapshot_tracks_turn_activation() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_live_session(&pool).await?;
+    let first_turn = submit_first_live_turn(&pool, session).await?;
+    activate_first_live_turn(&pool, session).await?;
+    let snapshot = SessionLiveRepository::new(pool.clone())
         .read_live_snapshot(session)
         .await?
         .expect("the activated session has a live snapshot");
-    let turns = queue_fixture_turns(&pool, session, first_turn, 33).await?;
-    let bounded = repository
-        .read_live_snapshot(session)
-        .await?
-        .expect("the occupied session has a bounded live snapshot");
-    let absent = repository
-        .read_live_snapshot(SessionId::from_uuid(Uuid::from_u128(LIVE_SEED + 0xffff)))
-        .await?;
-    let preview_limit = usize::from(max_session_live_queued_turns());
 
-    assert_eq!(queued.queued_turn_count, 1);
-    assert_eq!(queued.queued_turns, [first_turn]);
-    assert_eq!(queued.active, None);
-    assert_eq!(active.queued_turn_count, 0);
-    assert_eq!(active.queued_turns, []);
-    assert_eq!(bounded.queued_turn_count, 33);
-    assert_eq!(bounded.queued_turns.len(), preview_limit);
-    assert_eq!(bounded.queued_turns, turns[..preview_limit]);
+    assert_eq!(snapshot.queued_turn_count, 0);
+    assert_eq!(snapshot.queued_turns, []);
     assert_eq!(
-        active.active,
+        snapshot.active,
         Some(SessionLiveActiveTurn {
             turn: first_turn,
             state: SessionLiveActiveState::Running { model_call: None },
         })
     );
-    assert_eq!(bounded.active, active.active);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn live_snapshot_caps_the_queue_preview() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_live_session(&pool).await?;
+    let first_turn = submit_first_live_turn(&pool, session).await?;
+    activate_first_live_turn(&pool, session).await?;
+    let turns = queue_fixture_turns(&pool, session, first_turn, 33).await?;
+    let snapshot = SessionLiveRepository::new(pool.clone())
+        .read_live_snapshot(session)
+        .await?
+        .expect("the occupied session has a bounded live snapshot");
+    let preview_limit = usize::from(max_session_live_queued_turns());
+
+    assert_eq!(snapshot.queued_turn_count, 33);
+    assert_eq!(snapshot.queued_turns.len(), preview_limit);
+    assert_eq!(snapshot.queued_turns, turns[..preview_limit]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn live_snapshot_returns_none_for_an_absent_session() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let absent = SessionLiveRepository::new(pool.clone())
+        .read_live_snapshot(SessionId::from_uuid(Uuid::from_u128(LIVE_SEED + 0xffff)))
+        .await?;
+
     assert_eq!(absent, None);
 
     pool.close().await;

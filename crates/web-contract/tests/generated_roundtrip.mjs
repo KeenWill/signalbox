@@ -143,6 +143,27 @@ test("generated live decoder rejects duplicate queued turn identities", () => {
   );
 });
 
+test("generated live decoder rejects queued identities occupying current state", () => {
+  const occupiedTurn = "00000000-0000-0000-0000-000000000992";
+
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: occupiedTurn,
+          state: { kind: "running", model_call_id: null },
+        },
+        queued_turn_count: "1",
+        queued_turn_ids: [occupiedTurn],
+        reconciliation: null,
+        runner: null,
+      }),
+    /disjoint from active and reconciliation turn IDs/,
+  );
+});
+
 test("generated live decoder validates identities and active-state correlation", () => {
   assert.throws(
     () =>
@@ -220,6 +241,58 @@ test("generated live decoder requires positive placement revisions", () => {
         runner: { state: "unpinned", placement_revision: "0" },
       }),
     /one recognized variant/,
+  );
+});
+
+test("generated live decoder rejects self-referential child waits", () => {
+  const sessionId = "00000000-0000-0000-0000-000000000991";
+
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: sessionId,
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: {
+            kind: "awaiting_child",
+            tool_request_id: "00000000-0000-0000-0000-000000000993",
+            child_session_id: sessionId,
+          },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /different from the parent session ID/,
+  );
+});
+
+test("generated live decoder correlates runner recovery with placement", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: {
+            kind: "awaiting_runner_recovery",
+            runner_id: "00000000-0000-0000-0000-000000000993",
+            placement_revision: "4",
+          },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: {
+          state: "runner_lost",
+          runner_id: "00000000-0000-0000-0000-000000000994",
+          placement_revision: "4",
+        },
+      }),
+    /runner placement required by awaiting_runner_recovery/,
   );
 });
 

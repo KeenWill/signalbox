@@ -1855,8 +1855,30 @@ function assertLiveSnapshot(snapshot, path) {
   if (new Set(snapshot.queued_turn_ids).size !== snapshot.queued_turn_ids.length) {
     fail(`${path}.queued_turn_ids`, "unique turn IDs");
   }
+  const occupiedTurnId = snapshot.active?.turn_id ?? snapshot.reconciliation?.turn_id;
+  if (occupiedTurnId !== undefined && snapshot.queued_turn_ids.includes(occupiedTurnId)) {
+    fail(`${path}.queued_turn_ids`, "disjoint from active and reconciliation turn IDs");
+  }
   if (snapshot.active != null && snapshot.reconciliation != null) {
     fail(`${path}.reconciliation`, "absent while an active turn is present");
+  }
+  if (
+    snapshot.active?.state.kind === "awaiting_child" &&
+    snapshot.active.state.child_session_id === snapshot.session_id
+  ) {
+    fail(`${path}.active.state.child_session_id`, "different from the parent session ID");
+  }
+  if (snapshot.active?.state.kind === "awaiting_runner_recovery") {
+    const recovery = snapshot.active.state;
+    const runner = snapshot.runner;
+    const compatibleRunner =
+      runner != null &&
+      (runner.state === "runner_lost" || runner.state === "runner_lost_before_pin") &&
+      runner.runner_id === recovery.runner_id &&
+      runner.placement_revision === recovery.placement_revision;
+    if (!compatibleRunner) {
+      fail(`${path}.runner`, "the runner placement required by awaiting_runner_recovery");
+    }
   }
 }
 
