@@ -72,6 +72,7 @@ use signalboxd::{
     TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
     TurnLivenessNumericBounds, TurnLivenessRuntime,
     model_adapter::ConfiguredModelRuntime,
+    reconcile_fenced_pool_floor,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
         WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError,
@@ -107,6 +108,31 @@ fn graceful_shutdown_window(
 
 fn validate_fenced_pool_min_connections(minimum: Option<u32>) -> Option<Option<u32>> {
     (!minimum.is_some_and(|minimum| minimum > FENCED_POOL_MAX_CONNECTIONS)).then_some(minimum)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FencedPoolFloorReconciliationPolicy {
+    minimum: u32,
+    interval: Duration,
+    attempt_bound: Duration,
+}
+
+fn fenced_pool_floor_reconciliation_policy(
+    minimum: Option<u32>,
+    interval: Option<Duration>,
+    attempt_bound: Option<Duration>,
+) -> Option<Option<FencedPoolFloorReconciliationPolicy>> {
+    let minimum = minimum.filter(|minimum| *minimum > 0);
+    let Some(minimum) = minimum else {
+        return Some(None);
+    };
+    let interval = interval.filter(|interval| !interval.is_zero())?;
+    let attempt_bound = attempt_bound.filter(|bound| !bound.is_zero())?;
+    Some(Some(FencedPoolFloorReconciliationPolicy {
+        minimum,
+        interval,
+        attempt_bound,
+    }))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -641,6 +667,7 @@ enum RuntimeDrainOutcome {
 
 enum RuntimeTaskExit {
     Scheduler(SchedulerLoopExit),
+    FencedPoolFloor,
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
@@ -684,6 +711,7 @@ const fn combine_runtime_stop_cause(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeTaskDefect {
     SchedulerCompletedBeforeShutdown,
+    FencedPoolFloorCompletedBeforeShutdown,
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
     RepositoryWatchCompletedBeforeShutdown,
@@ -700,6 +728,9 @@ impl RuntimeTaskDefect {
     const fn cause_code(self) -> &'static str {
         match self {
             Self::SchedulerCompletedBeforeShutdown => "scheduler_completed_before_shutdown",
+            Self::FencedPoolFloorCompletedBeforeShutdown => {
+                "fenced_pool_floor_completed_before_shutdown"
+            }
             Self::ProcessCompletedBeforeShutdown => "process_runtime_completed_before_shutdown",
             Self::RunnerCompletedBeforeShutdown => "runner_runtime_completed_before_shutdown",
             Self::RepositoryWatchCompletedBeforeShutdown => {
@@ -826,6 +857,75 @@ async fn wait_for_guard_loss(database: &mut FencedHubDatabase) {
             return;
         }
         sleep(GUARD_CHECK_INTERVAL).await;
+    }
+}
+
+async fn run_fenced_pool_floor_reconciliation(
+    pool: sqlx::PgPool,
+    policy: FencedPoolFloorReconciliationPolicy,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+                continue;
+            }
+            () = sleep(policy.interval) => {}
+        }
+        let prior_size = pool.size();
+        if prior_size >= policy.minimum {
+            continue;
+        }
+        let attempt = timeout(
+            policy.attempt_bound,
+            reconcile_fenced_pool_floor(&pool, policy.minimum),
+        );
+        let outcome = select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+                continue;
+            }
+            outcome = attempt => outcome,
+        };
+        let current_size = pool.size();
+        match outcome {
+            Ok(Ok(())) if current_size >= policy.minimum => tracing::info!(
+                prior_size,
+                current_size,
+                minimum = policy.minimum,
+                "fenced pool floor automatically reconciled"
+            ),
+            Ok(Ok(())) => tracing::warn!(
+                failure_class = ?OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+                cause_code = "fenced_pool_floor_reconciliation_incomplete",
+                prior_size,
+                current_size,
+                minimum = policy.minimum,
+                "fenced pool floor reconciliation will retry"
+            ),
+            Ok(Err(_)) => tracing::warn!(
+                failure_class = ?OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+                cause_code = "fenced_pool_floor_reconciliation_failed",
+                prior_size,
+                current_size,
+                minimum = policy.minimum,
+                "fenced pool floor reconciliation will retry"
+            ),
+            Err(_) => tracing::warn!(
+                failure_class = ?OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+                cause_code = "fenced_pool_floor_reconciliation_timed_out",
+                prior_size,
+                current_size,
+                minimum = policy.minimum,
+                attempt_bound_seconds = policy.attempt_bound.as_secs(),
+                "fenced pool floor reconciliation will retry"
+            ),
+        }
     }
 }
 
@@ -1002,6 +1102,7 @@ fn joined_task_defect(error: &JoinError) -> RuntimeTaskDefect {
 fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> RuntimeTaskCompletion {
     match completed {
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
+        | Ok(RuntimeTaskExit::FencedPoolFloor)
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
@@ -1216,6 +1317,17 @@ async fn run_hub(
                     SanitizedStartupCause::Static("invalid_fenced_pool_min_connections"),
                 )
             })?;
+    let fenced_pool_floor_reconciliation = fenced_pool_floor_reconciliation_policy(
+        fenced_pool_min_connections,
+        configured_duration("fenced_pool_floor_reconciliation_interval"),
+        configured_duration("fenced_pool_floor_reconciliation_attempt_bound"),
+    )
+    .ok_or_else(|| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("invalid_fenced_pool_floor_reconciliation_policy"),
+        )
+    })?;
     let scheduler_pass_occupancy_bound = configured_duration("scheduler_pass_occupancy_bound")
         .map(SchedulerPassOccupancyBound::try_new)
         .transpose()
@@ -1551,6 +1663,7 @@ async fn run_hub(
         erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
     })?;
     let pool = database.pool().clone();
+    let fenced_pool_floor_pool = pool.clone();
     let tools = match daemon_tool_configuration {
         Some(tool_configuration) => DaemonTools::try_new_production(
             SystemCurrentTimeClock,
@@ -2073,6 +2186,7 @@ async fn run_hub(
         );
     }
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
+    let (fenced_pool_floor_shutdown, fenced_pool_floor_shutdown_receiver) = watch::channel(false);
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
@@ -2089,6 +2203,17 @@ async fn run_hub(
                 .await,
         )
     });
+    if let Some(policy) = fenced_pool_floor_reconciliation {
+        runtime_tasks.spawn(async move {
+            run_fenced_pool_floor_reconciliation(
+                fenced_pool_floor_pool,
+                policy,
+                fenced_pool_floor_shutdown_receiver,
+            )
+            .await;
+            RuntimeTaskExit::FencedPoolFloor
+        });
+    }
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Process(process_runtime.run(process_shutdown_receiver).await)
     });
@@ -2141,6 +2266,12 @@ async fn run_hub(
                     Some(Ok(RuntimeTaskExit::Process(Err(error)))) => {
                         report_process_runtime_failure(&error);
                         RuntimeStopCause::RuntimeFailed
+                    }
+                    Some(Ok(RuntimeTaskExit::FencedPoolFloor)) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::FencedPoolFloorCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
                     }
                     Some(Ok(RuntimeTaskExit::Process(Ok(())))) => {
                         report_runtime_task_defect(
@@ -2215,6 +2346,7 @@ async fn run_hub(
         } else {
             let _ = turn_execution_shutdown.send(true);
             let _ = scheduler_shutdown.send(());
+            let _ = fenced_pool_floor_shutdown.send(true);
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
             let _ = repository_watch_shutdown.send(true);
@@ -2558,18 +2690,19 @@ mod tests {
 
     use super::{
         AnthropicConstructionError, BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT,
-        FENCED_POOL_MAX_CONNECTIONS, GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration,
-        HubConfigurationError, HubConfigurationValues, HubRuntimeError,
-        MODEL_CONFIGURATION_FILE_ENVIRONMENT, OpenAiConstructionError, OperatorFilterDisposition,
-        PROCESS_SOCKET_PATH_ENVIRONMENT, ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT,
-        RepositoryWatchRuntimeError, RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase,
-        RuntimeStopCause, RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause,
-        SchedulerStopCause, ShutdownOutcome, SingleHubGuardError,
-        TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT, anthropic_construction_cause,
-        combine_runtime_stop_cause, completed_runtime_outcome, credential_files_conflict,
-        database_close_failure_outcome, drain_runtime_tasks, erase_startup_cause,
-        graceful_shutdown_window, migrate_scan_then_schedule, openai_construction_cause,
-        operator_filter, process_runtime_failure_class, report_database_close_failure,
+        FENCED_POOL_MAX_CONNECTIONS, FencedPoolFloorReconciliationPolicy,
+        GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError,
+        HubConfigurationValues, HubRuntimeError, MODEL_CONFIGURATION_FILE_ENVIRONMENT,
+        OpenAiConstructionError, OperatorFilterDisposition, PROCESS_SOCKET_PATH_ENVIRONMENT,
+        ProcessRuntimeError, RUNNER_SOCKET_PATH_ENVIRONMENT, RepositoryWatchRuntimeError,
+        RequiredSettingFailure, RuntimeDrainOutcome, RuntimePhase, RuntimeStopCause,
+        RuntimeTaskCompletion, RuntimeTaskExit, SanitizedStartupCause, SchedulerStopCause,
+        ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
+        anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
+        credential_files_conflict, database_close_failure_outcome, drain_runtime_tasks,
+        erase_startup_cause, fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
+        migrate_scan_then_schedule, openai_construction_cause, operator_filter,
+        process_runtime_failure_class, report_database_close_failure,
         repository_watch_rule_configuration_error, run_scheduler_until_shutdown,
         runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
         validate_fenced_pool_min_connections,
@@ -2589,6 +2722,45 @@ mod tests {
             None
         );
         assert_eq!(validate_fenced_pool_min_connections(None), Some(None));
+    }
+
+    #[test]
+    fn positive_fenced_pool_floor_requires_bounded_reconciliation() {
+        let interval = Duration::from_secs(5);
+        let attempt_bound = Duration::from_secs(30);
+
+        assert_eq!(
+            fenced_pool_floor_reconciliation_policy(
+                Some(FENCED_POOL_MAX_CONNECTIONS),
+                Some(interval),
+                Some(attempt_bound),
+            ),
+            Some(Some(FencedPoolFloorReconciliationPolicy {
+                minimum: FENCED_POOL_MAX_CONNECTIONS,
+                interval,
+                attempt_bound,
+            }))
+        );
+        assert_eq!(
+            fenced_pool_floor_reconciliation_policy(
+                Some(FENCED_POOL_MAX_CONNECTIONS),
+                None,
+                Some(attempt_bound),
+            ),
+            None
+        );
+        assert_eq!(
+            fenced_pool_floor_reconciliation_policy(
+                Some(FENCED_POOL_MAX_CONNECTIONS),
+                Some(interval),
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            fenced_pool_floor_reconciliation_policy(None, None, None),
+            Some(None)
+        );
     }
 
     fn hub_configuration_values() -> HubConfigurationValues {

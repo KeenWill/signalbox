@@ -26,6 +26,10 @@ repository_reconciliation_quantum = 16
 webhook_drain_work_budget = "45s"
 # Physical database sessions established before daemon work begins.
 fenced_pool_min_connections = 48
+# Delay between checks that restore retired fenced pool sessions.
+fenced_pool_floor_reconciliation_interval = "5s"
+# Time allowed for one fenced pool floor restoration attempt.
+fenced_pool_floor_reconciliation_attempt_bound = "30s"
 # Concurrent process-protocol snapshot readers.
 max_concurrent_snapshot_readers = 8
 # Replicas retained for one immutable blob.

@@ -10,7 +10,9 @@ use signalbox_persistence::{
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options,
 };
-use signalboxd::{FencedHubDatabase, SingleHubGuard, SingleHubGuardError};
+use signalboxd::{
+    FencedHubDatabase, SingleHubGuard, SingleHubGuardError, reconcile_fenced_pool_floor,
+};
 use sqlx::{Connection, PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
     postgres::Postgres,
@@ -121,6 +123,30 @@ async fn fenced_database_close_drains_pool_before_guard_release() -> Result<(), 
     close.await?;
     let replacement = SingleHubGuard::acquire(&control_pool).await?;
     replacement.close().await?;
+    control_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A retired physical session is restored to the deployment floor without
+/// replacing the fenced pool or its generation.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn fenced_pool_floor_reconciliation_reopens_retired_sessions() -> Result<(), Box<dyn Error>> {
+    const FLOOR: u32 = 4;
+    let (container, control_pool, database_url) = postgres().await?;
+    let options = local_test_connection_options(&database_url)?;
+    let database = FencedHubDatabase::connect_with(options, Some(FLOOR)).await?;
+    let pool = database.pool().clone();
+    let retired = pool.acquire().await?.detach();
+    retired.close().await?;
+
+    assert_eq!(pool.size(), FLOOR - 1);
+
+    reconcile_fenced_pool_floor(&pool, FLOOR).await?;
+
+    assert_eq!(pool.size(), FLOOR);
+    database.close().await?;
     control_pool.close().await;
     drop(container);
     Ok(())

@@ -716,6 +716,14 @@ const REQUIRED_NUMERIC_BOUNDS: &[(&str, NumericBoundKind)] = &[
     ),
     ("webhook_drain_work_budget", NumericBoundKind::Duration),
     ("fenced_pool_min_connections", NumericBoundKind::Integer),
+    (
+        "fenced_pool_floor_reconciliation_interval",
+        NumericBoundKind::Duration,
+    ),
+    (
+        "fenced_pool_floor_reconciliation_attempt_bound",
+        NumericBoundKind::Duration,
+    ),
     ("max_concurrent_snapshot_readers", NumericBoundKind::Integer),
     ("max_blob_replica_count", NumericBoundKind::Integer),
     ("max_session_metadata_tags", NumericBoundKind::Integer),
@@ -4407,6 +4415,8 @@ version = 1
 repository_reconciliation_quantum = 16
 webhook_drain_work_budget = "45s"
 fenced_pool_min_connections = 48
+fenced_pool_floor_reconciliation_interval = "5s"
+fenced_pool_floor_reconciliation_attempt_bound = "30s"
 max_concurrent_snapshot_readers = 8
 max_blob_replica_count = 32
 max_session_metadata_tags = 256

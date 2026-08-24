@@ -2,6 +2,7 @@
 
 use std::{error::Error, fmt, mem};
 
+use futures_util::future::try_join_all;
 use signalbox_persistence::{
     hub_fence::{
         HubFenceError, HubFenceGeneration, advance_hub_fence, initialize_hub_fence,
@@ -118,6 +119,27 @@ impl Drop for FencedHubDatabase {
             mem::forget(guard);
         }
     }
+}
+
+/// Reopens enough physical sessions to restore one deployment-owned pool
+/// floor.
+///
+/// Acquiring the current idle inventory together with the missing sessions
+/// forces SQLx to construct the deficit. All acquisitions remain held until
+/// the batch completes, then return to the pool together. Callers own the
+/// attempt deadline because concurrent checkouts can make the snapshot stale.
+pub async fn reconcile_fenced_pool_floor(pool: &PgPool, minimum: u32) -> Result<(), sqlx::Error> {
+    let current = pool.size();
+    if current >= minimum {
+        return Ok(());
+    }
+    let missing = minimum - current;
+    let idle = u32::try_from(pool.num_idle()).unwrap_or(u32::MAX);
+    let acquisition_count = idle.saturating_add(missing).min(minimum);
+    let acquisitions = (0..acquisition_count).map(|_| pool.acquire());
+    let held = try_join_all(acquisitions).await?;
+    drop(held);
+    Ok(())
 }
 
 /// Sanitized guarded-database startup failure.

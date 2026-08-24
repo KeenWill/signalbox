@@ -16,6 +16,8 @@ re-verified against this PR (`agent/daemon-live-codex-effective-window`).
 
 The required numeric-bound configuration grammar and scheduler admission policy
 are verified against this PR (`agent/bounds-required-config-protocol`). The
+fenced pool floor reconciliation policy is verified against this PR
+(`agent/daemon-live-sustained-pool-floor`). The
 fenced PostgreSQL prewarm policy is verified against this PR
 (`agent/daemon-live-configured-pool-prewarm`).
 
@@ -651,7 +653,12 @@ The required `numeric_bounds.fenced_pool_min_connections` policy controls how
 many fenced PostgreSQL sessions are established before daemon work begins;
 `"none"` preserves SQLx's zero-session floor. A finite value above the daemon's
 compiled pool ceiling is rejected during configuration rather than silently
-clamped.
+clamped. A positive floor also requires finite, positive
+`fenced_pool_floor_reconciliation_interval` and
+`fenced_pool_floor_reconciliation_attempt_bound` policies. The runtime
+periodically restores sessions retired after startup, bounds each restoration,
+and retries a failed, timed-out, or concurrently invalidated attempt after the
+configured interval. A zero or `"none"` floor disables that reconciliation.
 
 The optional `[model_settings]` table supplies the deployment-global settings
 overlay. Each `[[model_settings_profiles]]` entry gives an exact unique `name`
