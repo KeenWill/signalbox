@@ -2451,10 +2451,70 @@ async fn abort_fleet_scheduler(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FleetFatalShutdownOutcome {
+    Live,
+    Restarted,
+}
+
+enum FleetSchedulerWait {
+    Elapsed,
+    Stopped(Result<SchedulerLoopExit, tokio::task::JoinError>),
+}
+
+fn classify_fleet_scheduler_wait(
+    wait: FleetSchedulerWait,
+) -> Result<FleetFatalShutdownOutcome, Box<dyn Error>> {
+    match wait {
+        FleetSchedulerWait::Elapsed => Ok(FleetFatalShutdownOutcome::Live),
+        FleetSchedulerWait::Stopped(Ok(SchedulerLoopExit::Shutdown)) => {
+            Ok(FleetFatalShutdownOutcome::Restarted)
+        }
+        FleetSchedulerWait::Stopped(stopped) => Err(io::Error::other(format!(
+            "the fleet scheduler must stop by fatal-driven shutdown: {stopped:?}"
+        ))
+        .into()),
+    }
+}
+
+#[test]
+fn fleet_scheduler_wait_classifies_elapsed_as_live() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        classify_fleet_scheduler_wait(FleetSchedulerWait::Elapsed)?,
+        FleetFatalShutdownOutcome::Live
+    );
+    Ok(())
+}
+
+#[test]
+fn fleet_scheduler_wait_classifies_shutdown_as_restarted() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        classify_fleet_scheduler_wait(FleetSchedulerWait::Stopped(Ok(
+            SchedulerLoopExit::Shutdown,
+        )))?,
+        FleetFatalShutdownOutcome::Restarted
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn fleet_scheduler_wait_rejects_join_error() {
+    let scheduler = tokio::spawn(pending::<SchedulerLoopExit>());
+    scheduler.abort();
+    let stopped = scheduler.await;
+    let error = classify_fleet_scheduler_wait(FleetSchedulerWait::Stopped(stopped))
+        .expect_err("a cancelled scheduler join must not select a fleet oracle");
+    assert!(
+        error
+            .to_string()
+            .contains("the fleet scheduler must stop by fatal-driven shutdown")
+    );
+}
+
 async fn restart_after_fatal_shutdown(
     scheduler: &mut Option<JoinHandle<SchedulerLoopExit>>,
     runtime: &mut RunningRuntime,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<FleetFatalShutdownOutcome, Box<dyn Error>> {
     let stopped = timeout(
         FLEET_ASSERTION_BOUND,
         scheduler
@@ -2462,17 +2522,15 @@ async fn restart_after_fatal_shutdown(
             .expect("the fatal-driven fleet scheduler was installed"),
     )
     .await;
-    if let Ok(stopped) = stopped {
-        if !matches!(stopped, Ok(SchedulerLoopExit::Shutdown)) {
-            return Err(io::Error::other(format!(
-                "the fleet scheduler must stop by fatal-driven shutdown: {stopped:?}"
-            ))
-            .into());
-        }
+    let outcome = classify_fleet_scheduler_wait(match stopped {
+        Ok(stopped) => FleetSchedulerWait::Stopped(stopped),
+        Err(_) => FleetSchedulerWait::Elapsed,
+    })?;
+    if outcome == FleetFatalShutdownOutcome::Restarted {
         scheduler.take();
         runtime.kill_and_restart().await?;
     }
-    Ok(())
+    Ok(outcome)
 }
 
 async fn wait_for_completed_calls(
@@ -2570,6 +2628,7 @@ fn assert_hung_fleet_outcome(
     model: &FleetScriptedModel,
     census: FleetSoakCensus,
     hung_call_has_ambiguity_park: bool,
+    fatal_shutdown: FleetFatalShutdownOutcome,
 ) -> Result<(), Box<dyn Error>> {
     let active = census.active_turns();
     let terminal = census.terminal_turns();
@@ -2584,20 +2643,21 @@ fn assert_hung_fleet_outcome(
             || !hung_call_has_ambiguity_park
         {
             return Err(io::Error::other(format!(
-                "fleet liveness failed: hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}, recovery_parks={}, ambiguous_calls={}, hung_call_has_ambiguity_park={hung_call_has_ambiguity_park}",
+                "fleet liveness failed: fatal_shutdown={fatal_shutdown:?}, hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}, recovery_parks={}, ambiguous_calls={}, hung_call_has_ambiguity_park={hung_call_has_ambiguity_park}",
                 model.in_flight_hangs(),
                 census.awaiting_model_call_recovery_turns(),
                 census.ambiguous_model_calls()
             ))
             .into());
         }
-    } else if model.in_flight_hangs() != 1
+    } else if fatal_shutdown != FleetFatalShutdownOutcome::Live
+        || model.in_flight_hangs() != 1
         || active != 1
         || terminal != i64::try_from(FLEET_SESSION_COUNT - 1)?
         || typed_terminal_calls != i64::try_from(FLEET_SESSION_COUNT - 1)?
     {
         return Err(io::Error::other(format!(
-            "issue #1027 no longer reproduces: hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}",
+            "issue #1027 no longer reproduces: fatal_shutdown={fatal_shutdown:?}, hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}",
             model.in_flight_hangs()
         ))
         .into());
@@ -2650,7 +2710,7 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
         let completed_calls = wait_for_completed_calls(&model, FLEET_SESSION_COUNT - 1).await?;
         wait_for_terminal_calls(&census_repository, &completed_calls).await?;
         wait_for_terminal_turns(&census_repository, &completed_calls).await?;
-        restart_after_fatal_shutdown(&mut scheduler, &mut runtime).await?;
+        let fatal_shutdown = restart_after_fatal_shutdown(&mut scheduler, &mut runtime).await?;
         let model_calls = census_repository.model_call_ids().await?;
         let census = census_repository.census_for(&model_calls).await?;
         if fleet.sessions.len() != FLEET_SESSION_COUNT || model_calls.len() != FLEET_SESSION_COUNT {
@@ -2680,6 +2740,7 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
             &model,
             census,
             hung_call_has_ambiguity_park,
+            fatal_shutdown,
         )
     })
     .catch_unwind()
