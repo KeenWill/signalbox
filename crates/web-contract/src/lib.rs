@@ -719,7 +719,7 @@ pub enum WebAttentionStreamEvent {
     },
     Update {
         cursor: WebU64,
-        #[schemars(length(max = 128))]
+        #[schemars(length(max = 16))]
         summaries: Vec<WebAttentionSummary>,
     },
     ResyncRequired {

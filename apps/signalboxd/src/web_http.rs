@@ -35,9 +35,9 @@ use signalbox_application::{
     AttentionSummary, SessionLiveActiveState, SessionLiveReconciliation,
     SessionLiveRunnerConnectionHealth, SessionLiveRunnerState, SessionLiveSnapshot,
     SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress,
-    TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits,
-    max_attention_goal_summary_characters, max_attention_snapshot_items,
-    max_attention_title_characters,
+    TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits, max_attention_filter_tags,
+    max_attention_filter_utf8_bytes, max_attention_goal_summary_characters,
+    max_attention_snapshot_items, max_attention_title_characters,
 };
 use signalbox_domain::SessionId;
 use signalbox_persistence::attention::{AttentionRepository, AttentionRepositoryError};
@@ -951,7 +951,7 @@ fn next_web_text_fragment(
 fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
     WebSessionLiveSnapshot {
         session_id: WebSessionId::from_uuid_bytes(snapshot.session.into_uuid().into_bytes()),
-        observed_through: WebU64::from_u64(snapshot.observed_through),
+        observed_through: WebPositiveU64::from_u64(snapshot.observed_through),
         active: snapshot.active.map(|active| WebSessionLiveActiveTurn {
             turn_id: WebTurnId::from_uuid_bytes(active.turn.into_uuid().into_bytes()),
             state: match active.state {
@@ -1143,10 +1143,26 @@ async fn attention_snapshot(
 
 fn parse_attention_snapshot_query(raw: Option<&str>) -> Result<AttentionSnapshotQuery, ()> {
     let mut query = AttentionSnapshotQuery::default();
+    let mut filter_bytes = 0_usize;
     for (key, value) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
         match key.as_ref() {
-            "search" => set_once(&mut query.search, value.into_owned())?,
-            "required_tag" => query.required_tag.push(value.into_owned()),
+            "search" => {
+                filter_bytes = filter_bytes.checked_add(value.len()).ok_or(())?;
+                if filter_bytes > usize::from(max_attention_filter_utf8_bytes()) {
+                    return Err(());
+                }
+                set_once(&mut query.search, value.into_owned())?;
+            }
+            "required_tag" => {
+                if query.required_tag.len() >= usize::from(max_attention_filter_tags()) {
+                    return Err(());
+                }
+                filter_bytes = filter_bytes.checked_add(value.len()).ok_or(())?;
+                if filter_bytes > usize::from(max_attention_filter_utf8_bytes()) {
+                    return Err(());
+                }
+                query.required_tag.push(value.into_owned());
+            }
             "include_archived" => set_once(&mut query.include_archived, value.into_owned())?,
             "sort" => set_once(&mut query.sort, value.into_owned())?,
             "after_session_id" => set_once(&mut query.after_session_id, value.into_owned())?,
@@ -1819,8 +1835,9 @@ mod tests {
         AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
         AttentionContinuation, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts,
         AttentionSnapshot, AttentionSort, AttentionState, AttentionSummary,
-        max_attention_change_items, max_attention_goal_summary_characters,
-        max_attention_snapshot_items, max_attention_title_characters,
+        max_attention_change_items, max_attention_filter_utf8_bytes,
+        max_attention_goal_summary_characters, max_attention_snapshot_items,
+        max_attention_title_characters,
     };
     use signalbox_domain::{ModelCallId, SessionId, TurnId};
     use signalbox_web_contract::{
@@ -2513,6 +2530,27 @@ mod tests {
                 .expect("repeated exact tags are one bounded catalog filter");
 
         assert_eq!(query.required_tag, ["rust", "postgres"]);
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_the_ninth_tag_while_decoding() {
+        let raw = concat!(
+            "required_tag=one&required_tag=two&required_tag=three",
+            "&required_tag=four&required_tag=five&required_tag=six",
+            "&required_tag=seven&required_tag=eight&required_tag=nine"
+        );
+
+        assert!(super::parse_attention_snapshot_query(Some(raw)).is_err());
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_excess_filter_bytes_while_decoding() {
+        let raw = format!(
+            "search={}",
+            "x".repeat(usize::from(max_attention_filter_utf8_bytes()) + 1)
+        );
+
+        assert!(super::parse_attention_snapshot_query(Some(&raw)).is_err());
     }
 
     #[test]
