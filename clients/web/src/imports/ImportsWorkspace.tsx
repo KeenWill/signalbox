@@ -59,31 +59,54 @@ const isAmbiguousContinuationError = (error: unknown): boolean =>
 
 // The exact command must outlive this tab: once its POST leaves the browser, the daemon may
 // have committed it, so the only safe replacement source after a reload is a durable copy of
-// the same payload retained until a correlated outcome is decoded.
-const retainedCommandStorageKey = (scope: string): string =>
-  `signalbox.imports.retained-continuation.${scope}`
+// the same payload retained until a correlated outcome is decoded. Each command owns its own
+// slot keyed by its durable identity, so concurrent tabs in the same scope can neither
+// overwrite each other's unresolved command nor delete it when their own command settles.
+const retainedCommandStoragePrefix = (scope: string): string =>
+  `signalbox.imports.retained-continuation.${scope}.`
+
+const retainedCommandStorageKey = (scope: string, commandId: string): string =>
+  `${retainedCommandStoragePrefix(scope)}${commandId}`
 
 const readRetainedCommand = (scope: string): WebImportContinuationRequest | null => {
   try {
-    const stored = window.localStorage.getItem(retainedCommandStorageKey(scope))
-    if (stored === null) return null
-    return decodeWebImportContinuationRequest(JSON.parse(stored))
+    const prefix = retainedCommandStoragePrefix(scope)
+    const keys: string[] = []
+    for (let index = 0; index < window.localStorage.length; index += 1) {
+      const key = window.localStorage.key(index)
+      if (key?.startsWith(prefix)) keys.push(key)
+    }
+    for (const key of keys.sort()) {
+      const stored = window.localStorage.getItem(key)
+      if (stored === null) continue
+      try {
+        return decodeWebImportContinuationRequest(JSON.parse(stored))
+      } catch {
+        // An undecodable slot is not a retryable exact command; leave it for inspection.
+      }
+    }
+    return null
   } catch {
     return null
   }
 }
 
-const persistRetainedCommand = (scope: string, command: WebImportContinuationRequest): void => {
+// Returns whether the exact payload is durably retained; the caller must not send a
+// continuation whose only copy is component state that a reload would destroy.
+const persistRetainedCommand = (scope: string, command: WebImportContinuationRequest): boolean => {
+  const encoded = JSON.stringify(command)
+  const key = retainedCommandStorageKey(scope, command.command_id)
   try {
-    window.localStorage.setItem(retainedCommandStorageKey(scope), JSON.stringify(command))
+    window.localStorage.setItem(key, encoded)
+    return window.localStorage.getItem(key) === encoded
   } catch {
-    // Without browser persistence the exact command survives only in memory.
+    return false
   }
 }
 
-const clearRetainedCommand = (scope: string): void => {
+const clearRetainedCommand = (scope: string, commandId: string): void => {
   try {
-    window.localStorage.removeItem(retainedCommandStorageKey(scope))
+    window.localStorage.removeItem(retainedCommandStorageKey(scope, commandId))
   } catch {
     // A failed removal only re-offers an already-settled exact command later.
   }
@@ -139,17 +162,21 @@ export function ImportsWorkspace({
   // A command restored from browser persistence has an unknown durable outcome, which is
   // exactly the ambiguous posture: retry the exact payload until an outcome correlates.
   const [continuationAmbiguous, setContinuationAmbiguous] = useState(pendingCommand !== null)
+  const [retentionFailed, setRetentionFailed] = useState(false)
   const hasRetainedCommand = pendingCommand !== null
   const retainCommand = useCallback(
-    (command: WebImportContinuationRequest) => {
-      persistRetainedCommand(queryScope, command)
+    (command: WebImportContinuationRequest): boolean => {
+      if (!persistRetainedCommand(queryScope, command)) return false
       setPendingCommand(command)
+      return true
     },
     [queryScope],
   )
   const releaseRetainedCommand = useCallback(() => {
-    clearRetainedCommand(queryScope)
-    setPendingCommand(null)
+    setPendingCommand((command) => {
+      if (command !== null) clearRetainedCommand(queryScope, command.command_id)
+      return null
+    })
   }, [queryScope])
 
   const listRequest = useMemo(
@@ -407,7 +434,13 @@ export function ImportsWorkspace({
           ? { kind: 'direct', selection_id: modelSelectionId.trim() }
           : { kind: 'alias', alias_id: modelSelectionId.trim() },
     }
-    retainCommand(request)
+    // The POST leaves the browser only after the exact payload is durably retained: sending
+    // first would let a reload destroy the sole copy of a command the daemon may commit.
+    if (!retainCommand(request)) {
+      setRetentionFailed(true)
+      return
+    }
+    setRetentionFailed(false)
     setContinuationAmbiguous(false)
     continuation.mutate(request)
   }
@@ -691,6 +724,12 @@ export function ImportsWorkspace({
                   </div>
                   {!continuationAvailable && (
                     <p role="status">Imported continuation is not advertised by this daemon.</p>
+                  )}
+                  {retentionFailed && (
+                    <p role="alert">
+                      The exact command could not be durably retained in this browser, so no
+                      continuation was sent. Enable browser storage for this site and retry.
+                    </p>
                   )}
                   {commandRetainedForRetry && pendingCommand && (
                     <p role="alert">
