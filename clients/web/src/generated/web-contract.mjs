@@ -778,6 +778,11 @@ const schemas = {
   },
   "WebSessionTimelineDescriptor": {
     "$defs": {
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebSessionTimelineSizeFacts": {
         "additionalProperties": false,
         "description": "Explicit lifetime size facts used only for browser loading policy.",
@@ -863,7 +868,7 @@ const schemas = {
         "$ref": "#/$defs/WebU64"
       },
       "session_id": {
-        "type": "string"
+        "$ref": "#/$defs/WebSessionId"
       },
       "sizes": {
         "$ref": "#/$defs/WebSessionTimelineSizeFacts"
@@ -885,6 +890,11 @@ const schemas = {
   },
   "WebSessionTimelineWindow": {
     "$defs": {
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebSessionTimelineEventKind": {
         "description": "Closed durable event categories in the browser timeline foundation.",
         "enum": [
@@ -959,7 +969,18 @@ const schemas = {
       "continuation_after": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebTimelineAddress"
+            "additionalProperties": false,
+            "description": "Stable browser-visible location of one durable session event.",
+            "properties": {
+              "event_sequence": {
+                "$ref": "#/$defs/WebTimelineEventSequence",
+                "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+              }
+            },
+            "required": [
+              "event_sequence"
+            ],
+            "type": "object"
           },
           {
             "type": "null"
@@ -969,7 +990,18 @@ const schemas = {
       "continuation_before": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebTimelineAddress"
+            "additionalProperties": false,
+            "description": "Stable browser-visible location of one durable session event.",
+            "properties": {
+              "event_sequence": {
+                "$ref": "#/$defs/WebTimelineEventSequence",
+                "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+              }
+            },
+            "required": [
+              "event_sequence"
+            ],
+            "type": "object"
           },
           {
             "type": "null"
@@ -988,13 +1020,15 @@ const schemas = {
         "type": "integer"
       },
       "session_id": {
-        "type": "string"
+        "$ref": "#/$defs/WebSessionId"
       }
     },
     "required": [
       "session_id",
       "items",
-      "projected_structured_bytes"
+      "projected_structured_bytes",
+      "continuation_before",
+      "continuation_after"
     ],
     "title": "WebSessionTimelineWindow",
     "type": "object"
@@ -1134,6 +1168,13 @@ function assertSchema(root, schema, value, path) {
   }
   if (typeof value !== schema.type) {
     fail(path, schema.type);
+  }
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    value.length > 20
+  ) {
+    fail(path, "an unsigned 64-bit integer");
   }
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {
     fail(path, `a string matching ${schema.pattern}`);

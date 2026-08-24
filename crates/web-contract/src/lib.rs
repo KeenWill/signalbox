@@ -118,6 +118,73 @@ fn canonical_u64(value: &str) -> Option<u64> {
     canonical.then(|| value.parse::<u64>().ok()).flatten()
 }
 
+fn canonical_session_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
+}
+
+/// Checked canonical UUID used for browser-visible session identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebSessionId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebSessionId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+            bytes[6],
+            bytes[7],
+            bytes[8],
+            bytes[9],
+            bytes[10],
+            bytes[11],
+            bytes[12],
+            bytes[13],
+            bytes[14],
+            bytes[15],
+        ))
+    }
+
+    /// Constructs a session identity from its canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn from_canonical(value: String) -> Option<Self> {
+        canonical_session_id(&value).then_some(Self(value))
+    }
+
+    /// Returns the canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebSessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value)
+            .ok_or_else(|| de::Error::custom("session ID must be a canonical lowercase UUID"))
+    }
+}
+
 impl WebTimelineEventSequence {
     /// Encodes one already-validated positive durable-event sequence.
     #[must_use]
@@ -213,7 +280,7 @@ pub struct WebSessionWorkFacts {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDescriptor {
-    pub session_id: String,
+    pub session_id: WebSessionId,
     pub sizes: WebSessionTimelineSizeFacts,
     pub first_address: WebTimelineAddress,
     pub latest_address: WebTimelineAddress,
@@ -258,11 +325,23 @@ pub struct WebSessionTimelineItem {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineWindow {
-    pub session_id: String,
+    pub session_id: WebSessionId,
     pub items: Vec<WebSessionTimelineItem>,
     pub projected_structured_bytes: u32,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation_before: Option<WebTimelineAddress>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation_after: Option<WebTimelineAddress>,
+}
+
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 /// Layer that owns one browser API failure.
@@ -473,8 +552,10 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
     let descriptor_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineDescriptor).to_value());
-    let window_schema =
+    let mut window_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
+    make_property_nullable(&mut window_schema, "continuation_before")?;
+    make_property_nullable(&mut window_schema, "continuation_after")?;
     let attention_snapshot_schema =
         canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
     let attention_event_schema =
@@ -525,6 +606,18 @@ fn canonical_schema(mut schema: Value) -> Value {
     // must not change checked-in artifacts.
     schema.sort_all_objects();
     schema
+}
+
+fn make_property_nullable(
+    schema: &mut Value,
+    property_name: &str,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(&format!("/properties/{property_name}"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let concrete = property.take();
+    *property = json!({ "anyOf": [concrete, { "type": "null" }] });
+    Ok(())
 }
 
 fn runtime_module(
@@ -687,6 +780,13 @@ function assertSchema(root, schema, value, path) {{
   }}
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
+  }}
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    value.length > 20
+  ) {{
+    fail(path, "an unsigned 64-bit integer");
   }}
   if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {{
     fail(path, `a string matching ${{schema.pattern}}`);
@@ -908,7 +1008,7 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        WebContractBootstrap, WebContractExample, WebTimelineEventSequence, WebU64,
+        WebContractBootstrap, WebContractExample, WebSessionId, WebTimelineEventSequence, WebU64,
         generated_artifacts,
     };
 
@@ -981,5 +1081,14 @@ mod tests {
         assert!(serde_json::from_str::<WebU64>(r#""18446744073709551616""#).is_err());
         assert!(serde_json::from_str::<WebU64>(r#""0""#).is_ok());
         assert!(serde_json::from_str::<WebU64>(r#""18446744073709551615""#).is_ok());
+    }
+
+    #[test]
+    fn session_id_rejects_noncanonical_uuid_spellings() {
+        assert!(serde_json::from_str::<WebSessionId>(r#""not-a-uuid""#).is_err());
+        assert!(
+            serde_json::from_str::<WebSessionId>(r#""00000000-0000-0000-0000-000000000991""#)
+                .is_ok()
+        );
     }
 }
