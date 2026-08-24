@@ -1516,6 +1516,12 @@ impl RepositoryWatchTask {
         drained: &mut Option<WebhookDrainOutcome>,
         trailing_failure: &mut Option<RepositoryWatchAttemptError>,
     ) -> Result<Result<(), RepositoryWatchAttemptError>, RepositoryWatchAttemptError> {
+        // Any timed-out projection drain may have left pending work before it
+        // installed delivery-specific settlement state. Do not let projection
+        // backoff turn that timeout into a cursor-advancing deferred poll.
+        if drain == WebhookDrain::Deferred && self.webhook_drain_timed_out {
+            return Err(RepositoryWatchAttemptError::WebhookDrainTimedOut);
+        }
         // A deferred drain may still own a targeted terminal/cursor completion,
         // or a prior settlement may not know whether its terminal write
         // committed. Do not let a complete poll advance the cursor until the
@@ -8687,6 +8693,7 @@ mod tests {
             Some(admission.key()),
             "deadline cancellation retains the exact unsettled terminal write"
         );
+        let ambiguous = fixture.task.webhook_terminal_ambiguous.take();
         let mut deferred_drain = None;
         let mut deferred_dispatch_failure = None;
         assert_eq!(
@@ -8698,9 +8705,10 @@ mod tests {
                     &mut deferred_dispatch_failure,
                 )
                 .await,
-            Err(RepositoryWatchAttemptError::Persistence),
-            "an unsettled cancelled terminal write blocks cursor-advancing polls"
+            Err(RepositoryWatchAttemptError::WebhookDrainTimedOut),
+            "the general timeout fence blocks deferred cursor-advancing polls even before delivery-specific state is installed"
         );
+        fixture.task.webhook_terminal_ambiguous = ambiguous;
         assert!(!webhook_disposition_exists(&webhook_store, admission.key()).await?);
         let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
             .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
