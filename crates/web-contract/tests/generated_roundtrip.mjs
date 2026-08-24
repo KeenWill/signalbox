@@ -180,7 +180,7 @@ test("generated live decoder rejects queued identities occupying current state",
   );
 });
 
-test("generated live decoder validates identities and active-state correlation", () => {
+test("generated live decoder validates identities", () => {
   assert.throws(
     () =>
       decodeWebSessionLiveSnapshot({
@@ -194,6 +194,9 @@ test("generated live decoder validates identities and active-state correlation",
       }),
     /matching/,
   );
+});
+
+test("generated live decoder rejects simultaneous active and reconciliation states", () => {
   assert.throws(
     () =>
       decodeWebSessionLiveSnapshot({

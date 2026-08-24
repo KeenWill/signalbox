@@ -288,32 +288,29 @@ impl WebHttpRuntime {
     }
 
     /// Serves until shutdown, then cancels requests by dropping their futures.
-    pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<(), WebHttpRuntimeError> {
+    pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), WebHttpRuntimeError> {
         let Self {
             listener,
             router,
             stream_shutdown,
         } = self;
-        let shutdown_requested = async move {
-            if *shutdown.borrow() {
-                if let Some(stream_shutdown) = stream_shutdown.as_ref() {
-                    let _ = stream_shutdown.send(true);
-                }
-                return;
-            }
-            while shutdown.changed().await.is_ok() {
-                if *shutdown.borrow() {
-                    if let Some(stream_shutdown) = stream_shutdown.as_ref() {
-                        let _ = stream_shutdown.send(true);
-                    }
-                    return;
-                }
-            }
-        };
+        let shutdown_requested = relay_http_shutdown(shutdown, stream_shutdown);
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_requested)
             .await
             .map_err(|_| WebHttpRuntimeError::Serve)
+    }
+}
+
+async fn relay_http_shutdown(
+    mut shutdown: watch::Receiver<bool>,
+    stream_shutdown: Option<watch::Sender<bool>>,
+) {
+    if !*shutdown.borrow() {
+        while shutdown.changed().await.is_ok() && !*shutdown.borrow() {}
+    }
+    if let Some(stream_shutdown) = stream_shutdown {
+        let _ = stream_shutdown.send(true);
     }
 }
 
@@ -2091,6 +2088,22 @@ mod tests {
             .expect("shutdown ends the follow stream promptly");
 
         assert!(event.is_none());
+    }
+
+    #[tokio::test]
+    async fn closing_http_shutdown_sender_signals_follow_streams() {
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let (stream_shutdown, mut follow_shutdown) = watch::channel(false);
+        let relay = tokio::spawn(super::relay_http_shutdown(shutdown, Some(stream_shutdown)));
+        drop(shutdown_sender);
+
+        tokio::time::timeout(Duration::from_secs(1), follow_shutdown.changed())
+            .await
+            .expect("closing the HTTP shutdown sender signals follow streams promptly")
+            .expect("the follow shutdown sender remains live through notification");
+        relay.await.expect("the shutdown relay joins");
+
+        assert!(*follow_shutdown.borrow());
     }
 
     #[test]
