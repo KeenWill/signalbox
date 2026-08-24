@@ -1,7 +1,7 @@
 # File and media interpretation
 
-The provider-neutral core is verified against PR #898 (`agent/file-media-core`;
-via PR #900 `agent/file-media-worker`). Its isolated processor implementation is
+The provider-neutral core is verified against PR #898 (`agent/file-media-core`).
+Its isolated processor implementation is
 verified against PR #900 (`agent/file-media-worker`). Together they include the
 type model, declaration and registry checks, detection and validation algorithm,
 untrusted processor-response boundary, stable agent tool contracts,

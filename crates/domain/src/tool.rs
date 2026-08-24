@@ -609,13 +609,19 @@ pub enum ToolDecisionSource {
     SessionOverride,
     /// A checked delegate-model decision.
     Delegate,
+    /// A user-recorded one-shot override of a delegate denial supplied approval
+    /// when the session re-proposed the denied command.
+    UserOverride,
 }
 
 impl ToolDecisionSource {
     pub(crate) const fn requires_ordered_prefix(self) -> bool {
         match self {
             Self::UserCommand | Self::Delegate => true,
-            Self::PolicyAuto | Self::SessionBlanket | Self::SessionOverride => false,
+            Self::PolicyAuto
+            | Self::SessionBlanket
+            | Self::SessionOverride
+            | Self::UserOverride => false,
         }
     }
 }
@@ -634,6 +640,14 @@ pub enum ToolApprovalDecider {
         model: crate::DirectModelSelection,
         /// Dedicated recorded judge call.
         call: ModelCallId,
+    },
+    /// The user pre-approved the re-proposed command by overriding one exact
+    /// delegate denial through the named durable command.
+    UserOverride {
+        /// Exact override-command provenance.
+        command: DurableCommandId,
+        /// The delegate-denied request whose recorded override was consumed.
+        denied_request: ToolRequestId,
     },
 }
 
@@ -992,6 +1006,23 @@ impl ToolApprovalResolution {
         }
     }
 
+    pub(crate) const fn user_override(
+        request: ToolRequestId,
+        command: DurableCommandId,
+        denied_request: ToolRequestId,
+    ) -> Self {
+        Self {
+            request,
+            decision: ToolApprovalDecision::Approve,
+            source: ToolDecisionSource::UserOverride,
+            decider: Some(ToolApprovalDecider::UserOverride {
+                command,
+                denied_request,
+            }),
+            rationale: None,
+        }
+    }
+
     pub(crate) fn delegate(approval: &DelegateToolApproval) -> Option<Self> {
         let decision = match approval.recommendation {
             DelegateApprovalRecommendation::Approve => ToolApprovalDecision::Approve,
@@ -1062,6 +1093,12 @@ enum StoredToolApprovalEvidence {
         request: ToolRequestId,
         frozen_posture: DangerousToolAutoApproval,
     },
+    UserOverride {
+        request: ToolRequestId,
+        command: DurableCommandId,
+        denied_request: ToolRequestId,
+        frozen_posture: ToolApprovalPosture,
+    },
 }
 
 impl ToolApprovalResolutionReconstitutionInput {
@@ -1107,6 +1144,25 @@ impl ToolApprovalResolutionReconstitutionInput {
         Self {
             evidence: StoredToolApprovalEvidence::SessionBlanket {
                 request,
+                frozen_posture,
+            },
+        }
+    }
+
+    /// Supplies one request-bound consumed user override, its recorded
+    /// command and overridden request, and the exact approval posture frozen
+    /// on the approved request.
+    pub const fn user_override(
+        request: ToolRequestId,
+        command: DurableCommandId,
+        denied_request: ToolRequestId,
+        frozen_posture: ToolApprovalPosture,
+    ) -> Self {
+        Self {
+            evidence: StoredToolApprovalEvidence::UserOverride {
+                request,
+                command,
+                denied_request,
                 frozen_posture,
             },
         }
@@ -1169,6 +1225,20 @@ impl ToolApprovalResolutionReconstitutionInput {
                 frozen_posture: DangerousToolAutoApproval::Disabled,
                 ..
             } => None,
+            StoredToolApprovalEvidence::UserOverride {
+                request,
+                command,
+                denied_request,
+                frozen_posture: ToolApprovalPosture::Delegated,
+            } => Some(ToolApprovalResolution::user_override(
+                *request,
+                *command,
+                *denied_request,
+            )),
+            StoredToolApprovalEvidence::UserOverride {
+                frozen_posture: ToolApprovalPosture::Auto | ToolApprovalPosture::Human,
+                ..
+            } => None,
         };
         match resolution {
             Some(resolution) => Ok(resolution),
@@ -1220,6 +1290,15 @@ pub enum InitialToolApproval {
     PolicyAuto,
     /// Record automatic approval from the frozen dangerous blanket.
     SessionBlanket,
+    /// Record approval consumed from a user-recorded override of one exact
+    /// delegate denial instead of parking for the judge again.
+    UserOverride {
+        /// The applied durable override command.
+        command: DurableCommandId,
+        /// The delegate-denied request whose recorded override this proposal
+        /// consumes.
+        denied_request: ToolRequestId,
+    },
 }
 
 impl InitialToolApproval {
@@ -1228,13 +1307,21 @@ impl InitialToolApproval {
             Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Delegated => None,
             Self::PolicyAuto => Some(ToolApprovalResolution::policy_auto(request)),
             Self::SessionBlanket => Some(ToolApprovalResolution::session_blanket(request)),
+            Self::UserOverride {
+                command,
+                denied_request,
+            } => Some(ToolApprovalResolution::user_override(
+                request,
+                command,
+                denied_request,
+            )),
         }
     }
 
     pub(crate) const fn posture(self) -> ToolApprovalPosture {
         match self {
             Self::Confirm | Self::AlwaysConfirm | Self::Human => ToolApprovalPosture::Human,
-            Self::Delegated => ToolApprovalPosture::Delegated,
+            Self::Delegated | Self::UserOverride { .. } => ToolApprovalPosture::Delegated,
             Self::PolicyAuto | Self::SessionBlanket => ToolApprovalPosture::Auto,
         }
     }
@@ -1243,7 +1330,7 @@ impl InitialToolApproval {
     pub const fn requires_decision(self) -> bool {
         match self {
             Self::Confirm | Self::AlwaysConfirm | Self::Human | Self::Delegated => true,
-            Self::PolicyAuto | Self::SessionBlanket => false,
+            Self::PolicyAuto | Self::SessionBlanket | Self::UserOverride { .. } => false,
         }
     }
 }
@@ -1468,6 +1555,426 @@ impl DecideToolRequestPreparationError {
 
     /// Returns both unchanged values.
     pub fn into_parts(self) -> (DecideToolRequest, ToolRequestId) {
+        (self.command, self.provided_request)
+    }
+}
+
+/// One recorded, not-yet-consumed user override of a delegate denial.
+///
+/// The override pre-approves exactly one future proposal in the owning
+/// session: the first one whose tool name and normalized arguments equal the
+/// denied request's. It links the denied request, the judge call that denied
+/// it, and the user command that recorded the override, so the full audit chain
+/// stays queryable from any of the three.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct RecordedUserOverride {
+    command: DurableCommandId,
+    session: SessionId,
+    denied_request: ToolRequestId,
+    judge_call: ModelCallId,
+    tool: ToolName,
+    arguments: NormalizedToolArguments,
+}
+
+impl RecordedUserOverride {
+    /// Supplies all typed stored facts of one recorded override.
+    pub const fn new(
+        command: DurableCommandId,
+        session: SessionId,
+        denied_request: ToolRequestId,
+        judge_call: ModelCallId,
+        tool: ToolName,
+        arguments: NormalizedToolArguments,
+    ) -> Self {
+        Self {
+            command,
+            session,
+            denied_request,
+            judge_call,
+            tool,
+            arguments,
+        }
+    }
+
+    /// Returns the applied durable override command.
+    pub const fn command(&self) -> DurableCommandId {
+        self.command
+    }
+
+    /// Returns the session whose future proposal may consume this override.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the delegate-denied request the override names.
+    pub const fn denied_request(&self) -> ToolRequestId {
+        self.denied_request
+    }
+
+    /// Returns the completed judge call that denied the request.
+    pub const fn judge_call(&self) -> ModelCallId {
+        self.judge_call
+    }
+
+    /// Borrows the denied request's checked tool name.
+    pub const fn tool(&self) -> &ToolName {
+        &self.tool
+    }
+
+    /// Borrows the denied request's normalized arguments.
+    pub const fn arguments(&self) -> &NormalizedToolArguments {
+        &self.arguments
+    }
+
+    /// Returns whether the proposal re-proposes the exact denied command:
+    /// equal tool name and equal normalized arguments.
+    pub fn matches_proposal(&self, proposal: &ToolCallProposal) -> bool {
+        self.tool == *proposal.name() && self.arguments == *proposal.arguments()
+    }
+}
+
+/// The canonical user command overriding one delegate-denied tool request.
+///
+/// Applying the command records one one-shot pre-approval in the named session:
+/// the next proposal of the exact denied command is approved under
+/// user-override provenance instead of parking for the judge again. Unlike
+/// [`DecideToolRequest`], the session is part of the canonical payload,
+/// because the recorded override is a session-scoped standing fact consumed by a
+/// later proposal rather than a decision on an already-parked request.
+#[derive(Clone, Debug)]
+pub struct OverrideDeniedToolRequest {
+    command_id: DurableCommandId,
+    session: SessionId,
+    denied_request: ToolRequestId,
+}
+
+impl OverrideDeniedToolRequest {
+    /// Constructs the complete canonical caller payload after rejecting the
+    /// user-global nil and max command sentinels.
+    pub fn try_new(
+        command_id: DurableCommandId,
+        session: SessionId,
+        denied_request: ToolRequestId,
+    ) -> Result<Self, OverrideDeniedToolRequestConstructionError> {
+        if command_id.as_uuid().is_nil() || command_id.as_uuid().is_max() {
+            return Err(OverrideDeniedToolRequestConstructionError { command_id });
+        }
+        Ok(Self {
+            command_id,
+            session,
+            denied_request,
+        })
+    }
+
+    /// Returns the user-global command identity.
+    pub const fn command_id(&self) -> DurableCommandId {
+        self.command_id
+    }
+
+    /// Returns the session the override covers.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the exact delegate-denied request named by the command.
+    pub const fn denied_request(&self) -> ToolRequestId {
+        self.denied_request
+    }
+
+    /// Verifies the named request admits a user override and prepares the
+    /// terminal typed result.
+    ///
+    /// This is the override verification predicate. Recording requires every
+    /// conjunct, each with its own typed rejection:
+    ///
+    /// - the recorded approval is a delegate denial, so a user denial, any
+    ///   approval, or an undecided request cannot be overridden;
+    /// - the denial is terminal — its denied-result entry is materialized —
+    ///   so a denial whose round is still resolving cannot be overridden;
+    /// - the request belongs to the command's session, so an override can
+    ///   never pre-approve a proposal in another session; and
+    /// - no override is already recorded for the request, so each denial admits
+    ///   at most one override ever.
+    pub fn prepare(
+        self,
+        request: &ToolRequest,
+        approval: Option<&ToolApprovalResolution>,
+        terminal_resolution: Option<ToolRequestResolution>,
+        existing_override_command: Option<DurableCommandId>,
+    ) -> Result<PreparedOverrideDeniedToolRequest, OverrideDeniedToolRequestPreparationError> {
+        if request.id() != self.denied_request {
+            return Err(OverrideDeniedToolRequestPreparationError {
+                command: self,
+                provided_request: request.id(),
+            });
+        }
+        if let Some(approval) = approval
+            && approval.request() != self.denied_request
+        {
+            let provided_request = approval.request();
+            return Err(OverrideDeniedToolRequestPreparationError {
+                command: self,
+                provided_request,
+            });
+        }
+        if request.session() != self.session {
+            return Ok(self.prepare_request_not_in_session());
+        }
+        // Delegate-denied: the decision is a denial and its decider is the
+        // judge. The sealed resolution producers make a delegate decider
+        // equivalent to the delegate source, so the decider is the checked
+        // fact and also supplies the judge call the recorded override links.
+        let judge_call = match approval {
+            Some(approval) if matches!(approval.decision(), ToolApprovalDecision::Deny { .. }) => {
+                match approval.decider() {
+                    Some(ToolApprovalDecider::Delegate { call, .. }) => Some(*call),
+                    Some(
+                        ToolApprovalDecider::User { .. } | ToolApprovalDecider::UserOverride { .. },
+                    )
+                    | None => None,
+                }
+            }
+            Some(_) | None => None,
+        };
+        let Some(judge_call) = judge_call else {
+            return Ok(self.prepare_not_delegate_denied());
+        };
+        let terminally_denied = matches!(
+            terminal_resolution,
+            Some(ToolRequestResolution::Denied { request }) if request == self.denied_request
+        );
+        if !terminally_denied {
+            return Ok(self.prepare_not_terminally_denied());
+        }
+        if existing_override_command.is_some() {
+            return Ok(self.prepare_already_overridden());
+        }
+        let recorded = RecordedUserOverride::new(
+            self.command_id,
+            self.session,
+            self.denied_request,
+            judge_call,
+            request.name().clone(),
+            request.arguments().clone(),
+        );
+        Ok(PreparedOverrideDeniedToolRequest {
+            command: self,
+            result: OverrideDeniedToolRequestResult::Applied(
+                OverrideDeniedToolRequestAppliedResult { recorded },
+            ),
+        })
+    }
+
+    /// Restores the exact recorded applied receipt from its durable recorded
+    /// row, rejecting a row that does not correlate with this command.
+    pub fn reconstitute_applied(
+        self,
+        recorded: RecordedUserOverride,
+    ) -> Result<PreparedOverrideDeniedToolRequest, OverrideDeniedToolRequestPreparationError> {
+        if recorded.command() != self.command_id
+            || recorded.session() != self.session
+            || recorded.denied_request() != self.denied_request
+        {
+            let provided_request = recorded.denied_request();
+            return Err(OverrideDeniedToolRequestPreparationError {
+                command: self,
+                provided_request,
+            });
+        }
+        Ok(PreparedOverrideDeniedToolRequest {
+            command: self,
+            result: OverrideDeniedToolRequestResult::Applied(
+                OverrideDeniedToolRequestAppliedResult { recorded },
+            ),
+        })
+    }
+
+    /// Prepares an authoritative missing-request rejection.
+    pub const fn prepare_request_not_found(self) -> PreparedOverrideDeniedToolRequest {
+        let denied_request = self.denied_request;
+        PreparedOverrideDeniedToolRequest {
+            command: self,
+            result: OverrideDeniedToolRequestResult::Rejected(
+                OverrideDeniedToolRequestRejectedResult::RequestNotFound { denied_request },
+            ),
+        }
+    }
+
+    /// Prepares an authoritative other-session rejection.
+    pub const fn prepare_request_not_in_session(self) -> PreparedOverrideDeniedToolRequest {
+        let session = self.session;
+        let denied_request = self.denied_request;
+        PreparedOverrideDeniedToolRequest {
+            command: self,
+            result: OverrideDeniedToolRequestResult::Rejected(
+                OverrideDeniedToolRequestRejectedResult::RequestNotInSession {
+                    session,
+                    denied_request,
+                },
+            ),
+        }
+    }
+
+    /// Prepares an authoritative not-delegate-denied rejection.
+    pub const fn prepare_not_delegate_denied(self) -> PreparedOverrideDeniedToolRequest {
+        let denied_request = self.denied_request;
+        PreparedOverrideDeniedToolRequest {
+            command: self,
+            result: OverrideDeniedToolRequestResult::Rejected(
+                OverrideDeniedToolRequestRejectedResult::NotDelegateDenied { denied_request },
+            ),
+        }
+    }
+
+    /// Prepares an authoritative still-resolving rejection.
+    pub const fn prepare_not_terminally_denied(self) -> PreparedOverrideDeniedToolRequest {
+        let denied_request = self.denied_request;
+        PreparedOverrideDeniedToolRequest {
+            command: self,
+            result: OverrideDeniedToolRequestResult::Rejected(
+                OverrideDeniedToolRequestRejectedResult::NotTerminallyDenied { denied_request },
+            ),
+        }
+    }
+
+    /// Prepares an authoritative already-overridden rejection.
+    pub const fn prepare_already_overridden(self) -> PreparedOverrideDeniedToolRequest {
+        let denied_request = self.denied_request;
+        PreparedOverrideDeniedToolRequest {
+            command: self,
+            result: OverrideDeniedToolRequestResult::Rejected(
+                OverrideDeniedToolRequestRejectedResult::AlreadyOverridden { denied_request },
+            ),
+        }
+    }
+}
+
+impl PartialEq for OverrideDeniedToolRequest {
+    fn eq(&self, other: &Self) -> bool {
+        self.session == other.session && self.denied_request == other.denied_request
+    }
+}
+
+impl Eq for OverrideDeniedToolRequest {}
+
+impl std::hash::Hash for OverrideDeniedToolRequest {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.session.hash(state);
+        self.denied_request.hash(state);
+    }
+}
+
+/// An override command used a reserved user-global identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OverrideDeniedToolRequestConstructionError {
+    command_id: DurableCommandId,
+}
+
+impl OverrideDeniedToolRequestConstructionError {
+    /// Returns the rejected command identity.
+    pub const fn command_id(self) -> DurableCommandId {
+        self.command_id
+    }
+}
+
+/// Terminal typed result for one override command.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum OverrideDeniedToolRequestResult {
+    /// The override was recorded.
+    Applied(OverrideDeniedToolRequestAppliedResult),
+    /// Authoritative current state rejected the command.
+    Rejected(OverrideDeniedToolRequestRejectedResult),
+}
+
+/// The recorded override and its complete linked provenance.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct OverrideDeniedToolRequestAppliedResult {
+    recorded: RecordedUserOverride,
+}
+
+impl OverrideDeniedToolRequestAppliedResult {
+    /// Borrows the exact recorded override.
+    pub const fn recorded(&self) -> &RecordedUserOverride {
+        &self.recorded
+    }
+}
+
+/// Closed authoritative rejection vocabulary for override commands.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum OverrideDeniedToolRequestRejectedResult {
+    /// No logical request had this identity.
+    RequestNotFound {
+        /// The absent request.
+        denied_request: ToolRequestId,
+    },
+    /// The named request belongs to another session.
+    RequestNotInSession {
+        /// The session the command named.
+        session: SessionId,
+        /// The request owned elsewhere.
+        denied_request: ToolRequestId,
+    },
+    /// The request's recorded approval is not a delegate denial.
+    NotDelegateDenied {
+        /// The request without a delegate denial.
+        denied_request: ToolRequestId,
+    },
+    /// The delegate denial has not reached its terminal denied result.
+    NotTerminallyDenied {
+        /// The request whose denial is still resolving.
+        denied_request: ToolRequestId,
+    },
+    /// An override is already recorded for this denial.
+    AlreadyOverridden {
+        /// The already-overridden request.
+        denied_request: ToolRequestId,
+    },
+}
+
+/// A pre-commit override-command candidate.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PreparedOverrideDeniedToolRequest {
+    command: OverrideDeniedToolRequest,
+    result: OverrideDeniedToolRequestResult,
+}
+
+impl PreparedOverrideDeniedToolRequest {
+    /// Borrows the canonical command.
+    pub const fn command(&self) -> &OverrideDeniedToolRequest {
+        &self.command
+    }
+
+    /// Borrows the terminal typed result.
+    pub const fn result(&self) -> &OverrideDeniedToolRequestResult {
+        &self.result
+    }
+
+    /// Returns the command and result for one transaction.
+    pub fn into_parts(self) -> (OverrideDeniedToolRequest, OverrideDeniedToolRequestResult) {
+        (self.command, self.result)
+    }
+}
+
+/// A command/request adapter correlation error, not a recorded rejection.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OverrideDeniedToolRequestPreparationError {
+    command: OverrideDeniedToolRequest,
+    provided_request: ToolRequestId,
+}
+
+impl OverrideDeniedToolRequestPreparationError {
+    /// Borrows the unchanged command.
+    pub const fn command(&self) -> &OverrideDeniedToolRequest {
+        &self.command
+    }
+
+    /// Returns the mismatched supplied-evidence request identity.
+    pub const fn provided_request(&self) -> ToolRequestId {
+        self.provided_request
+    }
+
+    /// Returns both unchanged values.
+    pub fn into_parts(self) -> (OverrideDeniedToolRequest, ToolRequestId) {
         (self.command, self.provided_request)
     }
 }
@@ -2176,5 +2683,513 @@ mod tests {
             ToolRequestResolution::Denied { request },
             ToolRequestResolution::ClosedByTurnEnd { request }
         );
+    }
+
+    /// The request-identity seed of the canonical delegate-denied fixture; the
+    /// judge model and call seeds derive from it, decorrelated per testing
+    /// rule 4.
+    const DENIED_REQUEST_SEED: u128 = 70;
+    /// The seed of the fixture override command overriding that denial.
+    const OVERRIDE_COMMAND_SEED: u128 = 71;
+
+    /// One request frozen `Delegated` in the canonical fixture session.
+    fn delegated_request(seed: u128) -> ToolRequest {
+        ToolRequestReconstitutionInput::new(
+            tool_request_id(seed),
+            session_id(1),
+            turn_id(2),
+            model_call_id(3),
+            ToolRequestOrdinal::from_u32(0),
+            ToolName::try_new(String::from("current_time")).expect("fixture name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                .expect("fixture arguments are valid"),
+        )
+        .with_approval_posture(ToolApprovalPosture::Delegated)
+        .into_request()
+    }
+
+    /// The judge model and call seeds of the canonical delegate denial;
+    /// arbitrary — they only need to exist as one recorded judge.
+    const DENYING_JUDGE_MODEL_SEED: u128 = 200;
+    const DENYING_JUDGE_CALL_SEED: u128 = 201;
+
+    /// The delegate denial recorded against one delegated request by the
+    /// canonical fixture judge.
+    fn delegate_denial(request: &ToolRequest) -> ToolApprovalResolution {
+        let denial = DelegateToolApproval::try_new(
+            request,
+            DirectModelSelection::from_uuid(uuid::Uuid::from_u128(DENYING_JUDGE_MODEL_SEED)),
+            model_call_id(DENYING_JUDGE_CALL_SEED),
+            DelegateApprovalRecommendation::Deny,
+            ToolDecisionRationale::try_new(String::from("scope exceeded"))
+                .expect("fixture rationale is admitted"),
+        )
+        .expect("delegated authority may deny");
+        ToolApprovalResolution::delegate(&denial)
+            .expect("a delegate denial resolves the delegated request")
+    }
+
+    /// The canonical override command naming the fixture denial in its own
+    /// session.
+    fn override_command() -> OverrideDeniedToolRequest {
+        OverrideDeniedToolRequest::try_new(
+            command_id(OVERRIDE_COMMAND_SEED),
+            session_id(1),
+            tool_request_id(DENIED_REQUEST_SEED),
+        )
+        .expect("the fixture command identity is admitted")
+    }
+
+    /// The override verification predicate records exactly the denied command:
+    /// every conjunct holds, and the recorded override links the command, the
+    /// session, the denied request, and the denying judge call.
+    #[test]
+    fn override_prepare_records_the_exact_denied_command() {
+        let request = delegated_request(DENIED_REQUEST_SEED);
+        let denial = delegate_denial(&request);
+        let prepared = override_command()
+            .prepare(
+                &request,
+                Some(&denial),
+                Some(ToolRequestResolution::Denied {
+                    request: request.id(),
+                }),
+                None,
+            )
+            .expect("correlated evidence prepares a terminal result");
+
+        let OverrideDeniedToolRequestResult::Applied(applied) = prepared.result() else {
+            panic!("a terminal delegate denial admits the override");
+        };
+        let recorded = applied.recorded();
+        let Some(ToolApprovalDecider::Delegate {
+            call: denying_call, ..
+        }) = denial.decider()
+        else {
+            panic!("the fixture denial carries delegate provenance");
+        };
+        assert_eq!(recorded.command(), prepared.command().command_id());
+        assert_eq!(recorded.session(), request.session());
+        assert_eq!(recorded.denied_request(), request.id());
+        assert_eq!(recorded.judge_call(), *denying_call);
+        assert_eq!(recorded.tool(), request.name());
+        assert_eq!(recorded.arguments(), request.arguments());
+    }
+
+    /// An recorded override matches only the exact denied command: equal tool
+    /// name and equal normalized arguments.
+    #[test]
+    fn recorded_override_matches_only_the_exact_denied_command() {
+        let request = delegated_request(DENIED_REQUEST_SEED);
+        let denial = delegate_denial(&request);
+        let prepared = override_command()
+            .prepare(
+                &request,
+                Some(&denial),
+                Some(ToolRequestResolution::Denied {
+                    request: request.id(),
+                }),
+                None,
+            )
+            .expect("correlated evidence prepares a terminal result");
+        let OverrideDeniedToolRequestResult::Applied(applied) = prepared.result() else {
+            panic!("a terminal delegate denial admits the override");
+        };
+        let recorded = applied.recorded();
+
+        let same_command =
+            ToolCallProposal::new(request.name().clone(), request.arguments().clone());
+        let other_arguments = ToolCallProposal::new(
+            request.name().clone(),
+            NormalizedToolArguments::try_from_provider_text(String::from(r#"{"timezone":"UTC"}"#))
+                .expect("fixture arguments are valid"),
+        );
+        let other_tool = ToolCallProposal::new(
+            ToolName::try_new(String::from("another_tool")).expect("fixture name is valid"),
+            request.arguments().clone(),
+        );
+        assert!(recorded.matches_proposal(&same_command));
+        assert!(!recorded.matches_proposal(&other_arguments));
+        assert!(!recorded.matches_proposal(&other_tool));
+    }
+
+    /// Predicate conjunct: the request must belong to the command's session.
+    #[test]
+    fn override_prepare_rejects_another_sessions_request() {
+        const OTHER_SESSION_SEED: u128 = 9;
+
+        let request = delegated_request(DENIED_REQUEST_SEED);
+        let denial = delegate_denial(&request);
+        let command = OverrideDeniedToolRequest::try_new(
+            command_id(OVERRIDE_COMMAND_SEED),
+            session_id(OTHER_SESSION_SEED),
+            request.id(),
+        )
+        .expect("the fixture command identity is admitted");
+        let prepared = command
+            .prepare(
+                &request,
+                Some(&denial),
+                Some(ToolRequestResolution::Denied {
+                    request: request.id(),
+                }),
+                None,
+            )
+            .expect("correlated evidence prepares a terminal result");
+
+        assert_eq!(
+            prepared.result(),
+            &OverrideDeniedToolRequestResult::Rejected(
+                OverrideDeniedToolRequestRejectedResult::RequestNotInSession {
+                    session: session_id(OTHER_SESSION_SEED),
+                    denied_request: request.id(),
+                }
+            )
+        );
+    }
+
+    /// Predicate conjunct: an undecided request has no delegate denial to
+    /// override.
+    #[test]
+    fn override_prepare_rejects_an_undecided_request() {
+        let request = delegated_request(DENIED_REQUEST_SEED);
+        let prepared = override_command()
+            .prepare(&request, None, None, None)
+            .expect("correlated evidence prepares a terminal result");
+
+        assert_eq!(
+            prepared.result(),
+            &OverrideDeniedToolRequestResult::Rejected(
+                OverrideDeniedToolRequestRejectedResult::NotDelegateDenied {
+                    denied_request: request.id(),
+                }
+            )
+        );
+    }
+
+    /// Predicate conjunct: a user denial is not a judge denial; the override
+    /// can never reverse the user's own decision.
+    #[test]
+    fn override_prepare_rejects_a_user_denial() {
+        const USER_DENIAL_COMMAND_SEED: u128 = 8;
+
+        let request = delegated_request(DENIED_REQUEST_SEED);
+        let user_denial = ToolApprovalResolution::user(
+            command_id(USER_DENIAL_COMMAND_SEED),
+            request.id(),
+            ToolApprovalDecision::Deny { reason: None },
+        );
+        let prepared = override_command()
+            .prepare(
+                &request,
+                Some(&user_denial),
+                Some(ToolRequestResolution::Denied {
+                    request: request.id(),
+                }),
+                None,
+            )
+            .expect("correlated evidence prepares a terminal result");
+
+        assert_eq!(
+            prepared.result(),
+            &OverrideDeniedToolRequestResult::Rejected(
+                OverrideDeniedToolRequestRejectedResult::NotDelegateDenied {
+                    denied_request: request.id(),
+                }
+            )
+        );
+    }
+
+    /// Predicate conjunct: a delegate approval is not a denial; there is
+    /// nothing to override.
+    #[test]
+    fn override_prepare_rejects_a_delegate_approval() {
+        const APPROVING_JUDGE_CALL_SEED: u128 = 12;
+
+        let request = delegated_request(DENIED_REQUEST_SEED);
+        let approval = DelegateToolApproval::try_new(
+            &request,
+            DirectModelSelection::from_uuid(uuid::Uuid::from_u128(DENYING_JUDGE_MODEL_SEED)),
+            model_call_id(APPROVING_JUDGE_CALL_SEED),
+            DelegateApprovalRecommendation::Approve,
+            ToolDecisionRationale::try_new(String::from("bounded request"))
+                .expect("fixture rationale is admitted"),
+        )
+        .expect("delegated authority may approve");
+        let approval = ToolApprovalResolution::delegate(&approval)
+            .expect("a delegate approval resolves the delegated request");
+        let prepared = override_command()
+            .prepare(
+                &request,
+                Some(&approval),
+                Some(ToolRequestResolution::Denied {
+                    request: request.id(),
+                }),
+                None,
+            )
+            .expect("correlated evidence prepares a terminal result");
+
+        assert_eq!(
+            prepared.result(),
+            &OverrideDeniedToolRequestResult::Rejected(
+                OverrideDeniedToolRequestRejectedResult::NotDelegateDenied {
+                    denied_request: request.id(),
+                }
+            )
+        );
+    }
+
+    /// Predicate conjunct: a delegate denial whose denied result is not yet
+    /// materialized is still resolving and cannot be overridden.
+    #[test]
+    fn override_prepare_rejects_a_denial_still_resolving() {
+        let request = delegated_request(DENIED_REQUEST_SEED);
+        let denial = delegate_denial(&request);
+        let prepared = override_command()
+            .prepare(&request, Some(&denial), None, None)
+            .expect("correlated evidence prepares a terminal result");
+
+        assert_eq!(
+            prepared.result(),
+            &OverrideDeniedToolRequestResult::Rejected(
+                OverrideDeniedToolRequestRejectedResult::NotTerminallyDenied {
+                    denied_request: request.id(),
+                }
+            )
+        );
+    }
+
+    /// Predicate conjunct: the terminal resolution must be this exact
+    /// request's denial, so mismatched terminal evidence fails closed.
+    #[test]
+    fn override_prepare_rejects_a_foreign_terminal_denial() {
+        const FOREIGN_REQUEST_SEED: u128 = 6;
+
+        let request = delegated_request(DENIED_REQUEST_SEED);
+        let denial = delegate_denial(&request);
+        let prepared = override_command()
+            .prepare(
+                &request,
+                Some(&denial),
+                Some(ToolRequestResolution::Denied {
+                    request: tool_request_id(FOREIGN_REQUEST_SEED),
+                }),
+                None,
+            )
+            .expect("correlated evidence prepares a terminal result");
+
+        assert_eq!(
+            prepared.result(),
+            &OverrideDeniedToolRequestResult::Rejected(
+                OverrideDeniedToolRequestRejectedResult::NotTerminallyDenied {
+                    denied_request: request.id(),
+                }
+            )
+        );
+    }
+
+    /// Predicate conjunct: each denial admits at most one override ever.
+    #[test]
+    fn override_prepare_rejects_an_already_overridden_denial() {
+        const EARLIER_OVERRIDE_COMMAND_SEED: u128 = 7;
+
+        let request = delegated_request(DENIED_REQUEST_SEED);
+        let denial = delegate_denial(&request);
+        let prepared = override_command()
+            .prepare(
+                &request,
+                Some(&denial),
+                Some(ToolRequestResolution::Denied {
+                    request: request.id(),
+                }),
+                Some(command_id(EARLIER_OVERRIDE_COMMAND_SEED)),
+            )
+            .expect("correlated evidence prepares a terminal result");
+
+        assert_eq!(
+            prepared.result(),
+            &OverrideDeniedToolRequestResult::Rejected(
+                OverrideDeniedToolRequestRejectedResult::AlreadyOverridden {
+                    denied_request: request.id(),
+                }
+            )
+        );
+    }
+
+    /// Evidence for another request is an adapter correlation error, never a
+    /// recorded rejection.
+    #[test]
+    fn override_prepare_correlates_supplied_evidence() {
+        const UNCORRELATED_REQUEST_SEED: u128 = 5;
+
+        let uncorrelated = delegated_request(UNCORRELATED_REQUEST_SEED);
+        let error = override_command()
+            .prepare(&uncorrelated, None, None, None)
+            .expect_err("mismatched request evidence must fail as a preparation error");
+
+        assert_eq!(error.provided_request(), uncorrelated.id());
+        assert_eq!(error.command(), &override_command());
+    }
+
+    /// The recorded applied receipt restores from its durable recorded row and
+    /// rejects a row that does not correlate with the command.
+    #[test]
+    fn override_reconstitute_applied_restores_the_recorded_receipt() {
+        const FOREIGN_OVERRIDE_REQUEST_SEED: u128 = 4;
+        const FIXTURE_JUDGE_CALL_SEED: u128 = 930;
+
+        let request = delegated_request(DENIED_REQUEST_SEED);
+        let recorded = RecordedUserOverride::new(
+            command_id(OVERRIDE_COMMAND_SEED),
+            request.session(),
+            request.id(),
+            model_call_id(FIXTURE_JUDGE_CALL_SEED),
+            request.name().clone(),
+            request.arguments().clone(),
+        );
+        let restored = override_command()
+            .reconstitute_applied(recorded.clone())
+            .expect("the correlated recorded row restores the applied receipt");
+        let OverrideDeniedToolRequestResult::Applied(applied) = restored.result() else {
+            panic!("the recorded row restores an applied result");
+        };
+        assert_eq!(applied.recorded(), &recorded);
+
+        let foreign = RecordedUserOverride::new(
+            command_id(OVERRIDE_COMMAND_SEED),
+            request.session(),
+            tool_request_id(FOREIGN_OVERRIDE_REQUEST_SEED),
+            model_call_id(FIXTURE_JUDGE_CALL_SEED),
+            request.name().clone(),
+            request.arguments().clone(),
+        );
+        let error = override_command()
+            .reconstitute_applied(foreign)
+            .expect_err("an uncorrelated recorded row must fail closed");
+        assert_eq!(
+            error.provided_request(),
+            tool_request_id(FOREIGN_OVERRIDE_REQUEST_SEED)
+        );
+    }
+
+    /// INV-012: the reserved user-global nil and max command sentinels cannot
+    /// claim override commands.
+    #[test]
+    fn inv012_override_command_identity_rejects_reserved_sentinels() {
+        let nil = OverrideDeniedToolRequest::try_new(
+            DurableCommandId::from_uuid(uuid::Uuid::nil()),
+            session_id(1),
+            tool_request_id(DENIED_REQUEST_SEED),
+        )
+        .expect_err("the nil sentinel is reserved");
+        let max = OverrideDeniedToolRequest::try_new(
+            DurableCommandId::from_uuid(uuid::Uuid::max()),
+            session_id(1),
+            tool_request_id(DENIED_REQUEST_SEED),
+        )
+        .expect_err("the max sentinel is reserved");
+
+        assert_eq!(
+            nil.command_id(),
+            DurableCommandId::from_uuid(uuid::Uuid::nil())
+        );
+        assert_eq!(
+            max.command_id(),
+            DurableCommandId::from_uuid(uuid::Uuid::max())
+        );
+    }
+
+    /// INV-012: override-command comparison equality excludes only command
+    /// identity and retains the session and the denied request.
+    #[test]
+    fn inv012_override_command_equality_excludes_only_command_identity() {
+        const REPLAY_COMMAND_SEED: u128 = 72;
+        const OTHER_SESSION_SEED: u128 = 9;
+
+        let replay = OverrideDeniedToolRequest::try_new(
+            command_id(REPLAY_COMMAND_SEED),
+            session_id(1),
+            tool_request_id(DENIED_REQUEST_SEED),
+        )
+        .expect("the fixture command identity is admitted");
+        let other_session = OverrideDeniedToolRequest::try_new(
+            command_id(OVERRIDE_COMMAND_SEED),
+            session_id(OTHER_SESSION_SEED),
+            tool_request_id(DENIED_REQUEST_SEED),
+        )
+        .expect("the fixture command identity is admitted");
+
+        assert_eq!(override_command(), replay);
+        assert_ne!(override_command(), other_session);
+    }
+
+    /// A consumed user override records approval under override provenance:
+    /// the override source, the override command, and the overridden denial.
+    #[test]
+    fn user_override_initial_approval_records_override_provenance() {
+        const CONSUMING_REQUEST_SEED: u128 = 73;
+
+        let approval = InitialToolApproval::UserOverride {
+            command: command_id(OVERRIDE_COMMAND_SEED),
+            denied_request: tool_request_id(DENIED_REQUEST_SEED),
+        };
+        let resolution = approval
+            .resolution(tool_request_id(CONSUMING_REQUEST_SEED))
+            .expect("a consumed override records its approval at proposal time");
+
+        assert_eq!(
+            resolution.request(),
+            tool_request_id(CONSUMING_REQUEST_SEED)
+        );
+        assert_eq!(resolution.source(), ToolDecisionSource::UserOverride);
+        assert_eq!(
+            resolution.decider(),
+            Some(&ToolApprovalDecider::UserOverride {
+                command: command_id(OVERRIDE_COMMAND_SEED),
+                denied_request: tool_request_id(DENIED_REQUEST_SEED),
+            })
+        );
+        assert_eq!(resolution.decision(), &ToolApprovalDecision::Approve);
+        assert_eq!(resolution.rationale(), None);
+        assert_eq!(approval.posture(), ToolApprovalPosture::Delegated);
+        assert!(!approval.requires_decision());
+    }
+
+    /// S10 / INV-020: a restored user-override approval requires the
+    /// delegated posture frozen on its request — the posture the judge would
+    /// otherwise decide.
+    #[test]
+    fn s10_inv020_user_override_reconstitution_requires_delegated_posture() {
+        const CONSUMING_REQUEST_SEED: u128 = 73;
+
+        let restored = ToolApprovalResolutionReconstitutionInput::user_override(
+            tool_request_id(CONSUMING_REQUEST_SEED),
+            command_id(OVERRIDE_COMMAND_SEED),
+            tool_request_id(DENIED_REQUEST_SEED),
+            ToolApprovalPosture::Delegated,
+        )
+        .reconstitute()
+        .expect("the frozen delegated posture restores override authority");
+        assert_eq!(restored.source(), ToolDecisionSource::UserOverride);
+        assert_eq!(restored.request(), tool_request_id(CONSUMING_REQUEST_SEED));
+
+        let human = ToolApprovalResolutionReconstitutionInput::user_override(
+            tool_request_id(CONSUMING_REQUEST_SEED),
+            command_id(OVERRIDE_COMMAND_SEED),
+            tool_request_id(DENIED_REQUEST_SEED),
+            ToolApprovalPosture::Human,
+        )
+        .reconstitute()
+        .expect_err("a human-frozen request cannot restore override authority");
+        drop(human);
+        let auto = ToolApprovalResolutionReconstitutionInput::user_override(
+            tool_request_id(CONSUMING_REQUEST_SEED),
+            command_id(OVERRIDE_COMMAND_SEED),
+            tool_request_id(DENIED_REQUEST_SEED),
+            ToolApprovalPosture::Auto,
+        )
+        .reconstitute()
+        .expect_err("an auto-frozen request cannot restore override authority");
+        drop(auto);
     }
 }
