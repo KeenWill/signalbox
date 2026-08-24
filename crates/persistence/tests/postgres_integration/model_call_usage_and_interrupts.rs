@@ -1241,6 +1241,8 @@ async fn stopped_ambiguity_commits_reconciliation_and_rereads_exactly() -> Resul
         &ProcessTurnState::ActiveAwaitingModelCallRecovery {
             ended_attempt: waiting.attempt,
             recovery_call: waiting.call,
+            automatic_reconciliation_attempts: 0,
+            operator_action_required: false,
         }
     );
     assert_eq!(waiting_snapshot.entries().len(), 1);

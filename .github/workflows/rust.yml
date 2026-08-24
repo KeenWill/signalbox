@@ -229,7 +229,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            b06959f36036e230c03336ab06eaae6003a9e295e26390d88145694120b97781
+            7821f7cbfbb4dbfaee27a593c74d9ddec33606e232e0a15dfd731bdbd4b03b2a
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -594,7 +594,7 @@ jobs:
           shared-key: rust
           save-if: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
+        uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -731,7 +731,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@6cd13508893c0e7eab5f273c2575d3859bd7229a # v2.86.6
+        uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive
@@ -755,6 +755,10 @@ jobs:
           PARTITION: ${{ matrix.partition }}
           PARTITIONS: ${{ matrix.partitions }}
           FILTER: ${{ matrix.filter }}
+          # nextest runs each ignored integration test in its own libtest
+          # process. Keep deeply composed scheduler fixtures from exhausting
+          # the platform's smaller default test-thread stack.
+          RUST_MIN_STACK: "8388608"
         run: >-
           cargo nextest run
           --archive-file "$RUNNER_TEMP/archive/$SUITE.tar.zst"
