@@ -328,6 +328,18 @@ async fn usage_projection_has_session_terminal_order_index() -> Result<(), Box<d
     .await?;
 
     assert!(index_definition.contains("session_id, recorded_at DESC, model_call_id DESC"));
+    let combined_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_session_kind_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        combined_index_definition
+            .contains("session_id, call_kind, recorded_at DESC, model_call_id DESC")
+    );
 
     pool.close().await;
     drop(container);
@@ -356,8 +368,21 @@ async fn oversized_credential_references_receive_bounded_distinct_usage_labels()
             .bind("within-bound")
             .fetch_one(&pool)
             .await?,
-        "within-bound"
+        "exact:within-bound"
     );
+    let oversized = "z".repeat(257);
+    let digest_label: String = sqlx::query_scalar("SELECT bounded_web_usage_profile($1)")
+        .bind(&oversized)
+        .fetch_one(&pool)
+        .await?;
+    let literal_collision_candidate = digest_label
+        .strip_prefix("digest-md5:")
+        .expect("oversized label carries the digest discriminator");
+    let exact_label: String = sqlx::query_scalar("SELECT bounded_web_usage_profile($1)")
+        .bind(format!("digest-md5:{literal_collision_candidate}"))
+        .fetch_one(&pool)
+        .await?;
+    assert_ne!(digest_label, exact_label);
 
     pool.close().await;
     drop(container);
@@ -493,6 +518,10 @@ async fn terminal_context_compaction_usage_enters_session_level_call_evidence()
     assert_eq!(page.calls[0].turn, None);
     assert_eq!(page.calls[0].tokens.input, Some(17));
     assert_eq!(page.calls[0].tokens.output, Some(5));
+    assert_eq!(
+        page.calls[0].input_semantics,
+        signalbox_application::UsageInputTokenSemantics::CacheInclusive
+    );
 
     drop(connection);
     pool.close().await;

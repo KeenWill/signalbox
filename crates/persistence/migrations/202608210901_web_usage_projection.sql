@@ -12,8 +12,8 @@ STRICT
 PARALLEL SAFE
 AS $$
     SELECT CASE
-        WHEN octet_length(value) <= 256 THEN value
-        ELSE 'oversized-md5:' || md5(value)
+        WHEN octet_length(value) <= 250 THEN 'exact:' || value
+        ELSE 'digest-md5:' || md5(value)
     END
 $$;
 
@@ -89,6 +89,9 @@ CREATE INDEX web_usage_by_recorded_call
 CREATE INDEX web_usage_by_session_recorded_call
     ON web_usage_call_projection
        (session_id, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_kind_recorded_call
+    ON web_usage_call_projection
+       (session_id, call_kind, recorded_at DESC, model_call_id DESC);
 CREATE INDEX web_usage_by_turn_recorded_call
     ON web_usage_call_projection
        (turn_id, recorded_at DESC, model_call_id DESC);
@@ -164,7 +167,8 @@ BEGIN
     ) VALUES (
         NEW.model_call_id, 'context_compaction', NEW.session_id, NULL,
         NEW.resolved_provider_model_identity_id, NEW.credential_reference,
-        'reported', NULL, NEW.input_tokens, NEW.output_tokens,
+        'reported', NEW.usage_input_includes_cache_tokens,
+        NEW.input_tokens, NEW.output_tokens,
         NEW.cache_creation_input_tokens, NEW.cache_read_input_tokens
     );
     RETURN NEW;
@@ -213,7 +217,7 @@ INSERT INTO web_usage_call_projection (
 )
 SELECT model_call_id, 'context_compaction', session_id, NULL,
        resolved_provider_model_identity_id, credential_reference,
-       'reported', NULL, input_tokens, output_tokens,
+       'reported', usage_input_includes_cache_tokens, input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens
   FROM context_compaction_model_call
  WHERE state_kind = 'terminal';

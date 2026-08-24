@@ -1907,8 +1907,8 @@ async fn insert_pending_compact_command(
         "INSERT INTO context_compaction_model_call
             (model_call_id, session_id, direct_model_selection_id,
              resolved_provider_model_identity_id, source_frontier_id,
-             credential_reference, state_kind)
-         VALUES ($1, $2, $3, $4, $5, 'fixture-compaction-profile', 'prepared')",
+             credential_reference, usage_input_includes_cache_tokens, state_kind)
+         VALUES ($1, $2, $3, $4, $5, 'fixture-compaction-profile', false, 'prepared')",
     )
     .bind(model_call)
     .bind(session)
@@ -1983,9 +1983,9 @@ async fn insert_completed_context_compaction_call(
         "INSERT INTO context_compaction_model_call
             (model_call_id, session_id, direct_model_selection_id,
              resolved_provider_model_identity_id, source_frontier_id,
-             credential_reference, state_kind)
+             credential_reference, usage_input_includes_cache_tokens, state_kind)
          VALUES ($1, $2, $3, $4, $5, 'synthetic-compaction-credential',
-                 'prepared')",
+                 true, 'prepared')",
     )
     .bind(call)
     .bind(session)
