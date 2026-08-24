@@ -1663,6 +1663,14 @@ The protocol error-code set is:
 | `commit_ambiguous`      | Infrastructure obscured whether the requested mutation committed.                                                                      |
 | `internal`              | Fail-closed corruption or a daemon defect stopped the request.                                                                         |
 
+A `commission_session` request, and a pursuit-starting `attach_goal`,
+`resume_goal`, or `supersede_goal` request for a pull-request-commissioned
+session, additionally admits the transient rejection
+`commission_target_busy { session_id }` when another live commissioned session
+already owns the same target. `session_id` identifies that authoritative session
+so callers can wait and retry the exact same command identity and payload after
+the competing session becomes terminal.
+
 For `create_session`, `create_session_from_template`, `commission_session`,
 `create_session_from_imported_frontier`, `submit_input`, `compact_session`,
 `reconcile_turn`, `stop_turn`, `decide_tool_request`,
