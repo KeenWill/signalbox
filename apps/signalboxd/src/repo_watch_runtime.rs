@@ -666,6 +666,12 @@ impl WebhookDrainOutcome {
             Self::ProjectionFailed(error) | Self::DispatchFailedAfterTerminal(error) => Some(error),
         }
     }
+
+    /// Whether deadline cancellation can leave projection work pending and
+    /// therefore makes a cursor-advancing complete poll unsafe.
+    const fn blocks_complete_poll_after_timeout(self) -> bool {
+        !matches!(self, Self::DispatchFailedAfterTerminal(_))
+    }
 }
 
 /// How one webhook-triggered attempt ended, with the drain's own outcome held
@@ -1516,7 +1522,7 @@ impl RepositoryWatchTask {
             WebhookDrain::Run => {
                 let outcome = self.process_webhook_deliveries_with_timeout().await;
                 *drained = Some(outcome);
-                if self.webhook_drain_timed_out {
+                if self.webhook_drain_timed_out && outcome.blocks_complete_poll_after_timeout() {
                     // A complete poll after a cancelled pre-drain could advance
                     // the durable cursor past the delivery that remains pending.
                     // Return to the scheduler so retained drain state settles
@@ -7453,6 +7459,22 @@ mod tests {
         let drain = retry.poll_drain();
 
         assert_eq!(drain, WebhookDrain::Run);
+    }
+
+    #[test]
+    fn only_projection_timeouts_block_a_complete_poll() {
+        assert!(
+            WebhookDrainOutcome::ProjectionFailed(
+                RepositoryWatchAttemptError::WebhookDrainTimedOut
+            )
+            .blocks_complete_poll_after_timeout()
+        );
+        assert!(
+            !WebhookDrainOutcome::DispatchFailedAfterTerminal(
+                RepositoryWatchAttemptError::WebhookDrainTimedOut
+            )
+            .blocks_complete_poll_after_timeout()
+        );
     }
 
     #[tokio::test(start_paused = true)]
