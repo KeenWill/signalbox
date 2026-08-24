@@ -103,30 +103,6 @@ SELECT model_call_id, call_kind, session_id, turn_id,
  ORDER BY recorded_at DESC, model_call_id DESC
  LIMIT $10";
 
-const CALLS_OLDEST_SQL: &str = "
-SELECT model_call_id, call_kind, session_id, turn_id,
-       resolved_provider_model_identity_id,
-       credential_reference,
-       credential_profile_label AS web_profile,
-       usage_provenance_kind, usage_input_includes_cache_tokens,
-       input_tokens, output_tokens,
-       cache_creation_input_tokens, cache_read_input_tokens, recorded_at
-  FROM web_usage_call_projection
- WHERE ($1::timestamptz IS NULL OR recorded_at >= $1)
-   AND ($2::timestamptz IS NULL OR recorded_at < $2)
-   AND ($3::uuid IS NULL OR session_id = $3)
-   AND ($4::uuid IS NULL OR turn_id = $4)
-   AND ($5::uuid IS NULL OR resolved_provider_model_identity_id = $5)
-   AND ($6::text IS NULL OR usage_provenance_kind = $6)
-   AND ($7::text IS NULL OR call_kind = $7)
-   AND (
-       $8::timestamptz IS NULL
-       OR recorded_at > $8
-       OR (recorded_at = $8 AND model_call_id > $9)
-   )
- ORDER BY recorded_at, model_call_id
- LIMIT $10";
-
 /// Integrity failure in the dedicated usage projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum UsageProjectionCorruption {
@@ -251,23 +227,21 @@ impl UsageRepository {
             .map(|cursor| timestamp_to_offset(cursor.recorded_at))
             .transpose()?;
         let cursor_call = query.after.map(|cursor| cursor.call.into_uuid());
-        let sql = match query.order {
-            UsageCallOrder::NewestFirst => CALLS_NEWEST_SQL,
-            UsageCallOrder::OldestFirst => CALLS_OLDEST_SQL,
-        };
-        let rows = sqlx::query(sql)
-            .bind(filters.from)
-            .bind(filters.to)
-            .bind(filters.session)
-            .bind(filters.turn)
-            .bind(filters.model)
-            .bind(filters.provenance)
-            .bind(filters.call_kind)
-            .bind(cursor_time)
-            .bind(cursor_call)
-            .bind(i64::from(query.limit.get()) + 1)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = match query.order {
+            UsageCallOrder::NewestFirst => sqlx::query(CALLS_NEWEST_SQL),
+        }
+        .bind(filters.from)
+        .bind(filters.to)
+        .bind(filters.session)
+        .bind(filters.turn)
+        .bind(filters.model)
+        .bind(filters.provenance)
+        .bind(filters.call_kind)
+        .bind(cursor_time)
+        .bind(cursor_call)
+        .bind(i64::from(query.limit.get()) + 1)
+        .fetch_all(&self.pool)
+        .await?;
         decode_call_page(rows, usize::from(query.limit.get()))
     }
 }
@@ -534,8 +508,6 @@ mod tests {
         assert!(AGGREGATE_SQL.contains("credential_profile_label AS web_profile"));
         assert!(CALLS_NEWEST_SQL.contains("credential_reference,"));
         assert!(CALLS_NEWEST_SQL.contains("credential_profile_label AS web_profile"));
-        assert!(CALLS_OLDEST_SQL.contains("credential_reference,"));
-        assert!(CALLS_OLDEST_SQL.contains("credential_profile_label AS web_profile"));
     }
 
     #[test]

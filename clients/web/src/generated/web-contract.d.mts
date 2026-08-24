@@ -161,7 +161,7 @@ type WebUsageCall = {
   readonly recorded_at_micros: WebUsageTimestampMicros;
   readonly session_id: WebSessionId;
   readonly tokens: WebUsageTokenAxes;
-  readonly turn_id?: WebUuid | null;
+  readonly turn_id: string;
 };
 
 type WebUsageCallCount = string;
@@ -266,4 +266,4 @@ export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTi
 export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;
 export function decodeWebSearchPage(value: unknown): WebSearchPage;
 export function decodeWebUsageSummary(value: unknown): WebUsageSummary;
-export function decodeWebUsageCallPage(value: unknown, order: "newest" | "oldest"): WebUsageCallPage;
+export function decodeWebUsageCallPage(value: unknown, order: "newest"): WebUsageCallPage;

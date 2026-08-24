@@ -880,6 +880,7 @@ pub struct WebUsageCall {
     pub call_kind: WebUsageCallKind,
     pub call_id: WebUuid,
     pub session_id: WebSessionId,
+    #[schemars(required)]
     pub turn_id: Option<WebUuid>,
     pub model_id: WebUuid,
     pub provenance: WebUsageProvenance,
@@ -1388,8 +1389,8 @@ export function decodeWebUsageSummary(value) {{
 
 export function decodeWebUsageCallPage(value, order) {{
   assertSchema(schemas.WebUsageCallPage, schemas.WebUsageCallPage, value, "usage_call_page");
-  if (order !== "newest" && order !== "oldest") {{
-    fail("usage_call_page.order", "newest or oldest");
+  if (order !== "newest") {{
+    fail("usage_call_page.order", "newest");
   }}
   let previousKey = null;
   value.calls.forEach((call, index) => {{
@@ -1401,7 +1402,7 @@ export function decodeWebUsageCallPage(value, order) {{
       false,
     );
     const isCompaction = call.call_kind === "context_compaction";
-    if (isCompaction !== (call.turn_id === null)) {{
+    if (!Object.hasOwn(call, "turn_id") || isCompaction !== (call.turn_id === null)) {{
       fail(
         `usage_call_page.calls[${{index}}].turn_id`,
         "null exactly for context compaction calls",
@@ -1412,10 +1413,10 @@ export function decodeWebUsageCallPage(value, order) {{
       const comparison = key.recordedAt === previousKey.recordedAt
         ? key.callId < previousKey.callId ? -1 : key.callId > previousKey.callId ? 1 : 0
         : key.recordedAt < previousKey.recordedAt ? -1 : 1;
-      if ((order === "newest" && comparison >= 0) || (order === "oldest" && comparison <= 0)) {{
+      if (comparison >= 0) {{
         fail(
           `usage_call_page.calls[${{index}}]`,
-          `strictly ${{order === "newest" ? "descending" : "ascending"}} by call key`,
+          "strictly descending by call key",
         );
       }}
     }}
@@ -1531,7 +1532,7 @@ fn declaration_module(schemas: &GeneratedSchemas) -> Result<String, GenerateWebC
         "export type WebUsageCallPage = {usage_call_page};\n\n"
     ));
     output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebSearchPage(value: unknown): WebSearchPage;\nexport function decodeWebUsageSummary(value: unknown): WebUsageSummary;\nexport function decodeWebUsageCallPage(value: unknown, order: \"newest\" | \"oldest\"): WebUsageCallPage;\n",
+        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebSearchPage(value: unknown): WebSearchPage;\nexport function decodeWebUsageSummary(value: unknown): WebUsageSummary;\nexport function decodeWebUsageCallPage(value: unknown, order: \"newest\"): WebUsageCallPage;\n",
     );
     Ok(output)
 }

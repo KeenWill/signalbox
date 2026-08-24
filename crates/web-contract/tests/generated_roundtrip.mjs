@@ -489,11 +489,21 @@ test("generated usage decoder correlates call kind with turn presence", () => {
 
   assert.throws(
     () => decodeWebUsageCallPage({ calls: [compaction], continuation: null }, "newest"),
-    /null exactly for context compaction calls/,
+    /turn_id must be string|null exactly for context compaction calls/,
   );
   assert.throws(
     () => decodeWebUsageCallPage({ calls: [ordinary], continuation: null }, "newest"),
-    /null exactly for context compaction calls/,
+    /turn_id must be string|null exactly for context compaction calls/,
+  );
+});
+
+test("generated usage decoder rejects omitted turns for turn-scoped calls", () => {
+  const ordinary = usageCall();
+  delete ordinary.turn_id;
+
+  assert.throws(
+    () => decodeWebUsageCallPage({ calls: [ordinary], continuation: null }, "newest"),
+    /turn_id.*present|null exactly for context compaction calls/,
   );
 });
 

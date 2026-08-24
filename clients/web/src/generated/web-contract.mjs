@@ -868,20 +868,16 @@ const schemas = {
             "$ref": "#/$defs/WebUsageTokenAxes"
           },
           "turn_id": {
-            "anyOf": [
-              {
-                "$ref": "#/$defs/WebUuid"
-              },
-              {
-                "type": "null"
-              }
-            ]
+            "description": "Checked canonical UUID used for browser-visible non-session identities.",
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
           }
         },
         "required": [
           "call_kind",
           "call_id",
           "session_id",
+          "turn_id",
           "model_id",
           "provenance",
           "input_semantics",
@@ -1656,8 +1652,8 @@ export function decodeWebUsageSummary(value) {
 
 export function decodeWebUsageCallPage(value, order) {
   assertSchema(schemas.WebUsageCallPage, schemas.WebUsageCallPage, value, "usage_call_page");
-  if (order !== "newest" && order !== "oldest") {
-    fail("usage_call_page.order", "newest or oldest");
+  if (order !== "newest") {
+    fail("usage_call_page.order", "newest");
   }
   let previousKey = null;
   value.calls.forEach((call, index) => {
@@ -1669,7 +1665,7 @@ export function decodeWebUsageCallPage(value, order) {
       false,
     );
     const isCompaction = call.call_kind === "context_compaction";
-    if (isCompaction !== (call.turn_id === null)) {
+    if (!Object.hasOwn(call, "turn_id") || isCompaction !== (call.turn_id === null)) {
       fail(
         `usage_call_page.calls[${index}].turn_id`,
         "null exactly for context compaction calls",
@@ -1680,10 +1676,10 @@ export function decodeWebUsageCallPage(value, order) {
       const comparison = key.recordedAt === previousKey.recordedAt
         ? key.callId < previousKey.callId ? -1 : key.callId > previousKey.callId ? 1 : 0
         : key.recordedAt < previousKey.recordedAt ? -1 : 1;
-      if ((order === "newest" && comparison >= 0) || (order === "oldest" && comparison <= 0)) {
+      if (comparison >= 0) {
         fail(
           `usage_call_page.calls[${index}]`,
-          `strictly ${order === "newest" ? "descending" : "ascending"} by call key`,
+          "strictly descending by call key",
         );
       }
     }

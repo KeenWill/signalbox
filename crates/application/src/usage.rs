@@ -308,8 +308,6 @@ impl UsageCallPageLimit {
 pub enum UsageCallOrder {
     /// Newest terminal evidence first.
     NewestFirst,
-    /// Oldest terminal evidence first.
-    OldestFirst,
 }
 
 /// Strict detail-page keyset boundary.

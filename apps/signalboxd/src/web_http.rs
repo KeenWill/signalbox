@@ -637,7 +637,6 @@ async fn usage_calls(
     );
     let order = match query.order.as_str() {
         "newest" => Some(UsageCallOrder::NewestFirst),
-        "oldest" => Some(UsageCallOrder::OldestFirst),
         _ => None,
     };
     let limit = query
@@ -2055,7 +2054,7 @@ mod tests {
     #[tokio::test]
     async fn representable_usage_filters_are_parsed_before_projection_availability_is_reported() {
         let request = Request::get(
-            "/api/usage/calls?from_micros=0&to_micros=1777777777123456&provenance=estimated&call_kind=approval_judge&order=oldest&max_items=100",
+            "/api/usage/calls?from_micros=0&to_micros=1777777777123456&provenance=estimated&call_kind=approval_judge&order=newest&max_items=100",
         )
         .header(header::HOST, "localhost")
         .body(Body::empty())
@@ -2075,7 +2074,7 @@ mod tests {
     #[tokio::test]
     async fn usage_filters_reject_timestamps_outside_persistence_range() {
         let request = Request::get(
-            "/api/usage/calls?to_micros=9223372036854775807&order=oldest&max_items=100",
+            "/api/usage/calls?to_micros=9223372036854775807&order=newest&max_items=100",
         )
         .header(header::HOST, "localhost")
         .body(Body::empty())
