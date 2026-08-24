@@ -548,7 +548,7 @@ async fn inspect_bounded(
                     owned_pages.as_slice()
                 }
             };
-            if !object_is_pages(&pages_bytes, pages) {
+            if !object_is_pages(pages_bytes, pages) {
                 return Ok(malformed_validation());
             }
         }
