@@ -30,6 +30,14 @@ afterEach(() => {
   restoreLocalStorageDescriptor()
 })
 
+const oversizedLogicalPositionsFixture = () =>
+  Object.fromEntries(
+    Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS }, (_, index) => [
+      `session-${index}`,
+      '\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES),
+    ]),
+  )
+
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
     expect(() => decodeBrowserPreferences('not-an-object')).toThrow('preferences must be an object')
@@ -102,12 +110,7 @@ describe('browser preferences', () => {
     vi.stubGlobal('localStorage', { setItem })
     const oversized = {
       ...defaultBrowserPreferences,
-      lastLogicalPositions: Object.fromEntries(
-        Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS }, (_, index) => [
-          `session-${index}`,
-          '\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES),
-        ]),
-      ),
+      lastLogicalPositions: oversizedLogicalPositionsFixture(),
     }
 
     expect(serializeBrowserPreferences(oversized)).toBeNull()
@@ -182,6 +185,22 @@ describe('browser preferences', () => {
       decodeBrowserPreferences({
         ...defaultBrowserPreferences,
         keyOverrides: { command: 'é'.repeat(MAX_KEY_OVERRIDE_VALUE_BYTES) },
+      }),
+    ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
+  })
+
+  it('rejects key-override IDs with unordered plain-object key semantics', () => {
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        keyOverrides: { 1: 'Shift+K' },
+      }),
+    ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        keyOverrides: JSON.parse('{"__proto__":"Shift+K"}'),
       }),
     ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
   })

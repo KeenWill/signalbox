@@ -456,6 +456,20 @@ impl TerminalChildTurn {
         }
     }
 
+    /// Seals a reconciliation-required child as a failed result whose provider
+    /// outcome cannot be made available to its waiting parent.
+    pub const fn from_reconciliation_required(
+        value: &crate::ReconciliationRequiredModelCallTurn,
+    ) -> Self {
+        Self {
+            session: value.session(),
+            turn: value.turn(),
+            kind: TerminalChildTurnKind::Failed,
+            reason: DelegationOutcomeReason::ChildResultUnavailable,
+            result_digest: None,
+        }
+    }
+
     /// Seals cancellation from the exact cancelled-turn commit candidate.
     /// Unlike an accepted-input scheduling projection, this evidence may name
     /// any turn origin, including a delegated task.
@@ -912,6 +926,14 @@ impl DelegationOutcome {
     /// Derives a failed delivered outcome from a failed child turn.
     pub fn from_failed_child(value: &crate::FailedModelCallTurn) -> Self {
         Self::failed_child(TerminalChildTurn::from_failed(value))
+    }
+
+    /// Derives an unavailable failed result from a child whose ambiguous model
+    /// call required terminal reconciliation.
+    pub fn from_reconciliation_required_child(
+        value: &crate::ReconciliationRequiredModelCallTurn,
+    ) -> Self {
+        Self::failed_child(TerminalChildTurn::from_reconciliation_required(value))
     }
 
     /// Derives a failed delivered outcome from a refused child turn.

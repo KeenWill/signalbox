@@ -30,7 +30,7 @@ import {
   productTransport,
 } from './product'
 import { SettingsSurface } from './SettingsSurface'
-import { selectApp, store, useAppDispatch, useAppSelector } from './state'
+import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
   attention: {
@@ -401,6 +401,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   )
 
   useEffect(() => {
+    if (store.getState().app.overlay === 'help') dispatch(actions.overlaySet(null))
+  }, [dispatch])
+
+  useEffect(() => {
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
@@ -408,7 +412,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useEffect(() => {
     document.title = `${surfaceCopy[surface].title} · Signalbox`
     return () => {
-      document.title = 'Signalbox scenarios'
+      document.title = 'Signalbox'
     }
   }, [surface])
 
