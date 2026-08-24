@@ -14,7 +14,7 @@ import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
 import { ProductApp } from './ProductApp'
 import { type ProductRouteId, productRoutes, readProductSessionState } from './product'
-import { store } from './state'
+import { selectApp, store } from './state'
 import './app.css'
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> })
@@ -69,6 +69,10 @@ declare module '@tanstack/react-router' {
 
 const root = document.getElementById('root')
 if (!root) throw new Error('Missing web application root')
+
+const initialPresentation = selectApp(store.getState())
+document.documentElement.dataset.theme = initialPresentation.theme
+document.documentElement.dataset.density = initialPresentation.density
 
 createRoot(root).render(
   <StrictMode>

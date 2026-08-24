@@ -1,5 +1,5 @@
 import { expect, type Page, test } from '@playwright/test'
-import bootstrapFixture from '../src/generated/web-contract-bootstrap.json' with { type: 'json' }
+import { webContractBootstrapFixture } from '../src/product.fixture'
 
 const emptySessionPage = {
   continuation: null,
@@ -10,7 +10,9 @@ const emptySessionPage = {
 } as const
 
 const useDeterministicBootstrap = async (page: Page) => {
-  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
   await page.route('**/api/sessions?**', (route) => route.fulfill({ json: emptySessionPage }))
 }
 
@@ -35,7 +37,12 @@ test('opens the product at Attention with generated-contract transport status', 
 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
-  await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  await expect(
+    page.getByText(
+      `${webContractBootstrapFixture.contract.name} · ${webContractBootstrapFixture.contract.version}`,
+    ),
+  ).toBeVisible()
+  await expect(page).toHaveTitle('Attention · Signalbox')
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
     'aria-current',
     'page',
@@ -54,15 +61,69 @@ test('navigates from Attention to Sessions with the shared semantic link', async
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('moves focus out of desktop navigation before hiding it in focus layout', async ({ page }) => {
+test('describes Settings as browser-local rather than daemon-backed', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/settings')
+
+  await expect(
+    page.getByRole('heading', { name: 'Local settings are not exposed in this slice' }),
+  ).toBeVisible()
+  await expect(page.getByText(/do not depend on a daemon read contract/)).toBeVisible()
+  await expect(page.getByRole('status')).toHaveText('Browser-local preferences')
+  await expect(page.getByText('Transport unavailable', { exact: true })).toHaveCount(0)
+  await expect(page.getByText('Incompatible daemon contract', { exact: true })).toHaveCount(0)
+  await expect(
+    page.getByText('Operational data is not exposed by this daemon contract'),
+  ).toHaveCount(0)
+  const inspector = page.getByRole('complementary', { name: 'Inspector' })
+  await expect(inspector.getByText('Browser', { exact: true })).toBeVisible()
+  await expect(inspector.getByText('Local preferences', { exact: true })).toBeVisible()
+  await expect(inspector.getByText('Daemon', { exact: true })).toHaveCount(0)
+  await expect(
+    inspector.getByText('Presentation preferences are stored locally in this browser.'),
+  ).toBeVisible()
+  await expect(inspector.getByText(/server-provided evidence/)).toHaveCount(0)
+  const settingsCopy = page.getByRole('heading', {
+    name: 'Local settings are not exposed in this slice',
+  })
+  expect((await settingsCopy.boundingBox())?.width).toBeGreaterThan(200)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('clears scenario-only help when browser history returns to the product shell', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Open keyboard help/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await page.goBack()
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/sessions$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('preserves a scenario-specific title after leaving the product shell', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
   await page.goto('/attention')
 
-  await page.getByRole('link', { name: /Sessions/ }).focus()
-  await page.keyboard.press('Shift+W')
-
-  await expect(page.getByRole('main')).toBeFocused()
+  const scenarioEntry = page.getByRole('link', { name: /Scenario studio/ })
+  await scenarioEntry.focus()
+  await page.keyboard.press('Enter')
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  await expect(page).toHaveTitle('Streaming session · Signalbox scenarios')
+  await expect(page.getByRole('listbox', { name: 'Session timeline' })).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -159,6 +220,63 @@ test('moves focus into the scenario workspace after product navigation', async (
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('returns focus to a visible desktop control after closing palette-opened navigation', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await page.getByRole('button', { name: /Open navigation/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('uses the displayed product navigation sequence', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page).toHaveTitle('Sessions · Signalbox')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('moves focus before focus layout hides product navigation', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('link', { name: /Sessions/ }).focus()
+  await page.keyboard.press('Shift+W')
+
+  await expect(page.getByRole('main')).toBeFocused()
+  await expect(page.getByRole('navigation', { name: 'Product' })).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('suspends product hotkeys while the command palette owns input', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette).toBeVisible()
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(palette).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('uses a navigation sheet on a phone viewport and unwinds it with Escape', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
@@ -174,18 +292,16 @@ test('uses a navigation sheet on a phone viewport and unwinds it with Escape', a
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('restores visible focus after desktop navigation closes', async ({ page }) => {
+test('closes phone navigation after selecting a route', async ({ page }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/attention')
 
-  const modifier = await platformModifier(page)
-  await page.keyboard.press(`${modifier}+K`)
-  await page.getByRole('button', { name: /Open navigation/ }).click()
-  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeVisible()
-  await page.keyboard.press('Escape')
-
-  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
-  await expect(page.getByRole('main')).toBeFocused()
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation' })
+  await navigation.getByRole('link', { name: /Sessions/ }).click()
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(navigation).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

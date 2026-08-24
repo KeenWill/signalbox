@@ -13,41 +13,39 @@ type WebAttentionAction = "provide_goal_need" | "decide_approval" | "reconcile_t
 
 type WebAttentionActivity = {
   readonly kind: WebAttentionActivityKind;
-  readonly unix_milliseconds: string;
+  readonly unix_microseconds: WebU64;
 };
 
 type WebAttentionActivityKind = "session" | "turn" | "goal" | "approval_judge" | "runner";
 
 type WebAttentionBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure";
 
-type WebAttentionContinuation = {
-  readonly kind: "last_activity";
-  readonly session_id: string;
-  readonly unix_microseconds: string;
-} | {
-  readonly kind: "session_identity";
-  readonly session_id: string;
-};
-
 type WebAttentionGoalBlock = {
-  readonly generation: string;
+  readonly generation: WebPositiveU64;
   readonly need_summary: string;
   readonly reason: WebAttentionBlockedReason;
 };
 
 type WebAttentionJudgeFacts = {
-  readonly actionable: string;
-  readonly completed: string;
-  readonly escalated: string;
-  readonly failed: string;
+  readonly actionable: WebU64;
+  readonly completed: WebU64;
+  readonly escalated: WebU64;
+  readonly failed: WebU64;
 };
 
 type WebAttentionSnapshot = {
-  readonly continuation?: WebAttentionContinuation | null;
-  readonly cursor: string;
+  readonly continuation: {
+  readonly kind: "last_activity";
+  readonly session_id: WebSessionId;
+  readonly unix_microseconds: WebU64;
+} | {
+  readonly kind: "session_identity";
+  readonly session_id: WebSessionId;
+} | null;
+  readonly cursor: WebU64;
   readonly sort: WebAttentionSort;
   readonly summaries: ReadonlyArray<WebAttentionSummary>;
-  readonly total: string;
+  readonly total: WebU64;
 };
 
 type WebAttentionSort = "last_activity_descending" | "session_identity_ascending";
@@ -56,16 +54,16 @@ type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" |
 
 type WebAttentionSummary = {
   readonly action?: WebAttentionAction | null;
-  readonly active_turn_count: string;
+  readonly active_turn_count: WebU64;
   readonly archived: boolean;
-  readonly current_turn_id?: string | null;
+  readonly current_turn_id: string | null;
   readonly goal_block?: WebAttentionGoalBlock | null;
   readonly judge: WebAttentionJudgeFacts;
   readonly last_activity: WebAttentionActivity;
-  readonly queued_turn_count: string;
-  readonly session_id: string;
+  readonly queued_turn_count: WebU64;
+  readonly session_id: WebSessionId;
   readonly state: WebAttentionState;
-  readonly title_summary?: string | null;
+  readonly title_summary: string | null;
   readonly title_truncated: boolean;
 };
 
@@ -87,6 +85,10 @@ type WebContractLimits = {
   readonly max_timeline_window_bytes: number;
   readonly max_timeline_window_items: number;
 };
+
+type WebPositiveU64 = string;
+
+type WebSessionId = string;
 
 type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
 
@@ -135,36 +137,47 @@ export type WebSessionTimelineDescriptor = {
   readonly first_address: WebTimelineAddress;
   readonly latest_address: WebTimelineAddress;
   readonly observed_through: WebU64;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
   readonly sizes: WebSessionTimelineSizeFacts;
   readonly work: WebSessionWorkFacts;
 };
 
 export type WebSessionTimelineWindow = {
-  readonly continuation_after?: WebTimelineAddress | null;
-  readonly continuation_before?: WebTimelineAddress | null;
+  readonly continuation_after: {
+  readonly event_sequence: WebTimelineEventSequence;
+} | null;
+  readonly continuation_before: {
+  readonly event_sequence: WebTimelineEventSequence;
+} | null;
   readonly items: ReadonlyArray<WebSessionTimelineItem>;
   readonly projected_structured_bytes: number;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
 };
 
 export type WebAttentionSnapshot = {
-  readonly continuation?: WebAttentionContinuation | null;
-  readonly cursor: string;
+  readonly continuation: {
+  readonly kind: "last_activity";
+  readonly session_id: WebSessionId;
+  readonly unix_microseconds: WebU64;
+} | {
+  readonly kind: "session_identity";
+  readonly session_id: WebSessionId;
+} | null;
+  readonly cursor: WebU64;
   readonly sort: WebAttentionSort;
   readonly summaries: ReadonlyArray<WebAttentionSummary>;
-  readonly total: string;
+  readonly total: WebU64;
 };
 
 export type WebAttentionStreamEvent = {
   readonly kind: "snapshot";
   readonly snapshot: WebAttentionSnapshot;
 } | {
-  readonly cursor: string;
+  readonly cursor: WebU64;
   readonly kind: "update";
   readonly summaries: ReadonlyArray<WebAttentionSummary>;
 } | {
-  readonly cursor: string;
+  readonly cursor: WebU64;
   readonly kind: "resync_required";
 };
 

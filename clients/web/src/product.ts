@@ -326,6 +326,36 @@ export class ProductRequestError extends Error {
   }
 }
 
+export class BootstrapContractError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'BootstrapContractError'
+  }
+}
+
+// The bootstrap contains only contract identity, capabilities, and limits. Keep a hard response
+// ceiling independent of the untrusted limits inside that response.
+export const MAX_BOOTSTRAP_RESPONSE_BYTES = 65_536
+
+const readBoundedBody = async (response: Response): Promise<string> => {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let body = ''
+  let received = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    received += value.byteLength
+    if (received > MAX_BOOTSTRAP_RESPONSE_BYTES) {
+      await reader.cancel()
+      throw new BootstrapContractError('bootstrap response exceeds the byte limit')
+    }
+    body += decoder.decode(value, { stream: true })
+  }
+  return body + decoder.decode()
+}
+
 export class SameOriginProductTransport implements ProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
     const response = await fetch('/api/bootstrap', {
@@ -334,7 +364,15 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
+    const body = await readBoundedBody(response)
+    let bootstrap: WebContractBootstrap
+    try {
+      bootstrap = decodeWebContractBootstrap(JSON.parse(body))
+    } catch (error) {
+      throw new BootstrapContractError('bootstrap response violates the web contract', {
+        cause: error,
+      })
+    }
     if (
       bootstrap.contract.name !== generatedBootstrap.contract.name ||
       bootstrap.contract.version !== generatedBootstrap.contract.version

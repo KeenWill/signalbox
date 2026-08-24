@@ -5,9 +5,11 @@ use signalbox_application::{
     AttentionChanges, AttentionContinuation, AttentionCursor, AttentionQuery, AttentionSort,
     max_attention_change_items, max_attention_snapshot_items,
 };
-use signalbox_persistence::attention::AttentionRepository;
+use signalbox_persistence::attention::{
+    AttentionCorruption, AttentionRepository, AttentionRepositoryError,
+};
 
-const FLEET_SIZE: u128 = 258;
+const FLEET_SIZE: u128 = 130;
 const FLEET_SEED: u128 = 0xa770_0000;
 
 async fn create_mixed_scale_fleet(pool: &PgPool) -> Result<(), Box<dyn Error>> {
@@ -246,6 +248,36 @@ async fn oversized_change_burst_requires_resync() -> Result<(), Box<dyn Error>> 
     let resync = resync_cursor(repository.changes_after(first.cursor).await?);
 
     assert!(resync > first.cursor);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn missing_activity_fact_fails_the_default_catalog_page_closed() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    create_attention_session(&pool, 0).await?;
+    create_attention_session(&pool, 1).await?;
+    let repository = AttentionRepository::new(pool.clone());
+    let complete = repository.snapshot(AttentionQuery::hot_page()).await?;
+    assert_eq!(complete.summaries.len(), 2);
+    assert_eq!(complete.total, 2);
+    sqlx::query("DELETE FROM session_timeline_fact WHERE session_id = $1")
+        .bind(complete.summaries[0].session.into_uuid())
+        .execute(&pool)
+        .await?;
+    let error = repository
+        .snapshot(AttentionQuery::hot_page())
+        .await
+        .expect_err("a session missing its activity fact is projection corruption, not absence");
+
+    assert!(matches!(
+        error,
+        AttentionRepositoryError::Corruption(AttentionCorruption::Missing(_))
+    ));
 
     pool.close().await;
     drop(container);

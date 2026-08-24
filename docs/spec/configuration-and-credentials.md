@@ -174,6 +174,11 @@ daemon does not emit permissive CORS headers and adds no account, login,
 bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
 listener therefore rejects non-loopback binds; any future remote deployment
 requires an explicit authentication and transport-security design first.
+Unauthenticated session descriptor and timeline reads additionally require a
+loopback `Host` authority: `localhost` or an IPv4 or IPv6 loopback address, with
+an optional port. Another authority receives a structured `403 Forbidden`
+transport error with code `non_loopback_host_rejected` before session data is
+read.
 
 `GET /api/bootstrap` describes the production browser contract. It returns the
 exact contract family `signalbox.web-http`, version `1`, the `bounded_json`,
@@ -196,7 +201,8 @@ and its durable change-journal cursor, then emits summary replacements only for
 changed session identities. One incremental read examines at most 128 journal
 records. A larger cursor gap emits `resync_required` with the current cursor and
 ends that stream; it never skips records or continues from a partial gap. The
-HTTP producer retains only the item currently being encoded and waits between
+HTTP producer retains at most one bounded 128-summary replacement batch,
+represented as no more than eight 16-summary update items, and waits between
 empty polls. An initial projection failure returns a typed HTTP error before
 streaming begins. The append-only change journal timestamps commits explicitly;
 historical creation is seeded only from the durable command claim time and never

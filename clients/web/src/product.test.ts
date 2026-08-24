@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import bootstrapFixture from './generated/web-contract-bootstrap.json' with { type: 'json' }
 import {
+  BootstrapContractError,
+  MAX_BOOTSTRAP_RESPONSE_BYTES,
   MAX_PRODUCT_HTTP_RESPONSE_BYTES,
   MAX_SESSION_PAGE_ITEMS,
   MAX_SESSION_SEARCH_BYTES,
@@ -8,6 +10,7 @@ import {
   readProductSessionState,
   SameOriginProductTransport,
 } from './product'
+import { webContractBootstrapFixture } from './product.fixture'
 
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const previousSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6c'
@@ -85,12 +88,12 @@ describe('SameOriginProductTransport', () => {
   it('decodes the Rust-authored bootstrap contract', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(JSON.stringify(bootstrapFixture))),
+      vi.fn(async () => new Response(JSON.stringify(webContractBootstrapFixture))),
     )
 
     const bootstrap = await new SameOriginProductTransport().readBootstrap()
 
-    expect(bootstrap).toEqual(bootstrapFixture)
+    expect(bootstrap).toEqual(webContractBootstrapFixture)
   })
 
   it('fails closed when the daemon returns an unknown contract shape', async () => {
@@ -100,7 +103,29 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'bootstrap.contract',
+      BootstrapContractError,
+    )
+  })
+
+  it('rejects malformed JSON as a contract failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{')),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'violates the web contract',
+    )
+  })
+
+  it('rejects a bootstrap response above the fixed byte ceiling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('x'.repeat(MAX_BOOTSTRAP_RESPONSE_BYTES + 1))),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'exceeds the byte limit',
     )
   })
 

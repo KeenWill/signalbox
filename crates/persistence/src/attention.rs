@@ -10,8 +10,16 @@ use signalbox_application::{
     max_attention_goal_summary_characters, max_attention_snapshot_items,
     max_attention_title_characters,
 };
-use signalbox_domain::{SessionId, TurnId};
+use signalbox_domain::{GoalBlockedReasonKind, SessionId, TurnId};
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
+
+use crate::{
+    mapping::{
+        GoalEventDiscriminator, dispatched_runner_state_from_str, goal_blocked_reason_from_str,
+        goal_event_kind_from_str,
+    },
+    outbox::DispatchedRunnerState,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AttentionCorruption {
@@ -88,6 +96,7 @@ impl AttentionRepository {
     ) -> Result<AttentionSnapshot, AttentionRepositoryError> {
         let mut transaction = self.read_transaction().await?;
         let cursor = current_cursor(&mut transaction).await?;
+        verify_fact_completeness(&mut transaction).await?;
         let total = count_catalog_matches(&mut transaction, &query).await?;
         let mut summaries = load_summaries(&mut transaction, None, Some(&query)).await?;
         let has_more = summaries.len() > usize::from(max_attention_snapshot_items());
@@ -119,7 +128,7 @@ impl AttentionRepository {
             return Err(AttentionCorruption::Invalid("follow cursor").into());
         }
         let rows = sqlx::query(
-            "SELECT change_sequence, session_id
+            "SELECT change_sequence, session_id, fact_kind
                FROM operator_attention_change
               WHERE change_sequence > $1
               ORDER BY change_sequence
@@ -130,6 +139,16 @@ impl AttentionRepository {
         .fetch_all(&mut *transaction)
         .await?;
         if rows.len() > usize::from(max_attention_change_items()) {
+            transaction.commit().await?;
+            return Ok(AttentionChanges::ResyncRequired { cursor: current });
+        }
+        let membership_changed = rows
+            .iter()
+            .map(|row| row.try_get::<String, _>("fact_kind"))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .any(|fact_kind| fact_kind == "session");
+        if membership_changed {
             transaction.commit().await?;
             return Ok(AttentionChanges::ResyncRequired { cursor: current });
         }
@@ -204,51 +223,34 @@ macro_rules! summary_sql {
         concat!(
             "WITH selected AS (",
             $selection,
-            r#"), latest_turn AS (
-    SELECT DISTINCT ON (lifecycle.session_id)
-           lifecycle.session_id, lifecycle.turn_id, lifecycle.state_kind,
-           lifecycle.active_phase_kind, lifecycle.terminal_disposition_kind
-      FROM turn_lifecycle AS lifecycle JOIN selected USING (session_id)
-     ORDER BY lifecycle.session_id, lifecycle.acceptance_position DESC
-), latest_goal AS (
-    SELECT DISTINCT ON (goal.session_id)
-           goal.session_id, goal.generation::text AS generation, goal.event_kind,
-           goal.blocked_reason, LEFT(goal.need, $4) AS need_summary
-      FROM goal_event AS goal JOIN selected USING (session_id)
-     ORDER BY goal.session_id, goal.event_ordinal DESC
-), judge AS (
-    SELECT call.session_id,
-           count(*) FILTER (WHERE call.state_kind <> 'terminal') AS actionable,
-           count(*) FILTER (WHERE call.terminal_disposition_kind = 'completed'
-                              AND call.recommendation_kind <> 'escalate_to_human') AS completed,
-           count(*) FILTER (WHERE call.terminal_disposition_kind = 'completed'
-                              AND call.recommendation_kind = 'escalate_to_human') AS escalated,
-           count(*) FILTER (WHERE call.state_kind = 'terminal'
-                              AND call.terminal_disposition_kind <> 'completed') AS failed
-      FROM tool_approval_judge_model_call AS call JOIN selected USING (session_id)
-     GROUP BY call.session_id
-), latest_runner AS (
-    SELECT DISTINCT ON (placement.session_id)
-           placement.session_id, placement.state_kind
-      FROM runner_session_placement_record AS placement JOIN selected USING (session_id)
-     ORDER BY placement.session_id, placement.event_ordinal DESC
-)
-SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
-       turn.active_phase_kind, turn.terminal_disposition_kind,
+            r#")
+SELECT selected.session_id, selected.attention_turn_id AS turn_id,
+       selected.attention_turn_state_kind AS turn_state,
+       selected.attention_turn_active_phase_kind AS active_phase_kind,
+       selected.attention_turn_terminal_disposition_kind AS terminal_disposition_kind,
        selected.title_summary, selected.title_truncated, selected.archived,
        selected.active_turn_count, selected.queued_turn_count,
        goal.generation, goal.event_kind AS goal_state, goal.blocked_reason, goal.need_summary,
-       COALESCE(judge.actionable, 0) AS judge_actionable,
-       COALESCE(judge.completed, 0) AS judge_completed,
-       COALESCE(judge.escalated, 0) AS judge_escalated,
-       COALESCE(judge.failed, 0) AS judge_failed,
+       selected.judge_actionable, selected.judge_completed,
+       selected.judge_escalated, selected.judge_failed,
        runner.state_kind AS runner_state,
        selected.fact_kind, selected.recorded_at
   FROM selected
-  LEFT JOIN latest_turn AS turn USING (session_id)
-  LEFT JOIN latest_goal AS goal USING (session_id)
-  LEFT JOIN judge USING (session_id)
-  LEFT JOIN latest_runner AS runner USING (session_id) "#,
+  LEFT JOIN LATERAL (
+      SELECT event.generation::text AS generation, event.event_kind,
+             event.blocked_reason, LEFT(event.need, $4) AS need_summary
+        FROM goal_event AS event
+       WHERE event.session_id = selected.session_id
+       ORDER BY event.event_ordinal DESC
+       LIMIT 1
+  ) AS goal ON true
+  LEFT JOIN LATERAL (
+      SELECT placement.state_kind
+        FROM runner_session_placement_record AS placement
+       WHERE placement.session_id = selected.session_id
+       ORDER BY placement.event_ordinal DESC
+       LIMIT 1
+  ) AS runner ON true "#,
             $ordering
         )
     };
@@ -262,17 +264,22 @@ const SELECT_IDENTITY: &str = summary_sql!(
            COALESCE(metadata.archived, false) AS archived,
            facts.active_turn_count::text AS active_turn_count,
            facts.queued_turn_count::text AS queued_turn_count,
-           activity.fact_kind, activity.recorded_at
+           facts.approval_judge_actionable_count::text AS judge_actionable,
+           facts.approval_judge_completed_count::text AS judge_completed,
+           facts.approval_judge_escalated_count::text AS judge_escalated,
+           facts.approval_judge_failed_count::text AS judge_failed,
+           facts.attention_turn_id,
+           facts.attention_turn_state_kind,
+           facts.attention_turn_active_phase_kind,
+           facts.attention_turn_terminal_disposition_kind,
+           facts.attention_activity_kind AS fact_kind,
+           facts.attention_activity_recorded_at AS recorded_at
       FROM session AS session_row
       LEFT JOIN session_metadata AS metadata USING (session_id)
       LEFT JOIN session_timeline_fact AS facts USING (session_id)
-      LEFT JOIN LATERAL (
-          SELECT change.fact_kind, change.recorded_at
-            FROM operator_attention_change AS change
-           WHERE change.session_id = session_row.session_id
-           ORDER BY change.change_sequence DESC LIMIT 1
-      ) AS activity ON true
-     WHERE ($2::uuid[] IS NOT NULL AND session_row.session_id = ANY($2))
+     WHERE ($2::uuid[] IS NOT NULL
+            AND session_row.session_id = ANY($2)
+            AND NOT COALESCE(metadata.archived, false))
         OR ($2::uuid[] IS NULL
             AND ($3::uuid IS NULL OR session_row.session_id > $3)
             AND ($6::text IS NULL
@@ -285,11 +292,17 @@ const SELECT_IDENTITY: &str = summary_sql!(
                     SELECT 1 FROM session_metadata_tag AS stored
                      WHERE stored.session_id = session_row.session_id
                        AND stored.tag = required.tag)))
+            AND $9::timestamptz IS NULL
      ORDER BY session_row.session_id LIMIT $1
     "#,
     "ORDER BY selected.session_id"
 );
 
+// The page scan is driven by the indexed activity facts so the keyset order
+// stays a bounded ordered scan; completeness against `session` (which drives
+// the count query) is enforced separately by `verify_fact_completeness`, so a
+// session whose `session_timeline_fact` row is missing fails the snapshot
+// closed instead of being silently omitted while the exact total counts it.
 const SELECT_LAST_ACTIVITY: &str = summary_sql!(
     r#"
     SELECT session_row.session_id,
@@ -298,16 +311,19 @@ const SELECT_LAST_ACTIVITY: &str = summary_sql!(
            COALESCE(metadata.archived, false) AS archived,
            facts.active_turn_count::text AS active_turn_count,
            facts.queued_turn_count::text AS queued_turn_count,
-           activity.fact_kind, activity.recorded_at
-      FROM session AS session_row
+           facts.approval_judge_actionable_count::text AS judge_actionable,
+           facts.approval_judge_completed_count::text AS judge_completed,
+           facts.approval_judge_escalated_count::text AS judge_escalated,
+           facts.approval_judge_failed_count::text AS judge_failed,
+           facts.attention_turn_id,
+           facts.attention_turn_state_kind,
+           facts.attention_turn_active_phase_kind,
+           facts.attention_turn_terminal_disposition_kind,
+           facts.attention_activity_kind AS fact_kind,
+           facts.attention_activity_recorded_at AS recorded_at
+      FROM session_timeline_fact AS facts
+      JOIN session AS session_row USING (session_id)
       LEFT JOIN session_metadata AS metadata USING (session_id)
-      LEFT JOIN session_timeline_fact AS facts USING (session_id)
-      LEFT JOIN LATERAL (
-          SELECT change.fact_kind, change.recorded_at
-            FROM operator_attention_change AS change
-           WHERE change.session_id = session_row.session_id
-           ORDER BY change.change_sequence DESC LIMIT 1
-      ) AS activity ON true
      WHERE ($6::text IS NULL
             OR strpos(COALESCE(metadata.title, ''), $6) > 0
             OR strpos(session_row.session_id::text, $6) > 0)
@@ -319,9 +335,10 @@ const SELECT_LAST_ACTIVITY: &str = summary_sql!(
                 WHERE stored.session_id = session_row.session_id
                   AND stored.tag = required.tag))
        AND ($9::timestamptz IS NULL
-            OR activity.recorded_at < $9
-            OR (activity.recorded_at = $9 AND session_row.session_id > $3))
-     ORDER BY activity.recorded_at DESC, session_row.session_id LIMIT $1
+            OR facts.attention_activity_recorded_at < $9
+            OR (facts.attention_activity_recorded_at = $9
+                AND session_row.session_id > $3))
+     ORDER BY facts.attention_activity_recorded_at DESC, session_row.session_id LIMIT $1
     "#,
     "ORDER BY selected.recorded_at DESC, selected.session_id"
 );
@@ -365,7 +382,7 @@ async fn load_summaries(
             ) => (
                 SELECT_LAST_ACTIVITY,
                 Some(session.into_uuid()),
-                Some(sqlx::types::time::OffsetDateTime::from(*recorded_at)),
+                Some(offset_date_time_from_system_time(*recorded_at)?),
             ),
             (AttentionSort::LastActivityDescending, None) => (SELECT_LAST_ACTIVITY, None, None),
             (
@@ -399,6 +416,44 @@ async fn load_summaries(
         .collect()
 }
 
+fn offset_date_time_from_system_time(
+    recorded_at: SystemTime,
+) -> Result<sqlx::types::time::OffsetDateTime, AttentionRepositoryError> {
+    let nanoseconds = recorded_at
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|_| AttentionCorruption::Invalid("catalog continuation timestamp"))?
+        .as_nanos();
+    let nanoseconds = i128::try_from(nanoseconds)
+        .map_err(|_| AttentionCorruption::Invalid("catalog continuation timestamp"))?;
+    sqlx::types::time::OffsetDateTime::from_unix_timestamp_nanos(nanoseconds)
+        .map_err(|_| AttentionCorruption::Invalid("catalog continuation timestamp").into())
+}
+
+/// Fails the coherent read closed when any durable session is missing its
+/// `session_timeline_fact` row. The activity-ordered page scan is driven by
+/// the fact table for its index, while the exact total is counted from
+/// `session`; without this probe a missing projection row would silently
+/// shrink pages while the total still counted the session. The probe is a
+/// primary-key anti-join with an immediate limit, so it costs no more than
+/// the exact count that already runs in the same transaction.
+async fn verify_fact_completeness(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> Result<(), AttentionRepositoryError> {
+    let missing = sqlx::query_scalar::<_, i32>(
+        "SELECT 1
+           FROM session
+           LEFT JOIN session_timeline_fact USING (session_id)
+          WHERE session_timeline_fact.session_id IS NULL
+          LIMIT 1",
+    )
+    .fetch_optional(&mut **transaction)
+    .await?;
+    if missing.is_some() {
+        return Err(AttentionCorruption::Missing("session activity fact").into());
+    }
+    Ok(())
+}
+
 async fn count_catalog_matches(
     transaction: &mut Transaction<'_, Postgres>,
     query: &AttentionQuery,
@@ -430,10 +485,13 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
     let turn_state = row.try_get::<Option<String>, _>("turn_state")?;
     let phase = row.try_get::<Option<String>, _>("active_phase_kind")?;
     let terminal = row.try_get::<Option<String>, _>("terminal_disposition_kind")?;
-    let goal_state = row.try_get::<Option<String>, _>("goal_state")?;
+    let goal_state = row
+        .try_get::<Option<String>, _>("goal_state")?
+        .map(|value| decode_goal_event_kind(&value))
+        .transpose()?;
     let state = classify_state(
         runner.as_deref(),
-        goal_state.as_deref(),
+        goal_state,
         turn_state.as_deref(),
         phase.as_deref(),
         terminal.as_deref(),
@@ -451,6 +509,16 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
     let recorded_at = row
         .try_get::<Option<sqlx::types::time::OffsetDateTime>, _>("recorded_at")?
         .ok_or(AttentionCorruption::Missing("activity timestamp"))?;
+    // A blocked goal's projection is validated whenever the goal is blocked,
+    // even when runner-loss precedence wins the classified state, so a
+    // corrupted blocked row fails the read closed instead of hiding behind a
+    // higher-precedence fact. It is exposed only when blocked wins.
+    let blocked_goal = decode_goal_block(row, goal_state)?;
+    let goal_block = if state == AttentionState::Blocked {
+        blocked_goal
+    } else {
+        None
+    };
     Ok(AttentionSummary {
         session: SessionId::from_uuid(row.try_get("session_id")?),
         title_summary: row.try_get("title_summary")?,
@@ -467,12 +535,12 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
             .map_err(|_| AttentionCorruption::Invalid("queued turn count"))?,
         state,
         action,
-        goal_block: decode_goal_block(row, goal_state.as_deref())?,
+        goal_block,
         judge: AttentionJudgeFacts {
-            actionable: nonnegative(row.try_get("judge_actionable")?, "judge actionable")?,
-            completed: nonnegative(row.try_get("judge_completed")?, "judge completed")?,
-            escalated: nonnegative(row.try_get("judge_escalated")?, "judge escalated")?,
-            failed: nonnegative(row.try_get("judge_failed")?, "judge failed")?,
+            actionable: parse_u64(row, "judge_actionable")?,
+            completed: parse_u64(row, "judge_completed")?,
+            escalated: parse_u64(row, "judge_escalated")?,
+            failed: parse_u64(row, "judge_failed")?,
         },
         last_activity: AttentionActivity {
             recorded_at: SystemTime::from(recorded_at),
@@ -483,29 +551,63 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
 
 fn classify_state(
     runner: Option<&str>,
-    goal: Option<&str>,
+    goal: Option<GoalEventDiscriminator>,
     turn: Option<&str>,
     phase: Option<&str>,
     terminal: Option<&str>,
 ) -> Result<AttentionState, AttentionRepositoryError> {
-    if matches!(runner, Some("runner_lost" | "runner_lost_before_pin")) {
+    // Every stored fact is validated before precedence selects a winner, so
+    // corruption in a lower-precedence fact still fails closed instead of
+    // hiding behind runner loss or a blocked goal.
+    let runner_state = runner
+        .map(|value| {
+            dispatched_runner_state_from_str(value).ok_or(AttentionCorruption::Unsupported {
+                field: "runner state",
+                value: value.to_owned(),
+            })
+        })
+        .transpose()?;
+    let turn_state = classify_turn_shape(turn, phase, terminal)?;
+    if matches!(
+        runner_state,
+        Some(DispatchedRunnerState::RunnerLost | DispatchedRunnerState::RunnerLostBeforePin)
+    ) {
         return Ok(AttentionState::RunnerLost);
     }
-    if goal == Some("blocked") {
+    if goal == Some(GoalEventDiscriminator::Blocked) {
         return Ok(AttentionState::Blocked);
     }
+    Ok(turn_state)
+}
+
+fn classify_turn_shape(
+    turn: Option<&str>,
+    phase: Option<&str>,
+    terminal: Option<&str>,
+) -> Result<AttentionState, AttentionRepositoryError> {
     match (turn, phase, terminal) {
-        (Some("active"), Some("awaiting_tool_approval"), _) => Ok(AttentionState::AwaitingApproval),
-        (Some("active"), Some("awaiting_model_call_recovery" | "awaiting_tool_recovery"), _) => {
+        (Some("active"), Some("awaiting_tool_approval"), None) => {
+            Ok(AttentionState::AwaitingApproval)
+        }
+        (Some("active"), Some("awaiting_model_call_recovery" | "awaiting_tool_recovery"), None) => {
             Ok(AttentionState::Ambiguous)
         }
-        (Some("active"), Some("awaiting_runner_recovery"), _) => Ok(AttentionState::RunnerLost),
-        (Some("active"), Some("running" | "awaiting_child"), _) => Ok(AttentionState::Active),
-        (Some("queued"), None, _) => Ok(AttentionState::Queued),
+        (Some("active"), Some("awaiting_runner_recovery"), None) => Ok(AttentionState::RunnerLost),
+        (Some("active"), Some("running" | "awaiting_child"), None) => Ok(AttentionState::Active),
+        (Some("queued"), None, None) => Ok(AttentionState::Queued),
         (Some("terminal"), None, Some("reconciliation_required")) => {
             Ok(AttentionState::AwaitingReconciliation)
         }
-        (Some("terminal"), None, Some(_)) | (None, None, None) => Ok(AttentionState::Idle),
+        (Some("terminal"), None, Some("completed" | "refused" | "failed" | "cancelled"))
+        | (None, None, None) => Ok(AttentionState::Idle),
+        (Some("terminal"), None, Some(value)) => Err(AttentionCorruption::Unsupported {
+            field: "turn terminal disposition",
+            value: value.to_owned(),
+        }
+        .into()),
+        (Some("active" | "queued"), _, Some(_)) => {
+            Err(AttentionCorruption::Invalid("nonterminal turn disposition shape").into())
+        }
         (Some(value), _, _) => Err(AttentionCorruption::Unsupported {
             field: "turn state",
             value: value.to_owned(),
@@ -517,20 +619,25 @@ fn classify_state(
 
 fn decode_goal_block(
     row: &PgRow,
-    goal_state: Option<&str>,
+    goal_state: Option<GoalEventDiscriminator>,
 ) -> Result<Option<AttentionGoalBlock>, AttentionRepositoryError> {
-    if goal_state != Some("blocked") {
+    if goal_state != Some(GoalEventDiscriminator::Blocked) {
         return Ok(None);
     }
-    let reason = match required_string(row, "blocked_reason")?.as_str() {
-        "user_input_required" => AttentionBlockedReason::UserInputRequired,
-        "external_change_required" => AttentionBlockedReason::ExternalChangeRequired,
-        "authorization_required" => AttentionBlockedReason::AuthorizationRequired,
-        "execution_failure" => AttentionBlockedReason::ExecutionFailure,
-        value => {
+    let stored_reason = required_string(row, "blocked_reason")?;
+    let reason = match goal_blocked_reason_from_str(&stored_reason) {
+        Some(GoalBlockedReasonKind::UserInputRequired) => AttentionBlockedReason::UserInputRequired,
+        Some(GoalBlockedReasonKind::ExternalChangeRequired) => {
+            AttentionBlockedReason::ExternalChangeRequired
+        }
+        Some(GoalBlockedReasonKind::AuthorizationRequired) => {
+            AttentionBlockedReason::AuthorizationRequired
+        }
+        Some(GoalBlockedReasonKind::ExecutionFailure) => AttentionBlockedReason::ExecutionFailure,
+        None => {
             return Err(AttentionCorruption::Unsupported {
                 field: "goal blocked reason",
-                value: value.to_owned(),
+                value: stored_reason,
             }
             .into());
         }
@@ -542,6 +649,16 @@ fn decode_goal_block(
         reason,
         need_summary: required_string(row, "need_summary")?,
     }))
+}
+
+fn decode_goal_event_kind(value: &str) -> Result<GoalEventDiscriminator, AttentionRepositoryError> {
+    goal_event_kind_from_str(value).ok_or_else(|| {
+        AttentionCorruption::Unsupported {
+            field: "goal event kind",
+            value: value.to_owned(),
+        }
+        .into()
+    })
 }
 
 fn decode_activity_kind(value: &str) -> Result<AttentionActivityKind, AttentionRepositoryError> {
@@ -564,6 +681,12 @@ fn required_string(row: &PgRow, field: &'static str) -> Result<String, Attention
         .ok_or_else(|| AttentionCorruption::Missing(field).into())
 }
 
+fn parse_u64(row: &PgRow, field: &'static str) -> Result<u64, AttentionRepositoryError> {
+    required_string(row, field)?
+        .parse()
+        .map_err(|_| AttentionCorruption::Invalid(field).into())
+}
+
 fn nonnegative(value: i64, field: &'static str) -> Result<u64, AttentionRepositoryError> {
     u64::try_from(value).map_err(|_| AttentionCorruption::Invalid(field).into())
 }
@@ -571,13 +694,23 @@ fn nonnegative(value: i64, field: &'static str) -> Result<u64, AttentionReposito
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn continuation_timestamp_conversion_rejects_values_outside_database_range() {
+        let beyond_offset_date_time = SystemTime::UNIX_EPOCH + Duration::from_secs(253_402_300_800);
+        let before_unix_epoch = SystemTime::UNIX_EPOCH - Duration::from_secs(1);
+
+        assert!(offset_date_time_from_system_time(beyond_offset_date_time).is_err());
+        assert!(offset_date_time_from_system_time(before_unix_epoch).is_err());
+    }
 
     #[test]
     fn state_precedence_keeps_operator_actions_explicit() {
         assert_eq!(
             classify_state(
                 Some("runner_lost"),
-                Some("blocked"),
+                Some(GoalEventDiscriminator::Blocked),
                 Some("active"),
                 Some("running"),
                 None
@@ -586,7 +719,14 @@ mod tests {
             AttentionState::RunnerLost
         );
         assert_eq!(
-            classify_state(None, Some("blocked"), Some("active"), Some("running"), None).unwrap(),
+            classify_state(
+                None,
+                Some(GoalEventDiscriminator::Blocked),
+                Some("active"),
+                Some("running"),
+                None,
+            )
+            .unwrap(),
             AttentionState::Blocked
         );
         assert_eq!(
@@ -599,6 +739,109 @@ mod tests {
             )
             .unwrap(),
             AttentionState::AwaitingApproval
+        );
+    }
+
+    #[test]
+    fn goal_event_kind_decoding_rejects_unknown_storage_values() {
+        assert!(decode_goal_event_kind("future_goal_state").is_err());
+    }
+
+    #[test]
+    fn state_classification_rejects_a_terminal_disposition_on_an_active_turn() {
+        assert_eq!(
+            classify_state(
+                None,
+                None,
+                Some("active"),
+                Some("running"),
+                Some("completed"),
+            )
+            .unwrap_err()
+            .to_string(),
+            "invalid operator attention nonterminal turn disposition shape"
+        );
+    }
+
+    #[test]
+    fn state_classification_rejects_a_terminal_disposition_on_a_queued_turn() {
+        assert_eq!(
+            classify_state(None, None, Some("queued"), None, Some("cancelled"))
+                .unwrap_err()
+                .to_string(),
+            "invalid operator attention nonterminal turn disposition shape"
+        );
+    }
+
+    #[test]
+    fn state_classification_validates_turn_facts_before_runner_loss_precedence() {
+        assert_eq!(
+            classify_state(
+                Some("runner_lost"),
+                None,
+                Some("terminal"),
+                None,
+                Some("future_disposition"),
+            )
+            .unwrap_err()
+            .to_string(),
+            "unsupported operator attention turn terminal disposition: future_disposition"
+        );
+    }
+
+    #[test]
+    fn state_classification_validates_turn_facts_before_blocked_goal_precedence() {
+        assert_eq!(
+            classify_state(
+                None,
+                Some(GoalEventDiscriminator::Blocked),
+                Some("future_turn_state"),
+                None,
+                None,
+            )
+            .unwrap_err()
+            .to_string(),
+            "unsupported operator attention turn state: future_turn_state"
+        );
+    }
+
+    #[test]
+    fn state_classification_rejects_unknown_terminal_disposition_spellings() {
+        assert_eq!(
+            classify_state(
+                None,
+                None,
+                Some("terminal"),
+                None,
+                Some("future_disposition"),
+            )
+            .unwrap_err()
+            .to_string(),
+            "unsupported operator attention turn terminal disposition: future_disposition"
+        );
+    }
+
+    #[test]
+    fn state_classification_rejects_unknown_runner_state_spellings() {
+        assert_eq!(
+            classify_state(
+                Some("future_runner_state"),
+                None,
+                Some("active"),
+                Some("running"),
+                None,
+            )
+            .unwrap_err()
+            .to_string(),
+            "unsupported operator attention runner state: future_runner_state"
+        );
+    }
+
+    #[test]
+    fn state_classification_treats_known_healthy_runner_states_as_placements() {
+        assert_eq!(
+            classify_state(Some("suspect"), None, Some("active"), Some("running"), None).unwrap(),
+            AttentionState::Active
         );
     }
 }
