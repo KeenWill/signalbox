@@ -254,6 +254,12 @@ fn structured_view_with_output_bytes(output_bytes: usize) -> ReadViewDeclaration
 }
 
 fn registry_with_view(view: ReadViewDeclaration) -> FileMediaRegistry {
+    registry_with_view_result(view).expect("fixture registry is conflict-free")
+}
+
+fn registry_with_view_result(
+    view: ReadViewDeclaration,
+) -> Result<FileMediaRegistry, signalbox_file_media_runtime::FileMediaRegistryConstructionError> {
     let provider =
         FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
     let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
@@ -279,7 +285,6 @@ fn registry_with_view(view: ReadViewDeclaration) -> FileMediaRegistry {
         FileMediaCeilings::version_one(),
         ProcessorIsolation::Available,
     )
-    .expect("fixture registry is conflict-free")
 }
 
 fn inspection_request(source: &MemorySource, declared: &str) -> InspectionRequest {
@@ -297,7 +302,7 @@ fn inspection_request(source: &MemorySource, declared: &str) -> InspectionReques
 
 fn inspect(
     registry: &FileMediaRegistry,
-    processor: &SyntheticProcessor,
+    processor: &dyn FileMediaProcessor,
     source: &MemorySource,
     declared: &str,
 ) -> Result<FileInspection, FileMediaFailure> {
@@ -307,6 +312,378 @@ fn inspect(
         source,
         &NeverCancelled,
     ))
+}
+
+#[derive(Clone, Copy)]
+enum SelectionProbe {
+    Strong,
+    Structural,
+    Malformed,
+    NoMatch,
+}
+
+#[derive(Clone, Copy)]
+enum SelectionValidation {
+    Validated,
+    Malformed,
+    EncryptedOrLocked,
+    NoMatch,
+}
+
+struct SelectionProcessor {
+    probe: SelectionProbe,
+    validation: SelectionValidation,
+}
+
+impl SelectionProcessor {
+    fn media_type(&self) -> CanonicalMediaType {
+        media_type(SYNTHETIC_MEDIA_TYPE)
+    }
+
+    fn malformed_reason(&self) -> ReasonCode {
+        ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")
+    }
+}
+
+impl FileMediaProcessor for SelectionProcessor {
+    fn probe<'a>(
+        &'a self,
+        _reader: &'a ReaderIdentity,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
+        Box::pin(async move {
+            Ok(match self.probe {
+                SelectionProbe::Strong => ProcessorProbeOutput::Candidate {
+                    media_type: String::from(SYNTHETIC_MEDIA_TYPE),
+                    strength: ProbeStrength::Strong,
+                },
+                SelectionProbe::Structural => ProcessorProbeOutput::Candidate {
+                    media_type: String::from(SYNTHETIC_MEDIA_TYPE),
+                    strength: ProbeStrength::StructuralCandidate,
+                },
+                SelectionProbe::Malformed => ProcessorProbeOutput::RecognizedMalformed {
+                    media_type: String::from(SYNTHETIC_MEDIA_TYPE),
+                    reason_code: String::from(MALFORMED_REASON),
+                },
+                SelectionProbe::NoMatch => ProcessorProbeOutput::NoMatch,
+            })
+        })
+    }
+
+    fn validate<'a>(
+        &'a self,
+        _reader: &'a ReaderIdentity,
+        request: FileMediaProviderValidationRequest,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
+        Box::pin(async move {
+            Ok(match self.validation {
+                SelectionValidation::Validated => ProcessorValidationOutput::Validated {
+                    media_type: request.media_type.to_string(),
+                    evidence: request.evidence,
+                    metadata_json: String::from(r#"{"synthetic":true}"#),
+                },
+                SelectionValidation::Malformed => ProcessorValidationOutput::Malformed {
+                    media_type: request.media_type.to_string(),
+                    reason_code: String::from(MALFORMED_REASON),
+                },
+                SelectionValidation::EncryptedOrLocked => {
+                    ProcessorValidationOutput::EncryptedOrLocked {
+                        media_type: request.media_type.to_string(),
+                    }
+                }
+                SelectionValidation::NoMatch => ProcessorValidationOutput::NoMatch,
+            })
+        })
+    }
+
+    fn read<'a>(
+        &'a self,
+        _reader: &'a ReaderIdentity,
+        _request: FileMediaProviderReadRequest,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
+        Box::pin(async { Err(ProcessorFailure::Failed.into()) })
+    }
+}
+
+fn selection_registry(
+    owned_media_type: &str,
+    streaming_text_fallback: StreamingTextFallback,
+) -> FileMediaRegistry {
+    selection_registry_with_ceilings(
+        owned_media_type,
+        streaming_text_fallback,
+        FileMediaCeilings::version_one(),
+    )
+}
+
+fn selection_registry_with_ceilings(
+    owned_media_type: &str,
+    streaming_text_fallback: StreamingTextFallback,
+    ceilings: FileMediaCeilings,
+) -> FileMediaRegistry {
+    let provider =
+        FileReaderProviderName::try_new("selection").expect("fixture provider name is valid");
+    let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
+        provider: provider.clone(),
+        reader: FileReaderName::try_new("fixture").expect("fixture reader name is valid"),
+        revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
+        media_types: vec![media_type(owned_media_type)],
+        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        views: vec![text_view()],
+        reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
+        streaming_text_fallback,
+    })
+    .expect("fixture reader declaration is valid");
+    let declaration = FileMediaProviderDeclaration::try_new(provider, vec![reader])
+        .expect("fixture provider owns its reader");
+    FileMediaRegistry::try_new(vec![declaration], ceilings, ProcessorIsolation::Available)
+        .expect("selection fixture registry is valid")
+}
+
+fn selection_inspection(
+    probe: SelectionProbe,
+    validation: SelectionValidation,
+    registry_media_type: &str,
+    declared_media_type: &str,
+    streaming_text_fallback: StreamingTextFallback,
+) -> Result<FileInspection, FileMediaFailure> {
+    let source = MemorySource::synthetic();
+    let registry = selection_registry(registry_media_type, streaming_text_fallback);
+    let processor = SelectionProcessor { probe, validation };
+    inspect(&registry, &processor, &source, declared_media_type)
+}
+
+fn selection_inspection_with_processor(
+    processor: &SelectionProcessor,
+    registry_media_type: &str,
+    declared_media_type: &str,
+    streaming_text_fallback: StreamingTextFallback,
+) -> Result<FileInspection, FileMediaFailure> {
+    let source = MemorySource::synthetic();
+    let registry = selection_registry(registry_media_type, streaming_text_fallback);
+    inspect(&registry, processor, &source, declared_media_type)
+}
+
+fn validated_evidence(inspection: FileInspection) -> ValidationEvidence {
+    let FileInspection::Validated(validated) = inspection else {
+        panic!("fixture must produce a validated inspection");
+    };
+    validated.validation()
+}
+
+#[test]
+fn structural_candidate_precedes_declared_candidate() {
+    let inspection = selection_inspection(
+        SelectionProbe::Structural,
+        SelectionValidation::Validated,
+        SYNTHETIC_MEDIA_TYPE,
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+    )
+    .expect("structural candidate validates");
+
+    assert_eq!(
+        validated_evidence(inspection),
+        ValidationEvidence::StructuralValidation
+    );
+}
+
+#[test]
+fn declared_candidate_follows_probe_miss() {
+    let inspection = selection_inspection(
+        SelectionProbe::NoMatch,
+        SelectionValidation::Validated,
+        SYNTHETIC_MEDIA_TYPE,
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+    )
+    .expect("declared candidate validates");
+
+    assert_eq!(
+        validated_evidence(inspection),
+        ValidationEvidence::DeclaredCandidateStructurallyValidated
+    );
+}
+
+#[test]
+fn streaming_text_fallback_follows_probe_and_declaration_miss() {
+    let inspection = selection_inspection(
+        SelectionProbe::NoMatch,
+        SelectionValidation::Validated,
+        "text/plain",
+        "unknown",
+        StreamingTextFallback::Enabled,
+    )
+    .expect("streaming text fallback validates");
+
+    assert_eq!(
+        validated_evidence(inspection),
+        ValidationEvidence::StreamingTextValidation
+    );
+}
+
+#[test]
+fn oversized_streaming_text_fallback_becomes_unknown_before_validation() {
+    let source = MemorySource::synthetic();
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 1;
+    let registry =
+        selection_registry_with_ceilings("text/plain", StreamingTextFallback::Enabled, ceilings);
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::NoMatch,
+        validation: SelectionValidation::Validated,
+    };
+
+    let outcome = inspect(&registry, &processor, &source, "unknown")
+        .expect("oversized streaming fallback becomes unknown");
+
+    let FileInspection::Unknown { .. } = outcome else {
+        panic!("oversized streaming fallback must produce unknown inspection");
+    };
+}
+
+#[test]
+fn probe_recognized_malformed_is_terminal() {
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::Malformed,
+        validation: SelectionValidation::Validated,
+    };
+    let expected_media_type = processor.media_type();
+    let expected_reason = processor.malformed_reason();
+    let outcome = selection_inspection_with_processor(
+        &processor,
+        SYNTHETIC_MEDIA_TYPE,
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+    )
+    .expect("recognized malformed probe is terminal");
+
+    let FileInspection::Malformed {
+        media_type: detected_media_type,
+        reason_code,
+        ..
+    } = outcome
+    else {
+        panic!("recognized malformed probe must produce malformed inspection");
+    };
+    assert_eq!(detected_media_type, expected_media_type);
+    assert_eq!(reason_code, expected_reason);
+}
+
+#[test]
+fn validation_malformed_is_terminal_for_strong_evidence() {
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::Strong,
+        validation: SelectionValidation::Malformed,
+    };
+    let expected_media_type = processor.media_type();
+    let expected_reason = processor.malformed_reason();
+    let outcome = selection_inspection_with_processor(
+        &processor,
+        SYNTHETIC_MEDIA_TYPE,
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+    )
+    .expect("malformed strong validation is terminal");
+
+    let FileInspection::Malformed {
+        media_type: detected_media_type,
+        reason_code,
+        ..
+    } = outcome
+    else {
+        panic!("malformed strong validation must produce malformed inspection");
+    };
+    assert_eq!(detected_media_type, expected_media_type);
+    assert_eq!(reason_code, expected_reason);
+}
+
+#[test]
+fn validation_encrypted_is_terminal_for_strong_evidence() {
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::Strong,
+        validation: SelectionValidation::EncryptedOrLocked,
+    };
+    let expected_media_type = processor.media_type();
+    let outcome = selection_inspection_with_processor(
+        &processor,
+        SYNTHETIC_MEDIA_TYPE,
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+    )
+    .expect("encrypted strong validation is terminal");
+
+    let FileInspection::EncryptedOrLocked {
+        media_type: detected_media_type,
+        ..
+    } = outcome
+    else {
+        panic!("encrypted strong validation must produce encrypted inspection");
+    };
+    assert_eq!(detected_media_type, expected_media_type);
+}
+
+#[test]
+fn strong_validation_no_match_is_processor_failure() {
+    let outcome = selection_inspection(
+        SelectionProbe::Strong,
+        SelectionValidation::NoMatch,
+        SYNTHETIC_MEDIA_TYPE,
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+    );
+
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+#[test]
+fn structural_validation_no_match_is_processor_failure() {
+    let outcome = selection_inspection(
+        SelectionProbe::Structural,
+        SelectionValidation::NoMatch,
+        SYNTHETIC_MEDIA_TYPE,
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+    );
+
+    assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+#[test]
+fn declared_validation_no_match_becomes_unknown() {
+    let outcome = selection_inspection(
+        SelectionProbe::NoMatch,
+        SelectionValidation::NoMatch,
+        SYNTHETIC_MEDIA_TYPE,
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+    )
+    .expect("declared validation miss becomes unknown");
+
+    let FileInspection::Unknown { .. } = outcome else {
+        panic!("declared validation miss must produce unknown inspection");
+    };
+}
+
+#[test]
+fn streaming_text_validation_no_match_becomes_unknown() {
+    let outcome = selection_inspection(
+        SelectionProbe::NoMatch,
+        SelectionValidation::NoMatch,
+        "text/plain",
+        "unknown",
+        StreamingTextFallback::Enabled,
+    )
+    .expect("streaming text validation miss becomes unknown");
+
+    let FileInspection::Unknown { .. } = outcome else {
+        panic!("streaming text validation miss must produce unknown inspection");
+    };
 }
 
 /// INV-075: byte signatures, not caller metadata, select one reader.
@@ -474,6 +851,21 @@ fn inv076_canonicalized_structured_bytes_are_rechecked() {
     let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
 
     assert_eq!(outcome, Err(FileMediaFailure::ProcessorFailed));
+}
+
+#[test]
+fn structured_view_reserves_processor_frame_escaping_space() {
+    let view = structured_view_with_output_bytes(500 * 1_024 + 1);
+
+    let outcome = registry_with_view_result(view);
+
+    let Err(error) = outcome else {
+        panic!("structured view above the processor-frame allowance must be rejected");
+    };
+    assert_eq!(
+        error,
+        signalbox_file_media_runtime::FileMediaRegistryConstructionError::ViewBounds
+    );
 }
 
 /// INV-076: contradictory continuation facts from a processor do not enter the
