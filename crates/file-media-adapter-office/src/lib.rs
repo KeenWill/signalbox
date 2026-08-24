@@ -171,7 +171,7 @@ impl FileMediaProvider for OfficeProvider {
                 });
             }
             if !inventory.kinds.contains(&kind) {
-                return Ok(malformed_validation(kind, MALFORMED_REASON));
+                return Ok(ProcessorValidationOutput::NoMatch);
             }
             validated_output(kind, request.evidence, &inventory)
                 .map_err(|_| FileMediaProviderFailure::Failed)
@@ -358,18 +358,21 @@ struct CentralInventory {
 
 #[derive(Clone, Copy, Debug)]
 enum ValidationIssue {
+    Unrecognized,
     Malformed(&'static str),
 }
 
 impl ValidationIssue {
     const fn reason(self) -> &'static str {
         match self {
+            Self::Unrecognized => MALFORMED_REASON,
             Self::Malformed(reason) => reason,
         }
     }
 
     fn validation(self, kind: OfficeKind) -> ProcessorValidationOutput {
         match self {
+            Self::Unrecognized => ProcessorValidationOutput::NoMatch,
             Self::Malformed(reason) => malformed_validation(kind, reason),
         }
     }
@@ -438,7 +441,7 @@ async fn read_central_inventory(
     let prefix_length = source_length.min(ZIP_PREFIX_BYTES);
     let prefix = read_range(source, 0, prefix_length).await?;
     if !prefix.starts_with(b"PK\x03\x04") {
-        return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
+        return Err(ValidationIssue::Unrecognized.into());
     }
     let suffix_length = source_length.min(ZIP_SUFFIX_BYTES);
     let suffix_offset = source_length - suffix_length;
@@ -3186,6 +3189,13 @@ mod tests {
         fn read_range(&self, _offset: u64, _length: NonZeroU64) -> SourceReadFuture<'_> {
             Box::pin(async { Err(SourceReadError::Unavailable) })
         }
+    }
+
+    #[test]
+    fn unrecognized_declared_candidate_returns_no_match() {
+        let result = ValidationIssue::Unrecognized.validation(OfficeKind::Docx);
+
+        assert_eq!(result, ProcessorValidationOutput::NoMatch);
     }
 
     #[test]
