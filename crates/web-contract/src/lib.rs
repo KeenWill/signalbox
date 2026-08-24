@@ -275,7 +275,7 @@ pub struct WebSessionTimelineWindow {
 
 /// Current durable state of one active turn.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebSessionLiveActiveState {
     Running {
         model_call_id: Option<String>,
@@ -307,7 +307,7 @@ pub struct WebSessionLiveActiveTurn {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebSessionLiveReconciliation {
     ModelCall {
         turn_id: String,
@@ -321,16 +321,6 @@ pub enum WebSessionLiveReconciliation {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WebSessionLiveRunnerState {
-    Unpinned,
-    Pinned,
-    RunnerLostBeforePin,
-    RunnerLost,
-    RunnerAbandoned,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub enum WebSessionLiveRunnerConnectionHealth {
     Connected,
     Suspect,
@@ -339,12 +329,28 @@ pub enum WebSessionLiveRunnerConnectionHealth {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebSessionLiveRunner {
-    pub runner_id: Option<String>,
-    pub placement_revision: WebU64,
-    pub state: WebSessionLiveRunnerState,
-    pub connection_health: Option<WebSessionLiveRunnerConnectionHealth>,
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebSessionLiveRunner {
+    Unpinned {
+        placement_revision: WebU64,
+    },
+    Pinned {
+        runner_id: String,
+        placement_revision: WebU64,
+        connection_health: WebSessionLiveRunnerConnectionHealth,
+    },
+    RunnerLostBeforePin {
+        runner_id: String,
+        placement_revision: WebU64,
+    },
+    RunnerLost {
+        runner_id: String,
+        placement_revision: WebU64,
+    },
+    RunnerAbandoned {
+        runner_id: String,
+        placement_revision: WebU64,
+    },
 }
 
 /// Bounded repeatable-read current projection for one open workspace.
@@ -363,7 +369,7 @@ pub struct WebSessionLiveSnapshot {
 
 /// Snapshot-first event stream for one open workspace.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebSessionLiveStreamEvent {
     Snapshot {
         snapshot: Box<WebSessionLiveSnapshot>,

@@ -114,6 +114,11 @@ impl ProviderTextDelta {
     pub fn text(&self) -> &str {
         &self.text
     }
+
+    /// Shares the already-redacted provider text without copying its allocation.
+    pub fn shared_text(&self) -> Arc<str> {
+        Arc::clone(&self.text)
+    }
 }
 
 /// Best-effort presentation sink for already-redacted provider text deltas.

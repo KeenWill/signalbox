@@ -794,6 +794,7 @@ const schemas = {
         "description": "Current durable state of one active turn.",
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "running",
@@ -812,6 +813,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "awaiting_model_call_recovery",
@@ -828,6 +830,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "awaiting_tool_approval",
@@ -844,6 +847,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "child_session_id": {
                 "type": "string"
@@ -864,6 +868,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "awaiting_tool_recovery",
@@ -880,6 +885,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "awaiting_runner_recovery",
@@ -920,6 +926,7 @@ const schemas = {
       "WebSessionLiveReconciliation": {
         "oneOf": [
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "model_call",
@@ -940,6 +947,7 @@ const schemas = {
             "type": "object"
           },
           {
+            "additionalProperties": false,
             "properties": {
               "kind": {
                 "const": "tool_attempt",
@@ -962,36 +970,113 @@ const schemas = {
         ]
       },
       "WebSessionLiveRunner": {
-        "additionalProperties": false,
-        "properties": {
-          "connection_health": {
-            "anyOf": [
-              {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "placement_revision": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "state": {
+                "const": "unpinned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "placement_revision"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "connection_health": {
                 "$ref": "#/$defs/WebSessionLiveRunnerConnectionHealth"
               },
-              {
-                "type": "null"
+              "placement_revision": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "runner_id": {
+                "type": "string"
+              },
+              "state": {
+                "const": "pinned",
+                "type": "string"
               }
-            ]
+            },
+            "required": [
+              "state",
+              "runner_id",
+              "placement_revision",
+              "connection_health"
+            ],
+            "type": "object"
           },
-          "placement_revision": {
-            "$ref": "#/$defs/WebU64"
+          {
+            "additionalProperties": false,
+            "properties": {
+              "placement_revision": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "runner_id": {
+                "type": "string"
+              },
+              "state": {
+                "const": "runner_lost_before_pin",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "runner_id",
+              "placement_revision"
+            ],
+            "type": "object"
           },
-          "runner_id": {
-            "type": [
-              "string",
-              "null"
-            ]
+          {
+            "additionalProperties": false,
+            "properties": {
+              "placement_revision": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "runner_id": {
+                "type": "string"
+              },
+              "state": {
+                "const": "runner_lost",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "runner_id",
+              "placement_revision"
+            ],
+            "type": "object"
           },
-          "state": {
-            "$ref": "#/$defs/WebSessionLiveRunnerState"
+          {
+            "additionalProperties": false,
+            "properties": {
+              "placement_revision": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "runner_id": {
+                "type": "string"
+              },
+              "state": {
+                "const": "runner_abandoned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "state",
+              "runner_id",
+              "placement_revision"
+            ],
+            "type": "object"
           }
-        },
-        "required": [
-          "placement_revision",
-          "state"
-        ],
-        "type": "object"
+        ]
       },
       "WebSessionLiveRunnerConnectionHealth": {
         "enum": [
@@ -999,16 +1084,6 @@ const schemas = {
           "suspect",
           "shutdown",
           "lost"
-        ],
-        "type": "string"
-      },
-      "WebSessionLiveRunnerState": {
-        "enum": [
-          "unpinned",
-          "pinned",
-          "runner_lost_before_pin",
-          "runner_lost",
-          "runner_abandoned"
         ],
         "type": "string"
       },
@@ -1124,6 +1199,7 @@ const schemas = {
     "description": "Snapshot-first event stream for one open workspace.",
     "oneOf": [
       {
+        "additionalProperties": false,
         "properties": {
           "kind": {
             "const": "snapshot",
@@ -1140,6 +1216,7 @@ const schemas = {
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "properties": {
           "address": {
             "$ref": "#/$defs/WebTimelineAddress"
@@ -1164,6 +1241,7 @@ const schemas = {
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "properties": {
           "content": {
             "type": "string"
@@ -1194,6 +1272,7 @@ const schemas = {
         "type": "object"
       },
       {
+        "additionalProperties": false,
         "properties": {
           "cursor": {
             "$ref": "#/$defs/WebU64"
