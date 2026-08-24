@@ -1649,7 +1649,7 @@ async fn swept_sessions(pool: &PgPool) -> Result<Vec<SessionId>, Box<dyn Error>>
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
     let mut sessions = Vec::new();
     loop {
-        let (page, continuation) = sweep.find_sessions().await?.into_parts();
+        let (page, _dispatch_starts, continuation) = sweep.find_sessions().await?.into_parts();
         sessions.extend(page);
         if !continuation {
             break;

@@ -4975,10 +4975,19 @@ async fn inv069_expiry_retires_a_lease_without_stopping_its_successor_goal()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for_with_lease(
         one_action_rule(Duration::ZERO)?,
-        Some(Duration::from_millis(1)),
+        Some(Duration::from_secs(1)),
     )
     .await?;
     let session = fixture.session(0);
+    let mut predecessor_activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(fixture.pool.clone()),
+    );
+    assert!(matches!(
+        predecessor_activation.execute(session).await?,
+        StartEligibleTurnOutcome::Activated(_)
+    ));
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
     let successor_turn = TurnId::from_uuid(Uuid::from_u128(0x5d_f02));
     assert_applied_goal_command(
         GoalRepository::new(fixture.pool.clone())
@@ -4998,8 +5007,6 @@ async fn inv069_expiry_retires_a_lease_without_stopping_its_successor_goal()
             )
             .await?,
     );
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
     assert!(
         fixture
             .store
@@ -5021,16 +5028,36 @@ async fn inv069_expiry_retires_a_lease_without_stopping_its_successor_goal()
     .bind(session.as_uuid())
     .fetch_one(&fixture.pool)
     .await?;
-    let mut activation = StartEligibleTurnService::new(
-        UuidV7StartEligibleTurnIdGenerator,
-        StartEligibleTurnRepository::new(fixture.pool.clone()),
+    let model_calls = PostgresModelCallRepository::new(
+        fixture.pool.clone(),
+        model_targets(),
+        model_credential_reference(),
     );
-    let activation = activation.execute(session).await?;
+    let resumed = model_calls
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(0x5d_f04)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x5d_f05)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x5d_f06)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x5d_f07)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x5d_f08)),
+                    TurnId::from_uuid(Uuid::from_u128(0x5d_f09)),
+                )
+            },
+        )
+        .await?;
 
     assert_eq!(goal.current().generation().get(), 2);
     assert_eq!(goal.current().state(), &GoalState::Pursuing);
     assert_eq!(expiration_command, None);
-    assert!(matches!(activation, StartEligibleTurnOutcome::Activated(_)));
+    assert!(matches!(
+        resumed,
+        PrepareInitialModelCallOutcome::Checkpointed(_)
+    ));
     Ok(())
 }
 

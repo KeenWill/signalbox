@@ -203,6 +203,14 @@ pub trait ActivatedTurnExecution {
         std::future::ready(Ok(()))
     }
 
+    /// Reconciles an active evidence-free turn through its first call checkpoint.
+    fn resume_dispatch_start(
+        &self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.resume_active(session)
+    }
+
     /// Reports whether a failed active-turn resume may require startup
     /// recovery rather than ordinary scheduler retry.
     ///
@@ -325,6 +333,14 @@ where
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let execution = self.execution.resume_active(session);
+        supervise_active_resume::<Execution, _>(self.fatal_signal.clone(), execution)
+    }
+
+    fn resume_dispatch_start(
+        &self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.execution.resume_dispatch_start(session);
         supervise_active_resume::<Execution, _>(self.fatal_signal.clone(), execution)
     }
 
@@ -705,6 +721,14 @@ where
         let activation = self.activation.execute_with_cloned_transaction(session);
         let execution = self.execution.clone();
         async move {
+            execution
+                .resume_dispatch_start(session)
+                .await
+                .map_err(|source| ActivatedTurnPassError::Execution {
+                    stage: TurnPassExecutionStage::ActiveTurnRecovery,
+                    turn: Execution::active_resume_failure_turn(&source),
+                    source,
+                })?;
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
                 Err(error) => {
@@ -1737,6 +1761,33 @@ where
             match turn {
                 Some(turn) => execution
                     .execute_scope(session, turn, false)
+                    .instrument(turn_work_span(session, turn))
+                    .await
+                    .map_err(
+                        |source| PostgresProviderToolLoopExecutionError::ResumeExecution {
+                            turn,
+                            source: Box::new(source),
+                        },
+                    ),
+                None => Ok(()),
+            }
+        }
+    }
+
+    fn resume_dispatch_start(
+        &self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let tool_repository = self.tool_repository.clone();
+        let execution = self.clone();
+        async move {
+            let turn = tool_repository
+                .find_dispatch_start_turn(session)
+                .await
+                .map_err(PostgresProviderToolLoopExecutionError::ResumeLookup)?;
+            match turn {
+                Some(turn) => execution
+                    .execute_scope(session, turn, true)
                     .instrument(turn_work_span(session, turn))
                     .await
                     .map_err(

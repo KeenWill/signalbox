@@ -8506,7 +8506,12 @@ pub trait EligibilitySweep {
 pub struct EligibilitySweepBatch { /* private */ }
 impl EligibilitySweepBatch {
     pub fn new(sessions: Vec<SessionId>, continuation: bool) -> Self;
-    pub fn into_parts(self) -> (Vec<SessionId>, bool);
+    pub fn with_dispatch_starts(
+        sessions: Vec<SessionId>,
+        dispatch_starts: HashSet<SessionId>,
+        continuation: bool,
+    ) -> Self;
+    pub fn into_parts(self) -> (Vec<SessionId>, HashSet<SessionId>, bool);
 }
 
 pub trait EligibilityWorkSource {
@@ -8517,7 +8522,7 @@ pub trait EligibilityWorkSource {
     fn take_pending_dispatch_start(&mut self) -> Option<SessionId>;
     fn next_pending_dispatch_start(
         &mut self,
-    ) -> impl Future<Output = SessionId> + Send;
+    ) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
 }
 
 pub trait EligibilityPass {

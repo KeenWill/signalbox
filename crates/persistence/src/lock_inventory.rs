@@ -128,6 +128,13 @@ pub(crate) const EXPIRED_DISPATCH_START_LEASE: &str = "SELECT EXISTS (
                      WHERE lifecycle.session_id = lease.session_id
                        AND lifecycle.state_kind = 'active'
                        AND goal.goal_generation = 1
+                       AND NOT EXISTS (
+                            SELECT 1
+                              FROM goal_turn AS successor_goal
+                             WHERE successor_goal.session_id = lease.session_id
+                               AND successor_goal.goal_generation >
+                                   goal.goal_generation
+                       )
                 )
            )
     )";

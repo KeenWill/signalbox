@@ -749,13 +749,23 @@ impl PostgresRepoWatchDispatchStore {
                     "pending dispatch start lease has an invalid repository",
                 )
             })?;
-            if !self
+            match self
                 .process_next_expired_start_lease(&repository, &mut next_command_id)
-                .await?
+                .await
             {
-                return Err(RepoWatchDispatchRepositoryError::Corruption(
-                    "selected pending dispatch start lease disappeared",
-                ));
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(RepoWatchDispatchRepositoryError::Corruption(
+                        "selected pending dispatch start lease disappeared",
+                    ));
+                }
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    crate::goal::GoalRepositoryError::Corruption(_),
+                ))
+                | Err(RepoWatchDispatchRepositoryError::Corruption(
+                    "expired dispatch start lease references a missing session",
+                )) => {}
+                Err(error) => return Err(error),
             }
         }
     }

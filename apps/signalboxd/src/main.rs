@@ -626,6 +626,7 @@ enum RuntimeTaskExit {
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
+    RepositoryWatchLeaseExpiry(Result<(), RepoWatchDispatchRepositoryError>),
     WebHttp(Result<(), WebHttpRuntimeError>),
     TurnLiveness,
 }
@@ -668,6 +669,7 @@ enum RuntimeTaskDefect {
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
     RepositoryWatchCompletedBeforeShutdown,
+    RepositoryWatchLeaseExpiryCompletedBeforeShutdown,
     WebHttpCompletedBeforeShutdown,
     TurnLivenessCompletedBeforeShutdown,
     TaskCancelled,
@@ -684,6 +686,9 @@ impl RuntimeTaskDefect {
             Self::RunnerCompletedBeforeShutdown => "runner_runtime_completed_before_shutdown",
             Self::RepositoryWatchCompletedBeforeShutdown => {
                 "repository_watch_completed_before_shutdown"
+            }
+            Self::RepositoryWatchLeaseExpiryCompletedBeforeShutdown => {
+                "repository_watch_lease_expiry_completed_before_shutdown"
             }
             Self::WebHttpCompletedBeforeShutdown => "web_http_completed_before_shutdown",
             Self::TurnLivenessCompletedBeforeShutdown => "turn_liveness_completed_before_shutdown",
@@ -944,6 +949,15 @@ fn report_repository_watch_runtime_defect(error: &RepositoryWatchRuntimeError) {
     );
 }
 
+fn report_repository_watch_lease_expiry_failure(error: &RepoWatchDispatchRepositoryError) {
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        failure_class = ?OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+        cause = %error,
+        "global repository-watch lease expiry reconciliation failed"
+    );
+}
+
 fn report_web_http_runtime_failure(error: &WebHttpRuntimeError) {
     tracing::error!(
         phase = ?RuntimePhase::Runtime,
@@ -982,6 +996,7 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
+        | Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Ok(())))
         | Ok(RuntimeTaskExit::WebHttp(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
@@ -995,6 +1010,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         Ok(RuntimeTaskExit::RepositoryWatch(Err(error))) => {
             report_repository_watch_runtime_defect(&error);
             RuntimeTaskCompletion::Defect
+        }
+        Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Err(error))) => {
+            report_repository_watch_lease_expiry_failure(&error);
+            RuntimeTaskCompletion::Failed
         }
         Ok(RuntimeTaskExit::WebHttp(Err(error))) => {
             report_web_http_runtime_failure(&error);
@@ -1775,6 +1794,10 @@ async fn run_hub(
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
+    let (
+        repository_watch_lease_expiry_shutdown,
+        mut repository_watch_lease_expiry_shutdown_receiver,
+    ) = watch::channel(false);
     let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
@@ -1805,6 +1828,33 @@ async fn run_hub(
             )
         });
     }
+    let repository_watch_lease_expiry_store = repository_watch_store.clone();
+    runtime_tasks.spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let outcome = loop {
+            select! {
+                changed = repository_watch_lease_expiry_shutdown_receiver.changed() => {
+                    if changed.is_err()
+                        || *repository_watch_lease_expiry_shutdown_receiver.borrow_and_update()
+                    {
+                        break Ok(());
+                    }
+                }
+                _ = ticker.tick() => {
+                    if let Err(error) = repository_watch_lease_expiry_store
+                        .process_pending_expired_start_leases(|| {
+                            DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+                        })
+                        .await
+                    {
+                        break Err(error);
+                    }
+                }
+            }
+        };
+        RuntimeTaskExit::RepositoryWatchLeaseExpiry(outcome)
+    });
     runtime_tasks.spawn(async move {
         turn_liveness_runtime
             .run(turn_liveness_shutdown_receiver)
@@ -1858,6 +1908,16 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Err(error)))) => {
+                        report_repository_watch_lease_expiry_failure(&error);
+                        RuntimeStopCause::RuntimeFailed
+                    }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Ok(())))) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::RepositoryWatchLeaseExpiryCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::WebHttp(Err(error)))) => {
                         report_web_http_runtime_failure(&error);
                         RuntimeStopCause::RuntimeFailed
@@ -1901,6 +1961,7 @@ async fn run_hub(
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
             let _ = repository_watch_shutdown.send(true);
+            let _ = repository_watch_lease_expiry_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
             let _ = turn_liveness_shutdown.send(true);
             let (drain, components_clean) = drain_runtime_tasks(

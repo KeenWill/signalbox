@@ -2182,7 +2182,7 @@ impl RepositoryWatchTask {
     }
 
     async fn process_cutoffs(&self) -> Result<(), RepositoryWatchAttemptError> {
-        const MAX_EXPIRED_START_LEASES_PER_ATTEMPT: usize = 16;
+        const MAX_EXPIRED_START_LEASES_PER_ATTEMPT: usize = 32;
         for _ in 0..MAX_EXPIRED_START_LEASES_PER_ATTEMPT {
             match self
                 .dispatch_store

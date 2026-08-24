@@ -144,6 +144,12 @@ enum EligibilityHintPriority {
     DispatchStart,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingEligibilityHint {
+    priority: EligibilityHintPriority,
+    queued_channel_tokens: u8,
+}
+
 /// Finds sessions whose durable storage shape requires an authoritative pass.
 pub trait EligibilitySweep {
     /// Adapter-specific infrastructure failure.
@@ -159,21 +165,36 @@ pub trait EligibilitySweep {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EligibilitySweepBatch {
     sessions: Vec<SessionId>,
+    dispatch_starts: HashSet<SessionId>,
     continuation: bool,
 }
 
 impl EligibilitySweepBatch {
-    /// Builds a reconciliation batch.
+    /// Builds an ordinary reconciliation batch.
     pub fn new(sessions: Vec<SessionId>, continuation: bool) -> Self {
         Self {
             sessions,
+            dispatch_starts: HashSet::new(),
             continuation,
         }
     }
 
-    /// Splits the hints from the continuation marker.
-    pub fn into_parts(self) -> (Vec<SessionId>, bool) {
-        (self.sessions, self.continuation)
+    /// Builds a reconciliation batch carrying durable dispatch-start priority.
+    pub fn with_dispatch_starts(
+        sessions: Vec<SessionId>,
+        dispatch_starts: HashSet<SessionId>,
+        continuation: bool,
+    ) -> Self {
+        Self {
+            sessions,
+            dispatch_starts,
+            continuation,
+        }
+    }
+
+    /// Splits the hints, durable priorities, and continuation marker.
+    pub fn into_parts(self) -> (Vec<SessionId>, HashSet<SessionId>, bool) {
+        (self.sessions, self.dispatch_starts, self.continuation)
     }
 }
 
@@ -199,7 +220,9 @@ pub trait EligibilityWorkSource {
     }
 
     /// Waits for one buffered dispatch-start hint without consuming ordinary work.
-    fn next_pending_dispatch_start(&mut self) -> impl Future<Output = SessionId> + Send {
+    fn next_pending_dispatch_start(
+        &mut self,
+    ) -> impl Future<Output = Result<SessionId, Self::Error>> + Send {
         std::future::pending()
     }
 }
@@ -467,13 +490,13 @@ where
 #[derive(Clone, Debug)]
 pub struct InProcessEligibilityNudge {
     sender: mpsc::Sender<SessionId>,
-    pending: Arc<Mutex<HashMap<SessionId, EligibilityHintPriority>>>,
+    pending: Arc<Mutex<HashMap<SessionId, PendingEligibilityHint>>>,
     dispatch_start_available: Arc<Notify>,
     dispatch_start_backlog_capacity: usize,
 }
 
 impl InProcessEligibilityNudge {
-    fn pending_hints(&self) -> MutexGuard<'_, HashMap<SessionId, EligibilityHintPriority>> {
+    fn pending_hints(&self) -> MutexGuard<'_, HashMap<SessionId, PendingEligibilityHint>> {
         match self.pending.lock() {
             Ok(pending) => pending,
             Err(poisoned) => poisoned.into_inner(),
@@ -487,8 +510,8 @@ impl InProcessEligibilityNudge {
     ) -> EligibilityNudgeOutcome {
         let mut pending = self.pending_hints();
         if let Some(existing) = pending.get_mut(&session) {
-            if *existing < priority {
-                *existing = priority;
+            if existing.priority < priority {
+                existing.priority = priority;
             }
             drop(pending);
             if priority == EligibilityHintPriority::DispatchStart {
@@ -498,11 +521,22 @@ impl InProcessEligibilityNudge {
         }
         let pending_dispatch_starts = pending
             .values()
-            .filter(|pending_priority| **pending_priority == EligibilityHintPriority::DispatchStart)
+            .filter(|pending_hint| pending_hint.priority == EligibilityHintPriority::DispatchStart)
             .count();
-        pending.insert(session, priority);
+        pending.insert(
+            session,
+            PendingEligibilityHint {
+                priority,
+                queued_channel_tokens: 0,
+            },
+        );
         let outcome = match self.sender.try_send(session) {
-            Ok(()) => EligibilityNudgeOutcome::Enqueued,
+            Ok(()) => {
+                if let Some(pending_hint) = pending.get_mut(&session) {
+                    pending_hint.queued_channel_tokens = 1;
+                }
+                EligibilityNudgeOutcome::Enqueued
+            }
             Err(TrySendError::Full(_))
                 if priority == EligibilityHintPriority::DispatchStart
                     && pending_dispatch_starts < self.dispatch_start_backlog_capacity =>
@@ -555,7 +589,7 @@ where
     Sweep: EligibilitySweep,
 {
     nudges: mpsc::Receiver<SessionId>,
-    pending_nudges: Arc<Mutex<HashMap<SessionId, EligibilityHintPriority>>>,
+    pending_nudges: Arc<Mutex<HashMap<SessionId, PendingEligibilityHint>>>,
     dispatch_start_available: Arc<Notify>,
     returned_priority: Option<(SessionId, EligibilityHintPriority)>,
     sweep: Option<Sweep>,
@@ -563,6 +597,7 @@ where
     sweep_interval: Interval,
     initial_sweep_due: bool,
     pending_sweep_hints: VecDeque<SessionId>,
+    pending_sweep_dispatch_starts: HashSet<SessionId>,
     nudge_preferred_over_sweep_hint: bool,
     sweep_preferred_over_pending_hint: bool,
     sweep_continuation_due: bool,
@@ -652,6 +687,7 @@ where
             sweep_interval: interval,
             initial_sweep_due: true,
             pending_sweep_hints: VecDeque::new(),
+            pending_sweep_dispatch_starts: HashSet::new(),
             nudge_preferred_over_sweep_hint: true,
             sweep_preferred_over_pending_hint: false,
             sweep_continuation_due: false,
@@ -659,7 +695,11 @@ where
         (nudge, source)
     }
 
-    fn extend_pending_sweep_hints(&mut self, hints: impl IntoIterator<Item = SessionId>) {
+    fn extend_pending_sweep_hints(
+        &mut self,
+        hints: impl IntoIterator<Item = SessionId>,
+        dispatch_starts: HashSet<SessionId>,
+    ) {
         let mut pending = self
             .pending_sweep_hints
             .iter()
@@ -670,6 +710,17 @@ where
                 self.pending_sweep_hints.push_back(session);
             }
         }
+        self.pending_sweep_dispatch_starts.extend(dispatch_starts);
+    }
+
+    fn take_pending_sweep_dispatch_start(&mut self) -> Option<SessionId> {
+        let position = self
+            .pending_sweep_hints
+            .iter()
+            .position(|session| self.pending_sweep_dispatch_starts.contains(session))?;
+        let session = self.pending_sweep_hints.remove(position)?;
+        self.pending_sweep_dispatch_starts.remove(&session);
+        Some(session)
     }
 
     fn take_nudge(&mut self, session: SessionId) -> Option<SessionId> {
@@ -678,7 +729,7 @@ where
                 Ok(pending) => pending,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            pending.remove(&session)?
+            pending.remove(&session)?.priority
         };
         self.returned_priority = Some((session, priority));
         Some(session)
@@ -697,7 +748,14 @@ where
             }
         }
         self.nudge_preferred_over_sweep_hint = true;
-        self.pending_sweep_hints.pop_front()
+        let session = self.pending_sweep_hints.pop_front()?;
+        let priority = if self.pending_sweep_dispatch_starts.remove(&session) {
+            EligibilityHintPriority::DispatchStart
+        } else {
+            EligibilityHintPriority::Ordinary
+        };
+        self.returned_priority = Some((session, priority));
+        Some(session)
     }
 }
 
@@ -722,8 +780,8 @@ where
         let (sweep, result) = completion;
         self.sweep_in_progress = None;
         self.sweep = Some(sweep);
-        let (hints, continuation) = result?.into_parts();
-        self.extend_pending_sweep_hints(hints);
+        let (hints, dispatch_starts, continuation) = result?.into_parts();
+        self.extend_pending_sweep_hints(hints, dispatch_starts);
         self.sweep_continuation_due = continuation;
         self.sweep_preferred_over_pending_hint = false;
         Ok(())
@@ -738,6 +796,10 @@ where
 
     async fn next(&mut self) -> Result<SessionId, Self::Error> {
         'source: loop {
+            if let Some(session) = self.take_pending_dispatch_start() {
+                self.returned_priority = Some((session, EligibilityHintPriority::DispatchStart));
+                return Ok(session);
+            }
             if self.initial_sweep_due {
                 self.initial_sweep_due = false;
                 self.start_sweep();
@@ -824,25 +886,60 @@ where
     }
 
     fn take_pending_dispatch_start(&mut self) -> Option<SessionId> {
-        let mut pending = match self.pending_nudges.lock() {
-            Ok(pending) => pending,
-            Err(poisoned) => poisoned.into_inner(),
+        let session = {
+            let mut pending = match self.pending_nudges.lock() {
+                Ok(pending) => pending,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            let session = pending.iter().find_map(|(session, hint)| {
+                (hint.priority == EligibilityHintPriority::DispatchStart).then_some(*session)
+            });
+            if let Some(session) = session {
+                if pending
+                    .get(&session)
+                    .is_some_and(|hint| hint.queued_channel_tokens > 0)
+                {
+                    if let Some(hint) = pending.get_mut(&session) {
+                        hint.priority = EligibilityHintPriority::Ordinary;
+                    }
+                } else {
+                    pending.remove(&session);
+                }
+            }
+            session
         };
-        let session = pending.iter().find_map(|(session, priority)| {
-            (*priority == EligibilityHintPriority::DispatchStart).then_some(*session)
-        })?;
-        pending.remove(&session);
-        Some(session)
+        session.or_else(|| self.take_pending_sweep_dispatch_start())
     }
 
-    async fn next_pending_dispatch_start(&mut self) -> SessionId {
+    async fn next_pending_dispatch_start(&mut self) -> Result<SessionId, Self::Error> {
         let dispatch_start_available = Arc::clone(&self.dispatch_start_available);
         loop {
             let notified = dispatch_start_available.notified();
             if let Some(session) = self.take_pending_dispatch_start() {
-                return session;
+                return Ok(session);
             }
-            notified.await;
+            if self.initial_sweep_due {
+                self.initial_sweep_due = false;
+                self.start_sweep();
+            }
+            if self.sweep_continuation_due && self.sweep_in_progress.is_none() {
+                self.sweep_continuation_due = false;
+                self.start_sweep();
+            }
+            if let Some(sweep_in_progress) = self.sweep_in_progress.as_mut() {
+                let completion = select! {
+                    completion = sweep_in_progress => Some(completion),
+                    () = notified => None,
+                };
+                if let Some(completion) = completion {
+                    self.complete_sweep(completion)?;
+                }
+                continue;
+            }
+            select! {
+                _ = self.sweep_interval.tick() => self.start_sweep(),
+                () = notified => {}
+            }
         }
     }
 }
@@ -1081,6 +1178,13 @@ where
 
                         () = &mut shutdown => break 'scheduler,
                         session = &mut pending_dispatch_start => {
+                            let session = match session {
+                                Ok(session) => session,
+                                Err(error) => {
+                                    log_sweep_failure(&error);
+                                    break None;
+                                }
+                            };
                             deferred_dispatch_start_retries.remove(&session);
                             enqueue_pending_hint(
                                 session,
@@ -1837,6 +1941,21 @@ mod tests {
         );
         assert_eq!(source.next().await, Ok(selected));
         assert!(source.take_returned_dispatch_start(selected));
+    }
+
+    #[tokio::test]
+    async fn inv069_out_of_band_priority_take_preserves_its_channel_token() {
+        let selected = session(34);
+        let (nudge, mut source) =
+            InProcessEligibilityWorkSource::new(FakeSweep::returning([Ok(vec![])]));
+
+        assert_eq!(
+            nudge.nudge_dispatch_start(selected),
+            EligibilityNudgeOutcome::Enqueued
+        );
+        assert_eq!(source.take_pending_dispatch_start(), Some(selected));
+        assert_eq!(source.next().await, Ok(selected));
+        assert!(!source.take_returned_dispatch_start(selected));
     }
 
     #[tokio::test]
@@ -2814,7 +2933,7 @@ mod tests {
             timeout(Duration::from_secs(1), source.next_pending_dispatch_start())
                 .await
                 .expect("the priority-only notification wakes promptly"),
-            dispatch_start
+            Ok(dispatch_start)
         );
         assert_eq!(source.next().await, Ok(ordinary));
     }
@@ -2841,11 +2960,12 @@ mod tests {
             pending().await
         }
 
-        async fn next_pending_dispatch_start(&mut self) -> SessionId {
-            self.dispatch_starts
+        async fn next_pending_dispatch_start(&mut self) -> Result<SessionId, Self::Error> {
+            Ok(self
+                .dispatch_starts
                 .recv()
                 .await
-                .expect("the test retains its dispatch-start sender")
+                .expect("the test retains its dispatch-start sender"))
         }
     }
 
