@@ -5,6 +5,7 @@ import { Link, useNavigate } from '@tanstack/react-router'
 import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  BootstrapContractError,
   type ProductRouteId,
   productRoutes,
   productSurfaceCacheLabel,
@@ -448,6 +449,10 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   )
 
   useEffect(() => {
+    if (store.getState().app.overlay === 'help') dispatch(actions.overlaySet(null))
+  }, [dispatch])
+
+  useEffect(() => {
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
@@ -514,11 +519,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           <p>{copy.question}</p>
           <span
             className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+            role="status"
+            aria-live="polite"
           >
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
               : bootstrap.isError
-                ? 'Transport unavailable'
+                ? bootstrap.error instanceof BootstrapContractError
+                  ? 'Incompatible daemon contract'
+                  : 'Transport unavailable'
                 : 'Checking contract…'}
           </span>
           {bootstrap.isError && (

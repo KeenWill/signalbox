@@ -107,7 +107,9 @@ const productNavigationCommands = [
 
 export const productCommandRegistry = [
   ...productNavigationCommands,
-  ...commandRegistry.filter((command) => command.id !== 'navigation.open'),
+  ...commandRegistry.filter(
+    (command) => command.id !== 'navigation.open' && !command.id.startsWith('navigate.'),
+  ),
 ]
 export type ProductCommandId = (typeof productCommandRegistry)[number]['id']
 

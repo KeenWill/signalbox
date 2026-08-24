@@ -1,20 +1,5 @@
 import { expect, type Page, test } from '@playwright/test'
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    bounded_session_timeline: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: {
-    max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 262_144,
-    max_timeline_window_items: 256,
-    max_timeline_window_bytes: 65_536,
-  },
-} as const
+import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 
 const sessionWorkspaceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
@@ -554,5 +539,69 @@ test('honors the saved navigation width below 1080px', async ({ page }) => {
 
   await expect(page.locator('.product-navigation-pane')).toHaveCSS('width', '320px')
   await expect(page.getByText('320px', { exact: true })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('uses the displayed product navigation sequence', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page).toHaveTitle('Sessions · Signalbox')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('suspends product hotkeys while the command palette owns input', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette).toBeVisible()
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(palette).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('clears scenario-only help when browser history returns to the product shell', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  await page.getByRole('link', { name: /Scenario studio/ }).click()
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Open keyboard help/ }).click()
+  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  await page.goBack()
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/sessions$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('closes phone navigation after selecting a route', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation' })
+  await navigation.getByRole('link', { name: /Sessions/ }).click()
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(navigation).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })

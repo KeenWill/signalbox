@@ -1,28 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  BootstrapContractError,
   MAX_BOOTSTRAP_RESPONSE_BYTES,
   productRoutes,
   productSurfaceCacheLabel,
   productSurfaceStates,
   SameOriginProductTransport,
 } from './product'
+import { webContractBootstrapFixture } from './product.fixture'
 import { hasValidSessionTimelineContract } from './session-timeline/model'
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    bounded_session_timeline: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: {
-    max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 262_144,
-    max_timeline_window_items: 256,
-    max_timeline_window_bytes: 65_536,
-  },
-} as const
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -30,12 +16,12 @@ describe('SameOriginProductTransport', () => {
   it('decodes the Rust-authored bootstrap contract', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(JSON.stringify(bootstrapFixture))),
+      vi.fn(async () => new Response(JSON.stringify(webContractBootstrapFixture))),
     )
 
     const bootstrap = await new SameOriginProductTransport().readBootstrap()
 
-    expect(bootstrap).toEqual(bootstrapFixture)
+    expect(bootstrap).toEqual(webContractBootstrapFixture)
   })
 
   it('fails closed when the daemon returns an unknown contract shape', async () => {
@@ -45,7 +31,29 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'bootstrap.contract',
+      BootstrapContractError,
+    )
+  })
+
+  it('rejects malformed JSON as a contract failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{')),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'violates the web contract',
+    )
+  })
+
+  it('rejects a bootstrap response above the fixed byte ceiling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('x'.repeat(MAX_BOOTSTRAP_RESPONSE_BYTES + 1))),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'exceeds the byte limit',
     )
   })
 
@@ -57,41 +65,30 @@ describe('SameOriginProductTransport', () => {
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
   })
-
-  it('rejects an oversized bootstrap before JSON decoding', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(' '.repeat(MAX_BOOTSTRAP_RESPONSE_BYTES + 1))),
-    )
-
-    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'encoded byte ceiling',
-    )
-  })
 })
 
 describe('product surface availability', () => {
   it('requires bounded JSON before enabling timeline reads', () => {
     expect(
       hasValidSessionTimelineContract({
-        ...bootstrapFixture,
-        capabilities: { ...bootstrapFixture.capabilities, bounded_json: false },
+        ...webContractBootstrapFixture,
+        capabilities: { ...webContractBootstrapFixture.capabilities, bounded_json: false },
       }),
     ).toBe(false)
   })
 
   it('rejects timeline capability with unusable semantic limits', () => {
-    expect(hasValidSessionTimelineContract(bootstrapFixture)).toBe(true)
+    expect(hasValidSessionTimelineContract(webContractBootstrapFixture)).toBe(true)
     expect(
       hasValidSessionTimelineContract({
-        ...bootstrapFixture,
-        limits: { ...bootstrapFixture.limits, max_timeline_window_items: 0 },
+        ...webContractBootstrapFixture,
+        limits: { ...webContractBootstrapFixture.limits, max_timeline_window_items: 0 },
       }),
     ).toBe(false)
     expect(
       hasValidSessionTimelineContract({
-        ...bootstrapFixture,
-        limits: { ...bootstrapFixture.limits, max_timeline_window_bytes: 65_537 },
+        ...webContractBootstrapFixture,
+        limits: { ...webContractBootstrapFixture.limits, max_timeline_window_bytes: 65_537 },
       }),
     ).toBe(false)
   })

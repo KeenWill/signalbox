@@ -1,79 +1,119 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  BROWSER_PREFERENCES_KEY,
   decodeBrowserPreferences,
   defaultBrowserPreferences,
   loadBrowserPreferences,
+  MAX_BROWSER_PREFERENCES_BYTES,
+  MAX_LOGICAL_POSITION_KEY_BYTES,
+  MAX_LOGICAL_POSITION_VALUE_BYTES,
   MAX_SAVED_LOGICAL_POSITIONS,
   saveBrowserPreferences,
+  serializeBrowserPreferences,
 } from './preferences'
 
-afterEach(() => vi.unstubAllGlobals())
+const originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+
+const restoreLocalStorageDescriptor = () => {
+  if (originalLocalStorageDescriptor) {
+    Object.defineProperty(globalThis, 'localStorage', originalLocalStorageDescriptor)
+  } else {
+    Reflect.deleteProperty(globalThis, 'localStorage')
+  }
+}
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  restoreLocalStorageDescriptor()
+})
+
+const oversizedLogicalPositionsFixture = () =>
+  Object.fromEntries(
+    Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS }, (_, index) => [
+      `session-${index}`,
+      '\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES),
+    ]),
+  )
 
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
-    expect(decodeBrowserPreferences('not-an-object')).toEqual(defaultBrowserPreferences)
+    expect(() => decodeBrowserPreferences('not-an-object')).toThrow('preferences must be an object')
   })
 
-  it('clamps pane sizes and rejects unknown closed variants', () => {
+  it('rejects partial and unknown preference schemas atomically', () => {
     const stored = {
       layout: 'dashboard',
       density: 'comfortable',
       paneSizes: { navigation: -50, inspector: 50_000 },
-      remoteMedia: 'allow',
+      remoteMedia: 'proxy',
     } as const
-    const decoded = decodeBrowserPreferences(stored)
-
-    expect(decoded.layout).toBe(defaultBrowserPreferences.layout)
-    expect(decoded.density).toBe(stored.density)
-    expect(decoded.paneSizes).toEqual({ navigation: 160, inspector: 480 })
-    expect(decoded).not.toHaveProperty('remoteMedia')
+    expect(() => decodeBrowserPreferences(stored)).toThrow(
+      'preferences must match the current exact schema',
+    )
   })
 
-  it('bounds retained positions and ignores unsupported key overrides', () => {
+  it('bounds retained logical positions', () => {
     const lastLogicalPositions = Object.fromEntries(
       Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [
         `session-${index}`,
         String(index + 1),
       ]),
     )
+
     const decoded = decodeBrowserPreferences({
+      ...defaultBrowserPreferences,
       lastLogicalPositions,
-      keyOverrides: { 'selection.next': 'n' },
     })
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
-    expect(decoded).not.toHaveProperty('keyOverrides')
   })
 
-  it('discards malformed saved logical positions', () => {
-    const decoded = decodeBrowserPreferences({
-      lastLogicalPositions: {
-        valid: '42',
-        zero: '0',
-        malformed: 'not-a-position',
-        overflow: '18446744073709551616',
-      },
+  it('loads defaults atomically when the stored schema is partial', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) =>
+        key === BROWSER_PREFERENCES_KEY ? JSON.stringify({ layout: 'focus' }) : null,
     })
 
-    expect(decoded.lastLogicalPositions).toEqual({ valid: '42' })
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
   })
 
-  it('falls back to in-memory preferences when browser storage is unavailable', () => {
+  it('rejects an oversized stored payload before parsing it', () => {
     vi.stubGlobal('localStorage', {
-      getItem: vi.fn(() => {
+      getItem: (key: string) =>
+        key === BROWSER_PREFERENCES_KEY ? 'x'.repeat(MAX_BROWSER_PREFERENCES_BYTES + 1) : null,
+    })
+
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+  })
+
+  it('does not persist preferences above the serialized byte ceiling', () => {
+    const setItem = vi.fn()
+    vi.stubGlobal('localStorage', { setItem })
+    const oversized = {
+      ...defaultBrowserPreferences,
+      lastLogicalPositions: oversizedLogicalPositionsFixture(),
+    }
+
+    expect(serializeBrowserPreferences(oversized)).toBeNull()
+    saveBrowserPreferences(oversized)
+    expect(setItem).not.toHaveBeenCalled()
+  })
+
+  it('treats browser storage access failures as optional', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
         throw new DOMException('blocked', 'SecurityError')
-      }),
-      setItem: vi.fn(() => {
+      },
+      setItem: () => {
         throw new DOMException('full', 'QuotaExceededError')
-      }),
+      },
     })
 
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
     expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
 
-  it('falls back when acquiring browser storage throws', () => {
-    const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  it('guards access to a throwing browser storage getter', () => {
     Object.defineProperty(globalThis, 'localStorage', {
       configurable: true,
       get: () => {
@@ -81,12 +121,73 @@ describe('browser preferences', () => {
       },
     })
 
-    try {
-      expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
-      expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
-    } finally {
-      if (original === undefined) Reflect.deleteProperty(globalThis, 'localStorage')
-      else Object.defineProperty(globalThis, 'localStorage', original)
-    }
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+    expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
+  })
+
+  it('rejects logical-position keys and values above their UTF-8 byte ceilings', () => {
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES)]: '7' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { session: 'é'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES) },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+  })
+
+  it('rejects malformed saved logical positions atomically', () => {
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { malformed: 'not-a-position' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { zero: '0' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { overflow: '18446744073709551616' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+  })
+
+  it('accepts logical-position keys exactly at their byte ceiling', () => {
+    const decoded = decodeBrowserPreferences({
+      ...defaultBrowserPreferences,
+      lastLogicalPositions: {
+        ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES / 2)]: '18446744073709551615',
+      },
+    })
+
+    expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(1)
+  })
+
+  it('rejects logical-position keys with unordered plain-object key semantics', () => {
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { 1: '7' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: JSON.parse('{"__proto__":"7"}'),
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
   })
 })
