@@ -105,48 +105,6 @@ const schemas = {
         ],
         "type": "string"
       },
-      "WebAttentionContinuation": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "last_activity",
-                "type": "string"
-              },
-              "session_id": {
-                "$ref": "#/$defs/WebSessionId"
-              },
-              "unix_microseconds": {
-                "$ref": "#/$defs/WebU64"
-              }
-            },
-            "required": [
-              "kind",
-              "unix_microseconds",
-              "session_id"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "session_identity",
-                "type": "string"
-              },
-              "session_id": {
-                "$ref": "#/$defs/WebSessionId"
-              }
-            },
-            "required": [
-              "kind",
-              "session_id"
-            ],
-            "type": "object"
-          }
-        ]
-      },
       "WebAttentionGoalBlock": {
         "additionalProperties": false,
         "properties": {
@@ -312,7 +270,46 @@ const schemas = {
       "continuation": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebAttentionContinuation"
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "last_activity",
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "$ref": "#/$defs/WebSessionId"
+                  },
+                  "unix_microseconds": {
+                    "$ref": "#/$defs/WebU64"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unix_microseconds",
+                  "session_id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "session_identity",
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "$ref": "#/$defs/WebSessionId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "session_id"
+                ],
+                "type": "object"
+              }
+            ]
           },
           {
             "type": "null"
@@ -329,7 +326,7 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebAttentionSummary"
         },
-        "maxItems": 32,
+        "maxItems": 16,
         "type": "array"
       },
       "total": {
@@ -340,7 +337,8 @@ const schemas = {
       "cursor",
       "total",
       "sort",
-      "summaries"
+      "summaries",
+      "continuation"
     ],
     "title": "WebAttentionSnapshot",
     "type": "object"
@@ -390,48 +388,6 @@ const schemas = {
           "execution_failure"
         ],
         "type": "string"
-      },
-      "WebAttentionContinuation": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "last_activity",
-                "type": "string"
-              },
-              "session_id": {
-                "$ref": "#/$defs/WebSessionId"
-              },
-              "unix_microseconds": {
-                "$ref": "#/$defs/WebU64"
-              }
-            },
-            "required": [
-              "kind",
-              "unix_microseconds",
-              "session_id"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "session_identity",
-                "type": "string"
-              },
-              "session_id": {
-                "$ref": "#/$defs/WebSessionId"
-              }
-            },
-            "required": [
-              "kind",
-              "session_id"
-            ],
-            "type": "object"
-          }
-        ]
       },
       "WebAttentionGoalBlock": {
         "additionalProperties": false,
@@ -485,7 +441,46 @@ const schemas = {
           "continuation": {
             "anyOf": [
               {
-                "$ref": "#/$defs/WebAttentionContinuation"
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "last_activity",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "$ref": "#/$defs/WebSessionId"
+                      },
+                      "unix_microseconds": {
+                        "$ref": "#/$defs/WebU64"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "unix_microseconds",
+                      "session_id"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "session_identity",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "$ref": "#/$defs/WebSessionId"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "session_id"
+                    ],
+                    "type": "object"
+                  }
+                ]
               },
               {
                 "type": "null"
@@ -502,7 +497,7 @@ const schemas = {
             "items": {
               "$ref": "#/$defs/WebAttentionSummary"
             },
-            "maxItems": 32,
+            "maxItems": 16,
             "type": "array"
           },
           "total": {
@@ -513,7 +508,8 @@ const schemas = {
           "cursor",
           "total",
           "sort",
-          "summaries"
+          "summaries",
+          "continuation"
         ],
         "type": "object"
       },

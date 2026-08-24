@@ -522,8 +522,10 @@ pub struct WebAttentionSnapshot {
     pub cursor: WebU64,
     pub total: WebU64,
     pub sort: WebAttentionSort,
-    #[schemars(length(max = 32))]
+    #[schemars(length(max = 16))]
     pub summaries: Vec<WebAttentionSummary>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation: Option<WebAttentionContinuation>,
 }
 
@@ -590,10 +592,15 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
     make_property_nullable(&mut window_schema, "continuation_before")?;
     make_property_nullable(&mut window_schema, "continuation_after")?;
-    let attention_snapshot_schema =
+    let mut attention_snapshot_schema =
         canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
-    let attention_event_schema =
+    make_property_nullable(&mut attention_snapshot_schema, "continuation")?;
+    let mut attention_event_schema =
         canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value());
+    make_pointer_nullable(
+        &mut attention_event_schema,
+        "/$defs/WebAttentionSnapshot/properties/continuation",
+    )?;
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -646,8 +653,15 @@ fn make_property_nullable(
     schema: &mut Value,
     property_name: &str,
 ) -> Result<(), GenerateWebContractError> {
+    make_pointer_nullable(schema, &format!("/properties/{property_name}"))
+}
+
+fn make_pointer_nullable(
+    schema: &mut Value,
+    pointer: &str,
+) -> Result<(), GenerateWebContractError> {
     let property = schema
-        .pointer_mut(&format!("/properties/{property_name}"))
+        .pointer_mut(pointer)
         .ok_or(GenerateWebContractError::UnsupportedSchema)?;
     let concrete = property.take();
     *property = json!({ "anyOf": [concrete, { "type": "null" }] });

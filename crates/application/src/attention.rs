@@ -6,7 +6,7 @@ use signalbox_domain::{SessionId, TurnId};
 
 /// Maximum session summaries returned by one coherent fleet snapshot.
 // numeric-bound: ceiling - caps one fleet response's rows and projected bytes
-const ATTENTION_SNAPSHOT_ITEM_CEILING: u16 = 32;
+const ATTENTION_SNAPSHOT_ITEM_CEILING: u16 = 16;
 /// Maximum Unicode scalar values retained from blocked-goal need text.
 // numeric-bound: ceiling - prevents one fleet summary from carrying unbounded goal text
 const ATTENTION_GOAL_SUMMARY_CHARACTER_CEILING: u16 = 128;
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn fleet_snapshot_bound_is_pinned() {
-        assert_eq!(max_attention_snapshot_items(), 32);
+        assert_eq!(max_attention_snapshot_items(), 16);
     }
 
     #[test]

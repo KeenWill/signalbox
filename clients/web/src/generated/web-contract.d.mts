@@ -20,15 +20,6 @@ type WebAttentionActivityKind = "session" | "turn" | "goal" | "approval_judge" |
 
 type WebAttentionBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure";
 
-type WebAttentionContinuation = {
-  readonly kind: "last_activity";
-  readonly session_id: WebSessionId;
-  readonly unix_microseconds: WebU64;
-} | {
-  readonly kind: "session_identity";
-  readonly session_id: WebSessionId;
-};
-
 type WebAttentionGoalBlock = {
   readonly generation: WebU64;
   readonly need_summary: string;
@@ -43,7 +34,14 @@ type WebAttentionJudgeFacts = {
 };
 
 type WebAttentionSnapshot = {
-  readonly continuation?: WebAttentionContinuation | null;
+  readonly continuation: {
+  readonly kind: "last_activity";
+  readonly session_id: WebSessionId;
+  readonly unix_microseconds: WebU64;
+} | {
+  readonly kind: "session_identity";
+  readonly session_id: WebSessionId;
+} | null;
   readonly cursor: WebU64;
   readonly sort: WebAttentionSort;
   readonly summaries: ReadonlyArray<WebAttentionSummary>;
@@ -157,7 +155,14 @@ export type WebSessionTimelineWindow = {
 };
 
 export type WebAttentionSnapshot = {
-  readonly continuation?: WebAttentionContinuation | null;
+  readonly continuation: {
+  readonly kind: "last_activity";
+  readonly session_id: WebSessionId;
+  readonly unix_microseconds: WebU64;
+} | {
+  readonly kind: "session_identity";
+  readonly session_id: WebSessionId;
+} | null;
   readonly cursor: WebU64;
   readonly sort: WebAttentionSort;
   readonly summaries: ReadonlyArray<WebAttentionSummary>;

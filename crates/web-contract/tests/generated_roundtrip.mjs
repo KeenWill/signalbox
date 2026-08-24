@@ -267,6 +267,16 @@ test("generated attention decoder rejects unknown envelope fields", () => {
   );
 });
 
+test("generated attention decoder requires the continuation field", () => {
+  const { continuation: _continuation, ...withoutContinuation } = attentionSnapshot();
+
+  assert.throws(
+    () => decodeWebAttentionSnapshot(withoutContinuation),
+    /continuation must be present/,
+  );
+  assert.equal(decodeWebAttentionSnapshot(attentionSnapshot()).continuation, null);
+});
+
 test("generated attention decoder enforces collection and scalar bounds", () => {
   assert.throws(
     () =>
@@ -275,7 +285,7 @@ test("generated attention decoder enforces collection and scalar bounds", () => 
           summaries: Array.from({ length: 33 }, () => attentionSummary()),
         }),
       ),
-    /at most 32 items/,
+    /at most 16 items/,
   );
   assert.throws(
     () =>
