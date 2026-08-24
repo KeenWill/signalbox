@@ -164,6 +164,15 @@ impl VideoFixture {
             .with_reported_byte_length(u64::try_from(METADATA_BYTES + 8).unwrap_or(u64::MAX))
     }
 
+    pub fn mp4_with_incomplete_header_at_actual_eof() -> Self {
+        let mut bytes = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
+        let filler_payload_bytes = METADATA_BYTES - bytes.len() - 8 - 4;
+        bytes.extend_from_slice(&mp4_box(*b"free", &vec![0_u8; filler_payload_bytes]));
+        bytes.extend_from_slice(&12_u32.to_be_bytes());
+        Self::new(FixtureKind::Mp4, bytes)
+            .with_reported_byte_length(u64::try_from(METADATA_BYTES + 1).unwrap_or(u64::MAX))
+    }
+
     pub fn large_mp4_with_partial_extended_header_at_metadata_cutoff() -> Self {
         let mut bytes = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
         let filler_payload_bytes = METADATA_BYTES - bytes.len() - 8 - 12;
@@ -283,6 +292,84 @@ impl VideoFixture {
         )
     }
 
+    pub fn high_profile_avc_mp4() -> Self {
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(
+                MP4_TIMESCALE,
+                MP4_DURATION_UNITS,
+                visual_sample_entry(
+                    *b"avc1",
+                    *b"avcC",
+                    &[1, 100, 0, 31, 0xff, 0xe0, 0, 0xfc, 0xf8, 0xf8, 0],
+                ),
+            ),
+        )
+    }
+
+    pub fn mp4_with_unknown_movie_duration() -> Self {
+        Self::new(FixtureKind::Mp4, mp4_bytes(MP4_TIMESCALE, u32::MAX))
+    }
+
+    pub fn mp4_with_zero_sized_nested_configuration() -> Self {
+        let mut payload = vec![0_u8; 78];
+        payload[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        payload[24..26].copy_from_slice(&1920_u16.to_be_bytes());
+        payload[26..28].copy_from_slice(&1080_u16.to_be_bytes());
+        payload[40..42].copy_from_slice(&1_u16.to_be_bytes());
+        payload[74..76].copy_from_slice(&24_u16.to_be_bytes());
+        payload[76..78].copy_from_slice(&u16::MAX.to_be_bytes());
+        payload.extend_from_slice(&0_u32.to_be_bytes());
+        payload.extend_from_slice(b"avcC");
+        payload.extend_from_slice(&[1, 100, 0, 31, 0xff, 0xe0, 0]);
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(
+                MP4_TIMESCALE,
+                MP4_DURATION_UNITS,
+                mp4_box(*b"avc1", &payload),
+            ),
+        )
+    }
+
+    pub fn webm_with_webvtt_track() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let video_track = webm_track_entry(ContentProtection::Clear);
+        let track_number = ebml_element(&[0xd7], &[2]);
+        let track_type = ebml_element(&[0x83], &[0x11]);
+        let codec_id = ebml_element(&[0x86], b"D_WEBVTT/SUBTITLES");
+        let subtitle_track = ebml_element(&[0xae], &[track_number, track_type, codec_id].concat());
+        let tracks = ebml_element(
+            &[0x16, 0x54, 0xae, 0x6b],
+            &[video_track, subtitle_track].concat(),
+        );
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
+    }
+
+    pub fn mp4_video_track_without_mandatory_headers() -> Self {
+        let mut movie_header = vec![0_u8; 100];
+        movie_header[12..16].copy_from_slice(&MP4_TIMESCALE.to_be_bytes());
+        movie_header[16..20].copy_from_slice(&MP4_DURATION_UNITS.to_be_bytes());
+        let mut handler = vec![0_u8; 24];
+        handler[8..12].copy_from_slice(b"vide");
+        let mut sample_description = vec![0_u8; 8];
+        sample_description[4..8].copy_from_slice(&1_u32.to_be_bytes());
+        sample_description.extend_from_slice(&avc1_sample_entry());
+        let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
+        let media_information = mp4_box(*b"minf", &sample_table);
+        let media = mp4_box(
+            *b"mdia",
+            &[mp4_box(*b"hdlr", &handler), media_information].concat(),
+        );
+        let track = mp4_box(*b"trak", &media);
+        let movie = mp4_box(
+            *b"moov",
+            &[mp4_box(*b"mvhd", &movie_header), track].concat(),
+        );
+        Self::new(FixtureKind::Mp4, [ftyp(), movie].concat())
+    }
+
     pub fn mp4_media_with_duplicate_handlers() -> Self {
         let mut movie_header = vec![0_u8; 100];
         movie_header[12..16].copy_from_slice(&MP4_TIMESCALE.to_be_bytes());
@@ -348,11 +435,13 @@ impl VideoFixture {
         sample_description.extend_from_slice(&avc1_sample_entry());
         let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
         let media_information = mp4_box(*b"minf", &sample_table);
+        let media_header = mp4_box(*b"mdhd", &[0_u8; 24]);
         let media = mp4_box(
             *b"mdia",
-            &[mp4_box(*b"hdlr", &handler), media_information].concat(),
+            &[media_header, mp4_box(*b"hdlr", &handler), media_information].concat(),
         );
-        let track = mp4_box(*b"trak", &media);
+        let track_header = mp4_box(*b"tkhd", &[0_u8; 84]);
+        let track = mp4_box(*b"trak", &[track_header, media].concat());
         let mut fragment_duration = vec![0_u8; 8];
         fragment_duration[4..8].copy_from_slice(&MP4_DURATION_UNITS.to_be_bytes());
         let movie_extends = mp4_box(*b"mvex", &mp4_box(*b"mehd", &fragment_duration));
@@ -388,11 +477,13 @@ impl VideoFixture {
         sample_description.extend_from_slice(&avc1_sample_entry());
         let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
         let media_information = mp4_box(*b"minf", &sample_table);
+        let media_header = mp4_box(*b"mdhd", &[0_u8; 24]);
         let media = mp4_box(
             *b"mdia",
-            &[mp4_box(*b"hdlr", &handler), media_information].concat(),
+            &[media_header, mp4_box(*b"hdlr", &handler), media_information].concat(),
         );
-        let track = mp4_box(*b"trak", &media);
+        let track_header = mp4_box(*b"tkhd", &[0_u8; 84]);
+        let track = mp4_box(*b"trak", &[track_header, media].concat());
         let movie_extends = mp4_box(*b"mvex", &[]);
         let movie = mp4_box(
             *b"moov",
@@ -582,11 +673,13 @@ fn mp4_bytes_with_sample_entry(timescale: u32, duration: u32, sample_entry: Vec<
     sample_description.extend_from_slice(&sample_entry);
     let sample_table = mp4_box(*b"stbl", &mp4_box(*b"stsd", &sample_description));
     let media_information = mp4_box(*b"minf", &sample_table);
+    let media_header = mp4_box(*b"mdhd", &[0_u8; 24]);
     let media = mp4_box(
         *b"mdia",
-        &[mp4_box(*b"hdlr", &handler), media_information].concat(),
+        &[media_header, mp4_box(*b"hdlr", &handler), media_information].concat(),
     );
-    let track = mp4_box(*b"trak", &media);
+    let track_header = mp4_box(*b"tkhd", &[0_u8; 84]);
+    let track = mp4_box(*b"trak", &[track_header, media].concat());
     let movie = mp4_box(
         *b"moov",
         &[mp4_box(*b"mvhd", &movie_header), track].concat(),

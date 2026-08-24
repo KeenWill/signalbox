@@ -7,10 +7,10 @@ use signalbox_file_media_adapter_video::{VideoProvider, declaration};
 use signalbox_file_media_runtime::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProcessorFuture, FileMediaProvider, FileMediaProviderReadRequest,
-    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadRequest, FileReadResult,
-    InspectionRequest, NeverCancelled, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadContinuation, ReadViewName, ReaderIdentity,
-    VerifiedBlobSource,
+    FileMediaProviderValidationRequest, FileMediaRegistry, FileReadInput, FileReadRequest,
+    FileReadResult, InspectionRequest, NeverCancelled, ProcessorBoundaryFailure, ProcessorFailure,
+    ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
+    ReadContinuation, ReadViewName, ReaderIdentity, VerifiedBlobSource,
 };
 
 struct DirectProcessor {
@@ -32,7 +32,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
-        self.provider.probe(reader, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .probe(reader, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 
     fn validate<'a>(
@@ -42,7 +47,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
-        self.provider.inspect(reader, request, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .inspect(reader, request, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 
     fn read<'a>(
@@ -52,7 +62,12 @@ impl FileMediaProcessor for DirectProcessor {
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
-        self.provider.read(reader, request, source, cancellation)
+        Box::pin(async move {
+            self.provider
+                .read(reader, request, source, cancellation)
+                .await
+                .map_err(|_| ProcessorBoundaryFailure::Processor(ProcessorFailure::Failed))
+        })
     }
 }
 
@@ -249,6 +264,15 @@ async fn partial_mp4_extended_header_at_metadata_cutoff_is_an_accepted_truncated
 }
 
 #[tokio::test]
+async fn incomplete_mp4_header_at_actual_eof_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_incomplete_header_at_actual_eof(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn mp4_box_declared_past_actual_source_end_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::large_mp4_with_box_past_source_end(),
@@ -350,6 +374,34 @@ async fn truncated_avc_parameter_set_is_malformed() -> Result<(), Box<dyn Error>
 }
 
 #[tokio::test]
+async fn high_profile_avc_extension_validates() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::high_profile_avc_mp4().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_mp4_movie_duration_reports_unavailable_duration() -> Result<(), Box<dyn Error>> {
+    let fixture = VideoFixture::mp4_with_unknown_movie_duration();
+    let (inspection, body) = inspect_and_read_metadata(fixture).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    assert_eq!(body["duration_milliseconds"], serde_json::Value::Null);
+    Ok(())
+}
+
+#[tokio::test]
+async fn zero_sized_nested_mp4_box_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_zero_sized_nested_configuration(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn duplicate_mp4_handlers_are_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_media_with_duplicate_handlers(),
@@ -401,6 +453,15 @@ async fn webm_video_track_without_video_settings_is_malformed() -> Result<(), Bo
         "malformed_video",
     )
     .await
+}
+
+#[tokio::test]
+async fn webm_webvtt_track_is_accepted_as_non_video() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::webm_with_webvtt_track().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
 }
 
 #[tokio::test]
@@ -457,6 +518,15 @@ async fn fragmented_mp4_without_movie_extends_duration_reports_unavailable_durat
 async fn mp4_video_track_without_sample_description_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_video_track_without_sample_description(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn mp4_video_track_without_mandatory_headers_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_video_track_without_mandatory_headers(),
         "malformed_video",
     )
     .await
@@ -609,7 +679,7 @@ async fn read(
             visible_part: None,
         },
         view: ReadViewName::try_new(view).map_err(|_| FileMediaFailure::ProcessorFailed)?,
-        options,
+        input: FileReadInput::Initial { options },
     };
     registry()
         .map_err(|_| FileMediaFailure::ProcessorFailed)?
