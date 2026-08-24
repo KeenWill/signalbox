@@ -184,7 +184,9 @@ function SearchResults({
                     )}
                   </span>
                 </span>
-                <span className="result-owner">{result.source.kind.replaceAll('_', ' ')}</span>
+                <span className="result-source-kind">
+                  {result.source.kind.replaceAll('_', ' ')}
+                </span>
               </div>
             )
           })}

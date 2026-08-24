@@ -675,7 +675,7 @@ kbd {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 .result-address,
-.result-owner {
+.result-source-kind {
   overflow: hidden;
   color: var(--text-muted);
   font:
@@ -1018,7 +1018,7 @@ kbd {
   .search-result-row {
     grid-template-columns: 62px minmax(0, 1fr);
   }
-  .result-owner {
+  .result-source-kind {
     display: none;
   }
   .usage-controls {
