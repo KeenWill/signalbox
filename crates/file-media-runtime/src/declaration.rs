@@ -32,19 +32,27 @@ pub struct ProbeDeclaration {
     cumulative_bytes: u64,
 }
 
+/// Labeled fields for one finite probe envelope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProbeDeclarationInput {
+    /// Maximum prefix bytes available to the probe.
+    pub prefix_bytes: u64,
+    /// Maximum suffix bytes available to the probe.
+    pub suffix_bytes: u64,
+    /// Maximum exact range requests available to the probe.
+    pub range_count: u32,
+    /// Maximum cumulative bytes available to the probe.
+    pub cumulative_bytes: u64,
+}
+
 impl ProbeDeclaration {
-    /// Declares one finite probe envelope. Registry construction checks ceilings.
-    pub const fn new(
-        prefix_bytes: u64,
-        suffix_bytes: u64,
-        range_count: u32,
-        cumulative_bytes: u64,
-    ) -> Self {
+    /// Declares one finite probe envelope from labeled fields.
+    pub const fn new(input: ProbeDeclarationInput) -> Self {
         Self {
-            prefix_bytes,
-            suffix_bytes,
-            range_count,
-            cumulative_bytes,
+            prefix_bytes: input.prefix_bytes,
+            suffix_bytes: input.suffix_bytes,
+            range_count: input.range_count,
+            cumulative_bytes: input.cumulative_bytes,
         }
     }
 

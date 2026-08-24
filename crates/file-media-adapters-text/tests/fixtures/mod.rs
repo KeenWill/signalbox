@@ -22,6 +22,10 @@ pub(crate) fn truncated_json() -> Vec<u8> {
     br#"{"name":"fixture""#.to_vec()
 }
 
+pub(crate) fn duplicate_member_json() -> Vec<u8> {
+    br#"{"role":"user","role":"admin"}"#.to_vec()
+}
+
 pub(crate) fn pretty_json_document() -> Vec<u8> {
     b"{\n  \"name\": \"fixture\",\n  \"values\": [1, 2, 3]\n}\n".to_vec()
 }
@@ -88,6 +92,10 @@ pub(crate) fn csv_table_value() -> serde_json::Value {
         "headers":["name","value"],
         "rows":[["alpha","1"],["beta","2"]]
     })
+}
+
+pub(crate) fn one_column_csv() -> Vec<u8> {
+    b"header\nvalue\n".to_vec()
 }
 
 pub(crate) fn truncated_csv() -> Vec<u8> {

@@ -94,6 +94,24 @@ async fn json_rejects_truncated_structure_as_typed_malformed() -> Result<(), Box
 }
 
 #[tokio::test]
+async fn json_rejects_duplicate_object_members_as_malformed() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::duplicate_member_json());
+
+    let inspection = support::inspect(&source, "application/json").await?;
+    support::assert_malformed_reason(inspection, "malformed_json");
+    Ok(())
+}
+
+#[tokio::test]
+async fn top_level_json_scalar_uses_the_text_fallback() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(b"true".to_vec());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_validated_media(inspection, "text/plain");
+    Ok(())
+}
+
+#[tokio::test]
 async fn unprobed_declared_json_candidate_is_unknown() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(b"hello".to_vec());
 
@@ -318,6 +336,24 @@ async fn csv_detects_validates_and_returns_headers_and_rows() -> Result<(), Box<
     )
     .await?;
     support::assert_structured(result, &expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn declared_one_column_csv_validates() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::one_column_csv());
+
+    let inspection = support::inspect(&source, "text/csv").await?;
+    support::assert_validated_media(inspection, "text/csv");
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_quoted_csv_uses_the_text_fallback() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::csv_with_quotes_inside_unquoted_field());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_validated_media(inspection, "text/plain");
     Ok(())
 }
 

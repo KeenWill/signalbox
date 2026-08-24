@@ -485,7 +485,8 @@ impl BoundedMetadata {
     }
 }
 
-pub(crate) fn parse_json_without_duplicate_members(
+/// Parses structured JSON while rejecting duplicate object members and compiled-limit excess.
+pub fn parse_json_without_duplicate_members(
     value: &str,
 ) -> Result<serde_json::Value, serde_json::Error> {
     parse_json_without_duplicate_members_bounded(
@@ -495,7 +496,8 @@ pub(crate) fn parse_json_without_duplicate_members(
     )
 }
 
-pub(crate) fn parse_json_without_duplicate_members_bounded(
+/// Parses structured JSON with caller-labeled node and container-entry ceilings.
+pub fn parse_json_without_duplicate_members_bounded(
     value: &str,
     maximum_nodes: u64,
     maximum_container_entries: u64,

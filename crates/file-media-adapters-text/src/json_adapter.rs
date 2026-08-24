@@ -3,11 +3,11 @@ use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
     MAX_OBSERVED_CONTAINER_ENTRIES, MAX_STRUCTURED_DEPTH, ProbeStrength, ProcessorFailure,
     ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ValidationEvidence,
-    VerifiedBlobSource,
+    VerifiedBlobSource, parse_json_without_duplicate_members_bounded,
 };
 
 use crate::{
-    JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME, options_are_empty, source,
+    JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME, read_input_is_empty, source,
 };
 
 pub(crate) async fn probe(
@@ -29,14 +29,17 @@ pub(crate) async fn probe(
 
 fn has_json_structure(prefix: &[u8], complete: bool) -> bool {
     let prefix = trim_ascii_start(prefix);
+    if !matches!(prefix.first(), Some(b'{' | b'[')) {
+        return false;
+    }
     let Some(text) = source::probe_utf8(prefix) else {
         return false;
     };
     if complete {
-        return validate_json(text).is_ok();
-    }
-    if !matches!(prefix.first(), Some(b'{' | b'[')) {
-        return false;
+        return match validate_json(text) {
+            Ok(()) => true,
+            Err(error) => error.is_eof(),
+        };
     }
     incomplete_json_prefix(text)
 }
@@ -83,7 +86,10 @@ pub(crate) async fn inspect(
         Ok(text) => text,
         Err(reason) => return Ok(validation_failure(request.evidence, reason)),
     };
-    if validate_json(&text).is_err() {
+    if validate_json(&text).is_err()
+        || (!json_depth_exceeds(text.as_bytes(), MAX_STRUCTURED_DEPTH)
+            && parse_json_without_duplicate_members_bounded(&text, u64::MAX, u64::MAX).is_err())
+    {
         return Ok(validation_failure(request.evidence, "malformed_json"));
     }
     Ok(ProcessorValidationOutput::Validated {
@@ -98,7 +104,7 @@ pub(crate) async fn read(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorReadOutput, ProcessorFailure> {
-    if request.view.as_str() != STRUCTURED_VIEW_NAME || !options_are_empty(&request.options) {
+    if request.view.as_str() != STRUCTURED_VIEW_NAME || !read_input_is_empty(&request.input) {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
@@ -155,12 +161,7 @@ fn has_complete_json_value_prefix(prefix: &[u8]) -> bool {
 }
 
 fn parse_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {
-    let mut deserializer = serde_json::Deserializer::from_str(text);
-    deserializer.disable_recursion_limit();
-    let value =
-        serde_json::Value::deserialize(serde_stacker::Deserializer::new(&mut deserializer))?;
-    deserializer.end()?;
-    Ok(value)
+    parse_json_without_duplicate_members_bounded(text, u64::MAX, u64::MAX)
 }
 
 /// Detects excessive nesting before building a recursively dropped JSON tree.

@@ -1,17 +1,15 @@
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    ProbeStrength, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ValidationEvidence, VerifiedBlobSource,
+    MAX_OBSERVED_CONTAINER_ENTRIES, ProbeStrength, ProcessorFailure, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ValidationEvidence, VerifiedBlobSource,
 };
 
 use crate::{
-    CSV_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME, options_are_empty, source,
+    CSV_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME, read_input_is_empty, source,
 };
 
 // Hard safety ceiling preventing one record from causing runaway allocation.
 const MAX_COLUMNS: usize = 256;
-// Hard safety ceiling bounding table allocation and parse latency.
-const MAX_ROWS: usize = 10_000;
 
 pub(crate) async fn probe(
     source: &dyn VerifiedBlobSource,
@@ -46,7 +44,17 @@ pub(crate) async fn inspect(
     };
     let table = match parse_table(&text) {
         Ok(table) => table,
-        Err(reason) => return Ok(validation_failure(request.evidence, reason)),
+        Err(reason) => {
+            let declared_csv_shape = matches!(
+                request.evidence,
+                ValidationEvidence::DeclaredCandidateStructurallyValidated
+            ) && text.contains(',')
+                && text.bytes().any(|byte| matches!(byte, b'\r' | b'\n'));
+            if declared_csv_shape {
+                return Ok(malformed(reason));
+            }
+            return Ok(validation_failure(request.evidence, reason));
+        }
     };
     Ok(ProcessorValidationOutput::Validated {
         media_type: String::from(CSV_MEDIA_TYPE),
@@ -64,7 +72,7 @@ pub(crate) async fn read(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorReadOutput, ProcessorFailure> {
-    if request.view.as_str() != STRUCTURED_VIEW_NAME || !options_are_empty(&request.options) {
+    if request.view.as_str() != STRUCTURED_VIEW_NAME || !read_input_is_empty(&request.input) {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
     let Some(bytes) = source::read_complete(source, cancellation).await? else {
@@ -107,7 +115,7 @@ fn parse_table(text: &str) -> Result<CsvTable, &'static str> {
         .iter()
         .map(String::from)
         .collect::<Vec<_>>();
-    if headers.len() < 2 {
+    if headers.is_empty() {
         return Err("malformed_csv");
     }
     if headers.len() > MAX_COLUMNS {
@@ -115,7 +123,7 @@ fn parse_table(text: &str) -> Result<CsvTable, &'static str> {
     }
     let mut rows = Vec::new();
     for record in reader.records() {
-        if rows.len() == MAX_ROWS {
+        if rows.len() as u64 == MAX_OBSERVED_CONTAINER_ENTRIES {
             return Err("row_limit_exceeded");
         }
         let record = record.map_err(|_| "malformed_csv")?;
@@ -128,10 +136,16 @@ fn parse_table(text: &str) -> Result<CsvTable, &'static str> {
 }
 
 fn has_record_structure(text: &str) -> bool {
+    let Some(evidence) = first_two_strict_records(text) else {
+        return false;
+    };
+    if !quotes_are_well_formed(evidence) || has_blank_record(evidence) {
+        return false;
+    }
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
         .flexible(false)
-        .from_reader(text.as_bytes());
+        .from_reader(evidence.as_bytes());
     let mut records = reader.records();
     let Some(Ok(first)) = records.next() else {
         return false;
@@ -143,6 +157,49 @@ fn has_record_structure(text: &str) -> bool {
         return false;
     };
     second.len() == first.len()
+}
+
+fn first_two_strict_records(text: &str) -> Option<&str> {
+    let mut state = QuoteState::FieldStart;
+    let mut completed_records = 0_u8;
+    let mut bytes = text.as_bytes().iter().copied().enumerate().peekable();
+    while let Some((index, byte)) = bytes.next() {
+        state = match (state, byte) {
+            (QuoteState::FieldStart, b'"') => QuoteState::Quoted,
+            (QuoteState::FieldStart, b',') => QuoteState::FieldStart,
+            (QuoteState::FieldStart, b'\r' | b'\n')
+            | (QuoteState::Unquoted, b'\r' | b'\n')
+            | (QuoteState::AfterQuote, b'\r' | b'\n') => {
+                completed_records = completed_records.saturating_add(1);
+                let mut end = index + 1;
+                if byte == b'\r' && bytes.peek().is_some_and(|(_, next)| *next == b'\n') {
+                    let _ = bytes.next();
+                    end += 1;
+                }
+                if completed_records == 2 {
+                    return text.get(..end);
+                }
+                QuoteState::FieldStart
+            }
+            (QuoteState::FieldStart, _) => QuoteState::Unquoted,
+            (QuoteState::Unquoted, b'"') => return None,
+            (QuoteState::Unquoted, b',') => QuoteState::FieldStart,
+            (QuoteState::Unquoted, _) => QuoteState::Unquoted,
+            (QuoteState::Quoted, b'"') if bytes.peek().is_some_and(|(_, next)| *next == b'"') => {
+                let _ = bytes.next();
+                QuoteState::Quoted
+            }
+            (QuoteState::Quoted, b'"') => QuoteState::AfterQuote,
+            (QuoteState::Quoted, _) => QuoteState::Quoted,
+            (QuoteState::AfterQuote, b',') => QuoteState::FieldStart,
+            (QuoteState::AfterQuote, _) => return None,
+        };
+    }
+    if completed_records == 1 && !matches!(state, QuoteState::Quoted) {
+        Some(text)
+    } else {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]

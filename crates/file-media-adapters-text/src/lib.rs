@@ -9,12 +9,13 @@ use std::{error::Error, str::FromStr};
 
 use signalbox_file_media_runtime::{
     CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider, FileMediaProviderDeclaration,
-    FileMediaProviderFuture, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    FileReaderName, FileReaderProviderName, FileReaderRevision, MAX_STRUCTURED_DEPTH,
-    MAX_STRUCTURED_NODES, ProbeDeclaration, ProcessorFailure, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds,
-    ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity,
-    ReasonCode, StreamingTextFallback, VerifiedBlobSource,
+    FileMediaProviderFailure, FileMediaProviderFuture, FileMediaProviderReadRequest,
+    FileMediaProviderValidationRequest, FileReadInput, FileReaderName, FileReaderProviderName,
+    FileReaderRevision, MAX_STRUCTURED_DEPTH, MAX_STRUCTURED_NODES, ProbeDeclaration,
+    ProbeDeclarationInput, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
+    ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
+    StreamingTextFallback, VerifiedBlobSource,
 };
 
 const PROVIDER_NAME: &str = "signalbox_text";
@@ -58,6 +59,7 @@ impl FileMediaProvider for TextFamilyProvider {
                 CSV_READER_NAME => csv_adapter::probe(source, cancellation).await,
                 _ => Err(ProcessorFailure::Protocol),
             }
+            .map_err(|_| FileMediaProviderFailure::Failed)
         })
     }
 
@@ -75,6 +77,7 @@ impl FileMediaProvider for TextFamilyProvider {
                 CSV_READER_NAME => csv_adapter::inspect(request, source, cancellation).await,
                 _ => Err(ProcessorFailure::Protocol),
             }
+            .map_err(|_| FileMediaProviderFailure::Failed)
         })
     }
 
@@ -92,6 +95,7 @@ impl FileMediaProvider for TextFamilyProvider {
                 CSV_READER_NAME => csv_adapter::read(request, source, cancellation).await,
                 _ => Err(ProcessorFailure::Protocol),
             }
+            .map_err(|_| FileMediaProviderFailure::Failed)
         })
     }
 }
@@ -164,7 +168,12 @@ fn reader(input: ReaderInput<'_>) -> Result<ReaderDeclaration, Box<dyn Error + S
         reader: FileReaderName::try_new(input.name)?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(input.media_type)?],
-        probe: ProbeDeclaration::new(PROBE_PREFIX_BYTES, 1, 2, MAX_TEXT_FAMILY_BYTES),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: PROBE_PREFIX_BYTES,
+            suffix_bytes: 1,
+            range_count: 2,
+            cumulative_bytes: MAX_TEXT_FAMILY_BYTES,
+        }),
         views: vec![input.view],
         reason_codes,
         streaming_text_fallback: input.fallback,
@@ -176,7 +185,7 @@ fn text_view() -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> {
         ReadViewName::try_new(TEXT_VIEW_NAME)?,
         String::from("Reads the complete file as exact UTF-8 text."),
         empty_options_schema()?,
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 1 },
         ReadViewBounds::Text {
             source_bytes: MAX_TEXT_FAMILY_BYTES,
             output_bytes: MAX_TEXT_FAMILY_BYTES as usize,
@@ -189,7 +198,7 @@ fn structured_view(description: &str) -> Result<ReadViewDeclaration, Box<dyn Err
         ReadViewName::try_new(STRUCTURED_VIEW_NAME)?,
         String::from(description),
         empty_options_schema()?,
-        ReadAccessPattern::Streaming,
+        ReadAccessPattern::Streaming { maximum_ranges: 1 },
         ReadViewBounds::Structured {
             source_bytes: MAX_TEXT_FAMILY_BYTES,
             output_bytes: MAX_TEXT_FAMILY_BYTES as usize,
@@ -208,4 +217,11 @@ fn empty_options_schema() -> Result<CanonicalJsonObjectSchema, Box<dyn Error + S
 
 fn options_are_empty(options: &serde_json::Value) -> bool {
     options.as_object().is_some_and(serde_json::Map::is_empty)
+}
+
+fn read_input_is_empty(input: &FileReadInput) -> bool {
+    match input {
+        FileReadInput::Initial { options } => options_are_empty(options),
+        FileReadInput::Continuation { .. } => false,
+    }
 }
