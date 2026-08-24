@@ -941,7 +941,7 @@ fn usage_aggregate_cost_dto(
             ProcessModelCallInputTokenSemantics::CacheInclusive
         }
     };
-    if !group.cost_derivation_safe {
+    if !group.cache_normalization_safe {
         return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
     }
     let Some(cost) = configuration.derive_usage_aggregate_cost(
