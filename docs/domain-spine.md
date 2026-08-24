@@ -11233,4 +11233,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **302 (+6 free fn)**             |
+| **signalbox-application total**                    | **303 (+6 free fn)**             |
