@@ -4,11 +4,12 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport, UsageAggregateTokenAxes,
-    UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPage,
-    UsageCallQuery, UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageReader,
-    UsageTimestampMicros, UsageTokenAxes, UsageTokenCoverage, UsageTokenPresence,
-    max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_credential_profile_utf8_bytes,
+    UsageAggregateCompleteness, UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport,
+    UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallCursor, UsageCallEvidence,
+    UsageCallKind, UsageCallOrder, UsageCallPage, UsageCallQuery, UsageInputTokenSemantics,
+    UsageProvenance, UsageQuery, UsageReader, UsageTimestampMicros, UsageTokenAxes,
+    UsageTokenCoverage, UsageTokenPresence, max_usage_aggregate_calls, max_usage_aggregate_groups,
+    max_usage_credential_profile_utf8_bytes,
 };
 use signalbox_domain::{
     ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId,
@@ -207,13 +208,20 @@ impl UsageRepository {
             .map(|row| row.try_get::<bool, _>("calls_truncated"))
             .transpose()?
             .unwrap_or(false);
-        let truncated = rows.len() > limit || source_calls_truncated;
+        let completeness = if rows.len() > limit || source_calls_truncated {
+            UsageAggregateCompleteness::Truncated
+        } else {
+            UsageAggregateCompleteness::Complete
+        };
         let groups = rows
             .into_iter()
             .take(limit)
             .map(decode_aggregate)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(UsageAggregateReport { groups, truncated })
+        Ok(UsageAggregateReport {
+            groups,
+            completeness,
+        })
     }
 
     /// Reads one strict terminal-time/UUID keyset page.
@@ -372,8 +380,16 @@ fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryEr
         },
         call_count,
         tokens: decode_aggregate_tokens(&row)?,
-        cache_normalization_safe: row.try_get("cache_normalization_safe")?,
+        cache_normalization: decode_cache_normalization(row.try_get("cache_normalization_safe")?),
     })
+}
+
+const fn decode_cache_normalization(safe: bool) -> UsageCacheNormalization {
+    if safe {
+        UsageCacheNormalization::Safe
+    } else {
+        UsageCacheNormalization::Unsafe
+    }
 }
 
 fn decode_model(row: &PgRow) -> Result<ResolvedProviderTarget, sqlx::Error> {

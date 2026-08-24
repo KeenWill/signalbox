@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 
 use crate::*;
 use signalbox_application::{
-    UsageAggregateReport, UsageCallEvidence, UsageCallOrder, UsageCallPage, UsageCallPageLimit,
-    UsageCallQuery, UsageProvenance, UsageQuery, UsageSelection, UsageTimeRange,
+    UsageAggregateCompleteness, UsageAggregateReport, UsageCacheNormalization, UsageCallEvidence,
+    UsageCallOrder, UsageCallPage, UsageCallPageLimit, UsageCallQuery, UsageProvenance, UsageQuery,
+    UsageSelection, UsageTimeFromInclusive, UsageTimeRange,
 };
 use signalbox_persistence::usage::UsageRepository;
 
@@ -234,7 +235,7 @@ async fn mixed_provenance_aggregates_reconcile_with_exact_paged_call_evidence()
             ),
         ])
     );
-    assert!(!report.truncated);
+    assert_eq!(report.completeness, UsageAggregateCompleteness::Complete);
 
     pool.close().await;
     drop(container);
@@ -301,7 +302,7 @@ async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Bo
         signalbox_application::UsageTimestampMicros::new(page.calls[0].recorded_at.get() + 1)?;
     let excluded = repository
         .aggregate(UsageQuery {
-            time: UsageTimeRange::new(Some(next_microsecond), None)?,
+            time: UsageTimeRange::new(Some(UsageTimeFromInclusive(next_microsecond)), None)?,
             selection: UsageSelection::all(),
         })
         .await?;
@@ -362,7 +363,10 @@ async fn incomplete_cache_inclusive_aggregates_are_not_normalization_safe()
         .await?;
 
     assert_eq!(report.groups.len(), 1);
-    assert!(!report.groups[0].cache_normalization_safe);
+    assert_eq!(
+        report.groups[0].cache_normalization,
+        UsageCacheNormalization::Unsafe
+    );
 
     pool.close().await;
     drop(container);

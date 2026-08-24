@@ -42,11 +42,18 @@ pub const fn max_usage_credential_profile_utf8_bytes() -> u16 {
 
 /// Invalid microsecond timestamp supplied at an application boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UsageTimestampError;
+pub struct UsageTimestampError {
+    /// Rejected microseconds from the Unix epoch.
+    pub rejected_micros: u64,
+}
 
 impl fmt::Display for UsageTimestampError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("usage timestamp exceeds the supported range")
+        write!(
+            formatter,
+            "usage timestamp {} microseconds exceeds the supported range",
+            self.rejected_micros
+        )
     }
 }
 
@@ -61,7 +68,9 @@ impl UsageTimestampMicros {
     pub const fn new(value: u64) -> Result<Self, UsageTimestampError> {
         // 9999-12-31T23:59:59.999999Z, the shared PostgreSQL/time boundary.
         if value > 253_402_300_799_999_999 {
-            Err(UsageTimestampError)
+            Err(UsageTimestampError {
+                rejected_micros: value,
+            })
         } else {
             Ok(Self(value))
         }
@@ -76,15 +85,38 @@ impl UsageTimestampMicros {
 
 /// Invalid half-open usage time range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UsageTimeRangeError;
+pub struct UsageTimeRangeError {
+    /// Rejected inclusive lower boundary, in microseconds from the Unix epoch.
+    pub from_inclusive_micros: u64,
+    /// Rejected exclusive upper boundary, in microseconds from the Unix epoch.
+    pub to_exclusive_micros: u64,
+}
 
 impl fmt::Display for UsageTimeRangeError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("usage time range is empty or reversed")
+        write!(
+            formatter,
+            "usage time range [{}, {}) microseconds is empty or reversed",
+            self.from_inclusive_micros, self.to_exclusive_micros
+        )
     }
 }
 
 impl std::error::Error for UsageTimeRangeError {}
+
+/// Inclusive lower usage-time boundary.
+///
+/// This newtype exists so the two same-typed boundaries of
+/// [`UsageTimeRange::new`] cannot be transposed silently.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UsageTimeFromInclusive(pub UsageTimestampMicros);
+
+/// Exclusive upper usage-time boundary.
+///
+/// This newtype exists so the two same-typed boundaries of
+/// [`UsageTimeRange::new`] cannot be transposed silently.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UsageTimeToExclusive(pub UsageTimestampMicros);
 
 /// Optional half-open terminal-evidence time range.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -105,17 +137,27 @@ impl UsageTimeRange {
 
     /// Admits a nonempty half-open range.
     pub const fn new(
-        from_inclusive: Option<UsageTimestampMicros>,
-        to_exclusive: Option<UsageTimestampMicros>,
+        from_inclusive: Option<UsageTimeFromInclusive>,
+        to_exclusive: Option<UsageTimeToExclusive>,
     ) -> Result<Self, UsageTimeRangeError> {
-        if let (Some(from), Some(to)) = (from_inclusive, to_exclusive)
+        if let (Some(UsageTimeFromInclusive(from)), Some(UsageTimeToExclusive(to))) =
+            (from_inclusive, to_exclusive)
             && from.0 >= to.0
         {
-            return Err(UsageTimeRangeError);
+            return Err(UsageTimeRangeError {
+                from_inclusive_micros: from.0,
+                to_exclusive_micros: to.0,
+            });
         }
         Ok(Self {
-            from_inclusive,
-            to_exclusive,
+            from_inclusive: match from_inclusive {
+                Some(UsageTimeFromInclusive(from)) => Some(from),
+                None => None,
+            },
+            to_exclusive: match to_exclusive {
+                Some(UsageTimeToExclusive(to)) => Some(to),
+                None => None,
+            },
         })
     }
 
@@ -272,11 +314,19 @@ pub struct UsageQuery {
 
 /// Rejection of an individual-call page size.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UsageCallPageLimitError;
+pub struct UsageCallPageLimitError {
+    /// Rejected page size.
+    pub rejected_items: u16,
+}
 
 impl fmt::Display for UsageCallPageLimitError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("usage call page size is outside its hard bounds")
+        write!(
+            formatter,
+            "usage call page size {} is outside 1..={}",
+            self.rejected_items,
+            max_usage_call_page_items()
+        )
     }
 }
 
@@ -290,7 +340,9 @@ impl UsageCallPageLimit {
     /// Admits one through the application hard ceiling.
     pub const fn new(value: u16) -> Result<Self, UsageCallPageLimitError> {
         if value == 0 || value > max_usage_call_page_items() {
-            Err(UsageCallPageLimitError)
+            Err(UsageCallPageLimitError {
+                rejected_items: value,
+            })
         } else {
             Ok(Self(value))
         }
@@ -315,7 +367,7 @@ pub enum UsageCallOrder {
 pub struct UsageCallCursor {
     /// Exact terminal-evidence timestamp.
     pub recorded_at: UsageTimestampMicros,
-    /// UUID tiebreaker for calls recorded in one transaction.
+    /// UUID tiebreaker for calls sharing one terminal statement timestamp.
     pub call: ModelCallId,
 }
 
@@ -345,7 +397,12 @@ pub struct UsageCallEvidence {
     pub turn: Option<TurnId>,
     /// Resolved provider/model target.
     pub model: ResolvedProviderTarget,
-    /// Non-secret credential-profile reference needed for cost labeling.
+    /// Bounded non-secret projection label for the credential profile, not the
+    /// canonical credential reference: references of at most 250 UTF-8 bytes
+    /// appear as `exact:<reference>`, longer ones as a stable projection-owned
+    /// `mapped:<id>` identity. Strip the `exact:` discriminator before any
+    /// exact credential-catalog lookup; a `mapped:` label resolves only through
+    /// the projection's oversized-reference mapping.
     pub credential_profile: String,
     /// Reported or estimated provenance.
     pub provenance: UsageProvenance,
@@ -373,7 +430,10 @@ pub struct UsageAggregateKey {
     pub call_kind: UsageCallKind,
     /// Resolved provider/model target.
     pub model: ResolvedProviderTarget,
-    /// Non-secret credential-profile cost dimension.
+    /// Bounded non-secret credential-profile projection label used as the cost
+    /// dimension; see [`UsageCallEvidence::credential_profile`] for the
+    /// `exact:`/`mapped:` label forms and their distinction from the canonical
+    /// credential reference.
     pub credential_profile: String,
     /// Reported or estimated provenance.
     pub provenance: UsageProvenance,
@@ -381,6 +441,30 @@ pub struct UsageAggregateKey {
     pub input_semantics: UsageInputTokenSemantics,
     /// Exact token-axis presence shape.
     pub coverage: UsageTokenCoverage,
+}
+
+/// Whether cache-inclusive input can be normalized without underflow.
+///
+/// Safety here does not assert that later rate arithmetic is representable or
+/// equivalent to checked per-call cost derivation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UsageCacheNormalization {
+    /// Normalizing cache-inclusive input would underflow or lacks the cache
+    /// axes it needs, so a consumer must not subtract cache counts from input.
+    Unsafe,
+    /// Every call in the group carries the cache axes and input at least their
+    /// sum, so cache-inclusive input can be normalized without underflow.
+    Safe,
+}
+
+/// Whether an aggregate result covers every matching call and group.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UsageAggregateCompleteness {
+    /// Every matching source call and compatibility group is represented.
+    Complete,
+    /// The source-call or compatibility-group hard ceiling truncated the
+    /// aggregate result.
+    Truncated,
 }
 
 /// One aggregate over calls with fully compatible evidence dimensions.
@@ -393,10 +477,7 @@ pub struct UsageAggregateGroup {
     /// Sums only for axes present on every call in the group.
     pub tokens: UsageAggregateTokenAxes,
     /// Whether cache-inclusive input can be normalized without underflow.
-    ///
-    /// This does not assert that later rate arithmetic is representable or
-    /// equivalent to checked per-call cost derivation.
-    pub cache_normalization_safe: bool,
+    pub cache_normalization: UsageCacheNormalization,
 }
 
 /// Bounded aggregate result with explicit truncation.
@@ -404,9 +485,8 @@ pub struct UsageAggregateGroup {
 pub struct UsageAggregateReport {
     /// Compatibility-preserving groups.
     pub groups: Vec<UsageAggregateGroup>,
-    /// True when either the source-call or compatibility-group hard ceiling
-    /// truncated the aggregate result.
-    pub truncated: bool,
+    /// Whether either hard safety ceiling truncated the aggregate result.
+    pub completeness: UsageAggregateCompleteness,
 }
 
 /// Dedicated aggregate and detail read boundary for canonical usage evidence.
@@ -462,10 +542,15 @@ mod tests {
 
     #[test]
     fn usage_call_page_limit_rejects_values_outside_the_hard_bounds() {
-        assert_eq!(UsageCallPageLimit::new(0), Err(UsageCallPageLimitError));
+        assert_eq!(
+            UsageCallPageLimit::new(0),
+            Err(UsageCallPageLimitError { rejected_items: 0 })
+        );
         assert_eq!(
             UsageCallPageLimit::new(max_usage_call_page_items() + 1),
-            Err(UsageCallPageLimitError)
+            Err(UsageCallPageLimitError {
+                rejected_items: max_usage_call_page_items() + 1,
+            })
         );
     }
 
@@ -473,7 +558,9 @@ mod tests {
     fn usage_timestamp_rejects_values_outside_the_postgres_adapter_range() {
         assert_eq!(
             UsageTimestampMicros::new(253_402_300_800_000_000),
-            Err(UsageTimestampError)
+            Err(UsageTimestampError {
+                rejected_micros: 253_402_300_800_000_000,
+            })
         );
     }
 
@@ -481,10 +568,17 @@ mod tests {
     fn usage_time_range_rejects_an_empty_half_open_interval() {
         assert_eq!(
             UsageTimeRange::new(
-                Some(UsageTimestampMicros::new(8).expect("fixture timestamp fits")),
-                Some(UsageTimestampMicros::new(8).expect("fixture timestamp fits")),
+                Some(UsageTimeFromInclusive(
+                    UsageTimestampMicros::new(8).expect("fixture timestamp fits")
+                )),
+                Some(UsageTimeToExclusive(
+                    UsageTimestampMicros::new(8).expect("fixture timestamp fits")
+                )),
             ),
-            Err(UsageTimeRangeError)
+            Err(UsageTimeRangeError {
+                from_inclusive_micros: 8,
+                to_exclusive_micros: 8,
+            })
         );
     }
 

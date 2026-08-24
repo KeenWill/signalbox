@@ -6505,7 +6505,9 @@ pub const fn max_usage_aggregate_groups() -> u16;
 pub const fn max_usage_aggregate_calls() -> u16;
 pub const fn max_usage_credential_profile_utf8_bytes() -> u16;
 
-pub struct UsageTimestampError;
+pub struct UsageTimestampError {
+    pub rejected_micros: u64,
+}
 
 pub struct UsageTimestampMicros(/* private u64 */);
 impl UsageTimestampMicros {
@@ -6513,14 +6515,20 @@ impl UsageTimestampMicros {
     pub const fn get(self) -> u64;
 }
 
-pub struct UsageTimeRangeError;
+pub struct UsageTimeRangeError {
+    pub from_inclusive_micros: u64,
+    pub to_exclusive_micros: u64,
+}
+
+pub struct UsageTimeFromInclusive(pub UsageTimestampMicros);
+pub struct UsageTimeToExclusive(pub UsageTimestampMicros);
 
 pub struct UsageTimeRange { /* private */ }
 impl UsageTimeRange {
     pub const fn all() -> Self;
     pub const fn new(
-        from_inclusive: Option<UsageTimestampMicros>,
-        to_exclusive: Option<UsageTimestampMicros>,
+        from_inclusive: Option<UsageTimeFromInclusive>,
+        to_exclusive: Option<UsageTimeToExclusive>,
     ) -> Result<Self, UsageTimeRangeError>;
     pub const fn from_inclusive(self) -> Option<UsageTimestampMicros>;
     pub const fn to_exclusive(self) -> Option<UsageTimestampMicros>;
@@ -6571,7 +6579,9 @@ pub struct UsageQuery {
     pub selection: UsageSelection,
 }
 
-pub struct UsageCallPageLimitError;
+pub struct UsageCallPageLimitError {
+    pub rejected_items: u16,
+}
 
 pub struct UsageCallPageLimit(/* private u16 */);
 impl UsageCallPageLimit {
@@ -6620,16 +6630,19 @@ pub struct UsageAggregateKey {
     pub coverage: UsageTokenCoverage,
 }
 
+pub enum UsageCacheNormalization { Unsafe, Safe }
+pub enum UsageAggregateCompleteness { Complete, Truncated }
+
 pub struct UsageAggregateGroup {
     pub key: UsageAggregateKey,
     pub call_count: u64,
     pub tokens: UsageAggregateTokenAxes,
-    pub cache_normalization_safe: bool,
+    pub cache_normalization: UsageCacheNormalization,
 }
 
 pub struct UsageAggregateReport {
     pub groups: Vec<UsageAggregateGroup>,
-    pub truncated: bool,
+    pub completeness: UsageAggregateCompleteness,
 }
 
 pub trait UsageReader {
@@ -11480,7 +11493,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
 | application: search                                | 21 (+4 free fn) (incl. 2 traits) |
-| application: usage                                 | 25 (+4 free fn) (incl. 1 trait)  |
+| application: usage                                 | 29 (+4 free fn) (incl. 1 trait)  |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 35 (incl. 8 traits)              |
 | application: tool_loop                             | 26 (incl. 5 traits)              |
@@ -11500,4 +11513,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 8 (incl. 2 traits)               |
 | application: turn_liveness                         | 7                                |
-| **signalbox-application total**                    | **355 (+17 free fn)**            |
+| **signalbox-application total**                    | **359 (+17 free fn)**            |
