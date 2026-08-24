@@ -122,6 +122,15 @@ async fn wav_duration_over_limit_is_rejected() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn wav_without_frames_is_valid() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::wav_without_frames()?);
+
+    let inspection = support::inspect(&source, "audio/wav").await?;
+    support::assert_validated_media(inspection, "audio/wav");
+    Ok(())
+}
+
+#[tokio::test]
 async fn mp3_truncation_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_reason(
         FixtureFormat::Mp3,
@@ -207,6 +216,18 @@ async fn mp3_probe_rejects_invalid_id3_flags() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn mp3_probe_rejects_an_invalid_id3v24_footer() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::mp3_with_invalid_id3v24_footer()?);
+
+    let inspection = support::inspect(&source, "audio/mpeg").await?;
+    assert!(matches!(
+        inspection,
+        signalbox_file_media_runtime::FileInspection::Unknown { .. }
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn flac_truncation_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_reason(
         FixtureFormat::Flac,
@@ -251,6 +272,16 @@ async fn flac_mismatched_streaminfo_md5_is_rejected() -> Result<(), Box<dyn Erro
     assert_reason(
         FixtureFormat::Flac,
         fixtures::flac_with_mismatched_md5()?,
+        "malformed_audio",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn flac_truncated_between_complete_frames_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_reason(
+        FixtureFormat::Flac,
+        fixtures::flac_truncated_between_complete_frames()?,
         "malformed_audio",
     )
     .await
@@ -307,6 +338,26 @@ async fn ogg_opus_requires_an_end_of_stream_page() -> Result<(), Box<dyn Error>>
     let inspection = support::inspect(&source, format.media_type()).await?;
     support::assert_malformed_reason(inspection, "malformed_audio");
     Ok(())
+}
+
+#[tokio::test]
+async fn ogg_opus_rejects_end_of_stream_on_tags() -> Result<(), Box<dyn Error>> {
+    assert_reason(
+        FixtureFormat::OggOpus,
+        fixtures::ogg_opus_with_tags_end_of_stream()?,
+        "malformed_audio",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn ogg_opus_rejects_a_nonzero_tags_page_granule() -> Result<(), Box<dyn Error>> {
+    assert_reason(
+        FixtureFormat::OggOpus,
+        fixtures::ogg_opus_with_nonzero_tags_granule()?,
+        "malformed_audio",
+    )
+    .await
 }
 
 #[tokio::test]

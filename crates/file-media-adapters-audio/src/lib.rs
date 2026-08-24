@@ -18,7 +18,7 @@ const PROVIDER_NAME: &str = "signalbox_audio";
 const READER_REVISION: &str = "v1";
 const METADATA_VIEW_NAME: &str = "metadata";
 /// Hard safety ceiling covering the exact probe prefix and possible one-byte suffix.
-const AUDIO_PROBE_CUMULATIVE_BYTES: u64 = 68;
+const AUDIO_PROBE_CUMULATIVE_BYTES: u64 = 78;
 
 /// Hard safety ceiling bounding whole-source worker memory while admitting ordinary audio.
 pub const MAX_AUDIO_SOURCE_BYTES: u64 = 64 * 1_024 * 1_024;
@@ -105,7 +105,7 @@ fn mp3_signature(prefix: &[u8]) -> bool {
     audio.get(..4).is_some_and(valid_mp3_frame_header)
 }
 
-fn id3_audio_offset(bytes: &[u8]) -> Option<usize> {
+pub(crate) fn id3_tag_layout(bytes: &[u8]) -> Option<(usize, bool)> {
     let header = bytes.get(..10)?;
     let major = header[3];
     let revision = header[4];
@@ -125,8 +125,29 @@ fn id3_audio_offset(bytes: &[u8]) -> Option<usize> {
     let tag_length = header[6..10].iter().try_fold(0_usize, |length, byte| {
         length.checked_mul(128)?.checked_add(usize::from(*byte))
     })?;
-    let footer_length = usize::from(major == 4 && flags & 0x10 != 0) * 10;
-    10_usize.checked_add(tag_length)?.checked_add(footer_length)
+    Some((
+        10_usize.checked_add(tag_length)?,
+        major == 4 && flags & 0x10 != 0,
+    ))
+}
+
+pub(crate) fn valid_id3_footer(header: &[u8], footer: &[u8]) -> bool {
+    header.len() == 10
+        && footer.len() == 10
+        && footer.starts_with(b"3DI")
+        && footer[3..10] == header[3..10]
+}
+
+fn id3_audio_offset(bytes: &[u8]) -> Option<usize> {
+    let (tag_end, has_footer) = id3_tag_layout(bytes)?;
+    if !has_footer {
+        return Some(tag_end);
+    }
+    let footer_end = tag_end.checked_add(10)?;
+    if !valid_id3_footer(bytes.get(..10)?, bytes.get(tag_end..footer_end)?) {
+        return None;
+    }
+    Some(footer_end)
 }
 
 fn valid_mp3_frame_header(bytes: &[u8]) -> bool {
@@ -270,7 +291,7 @@ fn reader(
         reader: FileReaderName::try_new(format.reader_name())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(format.media_type())?],
-        probe: ProbeDeclaration::new(64, 1, 2, AUDIO_PROBE_CUMULATIVE_BYTES),
+        probe: ProbeDeclaration::new(64, 1, 3, AUDIO_PROBE_CUMULATIVE_BYTES),
         views: vec![metadata_view()?],
         reason_codes: reasons,
         streaming_text_fallback: StreamingTextFallback::Disabled,

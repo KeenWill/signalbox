@@ -230,6 +230,53 @@ pub(crate) fn flac_with_mismatched_md5() -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(bytes)
 }
 
+pub(crate) fn flac_truncated_between_complete_frames() -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut bytes = flac(8_000, 768)?;
+    let stream_info = bytes.get_mut(18..26).ok_or("missing FLAC STREAMINFO")?;
+    let mut encoded = u64::from_be_bytes(<[u8; 8]>::try_from(&*stream_info)?);
+    encoded = (encoded & !0x0f_ff_ff_ff_ff) | 800;
+    stream_info.copy_from_slice(&encoded.to_be_bytes());
+    Ok(bytes)
+}
+
+pub(crate) fn wav_without_frames() -> Result<Vec<u8>, Box<dyn Error>> {
+    wav(8_000, 0)
+}
+
+pub(crate) fn mp3_with_invalid_id3v24_footer() -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut bytes = mp3(8_000, 800)?;
+    bytes[5] = 0x10;
+    bytes.splice(10..10, [0_u8; 10]);
+    Ok(bytes)
+}
+
+pub(crate) fn ogg_opus_with_tags_end_of_stream() -> Result<Vec<u8>, Box<dyn Error>> {
+    ogg_opus_with_tags_ending(PacketWriteEndInfo::EndStream, 0)
+}
+
+pub(crate) fn ogg_opus_with_nonzero_tags_granule() -> Result<Vec<u8>, Box<dyn Error>> {
+    ogg_opus_with_tags_ending(PacketWriteEndInfo::EndPage, 1)
+}
+
+fn ogg_opus_with_tags_ending(
+    tags_ending: PacketWriteEndInfo,
+    tags_granule: u64,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    const SERIAL: u32 = 0x51_67_6e_6c;
+    let mut encoder = OpusEncoder::new(48_000, 1, Application::Audio)?;
+    encoder.bitrate_bps = 6_000;
+    let samples = vec![0.0_f32; 960];
+    let mut encoded = vec![0_u8; 1_276];
+    let packet_bytes = encoder.encode(&samples, 960, &mut encoded)?;
+    encoded.truncate(packet_bytes);
+
+    let mut writer = PacketWriter::new(Vec::new());
+    writer.write_packet(opus_head(0), SERIAL, PacketWriteEndInfo::EndPage, 0)?;
+    writer.write_packet(opus_tags(), SERIAL, tags_ending, tags_granule)?;
+    writer.write_packet(encoded, SERIAL, PacketWriteEndInfo::EndStream, 960)?;
+    Ok(writer.into_inner())
+}
+
 fn wav(sample_rate_hz: u32, frames: usize) -> Result<Vec<u8>, Box<dyn Error>> {
     let data_size = u32::try_from(frames)?;
     let riff_size = 36_u32.checked_add(data_size).ok_or("WAV size overflow")?;
