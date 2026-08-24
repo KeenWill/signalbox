@@ -611,22 +611,22 @@ fn parse_central_directory(
 ) -> Result<CentralInventory, CentralParseError> {
     let mut offset = 0_usize;
     let mut parsed_entries = Vec::with_capacity(expected_entries);
+    let mut recognized = Vec::new();
     while offset < bytes.len() {
         let parsed = parse_central_entry(bytes, offset).map_err(|issue| CentralParseError {
             issue,
-            kinds: Vec::new(),
+            kinds: recognized.clone(),
         })?;
+        if let Some(kind) = [OfficeKind::Docx, OfficeKind::Xlsx, OfficeKind::Pptx]
+            .into_iter()
+            .find(|kind| parsed.entry.name == kind.marker())
+            && !recognized.contains(&kind)
+        {
+            recognized.push(kind);
+        }
         offset = parsed.next_offset;
         parsed_entries.push(parsed);
     }
-    let recognized = [OfficeKind::Docx, OfficeKind::Xlsx, OfficeKind::Pptx]
-        .into_iter()
-        .filter(|kind| {
-            parsed_entries
-                .iter()
-                .any(|parsed| parsed.entry.name == kind.marker())
-        })
-        .collect::<Vec<_>>();
     if parsed_entries.len() != expected_entries {
         return Err(CentralParseError {
             issue: ValidationIssue::Malformed(MALFORMED_REASON),
@@ -3735,6 +3735,30 @@ mod tests {
         assert!(matches!(
             error.issue,
             ValidationIssue::Malformed(HOSTILE_ENTRY_NAME)
+        ));
+    }
+
+    #[test]
+    fn central_parse_errors_preserve_markers_from_earlier_entries() {
+        let marker_name = b"word/document.xml";
+        let invalid_offset = 46 + marker_name.len();
+        let mut central = vec![0_u8; invalid_offset + 4];
+        central[0..4].copy_from_slice(b"PK\x01\x02");
+        central[28..30].copy_from_slice(
+            &u16::try_from(marker_name.len())
+                .expect("fixture name fits in a ZIP length")
+                .to_le_bytes(),
+        );
+        central[46..invalid_offset].copy_from_slice(marker_name);
+        central[invalid_offset..].copy_from_slice(b"PK\x01\x02");
+
+        let error = parse_central_directory(&central, 2)
+            .expect_err("the truncated later entry should reject the directory");
+
+        assert_eq!(error.kinds, vec![OfficeKind::Docx]);
+        assert!(matches!(
+            error.issue,
+            ValidationIssue::Malformed(MALFORMED_REASON)
         ));
     }
 
