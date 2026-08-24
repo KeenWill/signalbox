@@ -165,17 +165,50 @@ pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_DISCOVERY: &str = "WITH dis
                 END
           WHERE singleton";
 
+/// Retires the recoveries whose durable wait no longer exists, one bounded lap
+/// at a time.
+///
+/// Supersession is the only scan here that must reinspect rows it already
+/// passed: a recovery becomes superseded by a change to `turn_lifecycle`, not
+/// by anything this statement wrote, so a row left behind the cursor can
+/// acquire that disposition afterwards — an operator resolving an exhausted
+/// wait, or a delegation cascade making the turn runtime-terminal. Advancing
+/// the cursor alone does not guarantee it is ever reread: while at least one
+/// window of higher-id recoveries keeps arriving between scans, the page never
+/// empties, so the cursor never wraps to `NULL` and the older rows starve.
+///
+/// So each lap is bounded the way the discovery cursor's is. The first page of
+/// a lap fixes a high-water mark over the same predicate, and the lap walks
+/// only up to it; rows inserted after it belong to the next lap and cannot
+/// defer the wrap. A row *below* the mark still enters its page on the state it
+/// holds when that page is read, so a disposition acquired mid-lap is not
+/// missed.
 pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION: &str = "WITH cursor AS (
-            SELECT after_turn_id
+            SELECT after_turn_id, high_turn_id
               FROM automatic_model_call_reconciliation_supersession_state
              WHERE singleton
              FOR UPDATE
+         ), bounds AS MATERIALIZED (
+            SELECT after_turn_id,
+                   CASE
+                       WHEN after_turn_id IS NULL THEN (
+                           SELECT recovery.turn_id
+                             FROM automatic_model_call_reconciliation AS recovery
+                            WHERE recovery.state_kind
+                                  IN ('scheduled', 'attempting', 'exhausted')
+                            ORDER BY recovery.turn_id DESC
+                            LIMIT 1
+                       )
+                       ELSE high_turn_id
+                   END AS high_turn_id
+              FROM cursor
          ), page AS (
             SELECT recovery.turn_id, recovery.session_id, recovery.model_call_id,
                    recovery.state_kind, recovery.attempt_count
-              FROM automatic_model_call_reconciliation AS recovery, cursor
+              FROM automatic_model_call_reconciliation AS recovery, bounds
              WHERE recovery.state_kind IN ('scheduled', 'attempting', 'exhausted')
-               AND (cursor.after_turn_id IS NULL OR recovery.turn_id > cursor.after_turn_id)
+               AND (bounds.after_turn_id IS NULL OR recovery.turn_id > bounds.after_turn_id)
+               AND recovery.turn_id <= bounds.high_turn_id
              ORDER BY recovery.turn_id
              LIMIT $1
          ), superseded AS (
@@ -206,9 +239,18 @@ pub(crate) const AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION: &str = "WITH 
              WHERE recovery.turn_id = superseded.turn_id
          )
          UPDATE automatic_model_call_reconciliation_supersession_state
-            SET after_turn_id = (
-                SELECT turn_id FROM page ORDER BY turn_id DESC LIMIT 1
-            )
+            SET after_turn_id = CASE
+                    WHEN (SELECT count(*) FROM page) = $1 THEN (
+                        SELECT turn_id FROM page ORDER BY turn_id DESC LIMIT 1
+                    )
+                    ELSE NULL
+                END,
+                high_turn_id = CASE
+                    WHEN (SELECT count(*) FROM page) = $1 THEN (
+                        SELECT high_turn_id FROM bounds
+                    )
+                    ELSE NULL
+                END
           WHERE singleton";
 
 /// Claims one due window of automatic reconciliations.

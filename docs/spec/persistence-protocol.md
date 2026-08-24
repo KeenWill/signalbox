@@ -915,7 +915,16 @@ Locks per transaction, in acquisition order:
   Abandoned-attempt settlement examines and updates at most 64 due
   recovery/attempt pairs from one materialized page. Supersession maintenance
   later locks its own singleton cursor row `FOR UPDATE`, then examines and
-  updates at most 64 recovery rows from one materialized keyset page. Exhaustion
+  updates at most 64 recovery rows from one materialized keyset page. Each
+  supersession lap likewise fixes its highest pending recovery identity before
+  paging and wraps after reaching that bound. The bound carries weight here that
+  it does not for discovery: a recovery becomes superseded by a `turn_lifecycle`
+  change rather than by anything this statement writes, so a row the cursor has
+  already passed can acquire that disposition afterwards and must be
+  reinspected — and a lap whose pages a steady arrival rate keeps full would
+  never wrap to reach it. A recovery below the lap's bound is paged on the state
+  it holds when that page is read, so a disposition acquired mid-lap is still
+  seen. Exhaustion
   parks at most 64 `scheduled` recoveries that spent the whole attempt budget
   and whose turn still holds the exact matching `awaiting_model_call_recovery`
   wait; a recovery whose turn no longer holds that wait is left for supersession

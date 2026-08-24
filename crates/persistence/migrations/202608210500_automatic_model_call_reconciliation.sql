@@ -35,7 +35,8 @@ VALUES (true);
 
 CREATE TABLE automatic_model_call_reconciliation_supersession_state (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    after_turn_id uuid
+    after_turn_id uuid,
+    high_turn_id uuid
 );
 
 INSERT INTO automatic_model_call_reconciliation_supersession_state (singleton)

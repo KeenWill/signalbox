@@ -637,7 +637,7 @@ mod tests {
     fn supersession_is_an_independent_bounded_keyset_page() {
         assert!(
             AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
-                .contains("recovery.turn_id > cursor.after_turn_id")
+                .contains("recovery.turn_id > bounds.after_turn_id")
         );
         assert!(
             AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("ORDER BY recovery.turn_id")
@@ -651,6 +651,33 @@ mod tests {
         assert!(
             AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
                 .contains("NOT lifecycle.delegation_runtime_terminal")
+        );
+    }
+
+    /// Each supersession lap is bounded, so late arrivals cannot starve rereads.
+    ///
+    /// Without the high-water mark the cursor wraps only on an empty page, and
+    /// a steady window of higher-id recoveries keeps every page full: rows left
+    /// behind the cursor that become superseded afterwards would never be
+    /// reinspected. The lap bound and the wrap that ends it are therefore part
+    /// of this statement's contract, not an optimization.
+    #[test]
+    fn supersession_bounds_each_cursor_lap() {
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
+                .contains("recovery.turn_id <= bounds.high_turn_id")
+        );
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
+                .contains("ORDER BY recovery.turn_id DESC")
+        );
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("SET after_turn_id = CASE")
+        );
+        assert!(AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION.contains("high_turn_id = CASE"));
+        assert!(
+            AUTOMATIC_MODEL_CALL_RECONCILIATION_SUPERSESSION
+                .contains("(SELECT count(*) FROM page) = $1")
         );
     }
 }
