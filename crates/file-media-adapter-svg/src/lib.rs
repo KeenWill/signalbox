@@ -5,7 +5,7 @@ use std::{borrow::Cow, collections::HashSet, error::Error, num::NonZeroU64, str:
 
 use iri_string::types::IriReferenceStr;
 use quick_xml::{
-    NsReader,
+    NsReader, Reader,
     escape::unescape,
     events::{BytesDecl, BytesStart, Event},
     name::{NamespaceResolver, ResolveResult},
@@ -26,6 +26,7 @@ const READER_NAME: &str = "quick-xml";
 const READER_REVISION: &str = "quick-xml-0-41-data-only-v1";
 const SVG_NAMESPACE: &[u8] = b"http://www.w3.org/2000/svg";
 const XLINK_NAMESPACE: &[u8] = b"http://www.w3.org/1999/xlink";
+const XML_EVENTS_NAMESPACE: &[u8] = b"http://www.w3.org/2001/xml-events";
 const XML_NAMESPACE: &[u8] = b"http://www.w3.org/XML/1998/namespace";
 const XMLNS_NAMESPACE: &[u8] = b"http://www.w3.org/2000/xmlns/";
 const TEXT_VIEW: &str = "text";
@@ -345,7 +346,26 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
     }
 }
 
+fn classify_svg_root(bytes: &[u8]) -> Result<bool, ParseIssue> {
+    let (document, _) = decode_xml(bytes, true)?;
+    let mut reader = Reader::from_reader(document.as_bytes());
+    let mut buffer = Vec::new();
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(start) | Event::Empty(start)) => {
+                return Ok(start.local_name().as_ref() == b"svg");
+            }
+            Ok(Event::Eof) | Err(_) => return Ok(false),
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
 fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
+    if !classify_svg_root(bytes)? {
+        return Err(ParseIssue::NoMatch);
+    }
     let (document, source_encoding) = decode_xml(bytes, false)?;
     let mut reader = NsReader::from_reader(document.as_bytes());
     reader.config_mut().trim_text(false);
@@ -648,6 +668,14 @@ fn inspect_element(
             Some(ResolveResult::Bound(namespace))
                 if namespace.as_ref() == XLINK_NAMESPACE && key == b"href"
         );
+        let is_xml_events_attribute = matches!(
+            attribute_namespace,
+            Some(ResolveResult::Bound(namespace))
+                if namespace.as_ref() == XML_EVENTS_NAMESPACE
+        );
+        if is_xml_events_attribute {
+            return Err(ParseIssue::ActiveContent);
+        }
         if is_svg_attribute
             && (event_handler_attribute(key)
                 || (depth == 0 && root_window_event_handler_attribute(key))
@@ -702,6 +730,8 @@ fn active_element(name: &[u8]) -> bool {
             | b"animateTransform"
             | b"set"
             | b"discard"
+            | b"handler"
+            | b"listener"
     )
 }
 
@@ -993,7 +1023,11 @@ impl<'a> CalculationParser<'a> {
 
     fn parse_function(&mut self) -> Option<CalculationKind> {
         let name = self.parse_identifier()?;
-        if !matches!(name, b"calc" | b"min" | b"max" | b"clamp") || !self.consume(b'(') {
+        if ![b"calc".as_slice(), b"min", b"max", b"clamp"]
+            .iter()
+            .any(|expected| name.eq_ignore_ascii_case(expected))
+            || !self.consume(b'(')
+        {
             return None;
         }
         let kind = self.parse_sum()?;
@@ -1004,11 +1038,12 @@ impl<'a> CalculationParser<'a> {
             }
             arguments += 1;
         }
-        let valid_arity = match name {
-            b"calc" => arguments == 1,
-            b"min" | b"max" => arguments >= 1,
-            b"clamp" => arguments == 3,
-            _ => false,
+        let valid_arity = if name.eq_ignore_ascii_case(b"calc") {
+            arguments == 1
+        } else if name.eq_ignore_ascii_case(b"min") || name.eq_ignore_ascii_case(b"max") {
+            arguments >= 1
+        } else {
+            name.eq_ignore_ascii_case(b"clamp") && arguments == 3
         };
         (valid_arity && self.consume(b')')).then_some(kind)
     }
@@ -1267,7 +1302,12 @@ fn parse_view_box(value: &str) -> Result<[f64; 4], ParseIssue> {
     let mut values = comma_groups
         .into_iter()
         .flat_map(str::split_ascii_whitespace)
-        .map(|part| part.parse::<f64>().map_err(|_| ParseIssue::Malformed));
+        .map(|part| {
+            if !valid_number_token(part) {
+                return Err(ParseIssue::Malformed);
+            }
+            part.parse::<f64>().map_err(|_| ParseIssue::Malformed)
+        });
     let view_box = [
         values.next().ok_or(ParseIssue::Malformed)??,
         values.next().ok_or(ParseIssue::Malformed)??,
@@ -1544,11 +1584,11 @@ fn decode_xml(
         }
     });
     let mut document = String::new();
-    let mut decoded = char::decode_utf16(units).peekable();
-    while let Some(character) = decoded.next() {
+    let decoded = char::decode_utf16(units);
+    for character in decoded {
         match character {
             Ok(character) => document.push(character),
-            Err(_) if allow_truncated_tail && decoded.peek().is_none() => break,
+            Err(_) if allow_truncated_tail => break,
             Err(_) => return Err(ParseIssue::Malformed),
         }
     }
