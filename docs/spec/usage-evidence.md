@@ -23,14 +23,14 @@ comparison resolves digest collisions without indexing or bounding the canonical
 reference. The exact reference is retained once in that mapping and is not
 copied into each projected call. Reads expose only the bounded, collision-free
 profile label, while server-side configured-cost derivation reconstructs the
-exact reference from that label and mapping. Reconstruction is itself bounded
-by the 256-byte configured-profile ceiling: a longer canonical reference can
-never name a configured profile, so reads report it as unpriceable instead of
-copying it out of the mapping, and the aggregate resolves each emitted group's
-reference exactly once, after grouping and the group ceiling, never per
-candidate call. Each physical token axis is either
-absent or an exact integer in the `u64` domain. Aggregate token sums use `u128`,
-so every sum admitted by the bounded source-call ceiling remains exact.
+exact reference from that label and mapping. Reconstruction is itself bounded by
+the 256-byte configured-profile ceiling: a longer canonical reference can never
+name a configured profile, so reads report it as unpriceable instead of copying
+it out of the mapping, and the aggregate resolves each emitted group's reference
+exactly once, after grouping and the group ceiling, never per candidate call.
+Each physical token axis is either absent or an exact integer in the `u64`
+domain. Aggregate token sums use `u128`, so every sum admitted by the bounded
+source-call ceiling remains exact.
 
 ## Compatibility grouping
 
@@ -81,9 +81,9 @@ provenance/call-kind selection support selective chronological pages.
 `GET /api/usage/calls` exposes at most 100 newest-first calls. Both accept the
 selection and time filters above, including all three closed call-kind
 spellings: `model_call`, `approval_judge`, and `context_compaction`. Malformed
-bounds, closed values, UUIDs, or partial cursors are application errors.
-Summary groups and individual calls both carry the bounded profile label, so a
-call can be associated with the profile-partitioned group that represents it.
+bounds, closed values, UUIDs, or partial cursors are application errors. Summary
+groups and individual calls both carry the bounded profile label, so a call can
+be associated with the profile-partitioned group that represents it.
 
 Dollar cost is not stored in the projection. Signalboxd reconstructs the exact
 non-secret credential reference from the bounded profile label when it fits the

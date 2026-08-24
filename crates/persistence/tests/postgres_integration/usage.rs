@@ -735,11 +735,11 @@ async fn usage_projection_retains_only_bounded_credential_identity() -> Result<(
     assert_eq!(page.calls[0].call, fixture.call);
     assert_eq!(
         page.calls[0].credential_profile.as_deref(),
-        Some("anthropic-primary")
+        Some(model_credential_reference().as_str())
     );
     assert_eq!(
         report.groups[0].key.credential_profile.as_deref(),
-        Some("anthropic-primary")
+        Some(model_credential_reference().as_str())
     );
 
     pool.close().await;
