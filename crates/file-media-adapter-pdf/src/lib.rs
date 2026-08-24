@@ -30,6 +30,7 @@ const VALIDATION_SOURCE_BYTES: u64 = 262_144;
 const ROOT_VALIDATION_BYTES: u64 = 4_096;
 // Hard safety ceiling bounds xref-stream decompression before entry parsing.
 const MAX_XREF_STREAM_BYTES: usize = VALIDATION_SOURCE_BYTES as usize;
+const MAX_TOTAL_XREF_STREAM_BYTES: usize = VALIDATION_SOURCE_BYTES as usize;
 // Hard safety ceiling bounds decompressed object streams independently of source layout.
 const MAX_OBJECT_STREAM_BYTES: usize = 1024 * 1024;
 // Hard safety ceiling bounds aggregate object-stream retention before lopdf construction.
@@ -73,6 +74,8 @@ struct TrailerFacts {
     decode_parameters: Option<Vec<u8>>,
     is_xref_stream: bool,
     indirect_xref_lengths: Vec<(IndirectReference, u64)>,
+    decoded_xref_bytes: usize,
+    xref_stream_limit_exceeded: bool,
 }
 
 #[derive(Default)]
@@ -94,6 +97,7 @@ enum StreamLength {
 struct CatalogFacts {
     pages: IndirectReference,
     version: Option<String>,
+    object_end: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -406,7 +410,7 @@ async fn inspect_bounded(
         bytes
     };
     require_active(cancellation)?;
-    let Some(mut parsed_xref) = parse_xref_structure(&xref_bytes) else {
+    let Some(mut parsed_xref) = parse_xref_structure(&xref_bytes, xref_offset) else {
         return Ok(malformed_validation());
     };
     let mut visited = BTreeSet::from([xref_offset]);
@@ -426,7 +430,7 @@ async fn inspect_bounded(
             return Ok(malformed_validation());
         }
         let previous_bytes = read_validation_range(source, budget, prev, length).await?;
-        let Some(mut previous) = parse_xref_structure(&previous_bytes) else {
+        let Some(mut previous) = parse_xref_structure(&previous_bytes, prev) else {
             return Ok(malformed_validation());
         };
         if !merge_bounded_supplemental_xref(source, budget, &mut previous, prev, &mut visited)
@@ -438,13 +442,18 @@ async fn inspect_bounded(
         newer_xref_offset = prev;
         require_active(cancellation)?;
     }
-    for (reference, expected) in parsed_xref.facts.indirect_xref_lengths.clone() {
+    let lengths = parsed_xref.facts.indirect_xref_lengths.clone();
+    for (index, (reference, expected)) in lengths.iter().copied().enumerate() {
+        let remaining = u64::try_from(lengths.len() - index - 1).unwrap_or(u64::MAX);
         let resolved = resolve_bounded_integer_object(
             source,
             budget,
             &parsed_xref,
             reference,
-            (2 * ROOT_VALIDATION_BYTES, 2),
+            (
+                2 * ROOT_VALIDATION_BYTES + remaining * ROOT_VALIDATION_BYTES,
+                2 + u32::try_from(remaining).unwrap_or(u32::MAX),
+            ),
             &mut BTreeSet::new(),
         )
         .await?;
@@ -458,6 +467,7 @@ async fn inspect_bounded(
         });
     }
     if parsed_xref.object_limit_exceeded
+        || parsed_xref.facts.xref_stream_limit_exceeded
         || !effective_size_contains_declarations(&parsed_xref)
         || !valid_xref_targets(&parsed_xref, source_length)
     {
@@ -482,7 +492,17 @@ async fn inspect_bounded(
             let Some(catalog) = catalog_facts(&root_bytes, root) else {
                 return Ok(malformed_validation());
             };
-            cached_uncompressed_range = Some((root_offset, root_bytes));
+            let Some(end) = catalog.object_end else {
+                return Ok(malformed_validation());
+            };
+            let end_offset = u64::try_from(end).map_err(|_| FileMediaProviderFailure::Failed)?;
+            let Some(cached_offset) = root_offset.checked_add(end_offset) else {
+                return Ok(malformed_validation());
+            };
+            let Some(cached_bytes) = root_bytes.get(end..) else {
+                return Ok(malformed_validation());
+            };
+            cached_uncompressed_range = Some((cached_offset, cached_bytes.to_vec()));
             catalog
         }
         XrefLocation::Compressed {
@@ -784,7 +804,9 @@ fn preflight_document(bytes: &[u8]) -> Result<Preflight, FileMediaProviderFailur
         Ok(Preflight::Encrypted)
     } else if parsed.object_limit_exceeded {
         Ok(Preflight::ObjectLimit)
-    } else if !object_streams_fit_expansion_limit(bytes, &parsed)? {
+    } else if parsed.facts.xref_stream_limit_exceeded
+        || !object_streams_fit_expansion_limit(bytes, &parsed)?
+    {
         Ok(Preflight::DecodedLimit)
     } else {
         Ok(Preflight::Ready)
@@ -1203,12 +1225,12 @@ fn last_keyword_outside_comments(bytes: &[u8], keyword: &[u8]) -> Option<usize> 
     latest
 }
 
-fn parse_xref_structure(bytes: &[u8]) -> Option<ParsedXref> {
+fn parse_xref_structure(bytes: &[u8], section_offset: u64) -> Option<ParsedXref> {
     let mut cursor = 0;
     if consume_keyword(bytes, &mut cursor, b"xref") {
         parse_classic_xref(bytes, cursor)
     } else {
-        parse_xref_stream(bytes, cursor)
+        parse_xref_stream(bytes, cursor, section_offset)
     }
 }
 
@@ -1239,7 +1261,7 @@ fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
             if generation > MAX_GENERATION {
                 return None;
             }
-            skip_pdf_space_and_comments(bytes, &mut cursor);
+            skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
             let state = *bytes.get(cursor)?;
             if state != b'n' && state != b'f' {
                 return None;
@@ -1275,7 +1297,7 @@ fn parse_classic_xref(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
     })
 }
 
-fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
+fn parse_xref_stream(bytes: &[u8], mut cursor: usize, section_offset: u64) -> Option<ParsedXref> {
     let xref_object = parse_unsigned(bytes, &mut cursor)?;
     if xref_object == 0 || xref_object > MAX_OBJECT_NUMBER {
         return None;
@@ -1327,6 +1349,8 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
     if decoded_length > MAX_XREF_STREAM_BYTES {
         return None;
     }
+    facts.decoded_xref_bytes = decoded_length;
+    facts.xref_stream_limit_exceeded = decoded_length > MAX_TOTAL_XREF_STREAM_BYTES;
     let stream = decode_xref_stream(
         encoded_stream,
         &facts.filters,
@@ -1344,13 +1368,18 @@ fn parse_xref_stream(bytes: &[u8], mut cursor: usize) -> Option<ParsedXref> {
         object_number: xref_object,
         generation: xref_generation,
     };
-    if live_entries
+    if let Some(entry) = live_entries
         .iter()
-        .all(|entry| entry.reference != xref_reference)
+        .find(|entry| entry.reference == xref_reference)
     {
+        if !matches!(entry.location, XrefLocation::Uncompressed(offset) if offset == section_offset)
+        {
+            return None;
+        }
+    } else {
         live_entries.push(LiveXrefEntry {
             reference: xref_reference,
-            location: XrefLocation::Uncompressed(0),
+            location: XrefLocation::Uncompressed(section_offset),
         });
         object_limit_exceeded = live_entries.len() > MAX_OBJECTS;
     }
@@ -1752,7 +1781,7 @@ fn valid_xref_targets(parsed: &ParsedXref, source_length: u64) -> bool {
 fn parse_xref_chain(bytes: &[u8], start: usize) -> Option<ParsedXref> {
     let mut visited = BTreeSet::new();
     let mut offset = start;
-    let mut parsed = parse_xref_structure(bytes.get(offset..)?)?;
+    let mut parsed = parse_xref_structure(bytes.get(offset..)?, u64::try_from(offset).ok()?)?;
     visited.insert(offset);
     merge_complete_supplemental_xref(bytes, &mut parsed, offset, &mut visited)?;
     while let Some(previous_offset) = parsed.facts.prev {
@@ -1764,7 +1793,7 @@ fn parse_xref_chain(bytes: &[u8], start: usize) -> Option<ParsedXref> {
         if !visited.insert(offset) {
             return None;
         }
-        let mut previous = parse_xref_structure(bytes.get(offset..)?)?;
+        let mut previous = parse_xref_structure(bytes.get(offset..)?, u64::try_from(offset).ok()?)?;
         merge_complete_supplemental_xref(bytes, &mut previous, offset, &mut visited)?;
         merge_previous_xref(&mut parsed, previous);
     }
@@ -1799,7 +1828,7 @@ fn merge_complete_supplemental_xref(
         if offset >= section_offset || !visited.insert(offset) {
             return None;
         }
-        let supplemental = parse_xref_structure(bytes.get(offset..)?)?;
+        let supplemental = parse_xref_structure(bytes.get(offset..)?, u64::try_from(offset).ok()?)?;
         merge_supplemental_xref(parsed, supplemental);
         section_offset = offset;
     }
@@ -1852,7 +1881,7 @@ async fn merge_bounded_supplemental_xref(
             return Ok(false);
         }
         let bytes = read_validation_range(source, budget, offset, length).await?;
-        let Some(supplemental) = parse_xref_structure(&bytes) else {
+        let Some(supplemental) = parse_xref_structure(&bytes, offset) else {
             return Ok(false);
         };
         merge_supplemental_xref(parsed, supplemental);
@@ -1871,6 +1900,12 @@ fn merge_supplemental_xref(current: &mut ParsedXref, mut supplemental: ParsedXre
         .facts
         .indirect_xref_lengths
         .append(&mut supplemental.facts.indirect_xref_lengths);
+    current.facts.decoded_xref_bytes = current
+        .facts
+        .decoded_xref_bytes
+        .saturating_add(supplemental.facts.decoded_xref_bytes);
+    current.facts.xref_stream_limit_exceeded |= supplemental.facts.xref_stream_limit_exceeded
+        || current.facts.decoded_xref_bytes > MAX_TOTAL_XREF_STREAM_BYTES;
     let objects = supplemental
         .live_entries
         .iter()
@@ -1896,6 +1931,12 @@ fn merge_previous_xref(current: &mut ParsedXref, mut previous: ParsedXref) {
         .facts
         .indirect_xref_lengths
         .append(&mut previous.facts.indirect_xref_lengths);
+    current.facts.decoded_xref_bytes = current
+        .facts
+        .decoded_xref_bytes
+        .saturating_add(previous.facts.decoded_xref_bytes);
+    current.facts.xref_stream_limit_exceeded |= previous.facts.xref_stream_limit_exceeded
+        || current.facts.decoded_xref_bytes > MAX_TOTAL_XREF_STREAM_BYTES;
     for entry in previous.live_entries {
         if !current
             .declared_objects
@@ -1965,10 +2006,12 @@ fn object_stream_object(
     let header = decoded.get(..first)?;
     let mut cursor = 0_usize;
     let mut entries = Vec::with_capacity(count);
-    for _ in 0..count {
-        skip_pdf_space_and_comments(header, &mut cursor);
+    for index in 0..count {
+        if index > 0 {
+            skip_required_pdf_space_and_comments(header, &mut cursor)?;
+        }
         let object_number = parse_nonnegative_integer(header, &mut cursor)?;
-        skip_pdf_space_and_comments(header, &mut cursor);
+        skip_required_pdf_space_and_comments(header, &mut cursor)?;
         let offset = parse_nonnegative_integer(header, &mut cursor)?;
         entries.push((object_number, offset));
     }
@@ -2170,7 +2213,7 @@ fn indirect_integer_object(bytes: &[u8], expected: IndirectReference) -> Option<
     }
     skip_pdf_space_and_comments(bytes, &mut cursor);
     let value = parse_nonnegative_integer(bytes, &mut cursor)?;
-    skip_pdf_space_and_comments(bytes, &mut cursor);
+    skip_required_pdf_space_and_comments(bytes, &mut cursor)?;
     consume_keyword(bytes, &mut cursor, b"endobj").then_some(value)
 }
 
@@ -2403,9 +2446,13 @@ fn catalog_facts(bytes: &[u8], expected: IndirectReference) -> Option<CatalogFac
         return None;
     }
     skip_pdf_space_and_comments(bytes, &mut cursor);
-    let (catalog, mut cursor) = parse_catalog_dictionary(bytes, cursor)?;
+    let (mut catalog, mut cursor) = parse_catalog_dictionary(bytes, cursor)?;
     skip_pdf_space_and_comments(bytes, &mut cursor);
-    consume_keyword(bytes, &mut cursor, b"endobj").then_some(catalog)
+    if !consume_keyword(bytes, &mut cursor, b"endobj") {
+        return None;
+    }
+    catalog.object_end = Some(cursor);
+    Some(catalog)
 }
 
 fn parse_catalog_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(CatalogFacts, usize)> {
@@ -2423,6 +2470,7 @@ fn parse_catalog_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(CatalogF
                 CatalogFacts {
                     pages: pages?,
                     version,
+                    object_end: None,
                 },
                 cursor + 2,
             ));
@@ -2594,12 +2642,15 @@ fn parse_xref_stream_entries(
             } else {
                 parse_big_endian(entry.get(..type_end)?)?
             };
+            let generation = parse_big_endian(entry.get(field_two_end..)?)?;
+            if entry_type == 0 && generation > MAX_GENERATION {
+                return None;
+            }
             if entry_type == 1 || entry_type == 2 {
                 if object_number == 0 {
                     return None;
                 }
                 let field_two = parse_big_endian(entry.get(type_end..field_two_end)?)?;
-                let generation = parse_big_endian(entry.get(field_two_end..)?)?;
                 if entry_type == 1 && generation > MAX_GENERATION {
                     return None;
                 }
@@ -2843,19 +2894,22 @@ mod tests {
         bytes.extend_from_slice(&stream);
         bytes.extend_from_slice(b"\nendstream\nendobj");
 
-        let parsed = parse_xref_structure(&bytes).expect("valid xref stream");
+        let parsed = parse_xref_structure(&bytes, 42).expect("valid xref stream");
 
         assert!(valid_xref_targets(&parsed, 128));
     }
 
     #[test]
     fn xref_stream_resolves_the_root_offset() {
-        let parsed = parsed_xref_stream_fixture();
+        let (parsed, expected_offset) = parsed_xref_stream_fixture();
 
-        assert_eq!(root_offset(&parsed).map(|(_, offset)| offset), Some(17));
+        assert_eq!(
+            root_offset(&parsed).map(|(_, offset)| offset),
+            Some(expected_offset)
+        );
     }
 
-    fn parsed_xref_stream_fixture() -> ParsedXref {
+    fn parsed_xref_stream_fixture() -> (ParsedXref, u64) {
         let stream = [
             0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 17, 1, 0, 0, 0, 0, 0, 0, 42,
         ];
@@ -2864,7 +2918,11 @@ mod tests {
                 .to_vec();
         bytes.extend_from_slice(&stream);
         bytes.extend_from_slice(b"\nendstream\nendobj");
-        parse_xref_structure(&bytes).expect("valid xref stream")
+        let expected_offset = u64::from(stream[15]);
+        (
+            parse_xref_structure(&bytes, 42).expect("valid xref stream"),
+            expected_offset,
+        )
     }
 
     #[test]
@@ -2878,7 +2936,7 @@ mod tests {
         bytes.extend_from_slice(&stream);
         bytes.extend_from_slice(b"\nendstream\nendobj");
 
-        assert!(parse_xref_structure(&bytes).is_some());
+        assert!(parse_xref_structure(&bytes, 42).is_some());
     }
 
     #[test]
@@ -2890,7 +2948,7 @@ mod tests {
         bytes.extend_from_slice(&stream);
         bytes.extend_from_slice(b"\nendstream\nendobj");
 
-        let parsed = parse_xref_structure(&bytes).expect("xref stream with trailing NUL");
+        let parsed = parse_xref_structure(&bytes, 42).expect("xref stream with trailing NUL");
 
         assert!(valid_xref_targets(&parsed, 128));
     }
@@ -2899,14 +2957,14 @@ mod tests {
     fn classic_xref_rejects_overlapping_subsections() {
         let bytes = b"xref\n1 2\n0000000017 00000 n\n0000000042 00000 n\n2 1\n0000000064 00000 n\ntrailer\n<< /Size 3 /Root 1 0 R >>";
 
-        assert!(parse_xref_structure(bytes).is_none());
+        assert!(parse_xref_structure(bytes, 0).is_none());
     }
 
     #[test]
     fn xref_stream_without_its_declared_body_is_rejected() {
         let bytes = b"2 0 obj\n<< /Type /XRef /Size 3 /Root 1 0 R /W [1 7 0] /Length 24 >>\nstream\nendstream\nendobj";
 
-        assert!(parse_xref_structure(bytes).is_none());
+        assert!(parse_xref_structure(bytes, 0).is_none());
     }
 
     #[test]
@@ -2916,7 +2974,7 @@ mod tests {
             "2 0 obj\n<< /Type /XRef /Size {count} /Root 1 0 R /W [1 0 0] /Index [0 {count}] /Length 1 /Filter /FlateDecode >>\nstream\nx\nendstream\nendobj"
         );
 
-        assert!(parse_xref_structure(bytes.as_bytes()).is_none());
+        assert!(parse_xref_structure(bytes.as_bytes(), 0).is_none());
     }
 
     #[test]
@@ -3018,7 +3076,7 @@ mod tests {
         bytes.extend_from_slice(&compressed.content);
         bytes.extend_from_slice(b"\nendstream\nendobj");
 
-        let parsed = parse_xref_structure(&bytes).expect("filtered xref stream");
+        let parsed = parse_xref_structure(&bytes, 0).expect("filtered xref stream");
         assert_eq!(parsed.declared_objects.len(), 16);
     }
 
@@ -3068,7 +3126,8 @@ mod tests {
     fn classic_xref_rejects_large_generation() {
         assert!(
             parse_xref_structure(
-                b"xref\n1 1\n0000000017 65536 n\ntrailer\n<< /Size 2 /Root 1 0 R >>"
+                b"xref\n1 1\n0000000017 65536 n\ntrailer\n<< /Size 2 /Root 1 0 R >>",
+                0,
             )
             .is_none()
         );
@@ -3273,9 +3332,9 @@ mod tests {
     }
 
     fn hybrid_xref_stream_entries(entry_count: usize) -> Vec<u8> {
-        let mut entries = vec![0, 0, 0];
+        let mut entries = vec![0, 0, 0, 2, 1, 1, 1, 9, 0];
         entries.extend(
-            (1..entry_count).flat_map(|index| [2, 1, u8::try_from(index % 2).unwrap_or(0)]),
+            (3..entry_count).flat_map(|index| [2, 1, u8::try_from(index % 2).unwrap_or(0)]),
         );
         entries
     }
@@ -3284,7 +3343,7 @@ mod tests {
     fn sparse_object_numbers_count_only_live_entries() {
         let bytes = b"xref\n0 1\n0000000000 65535 f\n20000 1\n0000000017 00000 n\ntrailer\n<< /Size 20001 /Root 20000 0 R >>";
 
-        let parsed = parse_xref_structure(bytes).expect("sparse xref");
+        let parsed = parse_xref_structure(bytes, 0).expect("sparse xref");
 
         assert!(!parsed.object_limit_exceeded);
         assert_eq!(parsed.live_entries.len(), 1);
