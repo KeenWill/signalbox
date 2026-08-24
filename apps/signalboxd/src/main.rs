@@ -1572,10 +1572,6 @@ async fn run_hub(
             return Err(failure);
         }
     };
-    tracing::info!(
-        phase = ?RuntimePhase::SocketBinding,
-        "daemon startup phase completed"
-    );
     let web_http_listener = match WebHttpRuntime::bind_listener(web_configuration).await {
         Ok(listener) => listener,
         Err(_) => {
@@ -1591,6 +1587,10 @@ async fn run_hub(
             return Err(failure);
         }
     };
+    tracing::info!(
+        phase = ?RuntimePhase::SocketBinding,
+        "daemon startup phase completed"
+    );
     let repository_watch_reconciliation = async {
         repository_watch_store
             .process_pending_lifecycle_cutoffs(|| DurableCommandId::from_uuid(uuid::Uuid::now_v7()))
