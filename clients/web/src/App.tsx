@@ -90,11 +90,19 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       dispatch,
       getState: store.getState,
       timelineIds,
-      navigate: (path) =>
+      navigate: (path) => {
+        if (path === '/scenario/streaming') {
+          void navigate({
+            to: '/scenario/$scenarioId',
+            params: { scenarioId: 'streaming' },
+          })
+          return
+        }
         void navigate({
           to: '/$surface',
           params: { surface: path.slice(1) as ProductRouteId },
-        }),
+        })
+      },
       focusTimeline: () => {
         const active = document.activeElement
         if (active instanceof HTMLElement) active.blur()

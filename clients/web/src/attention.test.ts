@@ -226,6 +226,30 @@ describe('attention projection recovery', () => {
     expect(phases.at(-1)).toBe('stale')
   })
 
+  it('resets the resync budget when a reconnect snapshot advances the cursor', async () => {
+    const phases: string[] = []
+    const advancingRecovery = (cursor: string) =>
+      [
+        { kind: 'snapshot', snapshot: { ...snapshot, cursor } },
+        { kind: 'resync_required', cursor },
+      ] as const
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        advancingRecovery('17'),
+        advancingRecovery('18'),
+        advancingRecovery('19'),
+        advancingRecovery('20'),
+        [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '21' } }],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
+    })
+
+    expect(phases.at(-1)).toBe('stale')
+  })
+
   it('preserves the immediate resync budget across replacement snapshots', async () => {
     const phases: string[] = []
     const resync = { kind: 'resync_required', cursor: '18' } as const

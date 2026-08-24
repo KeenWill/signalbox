@@ -198,7 +198,7 @@ export function AttentionSurface({
           onClick={monitorCanRestart ? restartMonitor : () => void attention.refetch()}
         >
           <RefreshCw aria-hidden="true" />
-          {phase === 'failed' ? 'Restart monitor' : 'Refresh snapshot'}
+          {monitorCanRestart ? 'Restart monitor' : 'Refresh snapshot'}
         </button>
       </div>
 

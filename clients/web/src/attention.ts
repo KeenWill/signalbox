@@ -103,10 +103,9 @@ export const synchronizeAttention = async ({
         const acceptance = onProjection(reduction.snapshot)
         projection = acceptance.snapshot
         if (
-          event.kind === 'update' &&
           acceptance.accepted &&
-          cursorBeforeReduction !== undefined &&
-          BigInt(acceptance.snapshot.cursor) > BigInt(cursorBeforeReduction)
+          (cursorBeforeReduction === undefined ||
+            BigInt(acceptance.snapshot.cursor) > BigInt(cursorBeforeReduction))
         ) {
           resyncs = 0
         }
