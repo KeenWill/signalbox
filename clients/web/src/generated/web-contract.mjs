@@ -1100,6 +1100,18 @@ function isWellFormedUnicode(value) {
   return true;
 }
 
+function exceedsScalarLength(value, maxLength) {
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {
+    count += 1;
+    if (count > maxLength) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function resolveReference(root, reference) {
   const prefix = "#/$defs/";
   if (!reference.startsWith(prefix)) {
@@ -1236,7 +1248,7 @@ function assertSchema(root, schema, value, path) {
   if (
     schema.type === "string" &&
     schema.maxLength !== undefined &&
-    Array.from(value).length > schema.maxLength
+    exceedsScalarLength(value, schema.maxLength)
   ) {
     fail(path, `at most ${schema.maxLength} Unicode scalar values`);
   }
