@@ -90,6 +90,13 @@ impl FileMediaProvider for ArchiveProvider {
             let prefix = ProbePrefix(read_range(source, SourceRange { offset: 0, length }).await?);
             require_active(cancellation)?;
             let prefix_matches = kind.matches_probe(prefix.as_bytes());
+            if kind == ArchiveKind::Zip
+                && source.byte_length().get() > SOURCE_BYTES
+                && prefix_matches
+                && !zip_signature_at_start(prefix.as_bytes())
+            {
+                return Ok(ProcessorProbeOutput::NoMatch);
+            }
             if prefix_matches
                 || kind == ArchiveKind::Zip && source.byte_length().get() <= SOURCE_BYTES
             {
@@ -421,10 +428,11 @@ fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         if file.size() > MAX_ENTRY_BYTES {
             return Err(ArchiveIssue::Expansion);
         }
-        if file.is_dir() && file.size() != 0 {
+        let is_directory = file.is_dir() || zip_directory_mode(file.unix_mode());
+        if is_directory && file.size() != 0 {
             return Err(ArchiveIssue::Special);
         }
-        let kind = if file.is_dir() { "directory" } else { "file" };
+        let kind = if is_directory { "directory" } else { "file" };
         descriptors.push((name, kind));
     }
     let mut entries = Vec::with_capacity(archive.len());
@@ -434,7 +442,7 @@ fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
             .by_index(index)
             .map_err(|_| ArchiveIssue::Malformed)?;
         let (expanded, recursive) = count_reader(&mut file, MAX_ENTRY_BYTES)?;
-        if file.is_dir() && expanded != 0 {
+        if kind == "directory" && expanded != 0 {
             return Err(ArchiveIssue::Special);
         }
         if recursive {
@@ -525,7 +533,7 @@ fn enumerate_gzip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
             first_name = Some(name);
         }
         let mut decoder = GzDecoder::new(Cursor::new(remaining));
-        let maximum = MAX_EXPANDED_BYTES
+        let maximum = MAX_ENTRY_BYTES
             .checked_sub(expanded)
             .ok_or(ArchiveIssue::Expansion)?;
         let member_expanded = count_reader_with_detector(&mut decoder, maximum, &mut detector)?;
@@ -550,7 +558,7 @@ fn enumerate_zstd(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
     }
     let mut decoder =
         zstd::stream::read::Decoder::new(bytes).map_err(|_| ArchiveIssue::Malformed)?;
-    let (expanded, recursive) = count_reader(&mut decoder, MAX_EXPANDED_BYTES)?;
+    let (expanded, recursive) = count_reader(&mut decoder, MAX_ENTRY_BYTES)?;
     if recursive {
         return Err(ArchiveIssue::Recursive);
     }
@@ -767,6 +775,10 @@ fn parse_tar_octal(bytes: &[u8]) -> Option<u64> {
 
 fn is_link(mode: Option<u32>) -> bool {
     mode.is_some_and(|mode| mode & 0o170_000 == 0o120_000)
+}
+
+fn zip_directory_mode(mode: Option<u32>) -> bool {
+    mode.is_some_and(|mode| mode & 0o170_000 == 0o040_000)
 }
 
 fn zip_special(mode: Option<u32>) -> bool {

@@ -332,6 +332,17 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn mode_only_data_bearing_zip_directory() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = zip_bytes(&[("payload", PAYLOAD, ZipEntryKind::File)])?;
+        set_unix_mode(&mut bytes, 0o040_755)?;
+        Ok(Self {
+            bytes,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "payload",
+        })
+    }
+
     pub fn zero_sized_data_bearing_zip_directory() -> Result<Self, Box<dyn Error>> {
         let mut fixture = Self::data_bearing_zip_directory()?;
         set_uncompressed_size(&mut fixture.bytes, 0)?;
@@ -491,8 +502,28 @@ impl ArchiveFixture {
         })
     }
 
+    pub fn gzip_entry_bomb() -> Result<Self, Box<dyn Error>> {
+        let payload = vec![b'x'; 8 * 1024 * 1024 + 1];
+        Ok(Self {
+            bytes: gzip_bytes("payload.txt", &payload)?,
+            media_type: "application/gzip",
+            expected_format: "gzip",
+            expected_name: "payload.txt",
+        })
+    }
+
     pub fn zstd_bomb() -> Result<Self, Box<dyn Error>> {
         let payload = vec![b'x'; 16 * 1024 * 1024 + 1];
+        Ok(Self {
+            bytes: zstd::stream::encode_all(payload.as_slice(), 1)?,
+            media_type: "application/zstd",
+            expected_format: "zstd",
+            expected_name: "content",
+        })
+    }
+
+    pub fn zstd_entry_bomb() -> Result<Self, Box<dyn Error>> {
+        let payload = vec![b'x'; 8 * 1024 * 1024 + 1];
         Ok(Self {
             bytes: zstd::stream::encode_all(payload.as_slice(), 1)?,
             media_type: "application/zstd",
@@ -649,6 +680,21 @@ fn set_uncompressed_size(bytes: &mut [u8], size: u32) -> Result<(), Box<dyn Erro
         .get_mut(central + 24..central + 28)
         .ok_or("ZIP central uncompressed size absent")?
         .copy_from_slice(&size.to_le_bytes());
+    Ok(())
+}
+
+fn set_unix_mode(bytes: &mut [u8], mode: u32) -> Result<(), Box<dyn Error>> {
+    let central = bytes
+        .windows(4)
+        .position(|window| window == b"PK\x01\x02")
+        .ok_or("ZIP fixture omitted central header")?;
+    *bytes
+        .get_mut(central + 5)
+        .ok_or("ZIP creator system absent")? = 3;
+    bytes
+        .get_mut(central + 38..central + 42)
+        .ok_or("ZIP external attributes absent")?
+        .copy_from_slice(&(mode << 16).to_le_bytes());
     Ok(())
 }
 

@@ -348,6 +348,15 @@ async fn data_bearing_zip_directory_is_rejected() -> Result<(), Box<dyn Error>> 
 }
 
 #[tokio::test]
+async fn mode_only_data_bearing_zip_directory_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::mode_only_data_bearing_zip_directory()?).await?,
+        "special_entry",
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn tar_symlink_is_rejected_without_following() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::tar_symlink()?).await?,
@@ -474,9 +483,27 @@ async fn compressed_gzip_bomb_is_a_typed_bounded_failure() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+async fn gzip_logical_entry_obeys_the_per_entry_ceiling() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::gzip_entry_bomb()?).await?,
+        "expanded_size_limit",
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn compressed_zstd_bomb_is_a_typed_bounded_failure() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         malformed_inspection(ArchiveFixture::zstd_bomb()?).await?,
+        "expanded_size_limit",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn zstd_logical_entry_obeys_the_per_entry_ceiling() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::zstd_entry_bomb()?).await?,
         "expanded_size_limit",
     );
     Ok(())
@@ -512,6 +539,17 @@ async fn unknown_bytes_remain_a_typed_unknown_inspection() -> Result<(), Box<dyn
 #[tokio::test]
 async fn invalid_unanchored_zip_signature_remains_unknown() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::unknown(b"plain bytes PK\x03\x04 without a ZIP".to_vec())?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn oversized_unanchored_zip_signature_remains_unknown() -> Result<(), Box<dyn Error>> {
+    let mut bytes = vec![b'x'; 256 * 1_024 + 1];
+    bytes[32..36].copy_from_slice(b"PK\x03\x04");
+    let source = MemorySource::unknown(bytes)?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
