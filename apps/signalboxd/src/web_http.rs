@@ -643,14 +643,20 @@ async fn attention_snapshot(
 fn parse_attention_snapshot_query(raw: Option<&str>) -> Result<AttentionSnapshotQuery, ()> {
     let mut query = AttentionSnapshotQuery::default();
     let mut filter_bytes = 0_usize;
-    for (key, value) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
-        match key.as_ref() {
+    for pair in raw.unwrap_or_default().split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = decode_query_component(key)?;
+        let value = decode_query_component(value)?;
+        match key.as_str() {
             "search" => {
                 filter_bytes = filter_bytes.checked_add(value.len()).ok_or(())?;
                 if filter_bytes > usize::from(max_attention_filter_utf8_bytes()) {
                     return Err(());
                 }
-                set_once(&mut query.search, value.into_owned())?;
+                set_once(&mut query.search, value)?;
             }
             "required_tag" => {
                 if query.required_tag.len() >= usize::from(max_attention_filter_tags()) {
@@ -660,15 +666,14 @@ fn parse_attention_snapshot_query(raw: Option<&str>) -> Result<AttentionSnapshot
                 if filter_bytes > usize::from(max_attention_filter_utf8_bytes()) {
                     return Err(());
                 }
-                query.required_tag.push(value.into_owned());
+                query.required_tag.push(value);
             }
-            "include_archived" => set_once(&mut query.include_archived, value.into_owned())?,
-            "sort" => set_once(&mut query.sort, value.into_owned())?,
-            "after_session_id" => set_once(&mut query.after_session_id, value.into_owned())?,
-            "after_activity_unix_microseconds" => set_once(
-                &mut query.after_activity_unix_microseconds,
-                value.into_owned(),
-            )?,
+            "include_archived" => set_once(&mut query.include_archived, value)?,
+            "sort" => set_once(&mut query.sort, value)?,
+            "after_session_id" => set_once(&mut query.after_session_id, value)?,
+            "after_activity_unix_microseconds" => {
+                set_once(&mut query.after_activity_unix_microseconds, value)?;
+            }
             _ => return Err(()),
         }
     }
@@ -680,6 +685,47 @@ fn set_once(target: &mut Option<String>, value: String) -> Result<(), ()> {
         return Err(());
     }
     Ok(())
+}
+
+/// Strict `application/x-www-form-urlencoded` component decoding: `+` is a
+/// space, `%XX` escapes must be complete hex pairs, and the decoded bytes must
+/// be valid UTF-8. A lossy decoder would silently rewrite invalid bytes to
+/// U+FFFD and execute a different exact filter than the caller sent.
+fn decode_query_component(raw: &str) -> Result<String, ()> {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' => {
+                let high = bytes.get(index + 1).copied().and_then(hex_digit_value);
+                let low = bytes.get(index + 2).copied().and_then(hex_digit_value);
+                let (Some(high), Some(low)) = (high, low) else {
+                    return Err(());
+                };
+                decoded.push(high * 16 + low);
+                index += 3;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| ())
+}
+
+const fn hex_digit_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn parse_attention_query(query: AttentionSnapshotQuery) -> Result<AttentionQuery, ()> {
@@ -1871,6 +1917,25 @@ mod tests {
         );
 
         assert!(super::parse_attention_snapshot_query(Some(&raw)).is_err());
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_invalid_percent_encoded_utf8() {
+        assert!(super::parse_attention_snapshot_query(Some("search=%FF")).is_err());
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_incomplete_percent_escapes() {
+        assert!(super::parse_attention_snapshot_query(Some("search=%F")).is_err());
+        assert!(super::parse_attention_snapshot_query(Some("search=%zz")).is_err());
+    }
+
+    #[test]
+    fn session_catalog_query_decodes_escapes_and_plus_exactly() {
+        let query = super::parse_attention_snapshot_query(Some("search=a+b%2Bc%C3%A9"))
+            .expect("valid percent-encoded UTF-8 decodes");
+
+        assert_eq!(query.search.as_deref(), Some("a b+c\u{e9}"));
     }
 
     #[test]
