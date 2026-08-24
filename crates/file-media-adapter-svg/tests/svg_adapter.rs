@@ -666,6 +666,10 @@ async fn read(
 }
 
 #[track_caller]
+#[allow(
+    clippy::manual_async_fn,
+    reason = "the synchronous wrapper propagates the caller location before constructing the async check"
+)]
 fn assert_malformed(
     fixture: SvgFixture,
     reason: &str,
