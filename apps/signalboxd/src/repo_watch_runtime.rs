@@ -3770,6 +3770,10 @@ impl GitHubRepositoryPoller {
         previous: &RepoWatchObservation,
         targets: &[TargetedPullRequest],
     ) -> Result<TargetedPollOutcome, RepositoryWatchAttemptError> {
+        // A cancelled complete poll can leave child fetches in the shared set.
+        // Settle them within the scheduler bound before issuing targeted
+        // requests, so work from two attempts cannot interleave.
+        self.drain_fetches_bounded().await?;
         let mut state = RepoWatchRepositoryStateInput {
             pull_requests: previous.state().pull_requests().to_vec(),
             workflow_runs: previous.state().workflow_runs().to_vec(),
@@ -7911,6 +7915,14 @@ mod tests {
         let previous = complete_typed_observation().await;
         let server = ScriptedServer::start(complete_pull_request_responses()).await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        fixture
+            .poller
+            .fetches
+            .lock()
+            .await
+            .spawn(std::future::pending::<
+                Result<super::FetchedPullRequest, RepositoryWatchAttemptError>,
+            >());
         let target = TargetedPullRequest {
             number: PullRequestNumber::new(
                 NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
@@ -7927,6 +7939,10 @@ mod tests {
             .expect("targeted refresh succeeds");
 
         server.finish().await;
+        assert!(
+            fixture.poller.fetches.lock().await.is_empty(),
+            "targeted refresh drains complete-poll survivors before fetching"
+        );
         assert_eq!(
             refreshed,
             TargetedPollOutcome::Observation {

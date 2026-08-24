@@ -1172,38 +1172,38 @@ after bounded child cleanup even when an inner operation never returns.
 Unfinished child fetches remain in the poller's shared set, which a later
 attempt must drain before it can spawn new work. A deadline reached by the
 pre-poll drain stops that poll before its provider sweep can advance the durable
-cursor past the still-pending delivery. A targeted completion already started
-by the cancelled drain retains its exact terminal request and cursor write. It
+cursor past the still-pending delivery. A targeted completion already started by
+the cancelled drain retains its exact terminal request and cursor write. It
 records the disposition and projections as the durable recovery handoff before
 attempting the cursor write, and the next drain settles that completion and its
 shadow outcome before subsequent drain work. Cancellation discards the shadow
 only when it races a projected terminal write whose durability is unknown. The
 task retains that delivery identity and blocks cursor-advancing polls until the
 disposition is definitively observed or replayed. If an earlier delivery had
-already failed before a later
-operation reached the deadline, the drain emits that earlier closed cause at
-error level before reporting the timeout, preserving the first-failure guarantee
-for an error-only telemetry sink. A terminal commit whose result is lost in
-transit is resolved by reading whether the row is already terminal, which cannot
-itself be ambiguous: if it is, the delivery counts as recorded and the shadow
-advances; if it is not, the record is re-attempted a bounded number of times
-before the delivery is left pending for the next drain. If every settling read
-is itself unavailable, the shadow is discarded rather than trusted, because a
-disposition may have landed without being reflected in that baseline. A durable
-disposition the shadow never accounted for is what this avoids. A delivery whose
-processing fails is deferred for the rest of that drain rather than failing it,
-so one persistently unprocessable receipt cannot pin the head of the queue and
-starve every later one; the attempt still reports the first such failure. A
-signature-valid delivery whose event or action is outside the mapped set,
-including a broadly subscribed `workflow_job`, is still acknowledged
-successfully and is cheaply logged and recorded as ignored rather than treated
-as an intake failure. A targeted projection records its terminal disposition and
-exact projections as the durable recovery handoff before its cursor write. If
-that cursor write conflicts with an intervening full poll, the delivery remains
-terminal and the in-memory shadow is handed over to the competing durable cursor
-before later pending receipts are projected. A webhook-enabled shadow wake may
-also preempt the read-only provider sweep of an in-flight complete poll, without
-resetting that poll's deadline, so the durable delivery drains before bounded
+already failed before a later operation reached the deadline, the drain emits
+that earlier closed cause at error level before reporting the timeout,
+preserving the first-failure guarantee for an error-only telemetry sink. A
+terminal commit whose result is lost in transit is resolved by reading whether
+the row is already terminal, which cannot itself be ambiguous: if it is, the
+delivery counts as recorded and the shadow advances; if it is not, the record is
+re-attempted a bounded number of times before the delivery is left pending for
+the next drain. If every settling read is itself unavailable, the shadow is
+discarded rather than trusted, because a disposition may have landed without
+being reflected in that baseline. A durable disposition the shadow never
+accounted for is what this avoids. A delivery whose processing fails is deferred
+for the rest of that drain rather than failing it, so one persistently
+unprocessable receipt cannot pin the head of the queue and starve every later
+one; the attempt still reports the first such failure. A signature-valid
+delivery whose event or action is outside the mapped set, including a broadly
+subscribed `workflow_job`, is still acknowledged successfully and is cheaply
+logged and recorded as ignored rather than treated as an intake failure. A
+targeted projection records its terminal disposition and exact projections as
+the durable recovery handoff before its cursor write. If that cursor write
+conflicts with an intervening full poll, the delivery remains terminal and the
+in-memory shadow is handed over to the competing durable cursor before later
+pending receipts are projected. A webhook-enabled shadow wake may also preempt
+the read-only provider sweep of an in-flight complete poll, without resetting
+that poll's deadline, so the durable delivery drains before bounded
 reconciliation resumes.
 
 **Implemented behavior.** A drain page attempts every loaded delivery even when
