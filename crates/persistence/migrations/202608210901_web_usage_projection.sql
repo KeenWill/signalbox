@@ -92,6 +92,9 @@ CREATE INDEX web_usage_by_session_recorded_call
 CREATE INDEX web_usage_by_session_kind_recorded_call
     ON web_usage_call_projection
        (session_id, call_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_provenance_recorded_call
+    ON web_usage_call_projection
+       (session_id, usage_provenance_kind, recorded_at DESC, model_call_id DESC);
 CREATE INDEX web_usage_by_turn_recorded_call
     ON web_usage_call_projection
        (turn_id, recorded_at DESC, model_call_id DESC);

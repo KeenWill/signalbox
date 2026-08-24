@@ -5,10 +5,10 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_application::{
     UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport, UsageAggregateTokenAxes,
-    UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallPage, UsageCallQuery,
-    UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageReader, UsageTimestampMicros,
-    UsageTokenAxes, UsageTokenCoverage, UsageTokenPresence, max_usage_aggregate_calls,
-    max_usage_aggregate_groups, max_usage_credential_profile_utf8_bytes,
+    UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPage,
+    UsageCallQuery, UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageReader,
+    UsageTimestampMicros, UsageTokenAxes, UsageTokenCoverage, UsageTokenPresence,
+    max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_credential_profile_utf8_bytes,
 };
 use signalbox_domain::{
     ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId,
@@ -215,13 +215,16 @@ impl UsageRepository {
         &self,
         query: UsageCallQuery,
     ) -> Result<UsageCallPage, UsageRepositoryError> {
+        let statement = match query.order {
+            UsageCallOrder::NewestFirst => CALLS_NEWEST_SQL,
+        };
         let filters = QueryBindings::new(query.scope)?;
         let cursor_time = query
             .after
             .map(|cursor| timestamp_to_offset(cursor.recorded_at))
             .transpose()?;
         let cursor_call = query.after.map(|cursor| cursor.call.into_uuid());
-        let rows = sqlx::query(CALLS_NEWEST_SQL)
+        let rows = sqlx::query(statement)
             .bind(filters.from)
             .bind(filters.to)
             .bind(filters.session)

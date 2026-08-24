@@ -54,10 +54,12 @@ is not exposed because transaction start timestamps can become visible behind an
 already emitted oldest-first cursor when concurrent transactions commit.
 
 Indexes led by session, turn, target, provenance, call kind, combined
-session/call-kind selection, and combined provenance/call-kind selection support
-selective chronological pages.
+session/call-kind selection, combined session/provenance selection, and combined
+provenance/call-kind selection support selective chronological pages.
 
 ## Open edges
 
-Configured currency rates and browser/API presentation are owned by later
-slices; this contract supplies exact bounded evidence and compatibility groups.
+Committed unimplemented functionality: configured currency rates and browser/API
+presentation will consume these compatibility groups in later slices. No current
+surface provides either capability; this contract supplies only exact bounded
+evidence and the compatibility boundary those later surfaces must preserve.
