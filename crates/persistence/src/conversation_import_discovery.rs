@@ -622,12 +622,15 @@ fn checked_content_projection(
         1 => checked_text_projection(&header, row, total_bytes, projected_bytes)
             .map(ImportedEntryContentProjection::Text),
         2 if content_kind.as_deref() == Some("tool_call") => {
+            checked_compound_envelope(&header, total_bytes, 3)?;
             Ok(ImportedEntryContentProjection::ToolCall)
         }
         3 if content_kind.as_deref() == Some("tool_result") => {
+            checked_compound_envelope(&header, total_bytes, 2)?;
             Ok(ImportedEntryContentProjection::ToolResult)
         }
         4 if content_kind.as_deref() == Some("thinking") => {
+            checked_compound_envelope(&header, total_bytes, 1)?;
             Ok(ImportedEntryContentProjection::Thinking)
         }
         5 if content_kind.as_deref() == Some("redacted_thinking") => {
@@ -635,6 +638,7 @@ fn checked_content_projection(
             Ok(ImportedEntryContentProjection::RedactedThinking)
         }
         6 if content_kind.as_deref() == Some("document") => {
+            checked_document_envelope(&header, total_bytes)?;
             Ok(ImportedEntryContentProjection::Document)
         }
         7 if content_kind.as_deref() == Some("message_content_absent")
@@ -675,6 +679,53 @@ fn checked_single_attestation_envelope(
                 Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into())
             }
         }
+        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
+    }
+}
+
+// Bounded structural validation for kinds whose payload opens with a text attestation
+// followed by `remaining_attestations` further attestations, each occupying at least its
+// one tag byte. The complete codec still owns full decoding; this rejects encodings whose
+// stored byte count cannot possibly hold the declared structure, such as a bare header.
+fn checked_compound_envelope(
+    header: &[u8],
+    total_bytes: i64,
+    remaining_attestations: i64,
+) -> Result<(), ImportedConversationDiscoveryError> {
+    match header.get(3) {
+        Some(0 | 1) if total_bytes >= 4 + remaining_attestations => Ok(()),
+        Some(2) if header.len() == 12 => {
+            let declared_bytes = u64::from_be_bytes(
+                header[4..12]
+                    .try_into()
+                    .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?,
+            );
+            let declared_bytes = i64::try_from(declared_bytes)
+                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
+            let minimum_total = declared_bytes
+                .checked_add(12)
+                .and_then(|bytes| bytes.checked_add(remaining_attestations))
+                .ok_or(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
+            if total_bytes >= minimum_total {
+                Ok(())
+            } else {
+                Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into())
+            }
+        }
+        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
+    }
+}
+
+// A document payload is one attestation of a media source, which is itself three text
+// attestations, so an attested document carries the inner kind-attestation tag directly
+// after the outer tag and needs at least the three inner tag bytes.
+fn checked_document_envelope(
+    header: &[u8],
+    total_bytes: i64,
+) -> Result<(), ImportedConversationDiscoveryError> {
+    match header.get(3) {
+        Some(0 | 1) if total_bytes == 4 => Ok(()),
+        Some(2) if header.get(4).is_some_and(|tag| *tag <= 2) && total_bytes >= 7 => Ok(()),
         _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
     }
 }
