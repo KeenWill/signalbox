@@ -300,6 +300,21 @@ impl RepositoryWatchRuntime {
         Ok(Self { tasks, webhook })
     }
 
+    /// Completes each repository's bounded startup webhook attempt before the
+    /// daemon admits scheduler work.
+    pub async fn prepare_startup(&mut self) -> Result<(), RepositoryWatchRuntimeError> {
+        let outcomes = futures_util::future::join_all(
+            self.tasks
+                .iter_mut()
+                .map(RepositoryWatchTask::prepare_startup),
+        )
+        .await;
+        if outcomes.into_iter().any(std::convert::identity) {
+            return Err(RepositoryWatchRuntimeError::RepositoryTaskExited);
+        }
+        Ok(())
+    }
+
     /// Runs every repository task until the daemon broadcasts shutdown.
     pub async fn run(
         self,
@@ -1030,6 +1045,7 @@ struct RepositoryWatchTask {
     webhook_shadow_superseded: bool,
     payload_purge: WebhookPayloadPurgeSchedule,
     rules_activated: bool,
+    startup_webhook_retry: Option<WebhookDrainRetry>,
     reconciliation_quantum: Option<usize>,
     webhook_drain_work_budget: Option<Duration>,
 }
@@ -1115,6 +1131,7 @@ impl RepositoryWatchTask {
             webhook_shadow_superseded: false,
             payload_purge,
             rules_activated: false,
+            startup_webhook_retry: None,
             reconciliation_quantum,
             webhook_drain_work_budget,
         })
@@ -1124,8 +1141,10 @@ impl RepositoryWatchTask {
         if *shutdown.borrow() {
             return;
         }
-        let mut webhook_retry = WebhookDrainRetry::default();
-        if self.webhook_work.is_some() {
+        let prepared_webhook_retry = self.startup_webhook_retry.take();
+        let startup_was_prepared = prepared_webhook_retry.is_some();
+        let mut webhook_retry = prepared_webhook_retry.unwrap_or_default();
+        if self.webhook_work.is_some() && !startup_was_prepared {
             let Some(outcome) = self.run_webhook_attempt_until_shutdown(&mut shutdown).await else {
                 return;
             };
@@ -1324,6 +1343,24 @@ impl RepositoryWatchTask {
                 }
             }
         }
+    }
+
+    async fn prepare_startup(&mut self) -> bool {
+        if self.webhook_work.is_none() {
+            self.startup_webhook_retry = Some(WebhookDrainRetry::default());
+            return false;
+        }
+        let outcome = self
+            .run_webhook_attempt_with_deadline(WEBHOOK_ATTEMPT_TIMEOUT)
+            .await;
+        let mut webhook_retry = WebhookDrainRetry::default();
+        let must_stop = self.record_webhook_attempt(
+            WebhookAttemptTrigger::Startup,
+            outcome,
+            &mut webhook_retry,
+        );
+        self.startup_webhook_retry = Some(webhook_retry);
+        must_stop
     }
 
     async fn run_webhook_attempt_until_shutdown(
@@ -5814,6 +5851,7 @@ mod tests {
                 eligibility_nudge,
                 webhook_store: PostgresRepoWatchWebhookStore::new(pool.clone()),
                 webhook_work: None,
+                startup_webhook_retry: None,
                 reconciliation_quantum: None,
                 webhook_drain_work_budget: None,
                 payload_purge: WebhookPayloadPurgeSchedule::starting_now(),
@@ -7924,6 +7962,26 @@ mod tests {
             .expect("the page peer reached a terminal disposition");
         assert_eq!(peer.disposition(), RepoWatchWebhookDisposition::Projected);
         assert_eq!(peer.outcome_code(), None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn startup_preparation_drains_pending_webhook_work_before_runtime_admission()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admitted = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admitted).await?;
+        let (_sender, receiver) = watch::channel(());
+        let mut fixture = webhook_task(&pool).await?;
+        fixture.task.webhook_work = Some(receiver);
+
+        let must_stop = fixture.task.prepare_startup().await;
+
+        assert!(!must_stop);
+        assert!(webhook_disposition_exists(&webhook_store, admitted.key()).await?);
+        assert!(fixture.task.startup_webhook_retry.is_some());
         Ok(())
     }
 

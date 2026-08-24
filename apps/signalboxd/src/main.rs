@@ -1989,7 +1989,7 @@ async fn run_hub(
         nudge_buffer_capacity,
     );
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
-    let repository_watch_runtime = match model_configuration.repository_watch() {
+    let mut repository_watch_runtime = match model_configuration.repository_watch() {
         Some(configuration) => match RepositoryWatchRuntime::try_new(
             pool.clone(),
             configuration,
@@ -2078,6 +2078,36 @@ async fn run_hub(
             drop(blob_store_registry);
             let _ = database.close().await;
             return Ok(ShutdownOutcome::GuardLost);
+        }
+    }
+    if let Some(runtime) = repository_watch_runtime.as_mut() {
+        match await_while_guarded(&mut database, runtime.prepare_startup()).await {
+            GuardedAwait::Completed(Ok(())) => tracing::info!(
+                phase = ?RuntimePhase::StartupScan,
+                "daemon startup completed bounded repository-watch webhook reconciliation"
+            ),
+            GuardedAwait::Completed(Err(_)) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("repository_watch_startup_webhook_failed"),
+                );
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+            GuardedAwait::GuardLost => {
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                if let Some(registry) = blob_store_registry.as_ref() {
+                    registry.disarm_staging_sweep();
+                }
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Ok(ShutdownOutcome::GuardLost);
+            }
         }
     }
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);

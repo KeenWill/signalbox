@@ -1119,7 +1119,8 @@ replace the first body. Every new admission and equal durable replay publishes a
 coalescing in-memory wake after commit; the listener returns success only while
 that repository's drain task remains available to receive it. The wake is an
 accelerator over durable state, not a work inventory: the repository task drains
-durable pending deliveries on startup, when woken, and as part of every full
+durable pending deliveries in a bounded startup attempt before scheduler work is
+admitted, when woken, and as part of every full
 poll for which no retry is already owed, and a wake arriving during a drain
 remains observable for a follow-up attempt. One pending page is bounded by both
 its row count and the exact payload bytes it may hold, and it reads those bodies
