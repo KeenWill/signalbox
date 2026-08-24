@@ -36,7 +36,8 @@ use signalbox_application::{
     SessionLiveRunnerConnectionHealth, SessionLiveRunnerState, SessionLiveSnapshot,
     SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress,
     TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits,
-    max_attention_goal_summary_characters, max_attention_title_characters,
+    max_attention_goal_summary_characters, max_attention_snapshot_items,
+    max_attention_title_characters,
 };
 use signalbox_domain::SessionId;
 use signalbox_persistence::attention::{AttentionRepository, AttentionRepositoryError};
@@ -49,12 +50,12 @@ use signalbox_web_contract::{
     WebAttentionAction, WebAttentionActivity, WebAttentionActivityKind, WebAttentionBlockedReason,
     WebAttentionContinuation, WebAttentionGoalBlock, WebAttentionJudgeFacts, WebAttentionSnapshot,
     WebAttentionSort, WebAttentionState, WebAttentionStreamEvent, WebAttentionSummary,
-    WebContractBootstrap, WebContractExample, WebSessionLiveActiveState, WebSessionLiveActiveTurn,
-    WebSessionLiveReconciliation, WebSessionLiveRunner, WebSessionLiveRunnerConnectionHealth,
-    WebSessionLiveSnapshot, WebSessionLiveStreamEvent, WebSessionTimelineDescriptor,
-    WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence,
-    WebU64,
+    WebContractBootstrap, WebContractExample, WebSessionId, WebSessionLiveActiveState,
+    WebSessionLiveActiveTurn, WebSessionLiveReconciliation, WebSessionLiveRunner,
+    WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot, WebSessionLiveStreamEvent,
+    WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
+    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebTimelineEventSequence, WebTurnId, WebU64,
 };
 use sqlx::{PgPool, types::Uuid};
 use tokio::{net::TcpListener, sync::watch};
@@ -571,7 +572,7 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
-        session_id: descriptor.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_uuid_bytes(*descriptor.session.into_uuid().as_bytes()),
         sizes: WebSessionTimelineSizeFacts {
             item_count: WebU64::from_u64(descriptor.sizes.item_count),
             projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
@@ -601,7 +602,7 @@ fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
     };
     WebSessionTimelineWindow {
-        session_id: window.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_uuid_bytes(*window.session.into_uuid().as_bytes()),
         items: window
             .items
             .into_iter()
@@ -1045,8 +1046,8 @@ fn set_once(target: &mut Option<String>, value: String) -> Result<(), ()> {
 
 fn parse_attention_query(query: AttentionSnapshotQuery) -> Result<AttentionQuery, ()> {
     let sort = match query.sort.as_deref() {
-        None | Some("last_activity_desc") => AttentionSort::LastActivityDescending,
-        Some("session_id_asc") => AttentionSort::SessionIdentityAscending,
+        None | Some("last_activity_descending") => AttentionSort::LastActivityDescending,
+        Some("session_identity_ascending") => AttentionSort::SessionIdentityAscending,
         Some(_) => return Err(()),
     };
     let include_archived = match query.include_archived.as_deref() {
@@ -1064,6 +1065,12 @@ fn parse_attention_query(query: AttentionSnapshotQuery) -> Result<AttentionQuery
         .map(|value| value.parse::<u64>())
         .transpose()
         .map_err(|_| ())?;
+    if after_activity_micros.is_some_and(|value| {
+        sqlx::types::time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(value) * 1_000)
+            .is_err()
+    }) {
+        return Err(());
+    }
     let after_activity = after_activity_micros
         .map(|value| {
             UNIX_EPOCH
@@ -1123,18 +1130,18 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
     let source = stream::unfold(
         (
             repository,
-            Some(WebAttentionStreamEvent::Snapshot { snapshot }),
+            VecDeque::from([(WebAttentionStreamEvent::Snapshot { snapshot }, cursor)]),
             cursor,
             AttentionFollowDisposition::Continue,
         ),
-        |(repository, pending, cursor, disposition)| async move {
-            if let Some(event) = pending {
+        |(repository, mut pending, cursor, disposition)| async move {
+            if let Some((event, emitted_cursor)) = pending.pop_front() {
                 return Some((
                     event,
                     (
                         repository,
-                        None,
-                        cursor,
+                        pending,
+                        emitted_cursor,
                         AttentionFollowDisposition::Continue,
                     ),
                 ));
@@ -1155,20 +1162,29 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                             .map(attention_summary_dto)
                             .collect::<Result<Vec<_>, _>>()
                             .ok()?;
+                        let mut updates = attention_update_events(cursor, next, summaries);
+                        let (event, emitted_cursor) = updates.pop_front()?;
                         return Some((
-                            WebAttentionStreamEvent::Update {
-                                cursor: next.value().to_string(),
-                                summaries,
-                            },
-                            (repository, None, next, AttentionFollowDisposition::Continue),
+                            event,
+                            (
+                                repository,
+                                updates,
+                                emitted_cursor,
+                                AttentionFollowDisposition::Continue,
+                            ),
                         ));
                     }
                     Ok(AttentionChanges::ResyncRequired { cursor: next }) => {
                         return Some((
                             WebAttentionStreamEvent::ResyncRequired {
-                                cursor: next.value().to_string(),
+                                cursor: WebU64::from_u64(next.value()),
                             },
-                            (repository, None, next, AttentionFollowDisposition::End),
+                            (
+                                repository,
+                                VecDeque::new(),
+                                next,
+                                AttentionFollowDisposition::End,
+                            ),
                         ));
                     }
                     Err(error) => {
@@ -1188,6 +1204,36 @@ enum AttentionFollowDisposition {
     End,
 }
 
+fn attention_update_events(
+    prior: signalbox_application::AttentionCursor,
+    next: signalbox_application::AttentionCursor,
+    summaries: Vec<WebAttentionSummary>,
+) -> VecDeque<(
+    WebAttentionStreamEvent,
+    signalbox_application::AttentionCursor,
+)> {
+    let chunk_size = usize::from(max_attention_snapshot_items());
+    let chunk_count = summaries.len().div_ceil(chunk_size);
+    summaries
+        .chunks(chunk_size)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let emitted_cursor = if index + 1 == chunk_count {
+                next
+            } else {
+                prior
+            };
+            (
+                WebAttentionStreamEvent::Update {
+                    cursor: WebU64::from_u64(emitted_cursor.value()),
+                    summaries: chunk.to_vec(),
+                },
+                emitted_cursor,
+            )
+        })
+        .collect()
+}
+
 fn attention_snapshot_dto(snapshot: AttentionSnapshot) -> Result<WebAttentionSnapshot, ()> {
     let continuation = snapshot
         .continuation
@@ -1196,23 +1242,26 @@ fn attention_snapshot_dto(snapshot: AttentionSnapshot) -> Result<WebAttentionSna
                 recorded_at,
                 session,
             } => Ok(WebAttentionContinuation::LastActivity {
-                unix_microseconds: recorded_at
-                    .duration_since(UNIX_EPOCH)
-                    .map_err(|_| ())?
-                    .as_micros()
-                    .to_string(),
-                session_id: session.into_uuid().to_string(),
+                unix_microseconds: WebU64::from_u64(
+                    recorded_at
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|_| ())?
+                        .as_micros()
+                        .try_into()
+                        .map_err(|_| ())?,
+                ),
+                session_id: WebSessionId::from_uuid_bytes(session.into_uuid().into_bytes()),
             }),
             AttentionContinuation::SessionIdentity(session) => {
                 Ok(WebAttentionContinuation::SessionIdentity {
-                    session_id: session.into_uuid().to_string(),
+                    session_id: WebSessionId::from_uuid_bytes(session.into_uuid().into_bytes()),
                 })
             }
         })
         .transpose()?;
     Ok(WebAttentionSnapshot {
-        cursor: snapshot.cursor.value().to_string(),
-        total: snapshot.total.to_string(),
+        cursor: WebU64::from_u64(snapshot.cursor.value()),
+        total: WebU64::from_u64(snapshot.total),
         sort: match snapshot.sort {
             AttentionSort::LastActivityDescending => WebAttentionSort::LastActivityDescending,
             AttentionSort::SessionIdentityAscending => WebAttentionSort::SessionIdentityAscending,
@@ -1234,13 +1283,14 @@ fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummar
     {
         return Err(());
     }
-    let unix_milliseconds = summary
+    let unix_microseconds = summary
         .last_activity
         .recorded_at
         .duration_since(UNIX_EPOCH)
         .map_err(|_| ())?
-        .as_millis()
-        .to_string();
+        .as_micros()
+        .try_into()
+        .map_err(|_| ())?;
     let goal_block = summary
         .goal_block
         .map(|goal| {
@@ -1250,7 +1300,7 @@ fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummar
                 return Err(());
             }
             Ok(WebAttentionGoalBlock {
-                generation: goal.generation.to_string(),
+                generation: WebU64::from_u64(goal.generation),
                 reason: match goal.reason {
                     AttentionBlockedReason::UserInputRequired => {
                         WebAttentionBlockedReason::UserInputRequired
@@ -1270,15 +1320,15 @@ fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummar
         })
         .transpose()?;
     Ok(WebAttentionSummary {
-        session_id: summary.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_uuid_bytes(summary.session.into_uuid().into_bytes()),
         title_summary: summary.title_summary,
         title_truncated: summary.title_truncated,
         archived: summary.archived,
         current_turn_id: summary
             .current_turn
-            .map(|turn| turn.into_uuid().to_string()),
-        active_turn_count: summary.active_turn_count.to_string(),
-        queued_turn_count: summary.queued_turn_count.to_string(),
+            .map(|turn| WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes())),
+        active_turn_count: WebU64::from_u64(summary.active_turn_count),
+        queued_turn_count: WebU64::from_u64(summary.queued_turn_count),
         state: match summary.state {
             AttentionState::Active => WebAttentionState::Active,
             AttentionState::Queued => WebAttentionState::Queued,
@@ -1297,13 +1347,13 @@ fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummar
         }),
         goal_block,
         judge: WebAttentionJudgeFacts {
-            actionable: summary.judge.actionable.to_string(),
-            completed: summary.judge.completed.to_string(),
-            escalated: summary.judge.escalated.to_string(),
-            failed: summary.judge.failed.to_string(),
+            actionable: WebU64::from_u64(summary.judge.actionable),
+            completed: WebU64::from_u64(summary.judge.completed),
+            escalated: WebU64::from_u64(summary.judge.escalated),
+            failed: WebU64::from_u64(summary.judge.failed),
         },
         last_activity: WebAttentionActivity {
-            unix_milliseconds,
+            unix_microseconds: WebU64::from_u64(unix_microseconds),
             kind: match summary.last_activity.kind {
                 AttentionActivityKind::Session => WebAttentionActivityKind::Session,
                 AttentionActivityKind::Turn => WebAttentionActivityKind::Turn,
@@ -1344,7 +1394,7 @@ pub fn deterministic_test_router() -> Router {
         .route("/mutate", post(deterministic_mutation))
         .route_layer(middleware::from_fn(validate_json_mutation));
     let api = Router::new()
-        .route("/bootstrap", get(contract_bootstrap))
+        .route("/bootstrap", get(deterministic_contract_bootstrap))
         .route("/test/read", get(deterministic_read))
         .route("/test/stream", get(deterministic_stream))
         .nest("/test", mutation)
@@ -1357,6 +1407,12 @@ pub fn deterministic_test_router() -> Router {
 
 async fn contract_bootstrap() -> Json<WebContractBootstrap> {
     Json(WebContractBootstrap::current())
+}
+
+async fn deterministic_contract_bootstrap() -> Json<WebContractBootstrap> {
+    let mut bootstrap = WebContractBootstrap::current();
+    bootstrap.capabilities.bounded_session_timeline = false;
+    Json(bootstrap)
 }
 
 fn deterministic_example() -> WebContractExample {
@@ -1639,8 +1695,8 @@ mod tests {
         AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
         AttentionContinuation, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts,
         AttentionSnapshot, AttentionSort, AttentionState, AttentionSummary,
-        max_attention_goal_summary_characters, max_attention_snapshot_items,
-        max_attention_title_characters,
+        max_attention_change_items, max_attention_goal_summary_characters,
+        max_attention_snapshot_items, max_attention_title_characters,
     };
     use signalbox_domain::{ModelCallId, SessionId, TurnId};
     use signalbox_web_contract::{
@@ -2224,6 +2280,31 @@ mod tests {
         assert_eq!(query.required_tag, ["rust", "postgres"]);
     }
 
+    #[test]
+    fn session_catalog_query_accepts_emitted_sort_tokens() {
+        for token in ["last_activity_descending", "session_identity_ascending"] {
+            let raw = format!("sort={token}");
+            let query = super::parse_attention_snapshot_query(Some(&raw))
+                .expect("the emitted sort token has a valid query shape");
+
+            super::parse_attention_query(query)
+                .expect("the emitted sort token round trips through the request parser");
+        }
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_timestamp_outside_database_range() {
+        let raw = concat!(
+            "sort=last_activity_descending",
+            "&after_session_id=00000000-0000-0000-0000-000000000991",
+            "&after_activity_unix_microseconds=18446744073709551615"
+        );
+        let query = super::parse_attention_snapshot_query(Some(raw))
+            .expect("the query envelope itself is syntactically valid");
+
+        assert!(super::parse_attention_query(query).is_err());
+    }
+
     #[tokio::test]
     async fn attention_follow_requires_projection_configuration() {
         let request = Request::get("/api/attention/follow")
@@ -2282,6 +2363,35 @@ mod tests {
             .expect("the maximum summary carries a goal block")
             .need_summary
             .push('x');
+
+        let mut precision_summary = summary.clone();
+        precision_summary.last_activity.recorded_at = UNIX_EPOCH + Duration::from_micros(1_234_567);
+        let precision_dto = super::attention_summary_dto(precision_summary)
+            .expect("the exact microsecond timestamp is representable");
+        assert_eq!(
+            precision_dto.last_activity.unix_microseconds.as_str(),
+            "1234567"
+        );
+
+        let maximal_update_summary = super::attention_summary_dto(summary.clone())
+            .expect("the maximal summary maps to the web contract");
+        let updates = super::attention_update_events(
+            AttentionCursor::new(7),
+            AttentionCursor::new(9),
+            vec![maximal_update_summary; usize::from(max_attention_change_items())],
+        );
+        assert_eq!(updates.len(), 4);
+        for (index, (event, cursor)) in updates.iter().enumerate() {
+            let mut update_writer = super::NdjsonItemWriter::new();
+            serde_json::to_writer(&mut update_writer, event)
+                .expect("each split update serializes within one item");
+            update_writer
+                .write_all(b"\n")
+                .expect("the NDJSON terminator fits the split update");
+            assert!(update_writer.encoded.len() <= MAX_NDJSON_ITEM_BYTES);
+            assert_eq!(cursor.value(), if index == 3 { 9 } else { 7 });
+        }
+
         let snapshot = attention_snapshot_dto(AttentionSnapshot {
             cursor: AttentionCursor::new(u64::MAX),
             total: u64::MAX,

@@ -7,20 +7,43 @@ CREATE TABLE operator_attention_change (
     fact_kind text NOT NULL CHECK (
         fact_kind IN ('session', 'turn', 'goal', 'approval_judge', 'runner')
     ),
-    recorded_at timestamptz NOT NULL DEFAULT transaction_timestamp(),
+    recorded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
     CHECK (change_sequence > 0)
 );
 
 CREATE INDEX operator_attention_change_by_session_sequence
     ON operator_attention_change (session_id, change_sequence DESC);
 
+CREATE FUNCTION serialize_operator_attention_change()
+RETURNS void
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    -- Identity values are allocated before commit. Serialize allocation so the
+    -- greatest visible sequence is also a commit-safe follow frontier.
+    PERFORM pg_advisory_xact_lock(1091, 1);
+END;
+$$;
+
 CREATE FUNCTION record_operator_attention_outbox_change()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    PERFORM serialize_operator_attention_change();
     INSERT INTO operator_attention_change (session_id, fact_kind)
-    VALUES (NEW.session_id, 'turn');
+    VALUES (
+        NEW.session_id,
+        CASE
+            WHEN NEW.event_kind IN (
+                'session_created',
+                'session_model_settings_changed'
+            ) THEN 'session'
+            WHEN NEW.event_kind = 'goal_turn_retired' THEN 'goal'
+            WHEN NEW.event_kind = 'runner_state_transition' THEN 'runner'
+            ELSE 'turn'
+        END
+    );
     RETURN NULL;
 END;
 $$;
@@ -33,11 +56,32 @@ CREATE TRIGGER delegation_outbox_event_records_operator_attention_change
 AFTER INSERT ON delegation_outbox_event
 FOR EACH ROW EXECUTE FUNCTION record_operator_attention_outbox_change();
 
+CREATE FUNCTION record_operator_attention_metadata_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    PERFORM serialize_operator_attention_change();
+    INSERT INTO operator_attention_change (session_id, fact_kind)
+    VALUES (COALESCE(NEW.session_id, OLD.session_id), 'session');
+    RETURN NULL;
+END;
+$$;
+
+CREATE TRIGGER session_metadata_records_operator_attention_change
+AFTER INSERT OR UPDATE ON session_metadata
+FOR EACH ROW EXECUTE FUNCTION record_operator_attention_metadata_change();
+
+CREATE TRIGGER session_metadata_tag_records_operator_attention_change
+AFTER INSERT OR DELETE ON session_metadata_tag
+FOR EACH ROW EXECUTE FUNCTION record_operator_attention_metadata_change();
+
 CREATE FUNCTION record_operator_attention_goal_change()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    PERFORM serialize_operator_attention_change();
     INSERT INTO operator_attention_change (session_id, fact_kind)
     VALUES (NEW.session_id, 'goal');
     RETURN NULL;
@@ -53,6 +97,7 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    PERFORM serialize_operator_attention_change();
     INSERT INTO operator_attention_change (session_id, fact_kind)
     VALUES (NEW.session_id, 'approval_judge');
     RETURN NULL;
@@ -68,6 +113,7 @@ RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 BEGIN
+    PERFORM serialize_operator_attention_change();
     INSERT INTO operator_attention_change (session_id, fact_kind)
     VALUES (NEW.session_id, 'runner');
     RETURN NULL;
