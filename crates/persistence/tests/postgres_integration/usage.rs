@@ -316,8 +316,7 @@ async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn usage_projection_has_combined_selection_indexes_and_canonical_token_bound()
--> Result<(), Box<dyn Error>> {
+async fn usage_projection_has_combined_selection_indexes() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let index_definition: String = sqlx::query_scalar(
         "SELECT indexdef FROM pg_indexes
@@ -352,6 +351,28 @@ async fn usage_projection_has_combined_selection_indexes_and_canonical_token_bou
     assert!(session_model_index_definition.contains(
         "session_id, resolved_provider_model_identity_id, recorded_at DESC, model_call_id DESC"
     ));
+    let model_provenance_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_model_provenance_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(model_provenance_index_definition.contains(
+        "resolved_provider_model_identity_id, usage_provenance_kind, recorded_at DESC, model_call_id DESC"
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn context_compaction_usage_axes_have_the_canonical_u64_ceiling() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
     let compaction_usage_constraint: String = sqlx::query_scalar(
         "SELECT pg_get_constraintdef(oid)
            FROM pg_constraint
@@ -361,6 +382,17 @@ async fn usage_projection_has_combined_selection_indexes_and_canonical_token_bou
     .fetch_one(&pool)
     .await?;
     assert!(compaction_usage_constraint.contains("18446744073709551615"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn context_compaction_input_semantics_preserve_history_and_pin_new_calls()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
     let compaction_semantics_nullable: bool = sqlx::query_scalar(
         "SELECT NOT attnotnull
            FROM pg_attribute
@@ -381,6 +413,16 @@ async fn usage_projection_has_combined_selection_indexes_and_canonical_token_bou
     .fetch_one(&pool)
     .await?;
     assert!(compaction_semantics_trigger.contains("BEFORE INSERT OR UPDATE"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn usage_projection_records_terminal_statement_time() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
     let recorded_at_default: String = sqlx::query_scalar(
         "SELECT pg_get_expr(adbin, adrelid)
            FROM pg_attrdef
@@ -427,18 +469,21 @@ async fn oversized_credential_references_receive_bounded_distinct_usage_labels()
         "exact:within-bound"
     );
     let oversized = "z".repeat(257);
-    let digest_label: String = sqlx::query_scalar("SELECT bounded_web_usage_profile($1)")
+    let mapped_label: String = sqlx::query_scalar("SELECT bounded_web_usage_profile($1)")
         .bind(&oversized)
         .fetch_one(&pool)
         .await?;
-    let literal_collision_candidate = digest_label
-        .strip_prefix("digest-md5:")
-        .expect("oversized label carries the digest discriminator");
-    let exact_label: String = sqlx::query_scalar("SELECT bounded_web_usage_profile($1)")
-        .bind(format!("digest-md5:{literal_collision_candidate}"))
+    assert!(mapped_label.starts_with("mapped:"));
+    let repeated_label: String = sqlx::query_scalar("SELECT bounded_web_usage_profile($1)")
+        .bind(&oversized)
         .fetch_one(&pool)
         .await?;
-    assert_ne!(digest_label, exact_label);
+    assert_eq!(repeated_label, mapped_label);
+    let exact_label: String = sqlx::query_scalar("SELECT bounded_web_usage_profile($1)")
+        .bind(&mapped_label)
+        .fetch_one(&pool)
+        .await?;
+    assert_ne!(mapped_label, exact_label);
 
     pool.close().await;
     drop(container);

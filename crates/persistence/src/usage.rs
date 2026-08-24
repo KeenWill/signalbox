@@ -44,7 +44,7 @@ WITH candidate_calls AS MATERIALIZED (
 )
 SELECT call_kind, resolved_provider_model_identity_id,
        credential_reference,
-       bounded_web_usage_profile(credential_reference) AS web_profile,
+       credential_profile_label AS web_profile,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens IS NOT NULL AS has_input,
        output_tokens IS NOT NULL AS has_output,
@@ -67,7 +67,8 @@ SELECT call_kind, resolved_provider_model_identity_id,
   FROM bounded_calls
  CROSS JOIN bounded_state
  GROUP BY call_kind, resolved_provider_model_identity_id, credential_reference,
-          usage_provenance_kind, usage_input_includes_cache_tokens,
+          credential_profile_label, usage_provenance_kind,
+          usage_input_includes_cache_tokens,
           input_tokens IS NOT NULL, output_tokens IS NOT NULL,
           cache_creation_input_tokens IS NOT NULL,
           cache_read_input_tokens IS NOT NULL, bounded_state.calls_truncated
@@ -82,7 +83,7 @@ const CALLS_NEWEST_SQL: &str = "
 SELECT model_call_id, call_kind, session_id, turn_id,
        resolved_provider_model_identity_id,
        credential_reference,
-       bounded_web_usage_profile(credential_reference) AS web_profile,
+       credential_profile_label AS web_profile,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens, recorded_at
@@ -106,7 +107,7 @@ const CALLS_OLDEST_SQL: &str = "
 SELECT model_call_id, call_kind, session_id, turn_id,
        resolved_provider_model_identity_id,
        credential_reference,
-       bounded_web_usage_profile(credential_reference) AS web_profile,
+       credential_profile_label AS web_profile,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens, recorded_at
@@ -530,20 +531,11 @@ mod tests {
     #[test]
     fn usage_queries_retain_raw_and_bounded_profile_projections() {
         assert!(AGGREGATE_SQL.contains("credential_reference,"));
-        assert!(
-            AGGREGATE_SQL
-                .contains("bounded_web_usage_profile(credential_reference) AS web_profile")
-        );
+        assert!(AGGREGATE_SQL.contains("credential_profile_label AS web_profile"));
         assert!(CALLS_NEWEST_SQL.contains("credential_reference,"));
-        assert!(
-            CALLS_NEWEST_SQL
-                .contains("bounded_web_usage_profile(credential_reference) AS web_profile")
-        );
+        assert!(CALLS_NEWEST_SQL.contains("credential_profile_label AS web_profile"));
         assert!(CALLS_OLDEST_SQL.contains("credential_reference,"));
-        assert!(
-            CALLS_OLDEST_SQL
-                .contains("bounded_web_usage_profile(credential_reference) AS web_profile")
-        );
+        assert!(CALLS_OLDEST_SQL.contains("credential_profile_label AS web_profile"));
     }
 
     #[test]

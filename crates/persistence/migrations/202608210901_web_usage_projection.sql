@@ -61,17 +61,34 @@ BEFORE INSERT OR UPDATE ON context_compaction_model_call
 FOR EACH ROW
 EXECUTE FUNCTION require_context_compaction_usage_input_semantics();
 
+CREATE TABLE web_usage_oversized_profile_identity (
+    profile_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    exact_reference text NOT NULL UNIQUE,
+    CONSTRAINT web_usage_oversized_profile_reference
+        CHECK (octet_length(exact_reference) > 250)
+);
+
 CREATE FUNCTION bounded_web_usage_profile(value text)
 RETURNS text
-LANGUAGE sql
-IMMUTABLE
+LANGUAGE plpgsql
 STRICT
-PARALLEL SAFE
 AS $$
-    SELECT CASE
-        WHEN octet_length(value) <= 250 THEN 'exact:' || value
-        ELSE 'digest-md5:' || md5(value)
-    END
+DECLARE
+    mapped_id bigint;
+BEGIN
+    IF octet_length(value) <= 250 THEN
+        RETURN 'exact:' || value;
+    END IF;
+
+    INSERT INTO web_usage_oversized_profile_identity (exact_reference)
+    VALUES (value)
+    ON CONFLICT (exact_reference) DO NOTHING;
+    SELECT profile_id
+      INTO mapped_id
+      FROM web_usage_oversized_profile_identity
+     WHERE exact_reference = value;
+    RETURN 'mapped:' || mapped_id::text;
+END;
 $$;
 
 CREATE TABLE web_usage_call_projection (
@@ -81,6 +98,7 @@ CREATE TABLE web_usage_call_projection (
     turn_id uuid,
     resolved_provider_model_identity_id uuid NOT NULL,
     credential_reference text NOT NULL,
+    credential_profile_label text NOT NULL,
     usage_provenance_kind text NOT NULL,
     usage_input_includes_cache_tokens boolean,
     input_tokens numeric,
@@ -95,6 +113,11 @@ CREATE TABLE web_usage_call_projection (
         CHECK (usage_provenance_kind IN ('reported', 'estimated')),
     CONSTRAINT web_usage_credential_reference_nonempty
         CHECK (char_length(credential_reference) > 0),
+    CONSTRAINT web_usage_credential_profile_label_bounded
+        CHECK (
+            char_length(credential_profile_label) > 0
+            AND octet_length(credential_profile_label) <= 256
+        ),
     CONSTRAINT web_usage_turn_shape
         CHECK ((call_kind = 'context_compaction') = (turn_id IS NULL)),
     CONSTRAINT web_usage_token_axes_u64
@@ -162,6 +185,10 @@ CREATE INDEX web_usage_by_turn_recorded_call
 CREATE INDEX web_usage_by_model_recorded_call
     ON web_usage_call_projection
        (resolved_provider_model_identity_id, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_model_provenance_recorded_call
+    ON web_usage_call_projection
+       (resolved_provider_model_identity_id, usage_provenance_kind,
+        recorded_at DESC, model_call_id DESC);
 CREATE INDEX web_usage_by_provenance_recorded_call
     ON web_usage_call_projection
        (usage_provenance_kind, recorded_at DESC, model_call_id DESC);
@@ -180,12 +207,14 @@ BEGIN
     INSERT INTO web_usage_call_projection (
         model_call_id, call_kind, session_id, turn_id,
         resolved_provider_model_identity_id, credential_reference,
+        credential_profile_label,
         usage_provenance_kind, usage_input_includes_cache_tokens,
         input_tokens, output_tokens,
         cache_creation_input_tokens, cache_read_input_tokens
     ) VALUES (
         NEW.model_call_id, 'model_call', NEW.session_id, NEW.turn_id,
         NEW.resolved_provider_model_identity_id, NEW.credential_reference,
+        bounded_web_usage_profile(NEW.credential_reference),
         NEW.usage_provenance_kind, NEW.usage_input_includes_cache_tokens,
         NEW.usage_input_tokens, NEW.usage_output_tokens,
         NEW.usage_cache_creation_input_tokens,
@@ -203,12 +232,14 @@ BEGIN
     INSERT INTO web_usage_call_projection (
         model_call_id, call_kind, session_id, turn_id,
         resolved_provider_model_identity_id, credential_reference,
+        credential_profile_label,
         usage_provenance_kind, usage_input_includes_cache_tokens,
         input_tokens, output_tokens,
         cache_creation_input_tokens, cache_read_input_tokens
     ) VALUES (
         NEW.model_call_id, 'approval_judge', NEW.session_id, NEW.turn_id,
         NEW.resolved_provider_model_identity_id, NEW.credential_reference,
+        bounded_web_usage_profile(NEW.credential_reference),
         NEW.usage_provenance_kind, NEW.usage_input_includes_cache_tokens,
         NEW.input_tokens, NEW.output_tokens,
         NEW.cache_creation_input_tokens, NEW.cache_read_input_tokens
@@ -225,12 +256,14 @@ BEGIN
     INSERT INTO web_usage_call_projection (
         model_call_id, call_kind, session_id, turn_id,
         resolved_provider_model_identity_id, credential_reference,
+        credential_profile_label,
         usage_provenance_kind, usage_input_includes_cache_tokens,
         input_tokens, output_tokens,
         cache_creation_input_tokens, cache_read_input_tokens
     ) VALUES (
         NEW.model_call_id, 'context_compaction', NEW.session_id, NULL,
         NEW.resolved_provider_model_identity_id, NEW.credential_reference,
+        bounded_web_usage_profile(NEW.credential_reference),
         'reported', NEW.usage_input_includes_cache_tokens,
         NEW.input_tokens, NEW.output_tokens,
         NEW.cache_creation_input_tokens, NEW.cache_read_input_tokens
@@ -245,12 +278,14 @@ $$;
 INSERT INTO web_usage_call_projection (
     model_call_id, call_kind, session_id, turn_id,
     resolved_provider_model_identity_id, credential_reference,
+    credential_profile_label,
     usage_provenance_kind, usage_input_includes_cache_tokens,
     input_tokens, output_tokens,
     cache_creation_input_tokens, cache_read_input_tokens
 )
 SELECT model_call_id, 'model_call', session_id, turn_id,
        resolved_provider_model_identity_id, credential_reference,
+       bounded_web_usage_profile(credential_reference),
        usage_provenance_kind, usage_input_includes_cache_tokens,
        usage_input_tokens, usage_output_tokens,
        usage_cache_creation_input_tokens, usage_cache_read_input_tokens
@@ -260,12 +295,14 @@ SELECT model_call_id, 'model_call', session_id, turn_id,
 INSERT INTO web_usage_call_projection (
     model_call_id, call_kind, session_id, turn_id,
     resolved_provider_model_identity_id, credential_reference,
+    credential_profile_label,
     usage_provenance_kind, usage_input_includes_cache_tokens,
     input_tokens, output_tokens,
     cache_creation_input_tokens, cache_read_input_tokens
 )
 SELECT model_call_id, 'approval_judge', session_id, turn_id,
        resolved_provider_model_identity_id, credential_reference,
+       bounded_web_usage_profile(credential_reference),
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens
@@ -275,12 +312,14 @@ SELECT model_call_id, 'approval_judge', session_id, turn_id,
 INSERT INTO web_usage_call_projection (
     model_call_id, call_kind, session_id, turn_id,
     resolved_provider_model_identity_id, credential_reference,
+    credential_profile_label,
     usage_provenance_kind, usage_input_includes_cache_tokens,
     input_tokens, output_tokens,
     cache_creation_input_tokens, cache_read_input_tokens
 )
 SELECT model_call_id, 'context_compaction', session_id, NULL,
        resolved_provider_model_identity_id, credential_reference,
+       bounded_web_usage_profile(credential_reference),
        'reported', usage_input_includes_cache_tokens, input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens
   FROM context_compaction_model_call
@@ -309,6 +348,11 @@ BEFORE UPDATE OR DELETE ON web_usage_call_projection
 FOR EACH ROW
 EXECUTE FUNCTION reject_immutable_record_change();
 
+CREATE TRIGGER web_usage_oversized_profile_identity_is_append_only
+BEFORE UPDATE OR DELETE ON web_usage_oversized_profile_identity
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
 CREATE FUNCTION reject_web_usage_projection_truncate()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -321,5 +365,10 @@ $$;
 
 CREATE TRIGGER web_usage_call_projection_cannot_be_truncated
 BEFORE TRUNCATE ON web_usage_call_projection
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_web_usage_projection_truncate();
+
+CREATE TRIGGER web_usage_oversized_profile_identity_cannot_be_truncated
+BEFORE TRUNCATE ON web_usage_oversized_profile_identity
 FOR EACH STATEMENT
 EXECUTE FUNCTION reject_web_usage_projection_truncate();
