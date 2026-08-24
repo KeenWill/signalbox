@@ -1112,7 +1112,7 @@ shared set, which a later attempt must drain before it can spawn new work. A
 deadline reached by the pre-poll drain stops that poll before its provider sweep
 can advance the durable cursor past the still-pending delivery. A targeted
 cursor commit already started by the cancelled drain is retained and settled by
-the next drain before any later repository work; its delivery keeps the shadow
+the next drain before any subsequent drain work; its delivery keeps the shadow
 baseline needed to reproduce the same projections and targeted-query provenance.
 Cancellation discards the shadow only when it races a projected terminal write
 whose durability is unknown. If an earlier delivery had already failed before a

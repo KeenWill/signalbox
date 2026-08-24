@@ -1007,7 +1007,15 @@ impl RepositoryWatchTask {
         })
     }
 
-    async fn run(mut self, mut shutdown: watch::Receiver<bool>) {
+    async fn run(mut self, shutdown: watch::Receiver<bool>) {
+        self.run_until_stop(shutdown).await;
+        // A targeted cursor/terminal completion is deliberately detached from
+        // drain cancellation, but repository shutdown must still join it before
+        // the supervisor can report that this task stopped cleanly.
+        let _ = self.settle_webhook_targeted_completion().await;
+    }
+
+    async fn run_until_stop(&mut self, mut shutdown: watch::Receiver<bool>) {
         if *shutdown.borrow() {
             return;
         }
@@ -1781,7 +1789,8 @@ impl RepositoryWatchTask {
                     self.webhook_shadow_superseded = false;
                     self.webhook_projected_terminal_in_flight = false;
                 }
-                if let Some(first_failure) = self.webhook_drain_first_failure.take() {
+                let first_failure = self.webhook_drain_first_failure.take();
+                if let Some(first_failure) = first_failure {
                     tracing::error!(
                         repository = %self.repository.as_str(),
                         cause_code = first_failure.cause_code(),
@@ -1795,7 +1804,10 @@ impl RepositoryWatchTask {
                     cause_code = error.cause_code(),
                     "repository-watch webhook drain exceeded its attempt deadline"
                 );
-                if self.webhook_dispatch_in_flight {
+                if let Some(first_failure) = first_failure {
+                    self.webhook_dispatch_in_flight = false;
+                    WebhookDrainOutcome::ProjectionFailed(first_failure)
+                } else if self.webhook_dispatch_in_flight {
                     self.webhook_dispatch_in_flight = false;
                     WebhookDrainOutcome::DispatchFailedAfterTerminal(error)
                 } else {
