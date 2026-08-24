@@ -16,10 +16,10 @@ use signalbox_file_media_runtime::{
     FileMediaProviderDeclaration, FileMediaProviderFailure, FileMediaProviderFuture,
     FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileReadInput,
     FileReaderName, FileReaderProviderName, FileReaderRevision, MAX_OBSERVED_CONTAINER_ENTRIES,
-    MAX_TEXT_BODY_BYTES, MAX_TEXT_OR_JSON_BYTES, ProbeDeclaration, ProbeStrength, ProcessorFailure,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
-    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
-    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    MAX_TEXT_BODY_BYTES, ProbeDeclaration, ProbeStrength, ProcessorFailure, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds,
+    ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity,
+    ReasonCode, StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
 };
 use zip::{CompressionMethod, ZipArchive};
 
@@ -381,6 +381,24 @@ enum ReadIssue {
     Failed,
 }
 
+#[derive(Default)]
+struct DecodedBudget {
+    bytes: u64,
+}
+
+impl DecodedBudget {
+    fn include(&mut self, bytes: u64) -> Result<(), ReadIssue> {
+        self.bytes = self
+            .bytes
+            .checked_add(bytes)
+            .ok_or(ReadIssue::Expansion(DECOMPRESSED_SIZE_LIMIT))?;
+        if self.bytes > MAX_TOTAL_EXPANDED_BYTES {
+            return Err(ReadIssue::Expansion(DECOMPRESSED_SIZE_LIMIT));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum XmlIssue {
     Malformed,
@@ -490,14 +508,26 @@ async fn read_central_inventory(
             issue,
             kinds: recognized.clone(),
         })?;
-    let package_relationships = read_probe_entry(
+    let package_relationships = match read_probe_entry(
         source,
         cancellation,
         &inventory,
         PACKAGE_RELS,
         PACKAGE_RELS_COMPRESSED_BYTES,
     )
-    .await?;
+    .await
+    {
+        Ok(package_relationships) => package_relationships,
+        Err(CentralReadError::Validation { issue, .. }) => {
+            return Err(CentralReadError::Validation {
+                issue,
+                kinds: recognized,
+            });
+        }
+        Err(CentralReadError::Processor(error)) => {
+            return Err(CentralReadError::Processor(error));
+        }
+    };
     inventory.kinds = validate_package_relationships(&package_relationships, &content_type_kinds)
         .map_err(|issue| CentralReadError::Validation {
         issue,
@@ -816,6 +846,9 @@ async fn read_probe_entry(
     }
     let name_length = u64::from(le_u16(&local, 26)?);
     let extra_length = u64::from(le_u16(&local, 28)?);
+    if name_length != u64::try_from(entry.name.len()).unwrap_or(u64::MAX) {
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
+    }
     let local_name_offset = entry
         .local_offset
         .checked_add(LOCAL_HEADER_BYTES)
@@ -1180,15 +1213,24 @@ fn read_text<R: Read + std::io::Seek>(
     kind: OfficeKind,
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorReadOutput, ProcessorFailure> {
+    let mut budget = DecodedBudget::default();
     let names = match kind {
         OfficeKind::Docx => vec![String::from(kind.marker())],
-        OfficeKind::Xlsx => return read_spreadsheet_text(archive, cancellation),
-        OfficeKind::Pptx => presentation_slide_names(archive)?,
+        OfficeKind::Xlsx => return read_spreadsheet_text(archive, cancellation, &mut budget),
+        OfficeKind::Pptx => match presentation_slide_names(archive, &mut budget) {
+            Ok(names) => names,
+            Err(ReadIssue::Expansion(reason)) => {
+                return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+                    limit_kind: String::from(reason),
+                });
+            }
+            Err(ReadIssue::Failed) => return Err(ProcessorFailure::Failed),
+        },
     };
     let mut output = String::new();
     for name in names {
         require_active(cancellation)?;
-        let bytes = match read_entry(archive, &name) {
+        let bytes = match read_entry(archive, &name, &mut budget) {
             Ok(bytes) => bytes,
             Err(ReadIssue::Expansion(reason)) => {
                 return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
@@ -1216,15 +1258,31 @@ fn read_text<R: Read + std::io::Seek>(
 fn read_spreadsheet_text<R: Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
     cancellation: &dyn CancellationSignal,
+    budget: &mut DecodedBudget,
 ) -> Result<ProcessorReadOutput, ProcessorFailure> {
-    let workbook = read_entry(archive, "xl/workbook.xml").map_err(|_| ProcessorFailure::Failed)?;
-    let relationships =
-        read_entry(archive, "xl/_rels/workbook.xml.rels").map_err(|_| ProcessorFailure::Failed)?;
+    let workbook = match read_entry(archive, "xl/workbook.xml", budget) {
+        Ok(bytes) => bytes,
+        Err(ReadIssue::Expansion(reason)) => {
+            return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+                limit_kind: String::from(reason),
+            });
+        }
+        Err(ReadIssue::Failed) => return Err(ProcessorFailure::Failed),
+    };
+    let relationships = match read_entry(archive, "xl/_rels/workbook.xml.rels", budget) {
+        Ok(bytes) => bytes,
+        Err(ReadIssue::Expansion(reason)) => {
+            return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+                limit_kind: String::from(reason),
+            });
+        }
+        Err(ReadIssue::Failed) => return Err(ProcessorFailure::Failed),
+    };
     let relationship_ids =
         workbook_relationship_ids(&workbook).map_err(|_| ProcessorFailure::Failed)?;
     let targets =
         workbook_relationship_targets(&relationships).map_err(|_| ProcessorFailure::Failed)?;
-    let shared_strings = match read_entry(archive, "xl/sharedStrings.xml") {
+    let shared_strings = match read_entry(archive, "xl/sharedStrings.xml", budget) {
         Ok(bytes) => spreadsheet_shared_strings(&bytes).map_err(|_| ProcessorFailure::Failed)?,
         Err(ReadIssue::Failed) => Vec::new(),
         Err(ReadIssue::Expansion(reason)) => {
@@ -1240,7 +1298,10 @@ fn read_spreadsheet_text<R: Read + std::io::Seek>(
             .iter()
             .find_map(|(candidate, target)| (candidate == &relationship_id).then_some(target))
             .ok_or(ProcessorFailure::Failed)?;
-        let worksheet = match read_entry(archive, target) {
+        let Some(target) = target else {
+            continue;
+        };
+        let worksheet = match read_entry(archive, target, budget) {
             Ok(bytes) => bytes,
             Err(ReadIssue::Expansion(reason)) => {
                 return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
@@ -1335,8 +1396,66 @@ fn required_prefixed_id(
     Err(XmlIssue::Malformed)
 }
 
-fn workbook_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, String)>, XmlIssue> {
-    relationship_targets(bytes, "/worksheet", spreadsheet_target_name)
+fn workbook_relationship_targets(bytes: &[u8]) -> Result<Vec<(String, Option<String>)>, XmlIssue> {
+    let transcoded = transcode_xml(bytes)?;
+    let mut reader = Reader::from_reader(Cursor::new(transcoded.as_ref()));
+    reader.config_mut().trim_text(true);
+    let mut buffer = Vec::new();
+    let mut targets = Vec::new();
+    loop {
+        match reader
+            .read_event_into(&mut buffer)
+            .map_err(|_| XmlIssue::Malformed)?
+        {
+            Event::Start(element) | Event::Empty(element)
+                if local_name(element.name().as_ref()) == b"Relationship" =>
+            {
+                let mut id = None;
+                let mut target = None;
+                let mut relationship_type = None;
+                let mut external = false;
+                for attribute in element.attributes() {
+                    let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
+                    let value = attribute
+                        .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
+                        .map_err(|_| XmlIssue::Malformed)?;
+                    match attribute.key.as_ref() {
+                        b"Id" => id = Some(value.into_owned()),
+                        b"Target" => target = Some(value.into_owned()),
+                        b"Type" => relationship_type = Some(value.into_owned()),
+                        b"TargetMode" => external = value.eq_ignore_ascii_case("external"),
+                        _ => {}
+                    }
+                }
+                let id = id.ok_or(XmlIssue::Malformed)?;
+                if targets
+                    .iter()
+                    .any(|(candidate, _): &(String, Option<String>)| candidate == &id)
+                {
+                    return Err(XmlIssue::Malformed);
+                }
+                let worksheet = relationship_type
+                    .as_deref()
+                    .is_some_and(|value| value.ends_with("/worksheet"));
+                if worksheet && external {
+                    return Err(XmlIssue::Malformed);
+                }
+                let target = if worksheet {
+                    Some(spreadsheet_target_name(
+                        &target.ok_or(XmlIssue::Malformed)?,
+                    )?)
+                } else {
+                    None
+                };
+                targets.push((id, target));
+            }
+            Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
+            Event::Eof => break,
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Ok(targets)
 }
 
 fn relationship_targets(
@@ -1475,12 +1594,15 @@ fn spreadsheet_shared_strings(bytes: &[u8]) -> Result<Vec<String>, XmlIssue> {
 fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String, XmlIssue> {
     let transcoded = transcode_xml(bytes)?;
     let mut reader = Reader::from_reader(Cursor::new(transcoded.as_ref()));
-    reader.config_mut().trim_text(true);
+    reader.config_mut().trim_text(false);
     let mut buffer = Vec::new();
     let mut output = String::new();
     let mut shared_cell = false;
+    let mut inline_cell = false;
     let mut value_depth = 0_usize;
+    let mut inline_text_depth = 0_usize;
     let mut value = String::new();
+    let mut inline_value = String::new();
     loop {
         match reader
             .read_event_into(&mut buffer)
@@ -1488,13 +1610,17 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
         {
             Event::Start(element) if local_name(element.name().as_ref()) == b"c" => {
                 shared_cell = false;
+                inline_cell = false;
+                value.clear();
+                inline_value.clear();
                 for attribute in element.attributes() {
                     let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
                     if attribute.key.as_ref() == b"t" {
-                        shared_cell = attribute
+                        let cell_type = attribute
                             .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
-                            .map_err(|_| XmlIssue::Malformed)?
-                            == "s";
+                            .map_err(|_| XmlIssue::Malformed)?;
+                        shared_cell = cell_type == "s";
+                        inline_cell = cell_type == "inlineStr";
                     }
                 }
             }
@@ -1502,25 +1628,48 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                 value.clear();
                 value_depth = value_depth.checked_add(1).ok_or(XmlIssue::Malformed)?;
             }
+            Event::Start(element) if inline_cell && local_name(element.name().as_ref()) == b"t" => {
+                inline_text_depth = inline_text_depth
+                    .checked_add(1)
+                    .ok_or(XmlIssue::Malformed)?;
+            }
             Event::Text(text) if value_depth > 0 => {
                 value.push_str(&text.xml10_content().map_err(|_| XmlIssue::Malformed)?);
+            }
+            Event::Text(text) if inline_text_depth > 0 => {
+                let decoded = text.xml10_content().map_err(|_| XmlIssue::Malformed)?;
+                append_xml_text(&mut inline_value, &decoded)?;
+            }
+            Event::CData(text) if inline_text_depth > 0 => {
+                let decoded = text.decode().map_err(|_| XmlIssue::Malformed)?;
+                append_xml_text(&mut inline_value, &decoded)?;
             }
             Event::End(element)
                 if local_name(element.name().as_ref()) == b"v" && value_depth > 0 =>
             {
                 value_depth -= 1;
             }
+            Event::End(element)
+                if local_name(element.name().as_ref()) == b"t" && inline_text_depth > 0 =>
+            {
+                inline_text_depth -= 1;
+            }
             Event::End(element) if local_name(element.name().as_ref()) == b"c" => {
                 if shared_cell {
                     let index = value.parse::<usize>().map_err(|_| XmlIssue::Malformed)?;
                     append_xml_text(&mut output, shared.get(index).ok_or(XmlIssue::Malformed)?)?;
                     append_xml_text(&mut output, "\n")?;
+                } else if inline_cell {
+                    append_xml_text(&mut output, &inline_value)?;
+                    append_xml_text(&mut output, "\n")?;
                 }
                 shared_cell = false;
+                inline_cell = false;
                 value.clear();
+                inline_value.clear();
             }
             Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
-            Event::Eof if value_depth == 0 => break,
+            Event::Eof if value_depth == 0 && inline_text_depth == 0 => break,
             Event::Eof => return Err(XmlIssue::Malformed),
             _ => {}
         }
@@ -1531,24 +1680,21 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
 
 fn presentation_slide_names<R: Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
-) -> Result<Vec<String>, ProcessorFailure> {
-    let presentation =
-        read_entry(archive, "ppt/presentation.xml").map_err(|_| ProcessorFailure::Failed)?;
-    let relationships = read_entry(archive, "ppt/_rels/presentation.xml.rels")
-        .map_err(|_| ProcessorFailure::Failed)?;
+    budget: &mut DecodedBudget,
+) -> Result<Vec<String>, ReadIssue> {
+    let presentation = read_entry(archive, "ppt/presentation.xml", budget)?;
+    let relationships = read_entry(archive, "ppt/_rels/presentation.xml.rels", budget)?;
     let relationship_ids =
-        presentation_relationship_ids(&presentation).map_err(|_| ProcessorFailure::Failed)?;
+        presentation_relationship_ids(&presentation).map_err(|_| ReadIssue::Failed)?;
     let targets =
-        presentation_relationship_targets(&relationships).map_err(|_| ProcessorFailure::Failed)?;
+        presentation_relationship_targets(&relationships).map_err(|_| ReadIssue::Failed)?;
     let mut names = Vec::with_capacity(relationship_ids.len());
     for relationship_id in relationship_ids {
         let target = targets
             .iter()
             .find_map(|(candidate, target)| (candidate == &relationship_id).then_some(target))
-            .ok_or(ProcessorFailure::Failed)?;
-        archive
-            .by_name(target)
-            .map_err(|_| ProcessorFailure::Failed)?;
+            .ok_or(ReadIssue::Failed)?;
+        archive.by_name(target).map_err(|_| ReadIssue::Failed)?;
         names.push(target.clone());
     }
     Ok(names)
@@ -1569,6 +1715,7 @@ fn presentation_target_name(target: &str) -> Result<String, XmlIssue> {
 fn read_entry<R: Read + std::io::Seek>(
     archive: &mut ZipArchive<R>,
     name: &str,
+    budget: &mut DecodedBudget,
 ) -> Result<Vec<u8>, ReadIssue> {
     let file = archive.by_name(name).map_err(|_| ReadIssue::Failed)?;
     let mut bytes = Vec::new();
@@ -1578,6 +1725,7 @@ fn read_entry<R: Read + std::io::Seek>(
     if u64::try_from(bytes.len()).map_err(|_| ReadIssue::Failed)? > MAX_ENTRY_BYTES {
         return Err(ReadIssue::Expansion(DECOMPRESSED_SIZE_LIMIT));
     }
+    budget.include(u64::try_from(bytes.len()).map_err(|_| ReadIssue::Failed)?)?;
     Ok(bytes)
 }
 
@@ -1661,7 +1809,7 @@ fn extract_xml_text(bytes: &[u8], kind: OfficeKind) -> Result<String, XmlIssue> 
                 let selected = alternate_depth.is_none() || fallback_depth.is_some();
                 if name == b"tab" && selected {
                     append_xml_text(&mut output, "\t")?;
-                } else if name == b"br" && selected {
+                } else if (name == b"br" || name == b"cr") && selected {
                     append_xml_text(&mut output, "\n")?;
                 }
             }
@@ -1770,7 +1918,7 @@ fn append_xml_text(output: &mut String, value: &str) -> Result<(), XmlIssue> {
         .len()
         .checked_add(value.len())
         .ok_or(XmlIssue::OutputTooLarge)?;
-    if total > MAX_TEXT_OR_JSON_BYTES {
+    if total > MAX_TEXT_BODY_BYTES {
         return Err(XmlIssue::OutputTooLarge);
     }
     output.push_str(value);
@@ -1782,7 +1930,7 @@ fn append_bounded(output: &mut String, value: &str) -> Result<(), XmlIssue> {
         .len()
         .checked_add(value.len())
         .ok_or(XmlIssue::OutputTooLarge)?;
-    if total > MAX_TEXT_OR_JSON_BYTES {
+    if total > MAX_TEXT_BODY_BYTES {
         return Err(XmlIssue::OutputTooLarge);
     }
     output.push_str(value);
@@ -2124,6 +2272,67 @@ mod tests {
         let result = spreadsheet_worksheet_text(xml, &shared);
 
         assert!(matches!(result, Ok(text) if text == "used\nused\n"));
+    }
+
+    #[test]
+    fn worksheet_inline_strings_follow_cell_occurrence_order() {
+        let xml = br#"<worksheet><sheetData><row><c t="inlineStr"><is><t>first</t></is></c><c t="inlineStr"><is><r><t>second</t></r><r><t> value</t></r></is></c></row></sheetData></worksheet>"#;
+
+        let result = spreadsheet_worksheet_text(xml, &[]);
+
+        assert!(matches!(result, Ok(text) if text == "first\nsecond value\n"));
+    }
+
+    #[test]
+    fn workbook_relationships_skip_non_worksheet_sheets() {
+        let xml = br#"<Relationships><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet" Target="chartsheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/></Relationships>"#;
+
+        let result = workbook_relationship_targets(xml);
+
+        assert!(matches!(
+            result,
+            Ok(targets)
+                if targets
+                    == vec![
+                        (String::from("rId1"), None),
+                        (String::from("rId2"), Some(String::from("xl/worksheets/sheet2.xml"))),
+                    ]
+        ));
+    }
+
+    #[test]
+    fn text_extraction_preserves_word_carriage_returns() {
+        let xml = b"<w:document><w:t>first</w:t><w:cr/><w:t>second</w:t></w:document>";
+
+        let result = extract_xml_text(xml, OfficeKind::Docx);
+
+        assert!(matches!(result, Ok(text) if text == "first\nsecond"));
+    }
+
+    #[test]
+    fn text_assembly_uses_the_declared_text_body_ceiling() {
+        let mut output = "x".repeat(MAX_TEXT_BODY_BYTES);
+
+        assert!(matches!(
+            append_xml_text(&mut output, "x"),
+            Err(XmlIssue::OutputTooLarge)
+        ));
+    }
+
+    #[test]
+    fn decoded_budget_is_aggregate_across_parts() {
+        let mut budget = DecodedBudget::default();
+
+        assert!(budget.include(MAX_ENTRY_BYTES).is_ok());
+        assert!(
+            budget
+                .include(MAX_TOTAL_EXPANDED_BYTES - MAX_ENTRY_BYTES)
+                .is_ok()
+        );
+        assert!(matches!(
+            budget.include(1),
+            Err(ReadIssue::Expansion(DECOMPRESSED_SIZE_LIMIT))
+        ));
     }
 
     #[test]
