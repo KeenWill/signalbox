@@ -14,10 +14,11 @@ projection is append-only.
 
 Canonical credential references remain exact and do not gain a terminalization
 bound from this read projection. The exposed profile label is nonempty and at
-most 256 UTF-8 bytes: references within that bound retain their exact spelling,
-while oversized references use a stable digest label. Exact canonical references
-remain a private grouping dimension, so the bounded label cannot combine
-otherwise distinct evidence. Each physical token axis is either absent or an
+most 256 UTF-8 bytes. References of at most 250 bytes use an `exact:` label,
+while longer references use a stable `digest-md5:` label. These discriminators
+make literal names and digest labels disjoint. Exact canonical references remain
+a private grouping dimension, so the bounded label cannot combine otherwise
+distinct evidence. Each physical token axis is either absent or an
 exact integer in the `u64` domain. Aggregate token sums use `u128`, so every sum
 admitted by the bounded source-call ceiling remains exact.
 
@@ -52,8 +53,9 @@ already visible ahead of it, not a cross-page snapshot. Oldest-first traversal
 is not exposed because transaction start timestamps can become visible behind an
 already emitted oldest-first cursor when concurrent transactions commit.
 
-Indexes led by session, turn, target, provenance, call kind, and the combined
-provenance/call-kind selection support selective chronological pages.
+Indexes led by session, turn, target, provenance, call kind, combined
+session/call-kind selection, and combined provenance/call-kind selection support
+selective chronological pages.
 
 ## Open edges
 

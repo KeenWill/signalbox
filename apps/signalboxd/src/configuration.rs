@@ -1432,6 +1432,13 @@ impl HubModelConfiguration {
         self.provider_model_adapters.get(provider_model).copied()
     }
 
+    /// Returns whether one configured target's reported input count includes cache axes.
+    pub fn input_includes_cache_tokens(&self, target: ResolvedProviderTarget) -> bool {
+        self.target_adapters
+            .get(&target)
+            .is_some_and(|adapter| adapter.reports_cache_inclusive_input())
+    }
+
     /// Returns targets whose provider-reported input count includes cache axes.
     pub fn cache_inclusive_input_targets(&self) -> HashSet<ResolvedProviderTarget> {
         self.target_adapters

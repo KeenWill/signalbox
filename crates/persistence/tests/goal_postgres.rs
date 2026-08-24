@@ -4304,6 +4304,7 @@ async fn s18_inv015_inv032_logically_terminal_child_admits_compaction() -> Resul
             session: session(bound_child),
             requested_through_position: None,
             automatic_for_turn: None,
+            input_includes_cache_tokens: false,
             defaults_version: SessionConfigurationDefaultsVersion::first(),
             selection: DirectModelSelection::from_uuid(Uuid::from_u128(0xfa22)),
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
