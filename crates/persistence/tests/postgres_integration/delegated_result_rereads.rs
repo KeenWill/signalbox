@@ -1176,6 +1176,107 @@ async fn s17_inv032_delegated_reconciliation_withholds_result_and_parent_deliver
     Ok(())
 }
 
+/// S17 / INV-032: daemon-owned reconciliation of an ambiguous delegated
+/// initial task atomically publishes an unavailable child result and wakes its
+/// parent while retaining the reconciliation-required turn boundary.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s17_inv032_automatic_delegated_reconciliation_closes_parent_delivery()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xd680;
+    let fixture = authorize_delegated_model_call_fixture(&pool, seed).await?;
+    let observation = fixture
+        .authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::Ambiguous);
+    let parked = fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            observation,
+            ModelCallTerminalIdentities::Ambiguous(AmbiguousModelCallTurnIdentities::new(
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30)),
+            )),
+            |_| panic!("the delegated recovery fixture has no pending steering"),
+        )
+        .await?;
+    let recovery = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let batch = recovery.claim_due().await?;
+    let claimed = batch.claimed()[0];
+    let outcome = recovery.reconcile(claimed).await?;
+    let evidence: (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        i64,
+        i64,
+        i64,
+    ) = sqlx::query_as(
+        "SELECT lifecycle.terminal_disposition_kind,
+                    result.outcome_kind,
+                    event.reason_kind,
+                    automatic.state_kind,
+                    result.content_text,
+                    (SELECT count(*) FROM delegation_update_outbox_event AS parent_update
+                      WHERE parent_update.session_id = $2
+                        AND parent_update.result_spawning_request_id = $1),
+                    (SELECT count(*) FROM delegation_wake_outbox_event AS parent_wake
+                      WHERE parent_wake.session_id = $2
+                        AND parent_wake.result_spawning_request_id = $1),
+                    (SELECT count(*) FROM turn_reconciliation_required_outbox_event AS turn_event
+                      WHERE turn_event.session_id = $3
+                        AND turn_event.turn_id = $4)
+               FROM session_child_result AS result
+               JOIN session_delegation_event AS event
+                 ON event.spawning_tool_request_id = result.spawning_tool_request_id
+                AND event.event_ordinal = result.event_ordinal
+               JOIN session_delegation_initial_task AS task
+                 ON task.spawning_tool_request_id = result.spawning_tool_request_id
+               JOIN turn_lifecycle AS lifecycle
+                 ON lifecycle.session_id = task.child_session_id
+                AND lifecycle.turn_id = task.turn_id
+               JOIN automatic_model_call_reconciliation AS automatic
+                 ON automatic.session_id = lifecycle.session_id
+                AND automatic.turn_id = lifecycle.turn_id
+              WHERE result.spawning_tool_request_id = $1",
+    )
+    .bind(fixture.spawning_request.into_uuid())
+    .bind(fixture.parent.into_uuid())
+    .bind(fixture.child.into_uuid())
+    .bind(claimed.turn().into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(matches!(
+        parked,
+        ModelCallTerminalOutcome::AwaitingRecovery(_)
+    ));
+    assert_eq!(batch.claimed().len(), 1);
+    assert_eq!(batch.exhausted(), &[]);
+    assert_eq!(claimed.session(), fixture.child);
+    assert_eq!(outcome, ModelCallReconciliationOutcome::Reconciled);
+    assert_eq!(
+        evidence,
+        (
+            "reconciliation_required".into(),
+            "child_failed".into(),
+            "child_result_unavailable".into(),
+            "reconciled".into(),
+            None,
+            1,
+            1,
+            1,
+        )
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S17 / INV-010 / INV-032: a child terminal commit takes the canonical parent
 /// session before the child scheduler and relationship, matching peer-message
 /// and descendant-cascade lock order.
@@ -1485,6 +1586,7 @@ async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<
     else {
         panic!("the unchanged delegated child activation must commit");
     };
+    record_empty_instruction_manifest(&pool, SessionId::from_uuid(child)).await?;
     let delegated = activated
         .delegated()
         .expect("activation preserves its delegated origin family");

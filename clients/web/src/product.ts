@@ -21,6 +21,70 @@ export const productRoutes = [
 
 export type ProductRouteId = (typeof productRoutes)[number]['id']
 
+export type ProductSurfaceState =
+  | { kind: 'browser-local'; authority: 'browser preferences' }
+  | { kind: 'server-backed'; owningTrack: string; facts: readonly string[] }
+  | {
+      kind: 'committed-unimplemented'
+      owningTrack: string
+      facts: readonly string[]
+    }
+
+export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> = {
+  attention: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#992 attention projections',
+    facts: ['prioritized attention reads'],
+  },
+  sessions: {
+    kind: 'server-backed',
+    owningTrack: '#991 session projections',
+    facts: ['bounded session descriptors', 'stable-address timeline windows'],
+  },
+  search: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#994 search and usage reads',
+    facts: ['cross-session search reads'],
+  },
+  activity: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['system activity reads'],
+  },
+  runners: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['runner discovery reads'],
+  },
+  reviews: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['review discovery reads'],
+  },
+  imports: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['import discovery reads'],
+  },
+  usage: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#994 search and usage reads',
+    facts: ['usage aggregation reads'],
+  },
+  settings: { kind: 'browser-local', authority: 'browser preferences' },
+}
+
+export const productSurfaceCacheLabel = (surface: ProductRouteId): string | null => {
+  switch (productSurfaceStates[surface].kind) {
+    case 'browser-local':
+      return 'Local settings'
+    case 'server-backed':
+      return 'Bounded query'
+    case 'committed-unimplemented':
+      return null
+  }
+}
+
 export interface ProductTransport {
   readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap>
   readBlobDescriptor(input: BlobDescriptorInput, signal?: AbortSignal): Promise<WebBlobDescriptor>

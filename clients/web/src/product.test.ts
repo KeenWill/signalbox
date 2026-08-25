@@ -7,9 +7,13 @@ import {
   ProductContractError,
   ProductInputError,
   ProductTransportError,
+  productRoutes,
+  productSurfaceCacheLabel,
+  productSurfaceStates,
   SameOriginProductTransport,
 } from './product'
 import { webContractBootstrapFixture } from './product.fixture'
+import { hasValidSessionTimelineContract } from './session-timeline/model'
 
 const interruptedResponse = (): Response =>
   new Response(
@@ -400,5 +404,65 @@ describe('SameOriginProductTransport', () => {
         response: responseFixture,
       }),
     )
+  })
+})
+
+describe('product surface availability', () => {
+  it('requires bounded JSON before enabling timeline reads', () => {
+    expect(
+      hasValidSessionTimelineContract({
+        ...webContractBootstrapFixture,
+        capabilities: { ...webContractBootstrapFixture.capabilities, bounded_json: false },
+      }),
+    ).toBe(false)
+  })
+
+  it('rejects timeline capability with unusable semantic limits', () => {
+    expect(hasValidSessionTimelineContract(webContractBootstrapFixture)).toBe(true)
+    expect(
+      hasValidSessionTimelineContract({
+        ...webContractBootstrapFixture,
+        limits: { ...webContractBootstrapFixture.limits, max_timeline_window_items: 0 },
+      }),
+    ).toBe(false)
+    expect(
+      hasValidSessionTimelineContract({
+        ...webContractBootstrapFixture,
+        limits: { ...webContractBootstrapFixture.limits, max_timeline_window_bytes: 65_537 },
+      }),
+    ).toBe(false)
+  })
+
+  it('defines one typed authority state for every product route', () => {
+    expect(productSurfaceStates).toHaveProperty(productRoutes[0].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[1].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[2].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[3].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[4].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[5].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[6].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[7].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[8].id)
+  })
+
+  it('keeps Settings browser-local instead of implying daemon authority', () => {
+    expect(productSurfaceStates.settings).toEqual({
+      kind: 'browser-local',
+      authority: 'browser preferences',
+    })
+  })
+
+  it('marks the available Session timeline facts as server-backed', () => {
+    expect(productSurfaceStates.sessions).toEqual({
+      kind: 'server-backed',
+      owningTrack: '#991 session projections',
+      facts: ['bounded session descriptors', 'stable-address timeline windows'],
+    })
+  })
+
+  it('reports cache ownership only for implemented surfaces', () => {
+    expect(productSurfaceCacheLabel('sessions')).toBe('Bounded query')
+    expect(productSurfaceCacheLabel('settings')).toBe('Local settings')
+    expect(productSurfaceCacheLabel('attention')).toBeNull()
   })
 })

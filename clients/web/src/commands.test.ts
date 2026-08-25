@@ -1,8 +1,64 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { commandById, invokeCommand } from './commands'
+import { productCommandRegistry } from './productCommands'
 import { actions, selectApp, store } from './state'
 
 describe('command registry', () => {
+  it('replaces scenario navigation with product navigation', () => {
+    const productCommandIds: readonly string[] = productCommandRegistry.map((command) => command.id)
+    expect(productCommandIds.filter((id) => id === 'navigation.open')).toHaveLength(1)
+    expect(productCommandRegistry.find((command) => command.id === 'navigation.open')?.title).toBe(
+      'Open product navigation',
+    )
+  })
+
+  it('registers preference reset as a central command', () => {
+    store.dispatch(actions.themeSet('light'))
+
+    invokeCommand('preferences.reset', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+    })
+
+    expect(selectApp(store.getState()).theme).toBe('dark')
+  })
+
+  it('routes pane resizing through parameterized central commands', () => {
+    invokeCommand('pane.navigation.resize', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      paneSize: 320,
+    })
+    invokeCommand('pane.inspector.resize', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      paneSize: 440,
+    })
+
+    expect(selectApp(store.getState()).paneSizes).toEqual({ navigation: 320, inspector: 440 })
+  })
+
+  it('routes exact session opening through a parameterized central command', () => {
+    const opened: string[] = []
+
+    invokeCommand('session.open', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      sessionId: '00000000-0000-0000-0000-000000000991',
+      openSession: (sessionId) => opened.push(sessionId),
+    })
+
+    expect(opened).toEqual(['00000000-0000-0000-0000-000000000991'])
+  })
+
   it('selects the first timeline item when next starts from a missing selection', () => {
     const timelineIds = ['event-0', 'event-1'] as const
     store.dispatch(actions.timelineSelected('filtered-out-event'))
@@ -10,7 +66,6 @@ describe('command registry', () => {
     invokeCommand('selection.next', {
       dispatch: store.dispatch,
       getState: store.getState,
-      scenarioSurface: true,
       timelineIds,
       focusTimeline: () => undefined,
     })
@@ -18,58 +73,88 @@ describe('command registry', () => {
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
   })
 
-  it('keeps keyboard help available on an empty scenario surface', () => {
-    const help = commandById('help.open')
-    expect(
-      help.available({
-        dispatch: store.dispatch,
-        getState: store.getState,
-        scenarioSurface: true,
-        timelineIds: [],
-        focusTimeline: () => undefined,
-      }),
-    ).toBe(true)
-  })
-
-  it('keeps scenario keyboard help out of product surfaces', () => {
-    const help = commandById('help.open')
-    expect(
-      help.available({
-        dispatch: store.dispatch,
-        getState: store.getState,
-        scenarioSurface: false,
-        timelineIds: [],
-        focusTimeline: () => undefined,
-      }),
-    ).toBe(false)
-  })
-
-  it('keeps product navigation bindings unavailable on scenario surfaces', () => {
-    const navigate = commandById('navigate.sessions')
-    expect(
-      navigate.available({
-        dispatch: store.dispatch,
-        getState: store.getState,
-        scenarioSurface: true,
-        timelineIds: [],
-        focusTimeline: () => undefined,
-      }),
-    ).toBe(false)
-  })
-
-  it('moves scenario focus before collapsing workbench panes', () => {
-    const focusTimeline = vi.fn()
-    store.dispatch(actions.layoutSet('workbench'))
-
-    invokeCommand('layout.toggle', {
+  it('delegates first and latest commands to the owning server-window loader', () => {
+    const loaded: Array<'first' | 'latest'> = []
+    const context = {
       dispatch: store.dispatch,
       getState: store.getState,
-      scenarioSurface: true,
-      timelineIds: [],
-      focusTimeline,
+      timelineIds: ['41', '42'],
+      focusTimeline: () => undefined,
+      loadTimelineWindow: (anchor: 'first' | 'latest') => loaded.push(anchor),
+    }
+
+    invokeCommand('selection.first', context)
+    invokeCommand('selection.last', context)
+
+    expect(loaded).toEqual(['first', 'latest'])
+  })
+
+  it('routes selected timeline expansion through the central command', () => {
+    let toggles = 0
+    store.dispatch(actions.timelineSelected('42'))
+
+    invokeCommand('selection.toggleExpansion', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: ['41', '42'],
+      focusTimeline: () => undefined,
+      toggleTimelineExpansion: () => {
+        toggles += 1
+      },
     })
 
-    expect(focusTimeline).toHaveBeenCalledOnce()
-    expect(selectApp(store.getState()).layout).toBe('focus')
+    expect(toggles).toBe(1)
+  })
+
+  it('keeps server-window boundary commands available when Results has no visible rows', () => {
+    const loaded: Array<'first' | 'latest'> = []
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      timelineWindowAvailable: true,
+      focusTimeline: () => undefined,
+      loadTimelineWindow: (anchor: 'first' | 'latest') => loaded.push(anchor),
+    }
+
+    invokeCommand('selection.first', context)
+    invokeCommand('selection.last', context)
+
+    expect(loaded).toEqual(['first', 'latest'])
+  })
+
+  it('withholds the artifact inspector until a surface owns an opener', () => {
+    const artifact = commandById('artifact.open')
+    const base = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+    }
+
+    expect(artifact.available(base)).toBe(false)
+    expect(artifact.available({ ...base, openArtifactInspector: () => undefined })).toBe(true)
+  })
+
+  it('routes artifact inspection through the owning surface opener', () => {
+    let opened = 0
+
+    invokeCommand('artifact.open', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      openArtifactInspector: () => {
+        opened += 1
+      },
+    })
+
+    expect(opened).toBe(1)
+  })
+
+  it('keeps the artifact inspector reachable from product surfaces', () => {
+    const productCommandIds: readonly string[] = productCommandRegistry.map((command) => command.id)
+
+    expect(productCommandIds).toContain('artifact.open')
   })
 })
