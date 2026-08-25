@@ -140,6 +140,7 @@ const WEBHOOK_DRAIN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 // runs on the same serialized repository task. Give the drain deadline and its
 // bounded child cleanup room to report before the enclosing attempt is
 // cancelled.
+// numeric-bound: ceiling - caps an attempt's hold on the repository task
 const WEBHOOK_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(70);
 // Every shared child-set join uses this bound. A later attempt may retry the
 // join, but it never spawns alongside survivors or wedges the scheduler while
@@ -813,6 +814,43 @@ impl WebhookAttemptOutcome {
     }
 }
 
+/// Which step of a webhook attempt is running.
+///
+/// The enclosing attempt deadline can expire in any of them, and cancellation
+/// carries no failure of its own to classify. Recording the step lets a
+/// cancelled attempt report the same outcome that step's own failure would
+/// have, so a wedge outside the drain does not advance the projection backoff
+/// that only drain failures are meant to grow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookAttemptPhase {
+    /// Activation and the leading reconciliation that precede the drain.
+    BeforeDrain,
+    /// The drain itself, which owns the durable pending deliveries.
+    Drain,
+    /// The cutoff and dispatch reconciliation that follow a committed drain.
+    AfterDrain,
+}
+
+impl WebhookAttemptPhase {
+    /// The outcome a cancellation during this step reports.
+    const fn cancelled_outcome(self, error: RepositoryWatchAttemptError) -> WebhookAttemptOutcome {
+        match self {
+            Self::BeforeDrain => WebhookAttemptOutcome::FailedBeforeDrain(error),
+            Self::Drain => WebhookAttemptOutcome::DrainFailed(error),
+            Self::AfterDrain => WebhookAttemptOutcome::DrainedThenFailed(error),
+        }
+    }
+
+    /// The operator-facing label for the cancelled step.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::BeforeDrain => "before_drain",
+            Self::Drain => "drain",
+            Self::AfterDrain => "after_drain",
+        }
+    }
+}
+
 /// Whether a full polling attempt performs its own webhook drain step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WebhookDrain {
@@ -1043,6 +1081,7 @@ struct RepositoryWatchTask {
     webhook_drain_first_failure: Option<RepositoryWatchAttemptError>,
     webhook_drain_projection_failure: Option<RepositoryWatchAttemptError>,
     webhook_drain_timed_out: bool,
+    webhook_attempt_phase: WebhookAttemptPhase,
     payload_purge: WebhookPayloadPurgeSchedule,
     rules_activated: bool,
 }
@@ -1158,6 +1197,7 @@ impl RepositoryWatchTask {
             webhook_drain_first_failure: None,
             webhook_drain_projection_failure: None,
             webhook_drain_timed_out: false,
+            webhook_attempt_phase: WebhookAttemptPhase::BeforeDrain,
             payload_purge,
             rules_activated: false,
         })
@@ -1763,6 +1803,7 @@ impl RepositoryWatchTask {
 
     async fn run_webhook_attempt(&mut self) -> WebhookAttemptOutcome {
         self.poller.begin_attempt();
+        self.webhook_attempt_phase = WebhookAttemptPhase::BeforeDrain;
         let outcome = async {
             if !self.rules_activated {
                 if let Err(error) = self.activate_rules().await {
@@ -1780,7 +1821,10 @@ impl RepositoryWatchTask {
             } else {
                 self.process_dispatches().await.err()
             };
-            match self.process_webhook_deliveries_with_timeout().await {
+            self.webhook_attempt_phase = WebhookAttemptPhase::Drain;
+            let drained = self.process_webhook_deliveries_with_timeout().await;
+            self.webhook_attempt_phase = WebhookAttemptPhase::AfterDrain;
+            match drained {
                 WebhookDrainOutcome::Drained => {}
                 WebhookDrainOutcome::ProjectionFailed(error) => {
                     return WebhookAttemptOutcome::DrainFailed(error);
@@ -1819,15 +1863,20 @@ impl RepositoryWatchTask {
         match timeout(deadline, self.run_webhook_attempt()).await {
             Ok(outcome) => outcome,
             Err(_) => {
+                let phase = self.webhook_attempt_phase;
                 self.finish_cancelled_webhook_attempt().await;
                 let error = RepositoryWatchAttemptError::WebhookAttemptTimedOut;
                 tracing::error!(
                     repository = %self.repository.as_str(),
                     timeout_seconds = deadline.as_secs(),
+                    cancelled_phase = phase.label(),
                     cause_code = error.cause_code(),
                     "repository-watch webhook attempt exceeded its deadline"
                 );
-                WebhookAttemptOutcome::DrainFailed(error)
+                // Cancellation carries no failure of its own, so the cancelled
+                // step decides the outcome: only a drain the deadline
+                // interrupted has earned the growing projection backoff.
+                phase.cancelled_outcome(error)
             }
         }
     }
@@ -6941,14 +6990,15 @@ mod tests {
         RepositoryWatchWake, ResourceKey, ReviewState, TargetedPollOutcome, TargetedPullRequest,
         TargetedRefreshSettlement, Url, UuidV7RepoWatchEventIdGenerator,
         WEBHOOK_DRAIN_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY,
-        WebhookAttemptOutcome, WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry,
-        WebhookPayloadPurgeSchedule, WebhookPollInterrupt, WebhookShadowBaseline, WorkflowName,
-        WorkflowResponse, await_poll_or_interrupt, derive_repo_watch_events, dispatch_context_json,
-        inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
-        normalize_checks_outcome, normalize_pull_request_context, object_id,
-        observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
-        record_dispatch_start_nudge_outcome, rule_activation_error, run_until_shutdown,
-        supervise_repository_tasks, targeted_pull_requests,
+        WebhookAttemptOutcome, WebhookAttemptPhase, WebhookDrain, WebhookDrainOutcome,
+        WebhookDrainRetry, WebhookPayloadPurgeSchedule, WebhookPollInterrupt,
+        WebhookShadowBaseline, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
+        derive_repo_watch_events, dispatch_context_json, inspect_webhook_drain,
+        next_cadence_deadline, next_repository_wake, normalize_checks_outcome,
+        normalize_pull_request_context, object_id, observe_webhook_work_before_drain,
+        owed_dispatch_context_json_parts, record_dispatch_start_nudge_outcome,
+        rule_activation_error, run_until_shutdown, supervise_repository_tasks,
+        targeted_pull_requests,
     };
     use signalbox_application::{
         EligibilityNudgeOutcome, InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
@@ -7289,6 +7339,7 @@ mod tests {
                 webhook_drain_first_failure: None,
                 webhook_drain_projection_failure: None,
                 webhook_drain_timed_out: false,
+                webhook_attempt_phase: WebhookAttemptPhase::BeforeDrain,
                 repository,
                 interval: POLL_INTERVAL,
                 poller,
@@ -9955,6 +10006,27 @@ mod tests {
         clock_guard.abort();
         clock_guard.await.ok();
         Ok(())
+    }
+
+    /// Only a cancelled drain has earned the growing projection backoff, so an
+    /// attempt deadline reached outside the drain reports the step it
+    /// interrupted rather than a drain failure.
+    #[test]
+    fn a_cancelled_attempt_reports_the_step_the_deadline_interrupted() {
+        let error = RepositoryWatchAttemptError::WebhookAttemptTimedOut;
+
+        assert_eq!(
+            WebhookAttemptPhase::BeforeDrain.cancelled_outcome(error),
+            WebhookAttemptOutcome::FailedBeforeDrain(error)
+        );
+        assert_eq!(
+            WebhookAttemptPhase::Drain.cancelled_outcome(error),
+            WebhookAttemptOutcome::DrainFailed(error)
+        );
+        assert_eq!(
+            WebhookAttemptPhase::AfterDrain.cancelled_outcome(error),
+            WebhookAttemptOutcome::DrainedThenFailed(error)
+        );
     }
 
     #[tokio::test]

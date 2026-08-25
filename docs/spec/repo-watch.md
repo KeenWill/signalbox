@@ -1273,9 +1273,13 @@ after bounded child cleanup even when an inner operation never returns. The
 enclosing webhook attempt has a seventy-second deadline so activation, lifecycle
 cutoffs, and dispatch reconciliation surrounding the drain cannot hold that task
 indefinitely either. Its cancellation performs the same bounded child cleanup
-and shadow settlement described below, invalidates partial freshness, emits the
-closed `webhook_attempt_timed_out` cause, and enters the same retry backoff. A
-cleanup that exceeds its own five-second bound emits
+and shadow settlement described below, invalidates partial freshness, and emits
+the closed `webhook_attempt_timed_out` cause. Cancellation carries no failure of
+its own, so the step it interrupted decides the retry: a cancelled drain
+advances the projection backoff, a cancelled reconciliation after a committed
+drain clears that backoff and arms the fixed dispatch follow-up, and a
+cancellation before the drain began neither grows nor clears it. A cleanup that
+exceeds its own five-second bound emits
 `webhook_cancelled_fetch_drain_timed_out` instead of preventing that retry from
 being scheduled. Unfinished child fetches remain in the poller's shared set,
 which a later attempt must drain before it can spawn new work. A deadline
