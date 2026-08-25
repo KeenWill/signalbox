@@ -159,7 +159,7 @@ ALLOWLIST = (
     Allowance(
         "GitHub repository GraphQL owner variables",
         re.compile(
-            r"^(?:apps/signalboxd/src/repo_watch_runtime[.]rs|"
+            r"^(?:apps/signalboxd/src/(?:convergence_sweep_runtime|repo_watch_runtime)[.]rs|"
             r"crates/tools-github/src/lib[.]rs|"
             r"crates/tools-code-host/src/code_host/github[.]rs)$"
         ),
@@ -171,8 +171,14 @@ ALLOWLIST = (
     ),
     Allowance(
         "GitHub nameWithOwner GraphQL repository-identity field",
-        re.compile(r"^crates/tools-code-host/src/code_host/github[.]rs$"),
-        re.compile(r"\"nameWithOwner\"|repository \{ nameWithOwner \}|\bname_with_owner\b"),
+        re.compile(
+            r"^(?:apps/signalboxd/src/convergence_sweep_runtime[.]rs|"
+            r"crates/tools-code-host/src/code_host/github[.]rs)$"
+        ),
+        re.compile(
+            r"\"nameWithOwner\"|repository \{ nameWithOwner \}|"
+            r"name_with_owner:\s*nameWithOwner|\bname_with_owner\b"
+        ),
     ),
     Allowance(
         "GitHub stack GraphQL owner declarations",

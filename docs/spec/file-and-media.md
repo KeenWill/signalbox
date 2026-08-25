@@ -2,11 +2,10 @@
 
 The provider-neutral core is verified against PR #898 (`agent/file-media-core`).
 Its isolated processor implementation is verified against PR #900
-(`agent/file-media-worker`; via PR #905 `agent/file-media-image-family`).
-Together they include the type model, declaration and registry checks, detection
-and validation algorithm, untrusted processor-response boundary, stable agent
-tool contracts, visibility-authorizing application bridge, and fresh
-daemon-supervised worker runtime.
+(`agent/file-media-worker`). Together they include the type model, declaration
+and registry checks, detection and validation algorithm, untrusted
+processor-response boundary, stable agent tool contracts, visibility-authorizing
+application bridge, and fresh daemon-supervised worker runtime.
 
 The image-family adapter coverage is verified against PR #905
 (`agent/file-media-image-family`).
@@ -246,7 +245,7 @@ The version-one compiled ceilings are:
 `FileMediaCeilings` admits only positive effective values at or below its
 compiled maxima. `FileMediaProcessCeilings` keeps the protocol frame fixed at
 1,048,576 bytes while admitting only positive resource values at or below their
-compiled maxima; descendants are fixed at zero (INV-072). Each worker snapshot
+compiled maxima; descendants are fixed at zero (INV-088). Each worker snapshot
 is additionally capped by its effective worker address-space budget; bubblewrap
 and all distinct worker snapshots together cannot exceed the 64 MiB aggregate
 snapshot ceiling. The text body ceiling reserves enough frame space for

@@ -49,8 +49,10 @@ where
                 &mut fingerprint,
                 reader.identity().revision().as_str().as_bytes(),
             );
-            fingerprint_len(&mut fingerprint, reader.media_types().len());
-            for media_type in reader.media_types() {
+            let mut media_types = reader.media_types().iter().collect::<Vec<_>>();
+            media_types.sort();
+            fingerprint_len(&mut fingerprint, media_types.len());
+            for media_type in media_types {
                 fingerprint_field(&mut fingerprint, media_type.as_str().as_bytes());
             }
             let probe = reader.probe();
@@ -91,8 +93,10 @@ where
                 );
                 fingerprint_view_bounds(&mut fingerprint, view.bounds());
             }
-            fingerprint_len(&mut fingerprint, reader.reason_codes().len());
-            for reason in reader.reason_codes() {
+            let mut reason_codes = reader.reason_codes().iter().collect::<Vec<_>>();
+            reason_codes.sort();
+            fingerprint_len(&mut fingerprint, reason_codes.len());
+            for reason in reason_codes {
                 fingerprint_field(&mut fingerprint, reason.as_str().as_bytes());
             }
             fingerprint_field(
@@ -523,6 +527,8 @@ pub(crate) fn decode_bytes(encoded: &str) -> Result<Vec<u8>, ProtocolValueError>
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr as _;
+
     use signalbox_file_media_runtime::{
         CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProviderDeclaration,
         FileReaderName, FileReaderProviderName, FileReaderRevision, MAX_PROCESSOR_FRAME_BYTES,
@@ -607,5 +613,63 @@ mod tests {
         };
         let encoded = serde_json::to_vec(&frame).expect("worker frame serializes");
         assert!(encoded.len() <= MAX_PROCESSOR_FRAME_BYTES);
+    }
+
+    fn declaration_with_member_order(
+        media_types: &[&str],
+        reason_codes: &[&str],
+    ) -> FileMediaProviderDeclaration {
+        let provider = FileReaderProviderName::try_new("fixture").expect("valid provider name");
+        let view = ReadViewDeclaration::try_new(
+            ReadViewName::try_new("text").expect("valid view name"),
+            String::from("Reads fixture text."),
+            CanonicalJsonObjectSchema::try_new(r#"{"type":"object"}"#)
+                .expect("valid arguments schema"),
+            ReadAccessPattern::Streaming { maximum_ranges: 1 },
+            ReadViewBounds::Text {
+                source_bytes: 64,
+                output_bytes: 64,
+            },
+        )
+        .expect("valid view declaration");
+        let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
+            provider: provider.clone(),
+            reader: FileReaderName::try_new("fixture").expect("valid reader name"),
+            revision: FileReaderRevision::try_new("v1").expect("valid revision"),
+            media_types: media_types
+                .iter()
+                .map(|value| CanonicalMediaType::from_str(value).expect("valid media type"))
+                .collect(),
+            probe: ProbeDeclaration::new(1, 0, 1, 1),
+            validation: ValidationDeclaration::new(64, 1),
+            views: vec![view],
+            reason_codes: reason_codes
+                .iter()
+                .map(|value| ReasonCode::try_new(*value).expect("valid reason code"))
+                .collect(),
+            streaming_text_fallback: StreamingTextFallback::Disabled,
+        })
+        .expect("valid reader declaration");
+        FileMediaProviderDeclaration::try_new(provider, vec![reader])
+            .expect("valid provider declaration")
+    }
+
+    #[test]
+    fn declaration_fingerprint_is_independent_of_unordered_member_order() {
+        let forward = declaration_with_member_order(
+            &["application/x-fixture-a", "application/x-fixture-b"],
+            &["reason_a", "reason_b"],
+        );
+        let reversed = declaration_with_member_order(
+            &["application/x-fixture-b", "application/x-fixture-a"],
+            &["reason_b", "reason_a"],
+        );
+
+        assert_eq!(
+            declaration_fingerprint(&[forward]),
+            declaration_fingerprint(&[reversed]),
+            "fingerprints over the same media-type and reason-code membership must match \
+             regardless of caller-supplied order",
+        );
     }
 }
