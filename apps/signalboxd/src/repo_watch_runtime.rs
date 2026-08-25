@@ -7061,7 +7061,7 @@ mod tests {
         error::Error,
         fs,
         io::{self, Write},
-        num::NonZeroU64,
+        num::{NonZeroU16, NonZeroU64},
         path::PathBuf,
         sync::{
             Arc, Mutex,
@@ -7086,18 +7086,18 @@ mod tests {
         MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE, PollAttemptWait, PollCache,
         PreparedTargetedRefresh, PullRequestSettlement, PullResponse, ReactionContent,
         RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
-        RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchObservation,
-        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewDecision,
-        RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState,
-        RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation, RepositorySlug,
-        RepositoryWatchAttemptError, RepositoryWatchChildExit,
-        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
-        RepositoryWatchWake, ResourceKey, ReviewState, TargetedPollOutcome, TargetedPullRequest,
-        TargetedRefreshSettlement, Url, UuidV7RepoWatchEventIdGenerator,
-        WEBHOOK_DRAIN_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY,
-        WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
-        WebhookPollInterrupt, WebhookShadowBaseline, WorkflowName, WorkflowResponse,
-        await_poll_or_interrupt, derive_repo_watch_events, dispatch_context_json,
+        RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchEventKindNameV1,
+        RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchReactionObservation,
+        RepoWatchReviewDecision, RepoWatchReviewObservation,
+        RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
+        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
+        RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
+        RepositoryWatchRuntimeError, RepositoryWatchTask, RepositoryWatchWake, ResourceKey,
+        ReviewState, TargetedPollOutcome, TargetedPullRequest, TargetedRefreshSettlement, Url,
+        UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_RETRY_DELAY,
+        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry,
+        WebhookPayloadPurgeSchedule, WebhookPollInterrupt, WebhookShadowBaseline, WorkflowName,
+        WorkflowResponse, await_poll_or_interrupt, derive_repo_watch_events, dispatch_context_json,
         inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
         normalize_checks_outcome, normalize_pull_request_context, object_id,
         observe_webhook_work_before_drain, owed_dispatch_context_json_parts, rule_activation_error,
@@ -7119,6 +7119,7 @@ mod tests {
         disposable_test_container_labels, local_test_connection_options, migrate,
         repo_watch::{
             PostgresRepoWatchStore, RepoWatchCommitRequest, RepoWatchCursorCandidate,
+            RepoWatchEventPageSize, RepoWatchEventProducer,
             RepoWatchPlannedStaleReviewClearanceFixture, RepoWatchStaleReviewClearanceClaimToken,
             RepoWatchStaleReviewClearanceId,
         },
@@ -7459,6 +7460,11 @@ mod tests {
             },
             _credential_directory: fixture._credential_directory,
         })
+    }
+
+    fn event_page_size() -> RepoWatchEventPageSize {
+        RepoWatchEventPageSize::try_new(NonZeroU16::new(16).expect("a page size is positive"))
+            .expect("sixteen is within the durable page ceiling")
     }
 
     async fn wait_for_webhook_projection_wedge(store: &PostgresRepoWatchWebhookStore) {
@@ -9955,23 +9961,25 @@ mod tests {
             after > before,
             "a primary delivery advances the durable cursor"
         );
-        let producers = sqlx::query_scalar::<_, String>(
-            "SELECT producer
-               FROM repo_watch_event
-              WHERE repository = $1 AND cursor_generation = $2
-              ORDER BY event_ordinal",
-        )
-        .bind(repository.as_str())
-        .bind(i64::try_from(after.get())?)
-        .fetch_all(&pool)
-        .await?;
-        assert!(
-            !producers.is_empty(),
-            "a primary delivery writes ordinary event rows"
-        );
-        assert!(
-            producers.iter().all(|producer| producer == "webhook"),
-            "every row a delivery produced records the webhook producer, got {producers:?}"
+        // The fixture's baseline commit carries no events, so this page holds
+        // exactly what the delivery wrote.
+        let page = fixture
+            .task
+            .store
+            .load_event_page(&repository, None, event_page_size())
+            .await?;
+        let recorded = page
+            .events()
+            .iter()
+            .map(|event| (event.event().kind().name(), event.producer()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            recorded,
+            vec![(
+                RepoWatchEventKindNameV1::ReviewSubmitted,
+                RepoWatchEventProducer::Webhook
+            )]
         );
         Ok(())
     }

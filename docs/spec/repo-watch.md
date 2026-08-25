@@ -1573,38 +1573,36 @@ that survives cancellation of the outer drain. Ordering the handoff this way is
 what makes an interrupted primary delivery safe — a delivery whose disposition
 is durable is never loaded again, so a lost cursor write costs the observation
 rather than duplicating it, and a cursor conflict hands ownership to the
-intervening poll exactly as it does in shadow mode. Rows a delivery commits
-record `webhook` as their producer rather than `poll`, so a reader can tell
-which intake observed a fact, and the parity view — whose poll side reads
-`producer = 'poll'` — never reports a primary-mode row as a poll-only
-divergence. Dispatch processing follows a landed commit, because under primary
-mode every applied delivery is a cursor advance that rules may act on.
+intervening poll exactly as it does in shadow mode. Every row one commit writes
+records that commit's producer, and a primary delivery's commit records
+`webhook`: the producer names the intake that produced the commit, so a fact its
+own targeted refresh supplied is attributed to the delivery that caused and
+bounded that query rather than to a sweep that never ran. The scheduled sweep's
+commits keep `poll`, which is what the parity view's poll side reads, so a
+primary-mode row is never reported as a poll-only divergence. Dispatch
+processing follows a landed commit, because under primary mode every applied
+delivery is a cursor advance that rules may act on. A durable event read returns
+its producer, so an audit of which intake produced a fact needs nothing beyond
+the event repository.
 
 **Implemented behavior.** Poll frequency does not drop in shadow mode. Under
 primary mode a deployment may lengthen a repository's `poll_interval_seconds` to
-one hour, the cadence the 2026-08-25 rollout ruling authorizes after dogfood
-parity: the delivery stream carries the mapped set, and the sweep returns to
+one hour: the delivery stream carries the mapped set, and the sweep returns to
 being the reconciliation backstop rather than the freshness path. Nothing in the
 daemon enforces that cadence — it is a per-repository configuration value, and a
 shorter interval stays valid at the cost of provider quota. No guarantee that
 depends on the sweep changes with the longer interval; only the delay before an
 unmapped or missed fact is observed grows with it.
 
-**Implemented behavior.** The rollout gate is no *unexplained* divergence, not
-no divergence: it is zero `repo_watch_webhook_parity` rows whose status is
-`webhook_only` or `poll_only` and whose cause is null, measured over a real
-workday. Divergence that names a closed cause is understood and does not hold
-the gate. Dogfood parity reached zero uncaused rows, and the gate was ruled met
-on 2026-08-25, which is what authorizes both primary mode and the hourly cadence
-above.
-
-**Committed unimplemented functionality.** Two of the four closed parity causes
-remain unreachable: the runtime records `cross_drain_shadow_gap` and derives
-`poll_only_family`, while `compressed_transition` and `context_drift` are
-admitted by the durable vocabulary and never emitted. Both belong beside the
-producing delivery's own projection rather than derived by the parity view,
-because only the delivery knows which applies. They are tracked as follow-up
-work rather than as a condition on the ruling above.
+**Implemented behavior.** Parity remains measurable while a repository stays in
+shadow mode: no *unexplained* divergence means zero `repo_watch_webhook_parity`
+rows whose status is `webhook_only` or `poll_only` and whose cause is null.
+Divergence that names a closed cause is understood. Of the four closed causes,
+the runtime records `cross_drain_shadow_gap` beside the producing delivery's
+projection and the view derives `poll_only_family` on the poll side;
+`compressed_transition` and `context_drift` are admitted by the durable
+vocabulary and are not emitted, so a divergence whose real explanation is either
+one is reported without a cause.
 
 ## Open edges
 

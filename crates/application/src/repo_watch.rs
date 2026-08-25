@@ -113,8 +113,8 @@ impl RepoWatchEventIdentityFrontierEntryV1 {
 
     /// Pairs one stream with its last sequence and the pull request owning it.
     ///
-    /// Ownership is what makes a stream retirable: a repository-global stream
-    /// has no subject that can reach a terminal state, so it carries none.
+    /// A repository-global stream, such as a branch workflow run, belongs to no
+    /// pull request and carries none.
     pub const fn for_pull_request(
         stream_identity: [u8; 32],
         sequence: NonZeroU64,
@@ -235,15 +235,6 @@ impl RepoWatchEventIdentityFrontierV1 {
             },
         );
         Ok(next)
-    }
-
-    /// Drops every recurring stream owned by one pull request.
-    ///
-    /// Called only for a subject that cannot produce another occurrence, so no
-    /// released sequence can be reassigned and mint a colliding identity.
-    fn retire_pull_request(&mut self, number: PullRequestNumber) {
-        self.sequences
-            .retain(|_, entry| entry.pull_request_number != Some(number));
     }
 }
 
@@ -1338,13 +1329,6 @@ pub fn derive_repo_watch_events(
             ids,
             &mut events,
         )?;
-        // A merged pull request cannot reopen, so no stream it owns can state
-        // another fact and no released sequence can be reassigned. Closed but
-        // unmerged requests keep their sequences, because GitHub permits them
-        // to reopen and advance the same streams again.
-        if current_pull_request.lifecycle() == RepoWatchPullRequestLifecycle::Merged {
-            identity_frontier.retire_pull_request(current_pull_request.context().number());
-        }
     }
     if let Some(previous) = previous {
         derive_workflow_events(
@@ -5089,8 +5073,8 @@ mod tests {
         Ok(())
     }
 
-    /// Ownership is what makes a stream retirable, so it has to survive the
-    /// durable round trip the cursor performs on every commit.
+    /// Ownership is the durable member a later retirement mechanism reads, so
+    /// it has to survive the round trip the cursor performs on every commit.
     #[test]
     fn identity_frontier_entries_carry_their_owning_pull_request() -> Result<(), Box<dyn Error>> {
         let owning = pull_request_number(PULL_REQUEST_NUMBER);
@@ -5106,43 +5090,6 @@ mod tests {
         let entries = frontier.entries().collect::<Vec<_>>();
         assert_eq!(entries[0].pull_request_number(), Some(owning));
         assert_eq!(entries[1].pull_request_number(), None);
-        Ok(())
-    }
-
-    /// A merged pull request releases exactly its own streams. A stream another
-    /// pull request owns keeps its sequence, and so does a repository-global one.
-    #[test]
-    fn retiring_a_pull_request_releases_only_its_own_streams() -> Result<(), Box<dyn Error>> {
-        let retired = pull_request_number(PULL_REQUEST_NUMBER);
-        let retained = pull_request_number(OTHER_PULL_REQUEST_NUMBER);
-        let mut frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
-            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
-                stream_identity_for(0),
-                NonZeroU64::MIN,
-                retired,
-            ),
-            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
-                stream_identity_for(1),
-                NonZeroU64::MIN,
-                retained,
-            ),
-            RepoWatchEventIdentityFrontierEntryV1::new(stream_identity_for(2), NonZeroU64::MIN),
-        ])?;
-
-        frontier.retire_pull_request(retired);
-
-        let entries = frontier.entries().collect::<Vec<_>>();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].stream_identity(), &stream_identity_for(1));
-        assert_eq!(entries[1].stream_identity(), &stream_identity_for(2));
-        // The released stream starts over, which is exactly the capacity the
-        // retirement recovers.
-        assert_eq!(
-            frontier
-                .advance(stream_identity_for(0), Some(retired))?
-                .get(),
-            1
-        );
         Ok(())
     }
 }

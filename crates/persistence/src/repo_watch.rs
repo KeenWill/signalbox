@@ -286,6 +286,7 @@ impl Error for RepoWatchPageSizeError {}
 pub struct PositionedRepoWatchEvent {
     position: RepoWatchEventPosition,
     event: RepoWatchEvent,
+    producer: RepoWatchEventProducer,
 }
 
 impl PositionedRepoWatchEvent {
@@ -295,6 +296,14 @@ impl PositionedRepoWatchEvent {
 
     pub const fn event(&self) -> &RepoWatchEvent {
         &self.event
+    }
+
+    /// The intake whose commit wrote this row.
+    ///
+    /// Returned rather than validated and discarded, so a reader auditing which
+    /// intake produced a fact does not have to reach past this repository.
+    pub const fn producer(&self) -> RepoWatchEventProducer {
+        self.producer
     }
 }
 
@@ -2825,12 +2834,11 @@ fn decode_positioned_event(
     if row.content_identity.len() != 32 {
         return Err(RepoWatchPersistenceCorruption::InvalidEventContentIdentity.into());
     }
-    match repo_watch_event_producer_from_str(&row.producer) {
-        Some(
-            RepoWatchEventProducerStorageKind::Poll | RepoWatchEventProducerStorageKind::Webhook,
-        ) => {}
+    let producer = match repo_watch_event_producer_from_str(&row.producer) {
+        Some(RepoWatchEventProducerStorageKind::Poll) => RepoWatchEventProducer::Poll,
+        Some(RepoWatchEventProducerStorageKind::Webhook) => RepoWatchEventProducer::Webhook,
         None => return Err(RepoWatchPersistenceCorruption::UnknownEventProducer.into()),
-    }
+    };
     let target = repo_watch_event_target_from_str(&row.target_kind).ok_or(
         RepoWatchPersistenceCorruption::UnknownEventDiscriminator("target_kind"),
     )?;
@@ -2875,6 +2883,7 @@ fn decode_positioned_event(
     Ok(PositionedRepoWatchEvent {
         position: RepoWatchEventPosition::new(generation, ordinal),
         event,
+        producer,
     })
 }
 
