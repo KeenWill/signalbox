@@ -1538,32 +1538,25 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         .map_err(|_| GenerateWebContractError::Serialization)?
         + "\n";
 
+    let schemas = ContractSchemas {
+        bootstrap: &bootstrap_schema,
+        example: &example_schema,
+        error: &error_schema,
+        descriptor: &descriptor_schema,
+        window: &window_schema,
+        detail: &detail_schema,
+        attention_snapshot: &attention_snapshot_schema,
+        attention_event: &attention_event_schema,
+    };
+
     Ok(vec![
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.mjs",
-            contents: runtime_module(
-                &bootstrap_schema,
-                &example_schema,
-                &error_schema,
-                &descriptor_schema,
-                &window_schema,
-                &detail_schema,
-                &attention_snapshot_schema,
-                &attention_event_schema,
-            )?,
+            contents: runtime_module(&schemas)?,
         },
         GeneratedArtifact {
             path: "clients/web/src/generated/web-contract.d.mts",
-            contents: declaration_module(
-                &bootstrap_schema,
-                &example_schema,
-                &error_schema,
-                &descriptor_schema,
-                &window_schema,
-                &detail_schema,
-                &attention_snapshot_schema,
-                &attention_event_schema,
-            )?,
+            contents: declaration_module(&schemas)?,
         },
         GeneratedArtifact {
             path: "crates/web-contract/tests/fixtures/example.json",
@@ -1613,25 +1606,32 @@ fn set_string_max_length(
     Ok(())
 }
 
-fn runtime_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-    descriptor_schema: &Value,
-    window_schema: &Value,
-    detail_schema: &Value,
-    attention_snapshot_schema: &Value,
-    attention_event_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+/// The seven canonical DTO schemas the browser artifacts are generated from.
+///
+/// Grouped into one value because the generated surface grows with every
+/// browser read: passing each schema positionally made the two generator
+/// entry points collect argument lists that no caller could read.
+struct ContractSchemas<'a> {
+    bootstrap: &'a Value,
+    example: &'a Value,
+    error: &'a Value,
+    descriptor: &'a Value,
+    window: &'a Value,
+    detail: &'a Value,
+    attention_snapshot: &'a Value,
+    attention_event: &'a Value,
+}
+
+fn runtime_module(schemas_input: &ContractSchemas<'_>) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
-        "WebContractBootstrap": bootstrap_schema,
-        "WebContractExample": example_schema,
-        "WebApiErrorResponse": error_schema,
-        "WebSessionTimelineDescriptor": descriptor_schema,
-        "WebSessionTimelineWindow": window_schema,
-        "WebSessionTimelineDetailPage": detail_schema,
-        "WebAttentionSnapshot": attention_snapshot_schema,
-        "WebAttentionStreamEvent": attention_event_schema,
+        "WebContractBootstrap": schemas_input.bootstrap,
+        "WebContractExample": schemas_input.example,
+        "WebApiErrorResponse": schemas_input.error,
+        "WebSessionTimelineDescriptor": schemas_input.descriptor,
+        "WebSessionTimelineWindow": schemas_input.window,
+        "WebSessionTimelineDetailPage": schemas_input.detail,
+        "WebAttentionSnapshot": schemas_input.attention_snapshot,
+        "WebAttentionStreamEvent": schemas_input.attention_event,
     });
     schemas.sort_all_objects();
     let max_detail_bytes = max_timeline_detail_bytes();
@@ -2937,31 +2937,22 @@ function assertAttentionSummary(summary, path) {{
     ))
 }
 
-fn declaration_module(
-    bootstrap_schema: &Value,
-    example_schema: &Value,
-    error_schema: &Value,
-    descriptor_schema: &Value,
-    window_schema: &Value,
-    detail_schema: &Value,
-    attention_snapshot_schema: &Value,
-    attention_event_schema: &Value,
-) -> Result<String, GenerateWebContractError> {
+fn declaration_module(schemas: &ContractSchemas<'_>) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
-    let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
-    let example = typescript_type(example_schema, example_schema, &mut definitions)?;
-    let error = typescript_type(error_schema, error_schema, &mut definitions)?;
-    let descriptor = typescript_type(descriptor_schema, descriptor_schema, &mut definitions)?;
-    let window = typescript_type(window_schema, window_schema, &mut definitions)?;
-    let detail = typescript_type(detail_schema, detail_schema, &mut definitions)?;
+    let bootstrap = typescript_type(schemas.bootstrap, schemas.bootstrap, &mut definitions)?;
+    let example = typescript_type(schemas.example, schemas.example, &mut definitions)?;
+    let error = typescript_type(schemas.error, schemas.error, &mut definitions)?;
+    let descriptor = typescript_type(schemas.descriptor, schemas.descriptor, &mut definitions)?;
+    let window = typescript_type(schemas.window, schemas.window, &mut definitions)?;
+    let detail = typescript_type(schemas.detail, schemas.detail, &mut definitions)?;
     let attention_snapshot = typescript_type(
-        attention_snapshot_schema,
-        attention_snapshot_schema,
+        schemas.attention_snapshot,
+        schemas.attention_snapshot,
         &mut definitions,
     )?;
     let attention_event = typescript_type(
-        attention_event_schema,
-        attention_event_schema,
+        schemas.attention_event,
+        schemas.attention_event,
         &mut definitions,
     )?;
     let mut output = String::from(
