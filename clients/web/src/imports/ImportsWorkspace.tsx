@@ -281,10 +281,18 @@ export function ImportsWorkspace({
       releaseRetainedCommand(request)
     },
     onError: (error, request) => {
-      const ambiguous = continuationAmbiguous || isAmbiguousContinuationError(error)
-      if (ambiguous) setContinuationAmbiguous(true)
-      if (!ambiguous && !isRetryableContinuationError(error)) {
+      if (!isRetryableContinuationError(error)) {
+        // A definitive application rejection proves this command never committed: the
+        // daemon replays a recorded command before validating anything else, so a
+        // validation rejection cannot have found a recorded commit. Release the slot even
+        // if the command was previously ambiguous.
         releaseRetainedCommand(request)
+        return
+      }
+      // Retryable failures (commit ambiguity, unavailability, transport loss) leave the
+      // durable outcome unknown, so ambiguity stays sticky until an outcome correlates.
+      if (continuationAmbiguous || isAmbiguousContinuationError(error)) {
+        setContinuationAmbiguous(true)
       }
     },
   })
