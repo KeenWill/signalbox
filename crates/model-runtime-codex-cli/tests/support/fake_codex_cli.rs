@@ -913,6 +913,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 completed();
             }
         }
+        "selected_credential_home" => {
+            let home = std::env::var_os("CODEX_HOME")
+                .ok_or("selected credential home was not delivered")?;
+            std::fs::write("fake-codex-selected-home", home.as_encoded_bytes())?;
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"{}","tool_calls":[]}}"#,
+                fixtures::BUFFERED_ANSWER
+            ));
+            completed();
+        }
         "stderr_credential_continuation" => {
             reasoning("reason-stderr-continuation", "Authoriz");
             eprintln!("ation: {}", fixtures::SENSITIVE_STDERR_CONTINUATION);

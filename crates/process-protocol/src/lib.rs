@@ -14,6 +14,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as STANDARD_BASE64};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{IgnoredAny, MapAccess, SeqAccess, Visitor},
+    ser::SerializeSeq,
 };
 use serde_json::value::RawValue;
 use signalbox_domain::{
@@ -161,6 +162,75 @@ pub const MAX_REVIEW_ORCHESTRATION_CONCERNS: usize = 32;
 /// Maximum finding-indexed members in one review-orchestration request.
 // numeric-bound: ceiling - protects review request memory and wire size
 pub const MAX_REVIEW_ORCHESTRATION_MEMBERS: usize = 1_024;
+
+/// Maximum UTF-8 bytes in one operator-status repository slug.
+///
+/// A slug is `owner/name`, and the provider admits 100 bytes on each side.
+// numeric-bound: ceiling - admits the widest provider repository slug
+pub const MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES: usize = 201;
+
+/// Maximum UTF-8 bytes in one operator-status repository-watch rule identity.
+// numeric-bound: ceiling - matches the durable rule-identity width
+pub const MAX_OPERATOR_STATUS_RULE_ID_UTF8_BYTES: usize = 128;
+
+/// Maximum UTF-8 bytes in one operator-status branch name.
+///
+/// Covers a held slot's branch origin and a convergence row's base branch.
+// numeric-bound: ceiling - admits the widest admitted git branch name
+pub const MAX_OPERATOR_STATUS_BRANCH_UTF8_BYTES: usize = 255;
+
+/// Maximum sessions named by one operator-status dispatch inventory.
+///
+/// Bounds both a held slot's own sessions and the sessions occupying a queued
+/// obligation, which name the same dispatch-action inventory.
+// numeric-bound: ceiling - protects frame size from a runaway dispatch fan-out
+pub const MAX_OPERATOR_STATUS_DISPATCH_SESSIONS: usize = 32;
+
+/// Maximum independently failing release clauses on one held slot.
+// numeric-bound: ceiling - one per admitted release clause, which cannot repeat
+pub const MAX_OPERATOR_STATUS_HELD_SLOT_BLOCKERS: usize = 4;
+
+/// Maximum unresolved review threads counted by one convergence assessment.
+// numeric-bound: ceiling - matches the inventory persistence admits per assessment
+pub const MAX_OPERATOR_STATUS_UNRESOLVED_THREADS: u64 = 10_000;
+
+/// Maximum gating checks counted by one convergence assessment.
+///
+/// Persistence admits the same inventory, so a divergence here would reject an
+/// otherwise valid projection and fail the whole snapshot.
+// numeric-bound: ceiling - matches the inventory persistence admits per assessment
+pub const MAX_OPERATOR_STATUS_GATING_CHECKS: u64 = 10_000;
+
+/// Maximum UTF-8 bytes in one operator-status gating-check name.
+// numeric-bound: ceiling - matches the durable check-run name width
+pub const MAX_OPERATOR_STATUS_CHECK_NAME_UTF8_BYTES: usize = 256;
+
+/// Maximum UTF-8 bytes in one operator-status review node identity.
+// numeric-bound: ceiling - matches the durable provider review node identity width
+pub const MAX_OPERATOR_STATUS_REVIEW_NODE_ID_UTF8_BYTES: usize = 256;
+
+/// Maximum UTF-8 bytes in one operator-status reviewer login.
+// numeric-bound: ceiling - admits the widest provider login
+pub const MAX_OPERATOR_STATUS_REVIEWER_UTF8_BYTES: usize = 44;
+
+/// Maximum UTF-8 bytes in one operator-status reviewer login's base, the
+/// spelling left once the optional App-bot suffix is set aside.
+// numeric-bound: ceiling - matches the durable login base width
+pub const MAX_OPERATOR_STATUS_REVIEWER_BASE_UTF8_BYTES: usize = 39;
+
+/// Literal suffix an App-bot reviewer login carries after its base.
+pub const OPERATOR_STATUS_BOT_LOGIN_SUFFIX: &str = "[bot]";
+
+/// The one base branch a merge-ready convergence verdict is settled against.
+///
+/// The durable assessment keys both converged verdicts to this spelling: a
+/// merge-ready row's base branch is exactly this branch, and an
+/// internally-converged row's base branch is any other.
+pub const OPERATOR_STATUS_TRUNK_BASE_BRANCH: &str = "main";
+
+/// Exact hexadecimal characters in one operator-status commit revision.
+// numeric-bound: not-a-bound - the fixed width of a git SHA-1 object name
+pub const OPERATOR_STATUS_COMMIT_SHA_LENGTH: usize = 40;
 
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -498,6 +568,210 @@ impl InputContent {
     /// Transfers ownership of the exact decoded text.
     pub fn into_string(self) -> String {
         self.0
+    }
+}
+
+/// Maximum number of ordered parts in one process-protocol user input.
+// numeric-bound: ceiling - bounds retained parts in one user input
+pub const MAX_USER_INPUT_PARTS: usize = signalbox_domain::UserContent::MAX_PARTS;
+/// Maximum aggregate UTF-8 bytes across process-protocol text parts.
+// numeric-bound: ceiling - bounds aggregate retained user text
+pub const MAX_USER_INPUT_TEXT_BYTES: usize = signalbox_domain::UserContent::MAX_TEXT_BYTES;
+/// Maximum encoded bytes in one process-protocol attachment media type.
+// numeric-bound: ceiling - bounds retained attachment media types
+pub const MAX_USER_INPUT_MEDIA_TYPE_BYTES: usize = signalbox_domain::DeclaredMediaType::MAX_BYTES;
+/// Maximum encoded bytes in one process-protocol attachment display filename.
+// numeric-bound: ceiling - bounds retained attachment display filenames
+pub const MAX_USER_INPUT_DISPLAY_FILENAME_BYTES: usize =
+    signalbox_domain::AttachmentDisplayFilename::MAX_BYTES;
+
+/// Closed semantic kind declared for one user attachment on the wire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserAttachmentKind {
+    /// Image content.
+    Image,
+    /// Page- or document-oriented content.
+    Document,
+    /// Other file content.
+    File,
+}
+
+/// One exact part in canonical ordered user input.
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum UserInputPart {
+    /// Exact decoded text.
+    Text {
+        /// Nonempty text containing no U+0000.
+        text: String,
+    },
+    /// Immutable blob reference and caller-declared metadata.
+    Attachment {
+        /// Canonical global blob identity.
+        digest: CanonicalBlobDigest,
+        /// Closed semantic attachment kind.
+        kind: UserAttachmentKind,
+        /// Exact visible-ASCII media-type declaration.
+        media_type: String,
+        /// Optional display basename, explicitly null when absent.
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        display_filename: Option<String>,
+    },
+}
+
+impl fmt::Debug for UserInputPart {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text { .. } => formatter
+                .debug_struct("Text")
+                .field("text", &"<redacted>")
+                .finish(),
+            Self::Attachment {
+                digest,
+                kind,
+                media_type,
+                display_filename,
+            } => formatter
+                .debug_struct("Attachment")
+                .field("digest", digest)
+                .field("kind", kind)
+                .field("media_type", media_type)
+                .field(
+                    "display_filename",
+                    &display_filename.as_ref().map(|_| "<redacted>"),
+                )
+                .finish(),
+        }
+    }
+}
+
+/// Canonical nonempty ordered user-input parts array.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct UserInputContent(Vec<UserInputPart>);
+
+struct UserInputContentVisitor;
+
+impl<'de> Visitor<'de> for UserInputContentVisitor {
+    type Value = UserInputContent;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "at most {MAX_USER_INPUT_PARTS} ordered user-input parts"
+        )
+    }
+
+    fn visit_seq<AccessT>(self, mut sequence: AccessT) -> Result<Self::Value, AccessT::Error>
+    where
+        AccessT: SeqAccess<'de>,
+    {
+        let mut parts = Vec::with_capacity(
+            sequence
+                .size_hint()
+                .unwrap_or_default()
+                .min(MAX_USER_INPUT_PARTS),
+        );
+        while parts.len() < MAX_USER_INPUT_PARTS {
+            match sequence.next_element::<UserInputPart>()? {
+                Some(part) => parts.push(part),
+                None => return Ok(UserInputContent(parts)),
+            }
+        }
+        if sequence.next_element::<IgnoredAny>()?.is_some() {
+            return Err(serde::de::Error::custom("too many user-input parts"));
+        }
+        Ok(UserInputContent(parts))
+    }
+}
+
+impl<'de> Deserialize<'de> for UserInputContent {
+    fn deserialize<DeserializerT>(deserializer: DeserializerT) -> Result<Self, DeserializerT::Error>
+    where
+        DeserializerT: Deserializer<'de>,
+    {
+        deserializer.deserialize_seq(UserInputContentVisitor)
+    }
+}
+
+impl UserInputContent {
+    /// Wraps one text part for text-only clients.
+    pub fn text(value: String) -> Self {
+        Self(vec![UserInputPart::Text { text: value }])
+    }
+
+    /// Wraps a complete parts array for structural validation at frame encode.
+    pub fn from_parts(parts: Vec<UserInputPart>) -> Self {
+        Self(parts)
+    }
+
+    /// Borrows the exact ordered parts.
+    pub fn parts(&self) -> &[UserInputPart] {
+        &self.0
+    }
+
+    /// Borrows text when this is exactly one text part.
+    pub fn single_text(&self) -> Option<&str> {
+        match self.0.as_slice() {
+            [UserInputPart::Text { text }] => Some(text),
+            _ => None,
+        }
+    }
+
+    /// Transfers ownership of the exact ordered parts.
+    pub fn into_parts(self) -> Vec<UserInputPart> {
+        self.0
+    }
+
+    fn validate(&self) -> Result<(), FrameValidationError> {
+        if self.0.is_empty() || self.0.len() > MAX_USER_INPUT_PARTS {
+            return Err(FrameValidationError::UserContentShape);
+        }
+
+        let mut text_bytes = 0_usize;
+        let mut previous_was_text = false;
+        for part in &self.0 {
+            match part {
+                UserInputPart::Text { text } => {
+                    if previous_was_text || text.is_empty() || text.contains('\0') {
+                        return Err(FrameValidationError::UserContentShape);
+                    }
+                    text_bytes = text_bytes
+                        .checked_add(text.len())
+                        .ok_or(FrameValidationError::UserContentShape)?;
+                    if text_bytes > MAX_USER_INPUT_TEXT_BYTES {
+                        return Err(FrameValidationError::UserContentShape);
+                    }
+                    previous_was_text = true;
+                }
+                UserInputPart::Attachment {
+                    media_type,
+                    display_filename,
+                    ..
+                } => {
+                    if media_type.is_empty()
+                        || media_type.len() > MAX_USER_INPUT_MEDIA_TYPE_BYTES
+                        || !media_type.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+                    {
+                        return Err(FrameValidationError::UserContentShape);
+                    }
+                    if display_filename.as_ref().is_some_and(|filename| {
+                        filename.is_empty()
+                            || filename.len() > MAX_USER_INPUT_DISPLAY_FILENAME_BYTES
+                            || filename == "."
+                            || filename == ".."
+                            || filename.contains('/')
+                            || filename.contains('\\')
+                            || filename.contains('\0')
+                    }) {
+                        return Err(FrameValidationError::UserContentShape);
+                    }
+                    previous_was_text = false;
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -2717,6 +2991,9 @@ fn validate_tool_approval_event_shape(
                 })
             }
         },
+        ToolApprovalEventDecider::UserOverride { .. } => {
+            matches!(decision, ToolApprovalEventDecision::Approve {}) && rationale.is_none()
+        }
     };
     if !shape_matches {
         return Err(FrameValidationError::ToolApprovalShape);
@@ -3103,6 +3380,62 @@ pub enum DescendantTerminationScope {
     ParentAndDescendants,
 }
 
+/// Singleton key class shown by repository-watch operator status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusSingletonScope {
+    PullRequest,
+    Stack,
+    Rule,
+    Repo,
+}
+
+/// One independently failing held-slot release clause.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusHeldSlotBlocker {
+    UndeliveredAction,
+    DeliveryTurnRuntimeRelevant,
+    LiveRuntimeTurn,
+    PursuingGoal,
+}
+
+/// Current provider mergeability shown by repository-watch operator status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusMergeableState {
+    Mergeable,
+    Conflicting,
+    Unknown,
+}
+
+/// Current provider review decision shown by repository-watch operator status.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusReviewDecision {
+    None,
+    Approved,
+    ReviewRequired,
+    ChangesRequested,
+}
+
+/// Latest repository-watch convergence verdict.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusConvergenceVerdict {
+    NotConverged,
+    InternallyConverged,
+    MergeReady,
+}
+
+/// Durable convergence seal attached to the latest assessment, when any.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperatorStatusConvergenceSeal {
+    InternallyConverged,
+    MergeReady,
+}
+
 /// Immutable authority fence a commissioned-session request records.
 ///
 /// The shapes mirror the repository-watch dispatch fence: a pull-request fence
@@ -3186,6 +3519,8 @@ pub enum ClientRequest {
     ListTemplates {},
     /// List current sessions.
     ListSessions {},
+    /// Read one coherent repository-watch operator-status snapshot.
+    ReadOperatorStatus {},
     /// Append one explicit immutable session-placement update event.
     UpdateSessionPlacement {
         command_id: CommandId,
@@ -3241,8 +3576,8 @@ pub enum ClientRequest {
         command_id: CommandId,
         /// Target session.
         session_id: CanonicalUuid,
-        /// Exact user text.
-        content: InputContent,
+        /// Exact ordered user parts.
+        content: UserInputContent,
         /// Caller-observed defaults version, or null for configuration-free
         /// steering.
         #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -3475,8 +3810,8 @@ pub enum ClientRequest {
         session_id: CanonicalUuid,
         /// The turn the caller observed parked awaiting reconciliation.
         expected_active_turn_id: CanonicalUuid,
-        /// Exact user text for the immediate successor turn.
-        content: InputContent,
+        /// Exact ordered user parts for the immediate successor turn.
+        content: UserInputContent,
         /// Caller-observed defaults version.
         expected_defaults_version: CanonicalU64,
         /// Per-call settings contribution for the immediate successor origin.
@@ -3652,8 +3987,8 @@ pub enum ClientRequest {
         session_id: CanonicalUuid,
         /// The turn the caller observed active in the session.
         expected_active_turn_id: CanonicalUuid,
-        /// Exact user text for the immediate successor turn.
-        content: InputContent,
+        /// Exact ordered user parts for the immediate successor turn.
+        content: UserInputContent,
         /// Caller-observed defaults version.
         expected_defaults_version: CanonicalU64,
         /// Explicit delegated-child scope.
@@ -3671,6 +4006,15 @@ pub enum ClientRequest {
         tool_request_id: CanonicalUuid,
         /// Exact closed approval decision.
         decision: ToolDecision,
+    },
+    /// Record one one-shot user override of a delegate-denied tool request.
+    OverrideDeniedToolRequest {
+        /// Durable mutation identity.
+        command_id: CommandId,
+        /// Session the override covers; part of the canonical payload.
+        session_id: CanonicalUuid,
+        /// Exact delegate-denied logical tool request.
+        tool_request_id: CanonicalUuid,
     },
 }
 
@@ -3706,6 +4050,7 @@ impl ClientRequest {
             | Self::CreateSessionFromTemplate { .. }
             | Self::ListTemplates {}
             | Self::ListSessions {}
+            | Self::ReadOperatorStatus {}
             | Self::UpdateSessionPlacement { .. }
             | Self::ReadGoal { .. }
             | Self::ResumeGoal { guidance: None, .. }
@@ -3760,7 +4105,8 @@ impl ClientRequest {
             | Self::RecordReviewPublicationOutcomes { .. }
             | Self::ReadReviewOrchestration { .. }
             | Self::StopTurn { .. }
-            | Self::DecideToolRequest { .. } => {}
+            | Self::DecideToolRequest { .. }
+            | Self::OverrideDeniedToolRequest { .. } => {}
         }
         match self {
             Self::CreateSession { placement, .. }
@@ -3795,9 +4141,11 @@ impl ClientRequest {
             expected_defaults_version,
             delivery,
             model_settings,
+            content,
             ..
         } = self
         {
+            content.validate()?;
             let valid = matches!(
                 (delivery, expected_defaults_version),
                 (None | Some(InputDelivery::StartWhenIdle {}), Some(_))
@@ -3812,6 +4160,9 @@ impl ClientRequest {
             {
                 return Err(FrameValidationError::ModelSettingsShape);
             }
+        }
+        if let Self::ReconcileTurn { content, .. } | Self::StopTurn { content, .. } = self {
+            content.validate()?;
         }
         if let Self::AppendConversationImport { chunk } = self
             && (chunk.as_bytes().is_empty()
@@ -4257,6 +4608,11 @@ pub enum RejectionDetail {
         /// Authoritative active turn.
         active_turn_id: CanonicalUuid,
     },
+    /// A commissioned target already has a live session.
+    CommissionTargetBusy {
+        /// Authoritative live session currently owning the target.
+        session_id: CanonicalUuid,
+    },
     /// The caller named a turn that no longer holds the session slot.
     ActiveTurnMismatch {
         /// Target session.
@@ -4338,6 +4694,22 @@ pub enum RejectionDetail {
         /// Session the caller named.
         session_id: CanonicalUuid,
         /// Tool request the caller named.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The named tool request carries no delegate denial, so no override is
+    /// admitted for it.
+    ToolRequestNotDelegateDenied {
+        /// Tool request without a delegate denial.
+        tool_request_id: CanonicalUuid,
+    },
+    /// The named delegate denial has not reached its terminal denied result.
+    ToolRequestNotTerminallyDenied {
+        /// Tool request whose denial is still resolving.
+        tool_request_id: CanonicalUuid,
+    },
+    /// An override is already recorded for the named delegate denial.
+    ToolDenialAlreadyOverridden {
+        /// Already-overridden tool request.
         tool_request_id: CanonicalUuid,
     },
     /// The named delegation request belongs to another turn.
@@ -4569,6 +4941,7 @@ impl RejectionDetail {
             | Self::SessionPlacementVersionExhausted { .. }
             | Self::GoalCommandRejected { .. }
             | Self::ActiveTurnPresent { .. }
+            | Self::CommissionTargetBusy { .. }
             | Self::ActiveTurnMismatch { .. }
             | Self::NoActiveTurn { .. }
             | Self::TurnNotAwaitingReconciliation { .. }
@@ -4579,6 +4952,9 @@ impl RejectionDetail {
             | Self::ToolRequestAlreadyResolved { .. }
             | Self::ToolRequestNotEarliestUndecided { .. }
             | Self::ToolRequestNotInSession { .. }
+            | Self::ToolRequestNotDelegateDenied { .. }
+            | Self::ToolRequestNotTerminallyDenied { .. }
+            | Self::ToolDenialAlreadyOverridden { .. }
             | Self::DelegationRequestNotInTurn { .. }
             | Self::DelegationToolRequestNotExecutable { .. }
             | Self::DelegationSpawnConflict { .. }
@@ -4835,8 +5211,8 @@ pub enum TurnState {
     Queued {
         /// Accepted input that created the queued turn.
         accepted_input_id: CanonicalUuid,
-        /// Exact accepted user text.
-        content: InputContent,
+        /// Exact ordered accepted user parts.
+        content: UserInputContent,
     },
     /// Delegated work has not activated.
     QueuedDelegated {
@@ -4882,6 +5258,10 @@ pub enum TurnState {
         ended_attempt_id: CanonicalUuid,
         /// Ambiguous call awaiting recovery.
         recovery_model_call_id: CanonicalUuid,
+        /// Durable automatic reconciliation attempts already claimed.
+        automatic_reconciliation_attempts: CanonicalU64,
+        /// True only when the automatic attempt budget is exhausted.
+        operator_action_required: bool,
     },
     /// The turn is parked on a user decision for a tool request.
     ActiveAwaitingToolApproval {
@@ -4976,7 +5356,7 @@ pub enum TurnState {
 enum RawTurnState {
     Queued {
         accepted_input_id: CanonicalUuid,
-        content: InputContent,
+        content: UserInputContent,
     },
     QueuedDelegated {
         spawning_request_id: CanonicalUuid,
@@ -5002,6 +5382,8 @@ enum RawTurnState {
     ActiveAwaitingModelCallRecovery {
         ended_attempt_id: CanonicalUuid,
         recovery_model_call_id: CanonicalUuid,
+        automatic_reconciliation_attempts: CanonicalU64,
+        operator_action_required: bool,
     },
     ActiveAwaitingToolApproval {
         tool_request_id: CanonicalUuid,
@@ -5065,10 +5447,13 @@ impl<'de> Deserialize<'de> for TurnState {
             RawTurnState::Queued {
                 accepted_input_id,
                 content,
-            } => Self::Queued {
-                accepted_input_id,
-                content,
-            },
+            } => {
+                content.validate().map_err(serde::de::Error::custom)?;
+                Self::Queued {
+                    accepted_input_id,
+                    content,
+                }
+            }
             RawTurnState::QueuedDelegated {
                 spawning_request_id,
                 parent_session_id,
@@ -5126,9 +5511,13 @@ impl<'de> Deserialize<'de> for TurnState {
             RawTurnState::ActiveAwaitingModelCallRecovery {
                 ended_attempt_id,
                 recovery_model_call_id,
+                automatic_reconciliation_attempts,
+                operator_action_required,
             } => Self::ActiveAwaitingModelCallRecovery {
                 ended_attempt_id,
                 recovery_model_call_id,
+                automatic_reconciliation_attempts,
+                operator_action_required,
             },
             RawTurnState::ActiveAwaitingToolApproval { tool_request_id } => {
                 Self::ActiveAwaitingToolApproval { tool_request_id }
@@ -6218,6 +6607,14 @@ pub enum ToolApprovalEventDecider {
         /// Exact recorded judge model call.
         model_call_id: CanonicalUuid,
     },
+    /// The user pre-approved the re-proposed command by overriding one exact
+    /// delegate denial through the named durable command.
+    UserOverride {
+        /// Exact durable override-command provenance.
+        command_id: CanonicalUuid,
+        /// The delegate-denied request whose recorded override was consumed.
+        overridden_tool_request_id: CanonicalUuid,
+    },
 }
 
 /// One explicit approval decision retained in an authoritative transcript.
@@ -6271,8 +6668,8 @@ pub enum SessionEvent {
         turn_id: CanonicalUuid,
         /// Immutable session acceptance position.
         acceptance_position: CanonicalU64,
-        /// Exact accepted user text.
-        content: InputContent,
+        /// Exact ordered accepted user parts.
+        content: UserInputContent,
     },
     /// A queued goal turn became intentionally ineligible.
     GoalTurnRetired {
@@ -6882,8 +7279,8 @@ fn validate_settings_event(event: &SessionEvent) -> Result<(), FrameValidationEr
             rationale,
             ..
         } => validate_tool_approval_event_shape(decision, decider, rationale)?,
+        SessionEvent::InputAccepted { content, .. } => content.validate()?,
         SessionEvent::SessionCreated {}
-        | SessionEvent::InputAccepted { .. }
         | SessionEvent::GoalTurnRetired { .. }
         | SessionEvent::TurnActivated { .. }
         | SessionEvent::ModelCallTransition { .. }
@@ -6939,6 +7336,135 @@ fn validate_adjustments(adjustments: &[ModelChangeAdjustment]) -> Result<(), Fra
         minimum_rank = rank + 1;
     }
     Ok(())
+}
+
+/// Origin fact whose dispatch holds one repository-watch singleton slot.
+///
+/// A rule matching branch workflow-run completion under `Rule` or `Repo`
+/// singleton scope holds a slot from a branch fact, which names no pull
+/// request; every other admitted origin names one. The two are exclusive, so
+/// the shape is a tagged choice rather than a pair of nullable numbers.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OperatorStatusHeldSlotOrigin {
+    /// A pull-request fact, named by its number.
+    PullRequest { pull_request_number: CanonicalU64 },
+    /// A branch workflow-run fact, named by its branch.
+    Branch { branch: String },
+}
+
+/// Payload for one active repository-watch dispatch slot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorStatusHeldSlotMessage {
+    pub dispatch_id: CanonicalUuid,
+    pub repository: String,
+    pub origin: OperatorStatusHeldSlotOrigin,
+    pub rule_id: String,
+    pub rule_version: CanonicalU64,
+    pub singleton_scope: OperatorStatusSingletonScope,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub singleton_repository: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub singleton_pull_request_number: Option<CanonicalU64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub singleton_stack_root_pull_request_number: Option<CanonicalU64>,
+    pub held_for_seconds: CanonicalU64,
+    pub session_ids: Vec<CanonicalUuid>,
+    pub blockers: Vec<OperatorStatusHeldSlotBlocker>,
+}
+
+/// Payload for one owed repository-watch dispatch waiting for admission.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorStatusQueuedObligationMessage {
+    pub obligation_id: CanonicalUuid,
+    pub repository: String,
+    pub rule_id: String,
+    pub rule_version: CanonicalU64,
+    pub singleton_scope: OperatorStatusSingletonScope,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub singleton_repository: Option<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub singleton_pull_request_number: Option<CanonicalU64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub singleton_stack_root_pull_request_number: Option<CanonicalU64>,
+    pub first_event_id: CanonicalUuid,
+    pub latest_event_id: CanonicalUuid,
+    pub matched_event_count: CanonicalU64,
+    pub waiting_for_seconds: CanonicalU64,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub occupying_dispatch_id: Option<CanonicalUuid>,
+    pub occupying_session_ids: Vec<CanonicalUuid>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub cooldown_remaining_seconds: Option<CanonicalU64>,
+    pub cooldown_never_eligible: bool,
+    pub ready: bool,
+}
+
+/// Payload for one latest pull-request convergence assessment.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorStatusPullRequestConvergenceMessage {
+    pub repository: String,
+    pub pull_request_number: CanonicalU64,
+    pub head_sha: String,
+    pub base_branch: String,
+    pub base_revision: String,
+    pub mergeable_state: OperatorStatusMergeableState,
+    pub review_decision: OperatorStatusReviewDecision,
+    pub unresolved_thread_count: CanonicalU64,
+    pub gating_check_count: CanonicalU64,
+    #[serde(
+        serialize_with = "serialize_operator_status_check_names",
+        deserialize_with = "deserialize_operator_status_check_names"
+    )]
+    pub non_green_gating_checks: Vec<String>,
+    pub verdict: OperatorStatusConvergenceVerdict,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub seal: Option<OperatorStatusConvergenceSeal>,
+    pub assessed_seconds_ago: CanonicalU64,
+}
+
+/// Payload for one stale blocking review whose planned clearance is unsettled.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorStatusPendingStaleReviewClearanceMessage {
+    pub repository: String,
+    pub pull_request_number: CanonicalU64,
+    pub current_head_sha: String,
+    pub review_node_id: String,
+    pub reviewer: String,
+    pub reviewed_head_sha: String,
+    pub pending_for_seconds: CanonicalU64,
+}
+
+/// Terminal counts for one coherent repository-watch operator-status snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OperatorStatusEndMessage {
+    pub held_slot_count: CanonicalU64,
+    pub queued_obligation_count: CanonicalU64,
+    pub pull_request_convergence_count: CanonicalU64,
+    pub pending_stale_review_clearance_count: CanonicalU64,
+}
+
+/// One member of a coherent repository-watch operator-status snapshot.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OperatorStatusMessage {
+    /// Begins the snapshot.
+    Start {},
+    /// One active repository-watch dispatch slot.
+    HeldSlot(Box<OperatorStatusHeldSlotMessage>),
+    /// One owed repository-watch dispatch waiting for admission.
+    QueuedObligation(Box<OperatorStatusQueuedObligationMessage>),
+    /// One latest pull-request convergence assessment.
+    PullRequestConvergence(Box<OperatorStatusPullRequestConvergenceMessage>),
+    /// One stale blocking review whose planned clearance is not yet settled.
+    PendingStaleReviewClearance(Box<OperatorStatusPendingStaleReviewClearanceMessage>),
+    /// Completes the snapshot with its section counts.
+    End(Box<OperatorStatusEndMessage>),
 }
 
 /// Closed versioned server message family.
@@ -7098,6 +7624,8 @@ pub enum ServerMessage {
         /// Number of preceding summaries.
         session_count: CanonicalU64,
     },
+    /// One member of a coherent repository-watch operator-status snapshot.
+    OperatorStatus(Box<OperatorStatusMessage>),
     /// Begins the available-template sequence.
     TemplatesStart {},
     /// One available static template summary.
@@ -7244,6 +7772,14 @@ pub enum ServerMessage {
         tool_request_id: CanonicalUuid,
         /// Exact recorded decision.
         decision: ToolDecision,
+    },
+    /// One recorded recorded-override receipt.
+    ///
+    /// The receipt mirrors the recorded applied result exactly; an equal
+    /// command replay returns this same projection.
+    ToolDenialOverridden {
+        /// Overridden delegate-denied tool request.
+        tool_request_id: CanonicalUuid,
     },
     /// One completed append-only context-compaction receipt.
     SessionCompacted {
@@ -7566,6 +8102,7 @@ pub enum ServerMessage {
 
 impl ServerMessage {
     fn validate(&self) -> Result<(), FrameValidationError> {
+        validate_operator_status_message(self)?;
         match self {
             Self::SessionCreated { model_settings, .. } => model_settings.validate_defaults()?,
             Self::SessionAwaitRegistered {
@@ -7630,21 +8167,26 @@ impl ServerMessage {
             }
             Self::TranscriptTurn {
                 turn_id,
-                model_settings: Some(settings),
+                model_settings,
                 state,
                 ..
             } => {
-                settings.validate()?;
-                if settings.turn_id != *turn_id
-                    || (matches!(
-                        state,
-                        TurnState::Queued {
-                            accepted_input_id,
-                            ..
-                        } if settings.accepted_input_id != *accepted_input_id
-                    ))
-                {
-                    return Err(FrameValidationError::ModelSettingsShape);
+                if let TurnState::Queued { content, .. } = state {
+                    content.validate()?;
+                }
+                if let Some(settings) = model_settings {
+                    settings.validate()?;
+                    if settings.turn_id != *turn_id
+                        || (matches!(
+                            state,
+                            TurnState::Queued {
+                                accepted_input_id,
+                                ..
+                            } if settings.accepted_input_id != *accepted_input_id
+                        ))
+                    {
+                        return Err(FrameValidationError::ModelSettingsShape);
+                    }
                 }
             }
             Self::TranscriptEntry {
@@ -7865,6 +8407,466 @@ impl ServerMessage {
     }
 }
 
+fn validate_operator_status_message(message: &ServerMessage) -> Result<(), FrameValidationError> {
+    let ServerMessage::OperatorStatus(message) = message else {
+        return Ok(());
+    };
+    let valid = match message.as_ref() {
+        OperatorStatusMessage::HeldSlot(item) => {
+            operator_status_repository_is_valid(&item.repository)
+                && operator_status_held_slot_origin_is_valid(&item.origin, item.singleton_scope)
+                && operator_status_held_slot_origin_matches_singleton(
+                    &item.origin,
+                    item.singleton_scope,
+                    item.singleton_pull_request_number,
+                )
+                && operator_status_rule_id_is_valid(&item.rule_id)
+                && item.rule_version.value() > 0
+                && operator_status_singleton_is_valid(
+                    &item.repository,
+                    &OperatorStatusSingletonAxes {
+                        scope: item.singleton_scope,
+                        repository: item.singleton_repository.as_deref(),
+                        pull_request_number: item.singleton_pull_request_number,
+                        stack_root_pull_request_number: item
+                            .singleton_stack_root_pull_request_number,
+                    },
+                )
+                && (1..=MAX_OPERATOR_STATUS_DISPATCH_SESSIONS).contains(&item.session_ids.len())
+                && values_are_distinct(&item.session_ids)
+                && item.blockers.len() <= MAX_OPERATOR_STATUS_HELD_SLOT_BLOCKERS
+                && item.blockers.windows(2).all(|pair| {
+                    operator_status_blocker_rank(pair[0]) < operator_status_blocker_rank(pair[1])
+                })
+        }
+        OperatorStatusMessage::QueuedObligation(item) => {
+            // A blocking occupant is either a watch dispatch, which names its
+            // identity and its whole admitted session inventory, or one
+            // independently commissioned live session, which names that single
+            // session and no dispatch. Both a dispatch identity owning no
+            // sessions and a dispatch-less occupant naming more than the one
+            // session the obligation retains contradict the projection.
+            let occupancy_is_valid = match item.occupying_dispatch_id {
+                Some(_) => (1..=MAX_OPERATOR_STATUS_DISPATCH_SESSIONS)
+                    .contains(&item.occupying_session_ids.len()),
+                None => item.occupying_session_ids.len() <= 1,
+            };
+            let is_occupied =
+                item.occupying_dispatch_id.is_some() || !item.occupying_session_ids.is_empty();
+            operator_status_repository_is_valid(&item.repository)
+                && operator_status_rule_id_is_valid(&item.rule_id)
+                && item.rule_version.value() > 0
+                && operator_status_singleton_is_valid(
+                    &item.repository,
+                    &OperatorStatusSingletonAxes {
+                        scope: item.singleton_scope,
+                        repository: item.singleton_repository.as_deref(),
+                        pull_request_number: item.singleton_pull_request_number,
+                        stack_root_pull_request_number: item
+                            .singleton_stack_root_pull_request_number,
+                    },
+                )
+                && operator_status_obligation_lineage_is_coherent(item)
+                && values_are_distinct(&item.occupying_session_ids)
+                && occupancy_is_valid
+                // The projection reports a remaining cooldown only while the
+                // eligibility instant is still ahead of the read, and rounds
+                // that strictly positive interval up, so the smallest value it
+                // can carry is one second. A zero would name a cooldown that
+                // has already lapsed while still claiming to withhold the
+                // obligation.
+                && item
+                    .cooldown_remaining_seconds
+                    .is_none_or(|remaining| remaining.value() > 0)
+                && !(item.cooldown_remaining_seconds.is_some() && item.cooldown_never_eligible)
+                && !(item.ready
+                    && (is_occupied
+                        || item.cooldown_remaining_seconds.is_some()
+                        || item.cooldown_never_eligible))
+        }
+        OperatorStatusMessage::PullRequestConvergence(item) => {
+            operator_status_repository_is_valid(&item.repository)
+                && item.pull_request_number.value() > 0
+                && operator_status_sha_is_valid(&item.head_sha)
+                && operator_status_branch_is_valid(&item.base_branch)
+                && operator_status_sha_is_valid(&item.base_revision)
+                && item.unresolved_thread_count.value() <= MAX_OPERATOR_STATUS_UNRESOLVED_THREADS
+                && item.gating_check_count.value() <= MAX_OPERATOR_STATUS_GATING_CHECKS
+                && u64::try_from(item.non_green_gating_checks.len())
+                    .is_ok_and(|count| count <= item.gating_check_count.value())
+                && item.non_green_gating_checks.iter().all(|name| {
+                    operator_status_text_is_valid(name, MAX_OPERATOR_STATUS_CHECK_NAME_UTF8_BYTES)
+                })
+                && item
+                    .non_green_gating_checks
+                    .windows(2)
+                    .all(|pair| pair[0] <= pair[1])
+                && operator_status_convergence_verdict_matches_evidence(item)
+                && operator_status_convergence_base_branch_matches_verdict(item)
+        }
+        OperatorStatusMessage::PendingStaleReviewClearance(item) => {
+            operator_status_repository_is_valid(&item.repository)
+                && item.pull_request_number.value() > 0
+                && operator_status_sha_is_valid(&item.current_head_sha)
+                && operator_status_text_is_valid(
+                    &item.review_node_id,
+                    MAX_OPERATOR_STATUS_REVIEW_NODE_ID_UTF8_BYTES,
+                )
+                && operator_status_reviewer_is_valid(&item.reviewer)
+                && operator_status_sha_is_valid(&item.reviewed_head_sha)
+                && item.current_head_sha != item.reviewed_head_sha
+        }
+        OperatorStatusMessage::Start {} | OperatorStatusMessage::End(_) => true,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(FrameValidationError::OperatorStatusShape)
+    }
+}
+
+fn operator_status_held_slot_origin_is_valid(
+    origin: &OperatorStatusHeldSlotOrigin,
+    singleton_scope: OperatorStatusSingletonScope,
+) -> bool {
+    match origin {
+        OperatorStatusHeldSlotOrigin::PullRequest {
+            pull_request_number,
+        } => pull_request_number.value() > 0,
+        // A branch workflow-run completion names no pull request, so the
+        // singleton it takes can only be keyed by the rule or the repository.
+        // A pull-request- or stack-scoped hold would have to name a pull
+        // request the branch fact never carried, so the two fields are only
+        // separately admissible and must be validated together.
+        OperatorStatusHeldSlotOrigin::Branch { branch } => {
+            operator_status_branch_is_valid(branch)
+                && matches!(
+                    singleton_scope,
+                    OperatorStatusSingletonScope::Rule | OperatorStatusSingletonScope::Repo
+                )
+        }
+    }
+}
+
+/// Holds the held-slot projection's own identity on the wire.
+///
+/// The durable projection joins each dispatch batch to the very
+/// `repo_watch_event` row it was admitted from, reads the origin pull request
+/// from that row, and carries the batch's singleton beside it. That singleton
+/// was keyed from the same event, so a pull-request-scoped hold names the very
+/// pull request its origin names; the two can never diverge in a row
+/// persistence produced.
+///
+/// A stack-scoped hold carries no such equality. Its singleton names the root
+/// of the open pull-request component the origin belongs to, which is a
+/// different pull request whenever the origin is not itself that root, so the
+/// stack axis is left to the scope shape alone. A branch origin never reaches
+/// either pull-request scope, which the adjacent origin validator settles.
+fn operator_status_held_slot_origin_matches_singleton(
+    origin: &OperatorStatusHeldSlotOrigin,
+    singleton_scope: OperatorStatusSingletonScope,
+    singleton_pull_request_number: Option<CanonicalU64>,
+) -> bool {
+    match (origin, singleton_scope) {
+        (
+            OperatorStatusHeldSlotOrigin::PullRequest {
+                pull_request_number,
+            },
+            OperatorStatusSingletonScope::PullRequest,
+        ) => singleton_pull_request_number == Some(*pull_request_number),
+        _ => true,
+    }
+}
+
+/// Holds the durable obligation lineage on the wire.
+///
+/// Persistence opens an obligation naming one evaluated event as both its first
+/// and its latest, with a matched count of one. Every later coalesced
+/// evaluation replaces the latest event with a distinct one and increments the
+/// count, and an event is evaluated at most once per rule version, so the count
+/// stands at one exactly while the two endpoints are the same event. A count of
+/// one across differing endpoints, or a larger count across identical ones,
+/// names a lineage no obligation row can hold.
+fn operator_status_obligation_lineage_is_coherent(
+    item: &OperatorStatusQueuedObligationMessage,
+) -> bool {
+    item.matched_event_count.value() > 0
+        && (item.matched_event_count.value() == 1) == (item.first_event_id == item.latest_event_id)
+}
+
+/// Holds the durable
+/// `repo_watch_convergence_verdict_matches_evidence` constraint on the wire.
+/// The stored assessment settles on the unconverged verdict exactly when the
+/// pull request carries at least one blocker, so either converged verdict
+/// contradicts every blocker the row carries beside it. Exactly one durable
+/// disjunct — the unsettled provider snapshot — is not carried on this wire, so
+/// the implication is only enforced in the direction the frame can prove: an
+/// unconverged verdict stays admissible against wholly clean carried evidence,
+/// while a converged verdict requires each carried condition to be clean.
+fn operator_status_convergence_verdict_matches_evidence(
+    item: &OperatorStatusPullRequestConvergenceMessage,
+) -> bool {
+    match item.verdict {
+        OperatorStatusConvergenceVerdict::NotConverged => true,
+        OperatorStatusConvergenceVerdict::InternallyConverged
+        | OperatorStatusConvergenceVerdict::MergeReady => {
+            item.unresolved_thread_count.value() == 0
+                && item.non_green_gating_checks.is_empty()
+                && item.mergeable_state == OperatorStatusMergeableState::Mergeable
+                && item.gating_check_count.value() > 0
+                && item.review_decision != OperatorStatusReviewDecision::ChangesRequested
+        }
+    }
+}
+
+/// Holds the durable base-branch pair on the wire.
+///
+/// Two constraints sit beside the evidence constraint on the same assessment
+/// row, and the status projection reads the verdict and the base branch from
+/// that one row: a merge-ready verdict is settled only against `main`, and an
+/// internally-converged verdict only against a branch that is not `main`. The
+/// pair is what distinguishes the two converged verdicts, so a merge-ready row
+/// on a release branch or an internally-converged row on the trunk names an
+/// assessment persistence cannot hold.
+///
+/// The unconverged verdict carries no base-branch constraint, and neither does
+/// the seal beside it: a seal is retained from the assessment that earned it
+/// and outlives later ones, so a pull request retargeted after it was sealed
+/// carries that seal beside its new base branch.
+fn operator_status_convergence_base_branch_matches_verdict(
+    item: &OperatorStatusPullRequestConvergenceMessage,
+) -> bool {
+    match item.verdict {
+        OperatorStatusConvergenceVerdict::NotConverged => true,
+        OperatorStatusConvergenceVerdict::MergeReady => {
+            item.base_branch == OPERATOR_STATUS_TRUNK_BASE_BRANCH
+        }
+        OperatorStatusConvergenceVerdict::InternallyConverged => {
+            item.base_branch != OPERATOR_STATUS_TRUNK_BASE_BRANCH
+        }
+    }
+}
+
+/// The singleton axes of one operator-status row, each named at its call site.
+///
+/// The two numeric axes carry one type and mean different things, so they are
+/// supplied by name rather than by position: a pull-request number transposed
+/// with a stack-root pull-request number would otherwise compile silently and
+/// admit rows the singleton grammar refuses.
+struct OperatorStatusSingletonAxes<'a> {
+    scope: OperatorStatusSingletonScope,
+    repository: Option<&'a str>,
+    pull_request_number: Option<CanonicalU64>,
+    stack_root_pull_request_number: Option<CanonicalU64>,
+}
+
+/// Holds the singleton axes of one row against the row's own identity.
+///
+/// Every repository-keyed singleton is keyed from the repository of the very
+/// event whose row carries it, and an obligation coalesces only across events
+/// sharing its singleton key, so a carried singleton repository is that row's
+/// own repository rather than an independent slug. The row's repository is
+/// checked against the slug grammar by the caller, so the equality carries that
+/// grammar onto the singleton axis with it.
+fn operator_status_singleton_is_valid(
+    row_repository: &str,
+    axes: &OperatorStatusSingletonAxes<'_>,
+) -> bool {
+    let OperatorStatusSingletonAxes {
+        scope,
+        repository,
+        pull_request_number,
+        stack_root_pull_request_number,
+    } = axes;
+    let repository_is_valid = repository.is_none_or(|value| value == row_repository);
+    repository_is_valid
+        && match scope {
+            OperatorStatusSingletonScope::PullRequest => {
+                repository.is_some()
+                    && pull_request_number.is_some_and(|value| value.value() > 0)
+                    && stack_root_pull_request_number.is_none()
+            }
+            OperatorStatusSingletonScope::Stack => {
+                repository.is_some()
+                    && pull_request_number.is_none()
+                    && stack_root_pull_request_number.is_some_and(|value| value.value() > 0)
+            }
+            OperatorStatusSingletonScope::Rule => {
+                repository.is_none()
+                    && pull_request_number.is_none()
+                    && stack_root_pull_request_number.is_none()
+            }
+            OperatorStatusSingletonScope::Repo => {
+                repository.is_some()
+                    && pull_request_number.is_none()
+                    && stack_root_pull_request_number.is_none()
+            }
+        }
+}
+
+fn operator_status_text_is_valid(value: &str, maximum: usize) -> bool {
+    !value.is_empty() && value.len() <= maximum && !value.contains('\0')
+}
+
+/// Holds the repository-slug grammar on the wire.
+///
+/// Mirrors the `RepositorySlug` constructor and the durable
+/// `repo_watch_repository_is_valid` check: exactly one separator, each segment
+/// nonempty and neither `.` nor `..`, and every byte an ASCII letter, digit,
+/// hyphen, underscore, or dot. The constructor lowercases what it admits and
+/// the durable check refuses anything else, so only the normalized spelling
+/// ever reaches this wire and an uppercase byte is refused with the rest.
+fn operator_status_repository_is_valid(value: &str) -> bool {
+    let mut segments = value.split('/');
+    let namespace = segments.next().unwrap_or_default();
+    let name = segments.next().unwrap_or_default();
+    operator_status_text_is_valid(value, MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES)
+        && segments.next().is_none()
+        && operator_status_repository_segment_is_valid(namespace)
+        && operator_status_repository_segment_is_valid(name)
+}
+
+/// Holds one side of a repository slug.
+fn operator_status_repository_segment_is_valid(value: &str) -> bool {
+    !value.is_empty()
+        && value != "."
+        && value != ".."
+        && value.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_' | b'.')
+        })
+}
+
+/// Holds the rule-identity grammar on the wire.
+///
+/// Mirrors the `RepoWatchRuleId` constructor and the durable
+/// `repo_watch_rule_id_is_valid` check: every byte an ASCII letter, digit,
+/// hyphen, underscore, or dot. Unlike the slug and the login, a rule identity
+/// is the operator's own spelling and is never case-normalized, so both cases
+/// are admitted.
+fn operator_status_rule_id_is_valid(value: &str) -> bool {
+    operator_status_text_is_valid(value, MAX_OPERATOR_STATUS_RULE_ID_UTF8_BYTES)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+/// Holds the branch-name grammar on the wire.
+///
+/// Mirrors the `BranchName` constructor and the durable
+/// `repo_watch_branch_is_valid` check, which are the same git ref-name rules:
+/// the name is not `@`, does not begin with a hyphen, does not end with a dot,
+/// carries neither `..` nor `@{`, carries no space, control byte, delete byte,
+/// or one of `~^:?*[\`, and every slash-separated component is nonempty, does
+/// not begin with a dot, and does not end with `.lock`. Both producers store
+/// the name without its `refs/heads/` prefix, so the prefix is not stripped
+/// again here.
+fn operator_status_branch_is_valid(value: &str) -> bool {
+    operator_status_text_is_valid(value, MAX_OPERATOR_STATUS_BRANCH_UTF8_BYTES)
+        && value != "@"
+        && !value.starts_with('-')
+        && !value.ends_with('.')
+        && !value.contains("..")
+        && !value.contains("@{")
+        && !value.bytes().any(|byte| {
+            byte <= 0x20
+                || byte == 0x7f
+                || matches!(byte, b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\')
+        })
+        && value
+            .split('/')
+            .all(operator_status_branch_component_is_valid)
+}
+
+/// Holds one slash-separated component of a branch name.
+fn operator_status_branch_component_is_valid(value: &str) -> bool {
+    !value.is_empty() && !value.starts_with('.') && !value.ends_with(".lock")
+}
+
+/// Holds the reviewer-login grammar on the wire.
+///
+/// Mirrors the `RepoWatchAuthorLogin` constructor and the durable
+/// `repo_watch_login_is_valid` check: an optional literal App-bot suffix is set
+/// aside, and the base left behind is nonempty, no wider than its own ceiling,
+/// begins and ends with something other than a hyphen, carries no doubled
+/// hyphen, and spells itself in ASCII lowercase letters, digits, hyphens, and
+/// underscores. Both producers lowercase what they admit, so only the
+/// normalized spelling reaches this wire.
+fn operator_status_reviewer_is_valid(value: &str) -> bool {
+    let base = value
+        .strip_suffix(OPERATOR_STATUS_BOT_LOGIN_SUFFIX)
+        .unwrap_or(value);
+    operator_status_text_is_valid(value, MAX_OPERATOR_STATUS_REVIEWER_UTF8_BYTES)
+        && !base.is_empty()
+        && base.len() <= MAX_OPERATOR_STATUS_REVIEWER_BASE_UTF8_BYTES
+        && !base.starts_with('-')
+        && !base.ends_with('-')
+        && !base.contains("--")
+        && base.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+}
+
+fn serialize_operator_status_check_names<SerializerT>(
+    names: &[String],
+    serializer: SerializerT,
+) -> Result<SerializerT::Ok, SerializerT::Error>
+where
+    SerializerT: Serializer,
+{
+    let mut sequence = serializer.serialize_seq(Some(names.len()))?;
+    for name in names {
+        sequence.serialize_element(&STANDARD_BASE64.encode(name.as_bytes()))?;
+    }
+    sequence.end()
+}
+
+fn deserialize_operator_status_check_names<'de, DeserializerT>(
+    deserializer: DeserializerT,
+) -> Result<Vec<String>, DeserializerT::Error>
+where
+    DeserializerT: Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer)?
+        .into_iter()
+        .map(|encoded| {
+            let decoded = STANDARD_BASE64.decode(encoded.as_bytes()).map_err(|_| {
+                serde::de::Error::custom("operator-status check name is not canonical base64")
+            })?;
+            if STANDARD_BASE64.encode(&decoded) != encoded {
+                return Err(serde::de::Error::custom(
+                    "operator-status check name is not canonical base64",
+                ));
+            }
+            String::from_utf8(decoded)
+                .map_err(|_| serde::de::Error::custom("operator-status check name is not UTF-8"))
+        })
+        .collect()
+}
+
+fn operator_status_sha_is_valid(value: &str) -> bool {
+    value.len() == OPERATOR_STATUS_COMMIT_SHA_LENGTH
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn operator_status_blocker_rank(blocker: OperatorStatusHeldSlotBlocker) -> u8 {
+    match blocker {
+        OperatorStatusHeldSlotBlocker::UndeliveredAction => 0,
+        OperatorStatusHeldSlotBlocker::DeliveryTurnRuntimeRelevant => 1,
+        OperatorStatusHeldSlotBlocker::LiveRuntimeTurn => 2,
+        OperatorStatusHeldSlotBlocker::PursuingGoal => 3,
+    }
+}
+
+fn values_are_distinct<ValueT>(values: &[ValueT]) -> bool
+where
+    ValueT: Eq + std::hash::Hash,
+{
+    let mut distinct = HashSet::with_capacity(values.len());
+    values.iter().all(|value| distinct.insert(value))
+}
+
 fn deserialize_required_nullable<'de, DeserializerT, ValueT>(
     deserializer: DeserializerT,
 ) -> Result<Option<ValueT>, DeserializerT::Error>
@@ -8054,6 +9056,7 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::UnsupportedServiceTier { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
         | RejectionDetail::NoActiveTurn { .. }
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
@@ -8064,6 +9067,9 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::ToolRequestNotDelegateDenied { .. }
+        | RejectionDetail::ToolRequestNotTerminallyDenied { .. }
+        | RejectionDetail::ToolDenialAlreadyOverridden { .. }
         | RejectionDetail::DelegationRequestNotInTurn { .. }
         | RejectionDetail::DelegationToolRequestNotExecutable { .. }
         | RejectionDetail::DelegationSpawnConflict { .. }
@@ -8157,6 +9163,7 @@ fn validate_conversation_import_detail(
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
         | RejectionDetail::NoActiveTurn { .. }
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
@@ -8167,6 +9174,9 @@ fn validate_conversation_import_detail(
         | RejectionDetail::ToolRequestAlreadyResolved { .. }
         | RejectionDetail::ToolRequestNotEarliestUndecided { .. }
         | RejectionDetail::ToolRequestNotInSession { .. }
+        | RejectionDetail::ToolRequestNotDelegateDenied { .. }
+        | RejectionDetail::ToolRequestNotTerminallyDenied { .. }
+        | RejectionDetail::ToolDenialAlreadyOverridden { .. }
         | RejectionDetail::DelegationRequestNotInTurn { .. }
         | RejectionDetail::DelegationToolRequestNotExecutable { .. }
         | RejectionDetail::DelegationSpawnConflict { .. }
@@ -8293,6 +9303,8 @@ pub enum FrameValidationError {
     MetadataShape,
     /// A unified conversation-listing frame carried an invalid shape.
     ConversationListShape,
+    /// A repository-watch operator-status row carried an invalid shape.
+    OperatorStatusShape,
     SystemPromptShape,
     /// A chunked conversation-import frame carried a contradictory shape.
     ConversationImportShape,
@@ -8314,6 +9326,8 @@ pub enum FrameValidationError {
     ImportedFrontierRangeShape,
     /// A submit-input delivery carried forbidden or missing correlated fields.
     InputDeliveryShape,
+    /// Ordered user parts violated their canonical shape or resource bounds.
+    UserContentShape,
     /// A template name or positive version carried an invalid shape.
     TemplateShape,
     /// A review lifecycle or orchestration frame carried an invalid shape.
@@ -8346,6 +9360,7 @@ impl fmt::Display for FrameValidationError {
             Self::ConversationListShape => {
                 "unified conversation-listing frame shape is inconsistent"
             }
+            Self::OperatorStatusShape => "operator-status frame shape is inconsistent",
             Self::SystemPromptShape => "frame omits its required system-prompt member",
             Self::ConversationImportShape => "conversation-import frame shape is inconsistent",
             Self::BlobUploadShape => "blob-upload frame shape is inconsistent",
@@ -8358,6 +9373,7 @@ impl fmt::Display for FrameValidationError {
             Self::ImportedTextPreviewShape => "imported text preview shape is inconsistent",
             Self::ImportedFrontierRangeShape => "imported frontier rejection range is inconsistent",
             Self::InputDeliveryShape => "submit-input delivery shape is inconsistent",
+            Self::UserContentShape => "ordered user content shape is inconsistent",
             Self::TemplateShape => "session-template frame shape is inconsistent",
             Self::ReviewShape => "review workflow frame shape is inconsistent",
             Self::ModelCallUsageShape => "model-call usage frame shape is inconsistent",
@@ -8793,8 +9809,14 @@ mod tests {
         ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
         ModelCapabilities, ModelChangeAdjustment, ModelSelection, ModelSettingSource,
         ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
-        PROTOCOL_VERSION, PositiveCanonicalU64, ProtocolVersion, ReasoningLevel, RejectionDetail,
-        RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
+        OperatorStatusConvergenceSeal, OperatorStatusConvergenceVerdict, OperatorStatusEndMessage,
+        OperatorStatusHeldSlotBlocker, OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
+        OperatorStatusMergeableState, OperatorStatusMessage,
+        OperatorStatusPendingStaleReviewClearanceMessage,
+        OperatorStatusPullRequestConvergenceMessage, OperatorStatusQueuedObligationMessage,
+        OperatorStatusReviewDecision, OperatorStatusSingletonScope, PROTOCOL_VERSION,
+        PositiveCanonicalU64, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
+        ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewImportTerminalOutcome,
         ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
         ReviewOrchestrationConcernInput, ReviewOrchestrationConcernSnapshot,
         ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts, ReviewOrchestrationSnapshot,
@@ -8808,8 +9830,9 @@ mod tests {
         SessionMetadata, SettingOverlay, SystemPromptMember, SystemPromptText,
         ToolApprovalEventDecider, ToolApprovalEventDecision, ToolBatchState, ToolDecision,
         TranscriptEntry, TranscriptTextEntry, TranscriptToolApproval, TurnModelSettingsSnapshot,
-        TurnState, UsageProvenance, decode_client_line, decode_server_line, encode_client_line,
-        encode_server_line, validate_adjustments,
+        TurnState, UsageProvenance, UserAttachmentKind, UserInputContent, UserInputPart,
+        decode_client_line, decode_server_line, encode_client_line, encode_server_line,
+        validate_adjustments,
     };
     use signalbox_domain::ToolDecisionRationale;
     use uuid::Uuid;
@@ -9163,6 +10186,1100 @@ mod tests {
     }
 
     #[test]
+    fn operator_status_request_and_rows_round_trip_in_one_closed_vocabulary()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_request_round_trip(
+            request(1)?,
+            ClientRequest::ReadOperatorStatus {},
+            r#"{"type":"read_operator_status"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
+                OperatorStatusHeldSlotMessage {
+                    dispatch_id: uuid(2),
+                    repository: String::from("example/repo"),
+                    origin: OperatorStatusHeldSlotOrigin::PullRequest {
+                        pull_request_number: CanonicalU64::new(41),
+                    },
+                    rule_id: String::from("review"),
+                    rule_version: CanonicalU64::new(1),
+                    singleton_scope: OperatorStatusSingletonScope::PullRequest,
+                    singleton_repository: Some(String::from("example/repo")),
+                    singleton_pull_request_number: Some(CanonicalU64::new(41)),
+                    singleton_stack_root_pull_request_number: None,
+                    held_for_seconds: CanonicalU64::new(90),
+                    session_ids: vec![uuid(3)],
+                    blockers: vec![
+                        OperatorStatusHeldSlotBlocker::UndeliveredAction,
+                        OperatorStatusHeldSlotBlocker::PursuingGoal,
+                    ],
+                },
+            )))),
+            r#"{"type":"operator_status","kind":"held_slot","dispatch_id":"00000000-0000-0000-0000-000000000002","repository":"example/repo","origin":{"kind":"pull_request","pull_request_number":"41"},"rule_id":"review","rule_version":"1","singleton_scope":"pull_request","singleton_repository":"example/repo","singleton_pull_request_number":"41","singleton_stack_root_pull_request_number":null,"held_for_seconds":"90","session_ids":["00000000-0000-0000-0000-000000000003"],"blockers":["undelivered_action","pursuing_goal"]}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
+                OperatorStatusHeldSlotMessage {
+                    dispatch_id: uuid(2),
+                    repository: String::from("example/repo"),
+                    origin: OperatorStatusHeldSlotOrigin::Branch {
+                        branch: String::from("main"),
+                    },
+                    rule_id: String::from("review"),
+                    rule_version: CanonicalU64::new(1),
+                    singleton_scope: OperatorStatusSingletonScope::Rule,
+                    singleton_repository: None,
+                    singleton_pull_request_number: None,
+                    singleton_stack_root_pull_request_number: None,
+                    held_for_seconds: CanonicalU64::new(90),
+                    session_ids: vec![uuid(3)],
+                    blockers: Vec::new(),
+                },
+            )))),
+            r#"{"type":"operator_status","kind":"held_slot","dispatch_id":"00000000-0000-0000-0000-000000000002","repository":"example/repo","origin":{"kind":"branch","branch":"main"},"rule_id":"review","rule_version":"1","singleton_scope":"rule","singleton_repository":null,"singleton_pull_request_number":null,"singleton_stack_root_pull_request_number":null,"held_for_seconds":"90","session_ids":["00000000-0000-0000-0000-000000000003"],"blockers":[]}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
+                Box::new(OperatorStatusQueuedObligationMessage {
+                    obligation_id: uuid(4),
+                    repository: String::from("example/repo"),
+                    rule_id: String::from("review"),
+                    rule_version: CanonicalU64::new(1),
+                    singleton_scope: OperatorStatusSingletonScope::Rule,
+                    singleton_repository: None,
+                    singleton_pull_request_number: None,
+                    singleton_stack_root_pull_request_number: None,
+                    first_event_id: uuid(5),
+                    latest_event_id: uuid(6),
+                    matched_event_count: CanonicalU64::new(3),
+                    waiting_for_seconds: CanonicalU64::new(45),
+                    occupying_dispatch_id: None,
+                    occupying_session_ids: Vec::new(),
+                    cooldown_remaining_seconds: Some(CanonicalU64::new(15)),
+                    cooldown_never_eligible: false,
+                    ready: false,
+                }),
+            ))),
+            r#"{"type":"operator_status","kind":"queued_obligation","obligation_id":"00000000-0000-0000-0000-000000000004","repository":"example/repo","rule_id":"review","rule_version":"1","singleton_scope":"rule","singleton_repository":null,"singleton_pull_request_number":null,"singleton_stack_root_pull_request_number":null,"first_event_id":"00000000-0000-0000-0000-000000000005","latest_event_id":"00000000-0000-0000-0000-000000000006","matched_event_count":"3","waiting_for_seconds":"45","occupying_dispatch_id":null,"occupying_session_ids":[],"cooldown_remaining_seconds":"15","cooldown_never_eligible":false,"ready":false}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+                Box::new(OperatorStatusPullRequestConvergenceMessage {
+                    repository: String::from("example/repo"),
+                    pull_request_number: CanonicalU64::new(41),
+                    head_sha: String::from("1111111111111111111111111111111111111111"),
+                    base_branch: String::from("main"),
+                    base_revision: String::from("2222222222222222222222222222222222222222"),
+                    mergeable_state: OperatorStatusMergeableState::Mergeable,
+                    review_decision: OperatorStatusReviewDecision::Approved,
+                    unresolved_thread_count: CanonicalU64::new(0),
+                    gating_check_count: CanonicalU64::new(2),
+                    non_green_gating_checks: Vec::new(),
+                    verdict: OperatorStatusConvergenceVerdict::MergeReady,
+                    seal: Some(OperatorStatusConvergenceSeal::MergeReady),
+                    assessed_seconds_ago: CanonicalU64::new(12),
+                }),
+            ))),
+            r#"{"type":"operator_status","kind":"pull_request_convergence","repository":"example/repo","pull_request_number":"41","head_sha":"1111111111111111111111111111111111111111","base_branch":"main","base_revision":"2222222222222222222222222222222222222222","mergeable_state":"mergeable","review_decision":"approved","unresolved_thread_count":"0","gating_check_count":"2","non_green_gating_checks":[],"verdict":"merge_ready","seal":"merge_ready","assessed_seconds_ago":"12"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatus(Box::new(
+                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
+                    OperatorStatusPendingStaleReviewClearanceMessage {
+                        repository: String::from("example/repo"),
+                        pull_request_number: CanonicalU64::new(41),
+                        current_head_sha: String::from("1111111111111111111111111111111111111111"),
+                        review_node_id: String::from("PRR_node"),
+                        reviewer: String::from("reviewer"),
+                        reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
+                        pending_for_seconds: CanonicalU64::new(8),
+                    },
+                )),
+            )),
+            r#"{"type":"operator_status","kind":"pending_stale_review_clearance","repository":"example/repo","pull_request_number":"41","current_head_sha":"1111111111111111111111111111111111111111","review_node_id":"PRR_node","reviewer":"reviewer","reviewed_head_sha":"3333333333333333333333333333333333333333","pending_for_seconds":"8"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
+                OperatorStatusEndMessage {
+                    held_slot_count: CanonicalU64::new(1),
+                    queued_obligation_count: CanonicalU64::new(1),
+                    pull_request_convergence_count: CanonicalU64::new(1),
+                    pending_stale_review_clearance_count: CanonicalU64::new(1),
+                },
+            )))),
+            r#"{"type":"operator_status","kind":"end","held_slot_count":"1","queued_obligation_count":"1","pull_request_convergence_count":"1","pending_stale_review_clearance_count":"1"}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn operator_status_rejects_contradictory_singletons_and_ready_waits()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let invalid_singleton = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
+                OperatorStatusHeldSlotMessage {
+                    dispatch_id: uuid(2),
+                    repository: String::from("example/repo"),
+                    origin: OperatorStatusHeldSlotOrigin::PullRequest {
+                        pull_request_number: CanonicalU64::new(41),
+                    },
+                    rule_id: String::from("review"),
+                    rule_version: CanonicalU64::new(1),
+                    singleton_scope: OperatorStatusSingletonScope::Rule,
+                    singleton_repository: Some(String::from("example/repo")),
+                    singleton_pull_request_number: None,
+                    singleton_stack_root_pull_request_number: None,
+                    held_for_seconds: CanonicalU64::new(1),
+                    session_ids: vec![uuid(3)],
+                    blockers: Vec::new(),
+                },
+            )))),
+        );
+        assert_eq!(
+            invalid_singleton,
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+
+        let invalid_ready = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
+                Box::new(OperatorStatusQueuedObligationMessage {
+                    obligation_id: uuid(4),
+                    repository: String::from("example/repo"),
+                    rule_id: String::from("review"),
+                    rule_version: CanonicalU64::new(1),
+                    singleton_scope: OperatorStatusSingletonScope::Rule,
+                    singleton_repository: None,
+                    singleton_pull_request_number: None,
+                    singleton_stack_root_pull_request_number: None,
+                    first_event_id: uuid(5),
+                    latest_event_id: uuid(6),
+                    matched_event_count: CanonicalU64::new(2),
+                    waiting_for_seconds: CanonicalU64::new(1),
+                    occupying_dispatch_id: None,
+                    occupying_session_ids: Vec::new(),
+                    cooldown_remaining_seconds: Some(CanonicalU64::new(1)),
+                    cooldown_never_eligible: false,
+                    ready: true,
+                }),
+            ))),
+        );
+        assert_eq!(
+            invalid_ready,
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        Ok(())
+    }
+
+    /// An obligation blocked by an independently commissioned live session
+    /// names exactly that one session and no dispatch. Both a dispatch identity
+    /// owning no sessions and a dispatch-less occupant naming a second session
+    /// contradict the projection, which retains a single external blocker.
+    #[test]
+    fn operator_status_admits_an_external_blocker_without_a_dispatch_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let externally_blocked = |dispatch, sessions, ready| {
+            ServerFrame::try_new(
+                request(1).expect("a valid request identity"),
+                ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
+                    Box::new(OperatorStatusQueuedObligationMessage {
+                        obligation_id: uuid(4),
+                        repository: String::from("example/repo"),
+                        rule_id: String::from("review"),
+                        rule_version: CanonicalU64::new(1),
+                        singleton_scope: OperatorStatusSingletonScope::Rule,
+                        singleton_repository: None,
+                        singleton_pull_request_number: None,
+                        singleton_stack_root_pull_request_number: None,
+                        first_event_id: uuid(5),
+                        latest_event_id: uuid(6),
+                        matched_event_count: CanonicalU64::new(2),
+                        waiting_for_seconds: CanonicalU64::new(1),
+                        occupying_dispatch_id: dispatch,
+                        occupying_session_ids: sessions,
+                        cooldown_remaining_seconds: None,
+                        cooldown_never_eligible: false,
+                        ready,
+                    }),
+                ))),
+            )
+        };
+
+        assert!(externally_blocked(None, vec![uuid(7)], false).is_ok());
+        assert_eq!(
+            externally_blocked(None, vec![uuid(7)], true),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        assert_eq!(
+            externally_blocked(None, vec![uuid(7), uuid(9)], false),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        assert_eq!(
+            externally_blocked(Some(uuid(8)), Vec::new(), false),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        assert!(externally_blocked(Some(uuid(8)), vec![uuid(7)], false).is_ok());
+        assert!(externally_blocked(Some(uuid(8)), vec![uuid(7), uuid(9)], false).is_ok());
+        Ok(())
+    }
+
+    /// A rule matching branch workflow-run completion holds its singleton slot
+    /// from a branch fact, which names a branch and never a pull request. That
+    /// fact carries no pull request for a singleton to be keyed by, so a branch
+    /// origin admits only the rule and repository scopes. A pull-request- or
+    /// stack-scoped branch hold passes both field validators on its own yet
+    /// names a slot no branch workflow event could ever have taken, so the
+    /// origin and the singleton scope are validated together.
+    #[test]
+    fn operator_status_admits_a_branch_origin_held_slot() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let held = |origin,
+                    singleton_scope,
+                    repository: Option<&str>,
+                    pull_request: Option<u64>,
+                    stack_root: Option<u64>| {
+            ServerFrame::try_new(
+                request(1).expect("a valid request identity"),
+                ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
+                    OperatorStatusHeldSlotMessage {
+                        dispatch_id: uuid(2),
+                        repository: String::from("example/repo"),
+                        origin,
+                        rule_id: String::from("review"),
+                        rule_version: CanonicalU64::new(1),
+                        singleton_scope,
+                        singleton_repository: repository.map(String::from),
+                        singleton_pull_request_number: pull_request.map(CanonicalU64::new),
+                        singleton_stack_root_pull_request_number: stack_root.map(CanonicalU64::new),
+                        held_for_seconds: CanonicalU64::new(1),
+                        session_ids: vec![uuid(3)],
+                        blockers: Vec::new(),
+                    },
+                )))),
+            )
+        };
+        let branch = || OperatorStatusHeldSlotOrigin::Branch {
+            branch: String::from("main"),
+        };
+        let pull_request = || OperatorStatusHeldSlotOrigin::PullRequest {
+            pull_request_number: CanonicalU64::new(41),
+        };
+
+        assert!(
+            held(
+                branch(),
+                OperatorStatusSingletonScope::Rule,
+                None,
+                None,
+                None
+            )
+            .is_ok()
+        );
+        assert!(
+            held(
+                branch(),
+                OperatorStatusSingletonScope::Repo,
+                Some("example/repo"),
+                None,
+                None
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            held(
+                branch(),
+                OperatorStatusSingletonScope::PullRequest,
+                Some("example/repo"),
+                Some(41),
+                None
+            ),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        assert_eq!(
+            held(
+                branch(),
+                OperatorStatusSingletonScope::Stack,
+                Some("example/repo"),
+                None,
+                Some(41)
+            ),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+
+        // Every admitted origin other than a branch fact names a pull request,
+        // which keys any of the four singleton scopes.
+        assert!(
+            held(
+                pull_request(),
+                OperatorStatusSingletonScope::PullRequest,
+                Some("example/repo"),
+                Some(41),
+                None
+            )
+            .is_ok()
+        );
+        assert!(
+            held(
+                pull_request(),
+                OperatorStatusSingletonScope::Stack,
+                Some("example/repo"),
+                None,
+                Some(41)
+            )
+            .is_ok()
+        );
+        assert!(
+            held(
+                pull_request(),
+                OperatorStatusSingletonScope::Rule,
+                None,
+                None,
+                None
+            )
+            .is_ok()
+        );
+        assert!(
+            held(
+                pull_request(),
+                OperatorStatusSingletonScope::Repo,
+                Some("example/repo"),
+                None,
+                None
+            )
+            .is_ok()
+        );
+
+        assert_eq!(
+            held(
+                OperatorStatusHeldSlotOrigin::Branch {
+                    branch: String::new(),
+                },
+                OperatorStatusSingletonScope::Rule,
+                None,
+                None,
+                None
+            ),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        assert_eq!(
+            held(
+                OperatorStatusHeldSlotOrigin::PullRequest {
+                    pull_request_number: CanonicalU64::new(0),
+                },
+                OperatorStatusSingletonScope::Rule,
+                None,
+                None,
+                None
+            ),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn operator_status_allows_a_seal_to_outlive_the_latest_assessment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let frame = ServerFrame::try_new(
+            request(1)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+                Box::new(OperatorStatusPullRequestConvergenceMessage {
+                    repository: String::from("example/repo"),
+                    pull_request_number: CanonicalU64::new(41),
+                    head_sha: String::from("1111111111111111111111111111111111111111"),
+                    base_branch: String::from("main"),
+                    base_revision: String::from("2222222222222222222222222222222222222222"),
+                    mergeable_state: OperatorStatusMergeableState::Mergeable,
+                    review_decision: OperatorStatusReviewDecision::Approved,
+                    unresolved_thread_count: CanonicalU64::new(0),
+                    gating_check_count: CanonicalU64::new(1),
+                    non_green_gating_checks: vec![String::from("rust-checks")],
+                    verdict: OperatorStatusConvergenceVerdict::NotConverged,
+                    seal: Some(OperatorStatusConvergenceSeal::MergeReady),
+                    assessed_seconds_ago: CanonicalU64::new(1),
+                }),
+            ))),
+        );
+
+        assert!(frame.is_ok());
+        Ok(())
+    }
+
+    /// One merge-ready convergence row: every carried condition clean, beside
+    /// the trunk base branch the durable side pairs that verdict with. Each
+    /// case below restates only the field whose contradiction it names.
+    fn merge_ready_convergence() -> OperatorStatusPullRequestConvergenceMessage {
+        OperatorStatusPullRequestConvergenceMessage {
+            repository: String::from("example/repo"),
+            pull_request_number: CanonicalU64::new(41),
+            head_sha: String::from("1111111111111111111111111111111111111111"),
+            base_branch: String::from("main"),
+            base_revision: String::from("2222222222222222222222222222222222222222"),
+            mergeable_state: OperatorStatusMergeableState::Mergeable,
+            review_decision: OperatorStatusReviewDecision::Approved,
+            unresolved_thread_count: CanonicalU64::new(0),
+            gating_check_count: CanonicalU64::new(2),
+            non_green_gating_checks: Vec::new(),
+            verdict: OperatorStatusConvergenceVerdict::MergeReady,
+            seal: None,
+            assessed_seconds_ago: CanonicalU64::new(1),
+        }
+    }
+
+    /// The same clean evidence beside the release base branch and the verdict
+    /// the durable side pairs that branch with.
+    fn internally_converged_convergence() -> OperatorStatusPullRequestConvergenceMessage {
+        OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("release/1"),
+            verdict: OperatorStatusConvergenceVerdict::InternallyConverged,
+            ..merge_ready_convergence()
+        }
+    }
+
+    /// The same clean evidence beneath the unconverged verdict, which the
+    /// durable side pairs with no base branch at all.
+    fn not_converged_convergence() -> OperatorStatusPullRequestConvergenceMessage {
+        OperatorStatusPullRequestConvergenceMessage {
+            verdict: OperatorStatusConvergenceVerdict::NotConverged,
+            ..merge_ready_convergence()
+        }
+    }
+
+    #[track_caller]
+    fn assert_convergence_admitted(item: OperatorStatusPullRequestConvergenceMessage) {
+        let frame = ServerFrame::try_new(
+            request(1).expect("a valid request identity"),
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+                Box::new(item),
+            ))),
+        );
+        assert!(frame.is_ok(), "convergence row must be admitted: {frame:?}");
+    }
+
+    #[track_caller]
+    fn assert_convergence_rejected(item: OperatorStatusPullRequestConvergenceMessage) {
+        let frame = ServerFrame::try_new(
+            request(1).expect("a valid request identity"),
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+                Box::new(item),
+            ))),
+        );
+        assert_eq!(frame, Err(FrameValidationError::OperatorStatusShape));
+    }
+
+    /// A convergence row's verdict is settled by the evidence beside it. The
+    /// durable `repo_watch_convergence_verdict_matches_evidence` constraint
+    /// makes the unconverged verdict exactly the carried-blocker case, so
+    /// either converged verdict is admitted only beside wholly clean evidence:
+    /// no unresolved thread, no non-green check, a mergeable provider state, at
+    /// least one gating check, and no requested change.
+    #[test]
+    fn operator_status_admits_a_converged_verdict_beside_clean_evidence() {
+        assert_convergence_admitted(merge_ready_convergence());
+        assert_convergence_admitted(internally_converged_convergence());
+    }
+
+    /// One rejection per contradiction class the wire carries: an empty gating
+    /// inventory, an unresolved thread, a non-green check, each unmergeable
+    /// provider state, and a requested change.
+    #[test]
+    fn operator_status_rejects_a_merge_ready_verdict_beside_each_contradiction() {
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            gating_check_count: CanonicalU64::new(0),
+            ..merge_ready_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            unresolved_thread_count: CanonicalU64::new(1),
+            ..merge_ready_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            non_green_gating_checks: vec![String::from("rust-checks")],
+            ..merge_ready_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            mergeable_state: OperatorStatusMergeableState::Conflicting,
+            ..merge_ready_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            mergeable_state: OperatorStatusMergeableState::Unknown,
+            ..merge_ready_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            review_decision: OperatorStatusReviewDecision::ChangesRequested,
+            ..merge_ready_convergence()
+        });
+    }
+
+    /// The same contradiction classes refuse the other converged verdict, which
+    /// the durable evidence constraint treats identically.
+    #[test]
+    fn operator_status_rejects_an_internally_converged_verdict_beside_each_contradiction() {
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            gating_check_count: CanonicalU64::new(0),
+            ..internally_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            unresolved_thread_count: CanonicalU64::new(1),
+            ..internally_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            non_green_gating_checks: vec![String::from("rust-checks")],
+            ..internally_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            mergeable_state: OperatorStatusMergeableState::Conflicting,
+            ..internally_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            mergeable_state: OperatorStatusMergeableState::Unknown,
+            ..internally_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            review_decision: OperatorStatusReviewDecision::ChangesRequested,
+            ..internally_converged_convergence()
+        });
+    }
+
+    /// A review still awaiting its first decision blocks neither converged
+    /// verdict, since only a requested change is a durable blocker.
+    #[test]
+    fn operator_status_admits_a_converged_verdict_beside_an_undecided_review() {
+        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
+            review_decision: OperatorStatusReviewDecision::None,
+            ..merge_ready_convergence()
+        });
+        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
+            review_decision: OperatorStatusReviewDecision::ReviewRequired,
+            ..merge_ready_convergence()
+        });
+        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
+            review_decision: OperatorStatusReviewDecision::None,
+            ..internally_converged_convergence()
+        });
+        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
+            review_decision: OperatorStatusReviewDecision::ReviewRequired,
+            ..internally_converged_convergence()
+        });
+    }
+
+    /// The unconverged verdict carries its own blockers freely and stays
+    /// admissible beside wholly clean evidence, because the unsettled provider
+    /// snapshot that alone justifies the latter never crosses this wire.
+    #[test]
+    fn operator_status_admits_an_unconverged_verdict_beside_any_carried_evidence() {
+        assert_convergence_admitted(not_converged_convergence());
+        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
+            mergeable_state: OperatorStatusMergeableState::Conflicting,
+            review_decision: OperatorStatusReviewDecision::ChangesRequested,
+            unresolved_thread_count: CanonicalU64::new(3),
+            non_green_gating_checks: vec![String::from("rust-checks")],
+            ..not_converged_convergence()
+        });
+        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
+            gating_check_count: CanonicalU64::new(0),
+            ..not_converged_convergence()
+        });
+    }
+
+    /// Two durable constraints sit beside the evidence constraint on the same
+    /// assessment row, and the status projection reads the verdict and the base
+    /// branch from that one row: a merge-ready verdict is settled only against
+    /// `main`, an internally-converged verdict only against another branch. The
+    /// pair is what separates the two converged verdicts, so each is refused on
+    /// the other's branch even beside wholly clean evidence.
+    #[test]
+    fn operator_status_binds_each_converged_verdict_to_its_base_branch() {
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("release/1"),
+            ..merge_ready_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("main"),
+            ..internally_converged_convergence()
+        });
+
+        // The unconverged verdict is settled without consulting the base
+        // branch, so it is admitted on either one.
+        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("main"),
+            ..not_converged_convergence()
+        });
+        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("release/1"),
+            ..not_converged_convergence()
+        });
+
+        // A seal is retained from the assessment that earned it and outlives
+        // later ones, so a pull request retargeted after it was sealed carries
+        // that merge-ready seal beside a branch no merge-ready verdict could be
+        // settled against. The seal therefore takes no base-branch pairing.
+        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("release/1"),
+            seal: Some(OperatorStatusConvergenceSeal::MergeReady),
+            ..not_converged_convergence()
+        });
+    }
+
+    /// The base branch is a git ref name on the wire, so the grammar the
+    /// `BranchName` constructor and the durable `repo_watch_branch_is_valid`
+    /// check share is mirrored here rather than a bare length bound.
+    #[test]
+    fn operator_status_rejects_a_convergence_base_branch_outside_the_ref_grammar() {
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from(".."),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("release branch"),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("-release"),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("release/"),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("release/.hidden"),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("release/1.lock"),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("release@{1}"),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("release^1"),
+            ..not_converged_convergence()
+        });
+
+        // A slashed, dotted, and hyphenated name is an ordinary ref name.
+        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
+            base_branch: String::from("release/v1.2-rc"),
+            ..not_converged_convergence()
+        });
+    }
+
+    /// A convergence row's repository is a canonical `namespace/name` slug on the
+    /// wire, so the grammar the `RepositorySlug` constructor and the durable
+    /// `repo_watch_repository_is_valid` check share is mirrored here. Both
+    /// producers lowercase what they admit, so an uppercase spelling is refused
+    /// with the malformed ones.
+    #[test]
+    fn operator_status_rejects_a_repository_outside_the_slug_grammar() {
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            repository: String::from("not-a-slug"),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            repository: String::from("example/repo/extra"),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            repository: String::from("example/"),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            repository: String::from("/repo"),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            repository: String::from("example/.."),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            repository: String::from("example/re po"),
+            ..not_converged_convergence()
+        });
+        assert_convergence_rejected(OperatorStatusPullRequestConvergenceMessage {
+            repository: String::from("Example/Repo"),
+            ..not_converged_convergence()
+        });
+
+        // Dots, hyphens, and underscores spell an ordinary slug on both sides.
+        assert_convergence_admitted(OperatorStatusPullRequestConvergenceMessage {
+            repository: String::from("ex-am_ple/re.po-1"),
+            ..not_converged_convergence()
+        });
+    }
+
+    /// One held slot whose pull-request origin, singleton scope, and singleton
+    /// axes all name the same pull request in the same repository, which is the
+    /// only identity the projection can produce for a pull-request-scoped hold.
+    fn held_slot_row() -> OperatorStatusHeldSlotMessage {
+        OperatorStatusHeldSlotMessage {
+            dispatch_id: uuid(2),
+            repository: String::from("example/repo"),
+            origin: OperatorStatusHeldSlotOrigin::PullRequest {
+                pull_request_number: CanonicalU64::new(41),
+            },
+            rule_id: String::from("review"),
+            rule_version: CanonicalU64::new(1),
+            singleton_scope: OperatorStatusSingletonScope::PullRequest,
+            singleton_repository: Some(String::from("example/repo")),
+            singleton_pull_request_number: Some(CanonicalU64::new(41)),
+            singleton_stack_root_pull_request_number: None,
+            held_for_seconds: CanonicalU64::new(90),
+            session_ids: vec![uuid(3)],
+            blockers: Vec::new(),
+        }
+    }
+
+    #[track_caller]
+    fn assert_held_slot_admitted(item: OperatorStatusHeldSlotMessage) {
+        let frame = ServerFrame::try_new(
+            request(1).expect("a valid request identity"),
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
+                item,
+            )))),
+        );
+        assert!(frame.is_ok(), "held-slot row must be admitted: {frame:?}");
+    }
+
+    #[track_caller]
+    fn assert_held_slot_rejected(item: OperatorStatusHeldSlotMessage) {
+        let frame = ServerFrame::try_new(
+            request(1).expect("a valid request identity"),
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
+                item,
+            )))),
+        );
+        assert_eq!(frame, Err(FrameValidationError::OperatorStatusShape));
+    }
+
+    /// One obligation owed by a rule-scoped singleton, opened by a single
+    /// matched event and still waiting behind nothing in particular.
+    fn queued_obligation_row() -> OperatorStatusQueuedObligationMessage {
+        OperatorStatusQueuedObligationMessage {
+            obligation_id: uuid(4),
+            repository: String::from("example/repo"),
+            rule_id: String::from("review"),
+            rule_version: CanonicalU64::new(1),
+            singleton_scope: OperatorStatusSingletonScope::Rule,
+            singleton_repository: None,
+            singleton_pull_request_number: None,
+            singleton_stack_root_pull_request_number: None,
+            first_event_id: uuid(5),
+            latest_event_id: uuid(5),
+            matched_event_count: CanonicalU64::new(1),
+            waiting_for_seconds: CanonicalU64::new(45),
+            occupying_dispatch_id: None,
+            occupying_session_ids: Vec::new(),
+            cooldown_remaining_seconds: None,
+            cooldown_never_eligible: false,
+            ready: false,
+        }
+    }
+
+    #[track_caller]
+    fn assert_obligation_admitted(item: OperatorStatusQueuedObligationMessage) {
+        let frame = ServerFrame::try_new(
+            request(1).expect("a valid request identity"),
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
+                Box::new(item),
+            ))),
+        );
+        assert!(frame.is_ok(), "obligation row must be admitted: {frame:?}");
+    }
+
+    #[track_caller]
+    fn assert_obligation_rejected(item: OperatorStatusQueuedObligationMessage) {
+        let frame = ServerFrame::try_new(
+            request(1).expect("a valid request identity"),
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
+                Box::new(item),
+            ))),
+        );
+        assert_eq!(frame, Err(FrameValidationError::OperatorStatusShape));
+    }
+
+    /// One stale blocking review whose planned clearance is still unsettled.
+    fn stale_review_clearance_row() -> OperatorStatusPendingStaleReviewClearanceMessage {
+        OperatorStatusPendingStaleReviewClearanceMessage {
+            repository: String::from("example/repo"),
+            pull_request_number: CanonicalU64::new(41),
+            current_head_sha: String::from("1111111111111111111111111111111111111111"),
+            review_node_id: String::from("PRR_node"),
+            reviewer: String::from("reviewer"),
+            reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
+            pending_for_seconds: CanonicalU64::new(8),
+        }
+    }
+
+    #[track_caller]
+    fn assert_stale_review_clearance_admitted(
+        item: OperatorStatusPendingStaleReviewClearanceMessage,
+    ) {
+        let frame = ServerFrame::try_new(
+            request(1).expect("a valid request identity"),
+            ServerMessage::OperatorStatus(Box::new(
+                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(item)),
+            )),
+        );
+        assert!(
+            frame.is_ok(),
+            "stale-review clearance row must be admitted: {frame:?}"
+        );
+    }
+
+    #[track_caller]
+    fn assert_stale_review_clearance_rejected(
+        item: OperatorStatusPendingStaleReviewClearanceMessage,
+    ) {
+        let frame = ServerFrame::try_new(
+            request(1).expect("a valid request identity"),
+            ServerMessage::OperatorStatus(Box::new(
+                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(item)),
+            )),
+        );
+        assert_eq!(frame, Err(FrameValidationError::OperatorStatusShape));
+    }
+
+    /// The held-slot projection joins each dispatch batch to the very event it
+    /// was admitted from and reads the origin pull request off that row, while
+    /// the batch's singleton was keyed from the same event. A pull-request
+    /// singleton therefore names the very pull request its origin names, and a
+    /// row naming two different ones is an identity persistence cannot hold.
+    ///
+    /// A stack singleton names the root of the open component the origin
+    /// belongs to, which is a different pull request whenever the origin is not
+    /// itself that root, so the stack axis takes no such equality.
+    #[test]
+    fn operator_status_binds_a_held_pull_request_singleton_to_its_origin() {
+        assert_held_slot_admitted(held_slot_row());
+        assert_held_slot_rejected(OperatorStatusHeldSlotMessage {
+            singleton_pull_request_number: Some(CanonicalU64::new(42)),
+            ..held_slot_row()
+        });
+
+        assert_held_slot_admitted(OperatorStatusHeldSlotMessage {
+            singleton_scope: OperatorStatusSingletonScope::Stack,
+            singleton_pull_request_number: None,
+            singleton_stack_root_pull_request_number: Some(CanonicalU64::new(7)),
+            ..held_slot_row()
+        });
+    }
+
+    /// Every repository-keyed singleton is keyed from the repository of the
+    /// very event whose row carries it, and an obligation coalesces only across
+    /// events sharing its singleton key, so a carried singleton repository is
+    /// the row's own repository and never an independent slug.
+    #[test]
+    fn operator_status_binds_a_singleton_repository_to_its_row_repository() {
+        assert_held_slot_rejected(OperatorStatusHeldSlotMessage {
+            singleton_repository: Some(String::from("other/repo")),
+            ..held_slot_row()
+        });
+        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
+            singleton_scope: OperatorStatusSingletonScope::Repo,
+            singleton_repository: Some(String::from("other/repo")),
+            ..queued_obligation_row()
+        });
+        assert_obligation_admitted(OperatorStatusQueuedObligationMessage {
+            singleton_scope: OperatorStatusSingletonScope::Repo,
+            singleton_repository: Some(String::from("example/repo")),
+            ..queued_obligation_row()
+        });
+
+        // A rule-scoped obligation legitimately spans repositories and carries
+        // no singleton repository at all, so its own repository stands alone.
+        assert_obligation_admitted(queued_obligation_row());
+    }
+
+    /// Persistence opens an obligation naming one evaluated event as both its
+    /// first and its latest with a matched count of one, and every later
+    /// coalesced evaluation replaces the latest with a distinct event and
+    /// increments the count. The count therefore stands at one exactly while
+    /// the two endpoints are the same event.
+    #[test]
+    fn operator_status_binds_the_matched_event_count_to_its_endpoints() {
+        assert_obligation_admitted(queued_obligation_row());
+        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
+            latest_event_id: uuid(6),
+            ..queued_obligation_row()
+        });
+        assert_obligation_admitted(OperatorStatusQueuedObligationMessage {
+            latest_event_id: uuid(6),
+            matched_event_count: CanonicalU64::new(2),
+            ..queued_obligation_row()
+        });
+        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
+            matched_event_count: CanonicalU64::new(2),
+            ..queued_obligation_row()
+        });
+        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
+            matched_event_count: CanonicalU64::new(0),
+            ..queued_obligation_row()
+        });
+    }
+
+    /// The projection reports a remaining cooldown only while the eligibility
+    /// instant is still ahead of the read, and rounds that strictly positive
+    /// interval up, so the smallest value it can carry is one second. A zero
+    /// names a cooldown that has already lapsed while still claiming to
+    /// withhold the obligation, and an infinite eligibility is carried as the
+    /// never-eligible flag rather than as any number at all.
+    #[test]
+    fn operator_status_rejects_a_zero_remaining_cooldown() {
+        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
+            cooldown_remaining_seconds: Some(CanonicalU64::new(0)),
+            ..queued_obligation_row()
+        });
+        assert_obligation_admitted(OperatorStatusQueuedObligationMessage {
+            cooldown_remaining_seconds: Some(CanonicalU64::new(1)),
+            ..queued_obligation_row()
+        });
+        assert_obligation_admitted(OperatorStatusQueuedObligationMessage {
+            cooldown_remaining_seconds: None,
+            cooldown_never_eligible: true,
+            ..queued_obligation_row()
+        });
+    }
+
+    /// A rule identity is the operator's own spelling, admitted by the
+    /// `RepoWatchRuleId` constructor and the durable `repo_watch_rule_id_is_valid`
+    /// check as ASCII letters, digits, hyphens, underscores, and dots. Unlike a
+    /// slug or a login it is never case-normalized, so both cases are admitted.
+    #[test]
+    fn operator_status_rejects_a_rule_id_outside_the_identity_grammar() {
+        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
+            rule_id: String::from("bad rule"),
+            ..queued_obligation_row()
+        });
+        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
+            rule_id: String::from("rule/one"),
+            ..queued_obligation_row()
+        });
+        assert_obligation_rejected(OperatorStatusQueuedObligationMessage {
+            rule_id: String::from("rule:one"),
+            ..queued_obligation_row()
+        });
+        assert_obligation_admitted(OperatorStatusQueuedObligationMessage {
+            rule_id: String::from("Review.rule-1_v2"),
+            ..queued_obligation_row()
+        });
+    }
+
+    /// A reviewer login is admitted by the `RepoWatchAuthorLogin` constructor
+    /// and the durable `repo_watch_login_is_valid` check: an optional App-bot
+    /// suffix is set aside, and the base left behind is nonempty, begins and
+    /// ends with something other than a hyphen, carries no doubled hyphen, and
+    /// spells itself in lowercase letters, digits, hyphens, and underscores.
+    #[test]
+    fn operator_status_rejects_a_reviewer_outside_the_login_grammar() {
+        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
+            reviewer: String::from("-bot"),
+            ..stale_review_clearance_row()
+        });
+        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
+            reviewer: String::from("bot-"),
+            ..stale_review_clearance_row()
+        });
+        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
+            reviewer: String::from("re--viewer"),
+            ..stale_review_clearance_row()
+        });
+        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
+            reviewer: String::from("Reviewer"),
+            ..stale_review_clearance_row()
+        });
+        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
+            reviewer: String::from("rev iewer"),
+            ..stale_review_clearance_row()
+        });
+        assert_stale_review_clearance_rejected(OperatorStatusPendingStaleReviewClearanceMessage {
+            reviewer: String::from("[bot]"),
+            ..stale_review_clearance_row()
+        });
+
+        assert_stale_review_clearance_admitted(OperatorStatusPendingStaleReviewClearanceMessage {
+            reviewer: String::from("rev_iewer-1"),
+            ..stale_review_clearance_row()
+        });
+        assert_stale_review_clearance_admitted(OperatorStatusPendingStaleReviewClearanceMessage {
+            reviewer: String::from("dependabot[bot]"),
+            ..stale_review_clearance_row()
+        });
+    }
+
+    /// A held slot's branch origin is a git ref name on the same grammar the
+    /// convergence row's base branch takes, so a malformed spelling is refused
+    /// there too rather than passing a bare length bound.
+    #[test]
+    fn operator_status_rejects_a_held_slot_branch_outside_the_ref_grammar() {
+        assert_held_slot_rejected(OperatorStatusHeldSlotMessage {
+            origin: OperatorStatusHeldSlotOrigin::Branch {
+                branch: String::from("feature branch"),
+            },
+            singleton_scope: OperatorStatusSingletonScope::Rule,
+            singleton_repository: None,
+            singleton_pull_request_number: None,
+            ..held_slot_row()
+        });
+        assert_held_slot_rejected(OperatorStatusHeldSlotMessage {
+            origin: OperatorStatusHeldSlotOrigin::Branch {
+                branch: String::from("feature/.hidden"),
+            },
+            singleton_scope: OperatorStatusSingletonScope::Rule,
+            singleton_repository: None,
+            singleton_pull_request_number: None,
+            ..held_slot_row()
+        });
+        assert_held_slot_admitted(OperatorStatusHeldSlotMessage {
+            origin: OperatorStatusHeldSlotOrigin::Branch {
+                branch: String::from("feature/v1.2-rc"),
+            },
+            singleton_scope: OperatorStatusSingletonScope::Rule,
+            singleton_repository: None,
+            singleton_pull_request_number: None,
+            ..held_slot_row()
+        });
+    }
+
+    #[test]
+    fn maximum_operator_status_convergence_inventory_fits_one_frame()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let maximum_check_name = "\u{1}".repeat(256);
+        let frame = ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            RequestId::try_new(u64::MAX)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+                Box::new(OperatorStatusPullRequestConvergenceMessage {
+                    repository: String::from("example/repo"),
+                    pull_request_number: CanonicalU64::new(41),
+                    head_sha: String::from("1111111111111111111111111111111111111111"),
+                    base_branch: String::from("main"),
+                    base_revision: String::from("2222222222222222222222222222222222222222"),
+                    mergeable_state: OperatorStatusMergeableState::Mergeable,
+                    review_decision: OperatorStatusReviewDecision::ChangesRequested,
+                    unresolved_thread_count: CanonicalU64::new(10_000),
+                    gating_check_count: CanonicalU64::new(10_000),
+                    non_green_gating_checks: vec![maximum_check_name; 10_000],
+                    verdict: OperatorStatusConvergenceVerdict::NotConverged,
+                    seal: None,
+                    assessed_seconds_ago: CanonicalU64::new(u64::MAX),
+                }),
+            ))),
+        )?;
+
+        let encoded = encode_server_line(&frame)?;
+        assert!(encoded.len() <= super::MAX_FRAME_BYTES);
+        assert_eq!(decode_server_line(&encoded)?, frame);
+        Ok(())
+    }
+
+    #[test]
     fn inv033_goal_requests_and_history_round_trip_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         assert_client_request_round_trip(
@@ -9331,7 +11448,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(1)?,
                 session_id: uuid(2),
-                content: InputContent::new("hello".to_owned()),
+                content: UserInputContent::text("hello".to_owned()),
                 expected_defaults_version: Some(CanonicalU64::new(u64::MAX)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -9346,9 +11463,127 @@ mod tests {
         let ClientRequest::SubmitInput { content, .. } = decoded_request else {
             return Err("decoded request changed variant".into());
         };
-        assert_eq!(content.into_string(), "hello");
+        assert_eq!(
+            content.parts(),
+            &[UserInputPart::Text {
+                text: String::from("hello")
+            }]
+        );
         assert!(String::from_utf8(encoded)?.contains("\"request_id\":\"18446744073709551615\""));
         Ok(())
+    }
+
+    /// INV-012 / INV-060: multipart request encoding preserves part order and
+    /// every attachment metadata field in the one canonical array shape.
+    #[test]
+    fn inv012_inv060_multipart_input_wire_is_ordered_and_exact()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            .parse::<CanonicalBlobDigest>()?;
+        let content = UserInputContent::from_parts(vec![
+            UserInputPart::Text {
+                text: String::from("inspect "),
+            },
+            UserInputPart::Attachment {
+                digest,
+                kind: UserAttachmentKind::Image,
+                media_type: String::from("image/png"),
+                display_filename: Some(String::from("chart.png")),
+            },
+            UserInputPart::Text {
+                text: String::from(" carefully"),
+            },
+        ]);
+        let frame = ClientFrame::try_new(
+            request(9)?,
+            ClientRequest::SubmitInput {
+                command_id: command(10)?,
+                session_id: uuid(11),
+                content,
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )?;
+
+        let encoded = encode_client_line(&frame)?;
+
+        assert_eq!(decode_client_line(&encoded)?, frame);
+        assert_eq!(
+            String::from_utf8(encoded)?,
+            concat!(
+                "{\"version\":1,\"request_id\":\"9\",\"request\":{",
+                "\"type\":\"submit_input\",",
+                "\"command_id\":\"00000000-0000-0000-0000-00000000000a\",",
+                "\"session_id\":\"00000000-0000-0000-0000-00000000000b\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"inspect \"},",
+                "{\"type\":\"attachment\",",
+                "\"digest\":\"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\",",
+                "\"kind\":\"image\",\"media_type\":\"image/png\",",
+                "\"display_filename\":\"chart.png\"},",
+                "{\"type\":\"text\",\"text\":\" carefully\"}],",
+                "\"expected_defaults_version\":\"1\",",
+                "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
+                "\"fast_mode\":{\"kind\":\"inherit\"},",
+                "\"service_tier\":{\"kind\":\"inherit\"}}}}\n"
+            )
+        );
+        Ok(())
+    }
+
+    /// INV-012: multipart decoding stops at the public retained-parts bound.
+    #[test]
+    fn inv012_multipart_deserialization_stops_after_the_parts_bound()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let oversized = vec![
+            UserInputPart::Text {
+                text: String::from("x"),
+            };
+            super::MAX_USER_INPUT_PARTS + 1
+        ];
+        let encoded = serde_json::to_vec(&oversized)?;
+        let error = serde_json::from_slice::<UserInputContent>(&encoded)
+            .expect_err("one part beyond the retained bound is rejected during decoding");
+
+        assert!(error.to_string().contains("too many user-input parts"));
+        Ok(())
+    }
+
+    #[test]
+    fn user_input_debug_redacts_content_bearing_values() -> Result<(), Box<dyn std::error::Error>> {
+        let private_text = "private user text";
+        let private_filename = "private-filename.txt";
+        let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            .parse::<CanonicalBlobDigest>()?;
+        let content = UserInputContent::from_parts(vec![
+            UserInputPart::Text {
+                text: String::from(private_text),
+            },
+            UserInputPart::Attachment {
+                digest,
+                kind: UserAttachmentKind::File,
+                media_type: String::from("text/plain"),
+                display_filename: Some(String::from(private_filename)),
+            },
+        ]);
+
+        let debug = format!("{content:?}");
+        assert!(!debug.contains(private_text));
+        assert!(!debug.contains(private_filename));
+        assert!(debug.contains("<redacted>"));
+        Ok(())
+    }
+
+    /// INV-012 / INV-060: attachment display filenames are required-nullable
+    /// in both directions of the version-one wire.
+    #[test]
+    fn inv012_inv060_attachment_requires_display_filename_member() {
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"1","request":{"type":"submit_input","command_id":"00000000-0000-0000-0000-000000000001","session_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}],"expected_defaults_version":"1","model_settings":{"reasoning_level":{"kind":"inherit"},"fast_mode":{"kind":"inherit"},"service_tier":{"kind":"inherit"}}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}]}}}"#,
+        );
     }
 
     #[test]
@@ -9950,7 +12185,7 @@ mod tests {
             r#"{"version":1,"request_id":"1","message":{"type":"sessions_start","extra":true}}"#,
         );
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued","extra":true}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"text","text":"queued"}],"extra":true}}}"#,
         );
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"session_event","cursor":"1","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"session_created","extra":true}}}"#,
@@ -10477,7 +12712,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(5)?,
                 session_id: uuid(6),
-                content: InputContent::new(String::new()),
+                content: UserInputContent::text(String::from("content")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -11935,7 +14170,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(4)?,
                 session_id: uuid(6),
-                content: InputContent::new(String::from("ordinary work")),
+                content: UserInputContent::text(String::from("ordinary work")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -11957,7 +14192,7 @@ mod tests {
                 command_id: command(4)?,
                 session_id: uuid(6),
                 expected_active_turn_id: uuid(7),
-                content: InputContent::new(String::from("continue after the stop")),
+                content: UserInputContent::text(String::from("continue after the stop")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -11979,7 +14214,7 @@ mod tests {
             command_id: command(4)?,
             session_id: uuid(6),
             expected_active_turn_id: uuid(7),
-            content: InputContent::new(String::from("continue after reconciliation")),
+            content: UserInputContent::text(String::from("continue after reconciliation")),
             expected_defaults_version: CanonicalU64::new(1),
             model_settings: ModelSettingsOverlay::inherit_all(),
         };
@@ -11993,7 +14228,7 @@ mod tests {
              \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
-             \"content\":\"continue after reconciliation\",\
+             \"content\":[{\"type\":\"text\",\"text\":\"continue after reconciliation\"}],\
              \"expected_defaults_version\":\"1\",\
              \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
              \"fast_mode\":{\"kind\":\"inherit\"},\
@@ -12069,7 +14304,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(2)?,
                 session_id: uuid(3),
-                content: InputContent::new(String::from("content")),
+                content: UserInputContent::text(String::from("content")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -12127,7 +14362,7 @@ mod tests {
             command_id: command(2)?,
             target_id: uuid(3),
             provider: String::from("example-host"),
-            repository: String::from("owner/repository"),
+            repository: String::from("example/repository"),
             subject: ReviewTargetSubject::ChangeRequest {
                 number: CanonicalU64::new(42),
             },
@@ -12143,7 +14378,7 @@ mod tests {
             "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"create_review_target\",\
              \"command_id\":\"00000000-0000-0000-0000-000000000002\",\
              \"target_id\":\"00000000-0000-0000-0000-000000000003\",\
-             \"provider\":\"example-host\",\"repository\":\"owner/repository\",\
+             \"provider\":\"example-host\",\"repository\":\"example/repository\",\
              \"subject\":{\"kind\":\"change_request\",\"number\":\"42\"},\
              \"head_revision\":\"head-revision\",\"base_revision\":\"base-revision\",\
              \"stack_parent_target_id\":null}}\n"
@@ -13403,7 +15638,7 @@ mod tests {
             command_id: command(4)?,
             session_id: uuid(6),
             expected_active_turn_id: uuid(7),
-            content: InputContent::new(String::from("continue after the stop")),
+            content: UserInputContent::text(String::from("continue after the stop")),
             expected_defaults_version: CanonicalU64::new(1),
             descendant_scope: DescendantTerminationScope::ParentAndDescendants,
             model_settings: ModelSettingsOverlay::inherit_all(),
@@ -13418,7 +15653,7 @@ mod tests {
              \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
              \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
              \"expected_active_turn_id\":\"00000000-0000-0000-0000-000000000007\",\
-             \"content\":\"continue after the stop\",\
+             \"content\":[{\"type\":\"text\",\"text\":\"continue after the stop\"}],\
              \"expected_defaults_version\":\"1\",\
              \"descendant_scope\":\"parent_and_descendants\",\
              \"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},\
@@ -13593,6 +15828,115 @@ mod tests {
     fn inv033_tool_approval_user_decider_rejects_delegate_rationale() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"5","message":{"type":"session_event","cursor":"8","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user","command_id":"00000000-0000-0000-0000-000000000009"},"rationale":"forged judge rationale"}}}"#,
+        );
+    }
+
+    /// INV-033: the override request carries its exact closed wire shape.
+    #[test]
+    fn inv033_override_denied_tool_request_has_exact_closed_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let override_request = ClientRequest::OverrideDeniedToolRequest {
+            command_id: command(4)?,
+            session_id: uuid(6),
+            tool_request_id: uuid(7),
+        };
+        let frame =
+            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, override_request)?;
+        let encoded = encode_client_line(&frame)?;
+        assert_eq!(
+            String::from_utf8(encoded.clone())?,
+            "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"override_denied_tool_request\",\
+             \"command_id\":\"00000000-0000-0000-0000-000000000004\",\
+             \"session_id\":\"00000000-0000-0000-0000-000000000006\",\
+             \"tool_request_id\":\"00000000-0000-0000-0000-000000000007\"}}\n"
+        );
+        assert_eq!(decode_client_line(&encoded)?, frame);
+
+        assert_client_malformed(
+            r#"{"version":1,"request_id":"2","request":{"type":"override_denied_tool_request","command_id":"00000000-0000-0000-0000-000000000004","session_id":"00000000-0000-0000-0000-000000000006","tool_request_id":"00000000-0000-0000-0000-000000000007","decision":{"type":"approve"}}}"#,
+        );
+        Ok(())
+    }
+
+    /// INV-033: the override receipt and every override rejection carry their
+    /// exact closed wire shapes.
+    #[test]
+    fn inv033_override_denial_responses_have_exact_closed_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::ToolDenialOverridden {
+                tool_request_id: uuid(7),
+            },
+            r#"{"type":"tool_denial_overridden","tool_request_id":"00000000-0000-0000-0000-000000000007"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the request carries no delegate denial"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolRequestNotDelegateDenied {
+                    tool_request_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the request carries no delegate denial","detail":{"type":"tool_request_not_delegate_denied","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("the denial is still resolving"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolRequestNotTerminallyDenied {
+                    tool_request_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"the denial is still resolving","detail":{"type":"tool_request_not_terminally_denied","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(4)?,
+            ServerMessage::Error {
+                code: ErrorCode::Rejected,
+                message: String::from("an override is already recorded for the denial"),
+                detail: ErrorDetail::rejected(RejectionDetail::ToolDenialAlreadyOverridden {
+                    tool_request_id: uuid(7),
+                }),
+            },
+            r#"{"type":"error","code":"rejected","message":"an override is already recorded for the denial","detail":{"type":"tool_denial_already_overridden","tool_request_id":"00000000-0000-0000-0000-000000000007"}}"#,
+        )
+    }
+
+    #[test]
+    fn inv033_tool_approval_user_override_event_round_trips()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_server_message_round_trip(
+            request(5)?,
+            ServerMessage::SessionEvent {
+                cursor: CanonicalU64::new(9),
+                session_id: uuid(6),
+                event: SessionEvent::ToolApprovalDecided {
+                    turn_id: uuid(7),
+                    tool_request_id: uuid(8),
+                    decision: ToolApprovalEventDecision::Approve {},
+                    decider: ToolApprovalEventDecider::UserOverride {
+                        command_id: uuid(9),
+                        overridden_tool_request_id: uuid(12),
+                    },
+                    rationale: None,
+                },
+            },
+            r#"{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user_override","command_id":"00000000-0000-0000-0000-000000000009","overridden_tool_request_id":"00000000-0000-0000-0000-00000000000c"},"rationale":null}}"#,
+        )
+    }
+
+    /// A user-override decider is approve-only and carries no rationale: a
+    /// denial or a rationale under that decider is a malformed frame.
+    #[test]
+    fn inv033_tool_approval_user_override_decider_is_approve_only() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"6","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"deny","reason":null},"decider":{"type":"user_override","command_id":"00000000-0000-0000-0000-000000000009","overridden_tool_request_id":"00000000-0000-0000-0000-00000000000c"},"rationale":null}}}"#,
+        );
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"7","message":{"type":"session_event","cursor":"9","session_id":"00000000-0000-0000-0000-000000000006","event":{"type":"tool_approval_decided","turn_id":"00000000-0000-0000-0000-000000000007","tool_request_id":"00000000-0000-0000-0000-000000000008","decision":{"type":"approve"},"decider":{"type":"user_override","command_id":"00000000-0000-0000-0000-000000000009","overridden_tool_request_id":"00000000-0000-0000-0000-00000000000c"},"rationale":"forged rationale"}}}"#,
         );
     }
 
@@ -15086,7 +17430,7 @@ mod tests {
         let steering_request = ClientRequest::SubmitInput {
             command_id: command(1)?,
             session_id: uuid(2),
-            content: InputContent::new(String::from("steering")),
+            content: UserInputContent::text(String::from("steering")),
             expected_defaults_version: None,
             model_settings: ModelSettingsOverlay::inherit_all(),
             delivery: Some(InputDelivery::Steer {
@@ -15103,7 +17447,8 @@ mod tests {
                 "\"type\":\"submit_input\",",
                 "\"command_id\":\"00000000-0000-0000-0000-000000000001\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
-                "\"content\":\"steering\",\"expected_defaults_version\":null,",
+                "\"content\":[{\"type\":\"text\",\"text\":\"steering\"}],",
+                "\"expected_defaults_version\":null,",
                 "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
                 "\"fast_mode\":{\"kind\":\"inherit\"},",
                 "\"service_tier\":{\"kind\":\"inherit\"}},",
@@ -15125,7 +17470,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(4)?,
                 session_id: uuid(2),
-                content: InputContent::new(String::from("queued")),
+                content: UserInputContent::text(String::from("queued")),
                 expected_defaults_version: Some(CanonicalU64::new(7)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Queue {
@@ -15141,7 +17486,8 @@ mod tests {
                 "\"type\":\"submit_input\",",
                 "\"command_id\":\"00000000-0000-0000-0000-000000000004\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
-                "\"content\":\"queued\",\"expected_defaults_version\":\"7\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"queued\"}],",
+                "\"expected_defaults_version\":\"7\",",
                 "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
                 "\"fast_mode\":{\"kind\":\"inherit\"},",
                 "\"service_tier\":{\"kind\":\"inherit\"}},",
@@ -15164,7 +17510,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(5)?,
                 session_id: uuid(2),
-                content: InputContent::new(String::from("start")),
+                content: UserInputContent::text(String::from("start")),
                 expected_defaults_version: Some(CanonicalU64::new(7)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::StartWhenIdle {}),
@@ -15178,7 +17524,8 @@ mod tests {
                 "\"type\":\"submit_input\",",
                 "\"command_id\":\"00000000-0000-0000-0000-000000000005\",",
                 "\"session_id\":\"00000000-0000-0000-0000-000000000002\",",
-                "\"content\":\"start\",\"expected_defaults_version\":\"7\",",
+                "\"content\":[{\"type\":\"text\",\"text\":\"start\"}],",
+                "\"expected_defaults_version\":\"7\",",
                 "\"model_settings\":{\"reasoning_level\":{\"kind\":\"inherit\"},",
                 "\"fast_mode\":{\"kind\":\"inherit\"},",
                 "\"service_tier\":{\"kind\":\"inherit\"}},",
@@ -15200,7 +17547,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(6)?,
                 session_id: uuid(2),
-                content: InputContent::new(String::from("start without defaults")),
+                content: UserInputContent::text(String::from("start without defaults")),
                 expected_defaults_version: None,
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::StartWhenIdle {}),
@@ -15214,7 +17561,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(7)?,
                 session_id: uuid(2),
-                content: InputContent::new(String::from("queue without defaults")),
+                content: UserInputContent::text(String::from("queue without defaults")),
                 expected_defaults_version: None,
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Queue {
@@ -15237,7 +17584,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(5)?,
                 session_id: uuid(2),
-                content: InputContent::new(String::from("misconfigured steering")),
+                content: UserInputContent::text(String::from("misconfigured steering")),
                 expected_defaults_version: Some(CanonicalU64::new(7)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Steer {
@@ -15253,7 +17600,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(6)?,
                 session_id: uuid(2),
-                content: InputContent::new(String::from("zero-version steering")),
+                content: UserInputContent::text(String::from("zero-version steering")),
                 expected_defaults_version: Some(CanonicalU64::new(0)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Steer {
@@ -15314,23 +17661,21 @@ mod tests {
     }
 
     #[test]
-    fn submit_content_is_admitted_by_the_application_not_wire_decoding()
+    fn submit_content_bound_is_enforced_before_wire_encoding()
     -> Result<(), Box<dyn std::error::Error>> {
         let content = "x".repeat(MAX_CONTENT_FRAGMENT_BYTES + 1);
-        let frame = ClientFrame::try_new(
+        let result = ClientFrame::try_new(
             request(1)?,
             ClientRequest::SubmitInput {
                 command_id: command(5)?,
                 session_id: uuid(6),
-                content: InputContent::new(content),
+                content: UserInputContent::text(content),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
             },
-        )?;
-        let encoded = encode_client_line(&frame)?;
-        assert!(encoded.len() < super::MAX_FRAME_BYTES);
-        assert_eq!(decode_client_line(&encoded)?, frame);
+        );
+        assert_eq!(result, Err(FrameValidationError::UserContentShape));
         Ok(())
     }
 
@@ -15463,10 +17808,10 @@ mod tests {
                 model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id: uuid(2),
-                    content: InputContent::new("queued request".to_owned()),
+                    content: UserInputContent::text("queued request".to_owned()),
                 },
             },
-            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued request"}}"#,
+            r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","model_settings":null,"state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"text","text":"queued request"}]}}"#,
         )?;
         assert_server_message_round_trip(
             request(15)?,
@@ -15749,10 +18094,10 @@ mod tests {
                     accepted_input_id: uuid(2),
                     turn_id: uuid(3),
                     acceptance_position: CanonicalU64::new(1),
-                    content: InputContent::new("accepted request".to_owned()),
+                    content: UserInputContent::text("accepted request".to_owned()),
                 },
             },
-            r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"input_accepted","accepted_input_id":"00000000-0000-0000-0000-000000000002","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","content":"accepted request"}}"#,
+            r#"{"type":"session_event","cursor":"2","session_id":"00000000-0000-0000-0000-000000000001","event":{"type":"input_accepted","accepted_input_id":"00000000-0000-0000-0000-000000000002","turn_id":"00000000-0000-0000-0000-000000000003","acceptance_position":"1","content":[{"type":"text","text":"accepted request"}]}}"#,
         )?;
         assert_server_message_round_trip(
             request(19)?,
@@ -16004,7 +18349,7 @@ mod tests {
             }),
             state: TurnState::Queued {
                 accepted_input_id: uuid(2),
-                content: InputContent::new("settings-aware turn".to_owned()),
+                content: UserInputContent::text("settings-aware turn".to_owned()),
             },
         };
         let frame = ServerFrame::try_new_for_version(ProtocolVersion::One, request(43)?, message)?;
@@ -16012,6 +18357,26 @@ mod tests {
 
         assert_eq!(decode_server_line(&encoded)?, frame);
         Ok(())
+    }
+
+    /// INV-012: queued user content is validated before a server frame can be
+    /// encoded, including when no model-settings snapshot is present.
+    #[test]
+    fn inv012_transcript_turn_rejects_invalid_queued_content_before_encoding() {
+        let result = ServerFrame::try_new(
+            RequestId::try_new(1).expect("fixture request identity is admitted"),
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::Queued {
+                    accepted_input_id: uuid(2),
+                    content: UserInputContent::from_parts(Vec::new()),
+                },
+            },
+        );
+
+        assert_eq!(result, Err(FrameValidationError::UserContentShape));
     }
 
     /// INV-033: queued turn settings evidence belongs to the accepted input
@@ -16039,7 +18404,7 @@ mod tests {
                 }),
                 state: TurnState::Queued {
                     accepted_input_id: uuid(2),
-                    content: InputContent::new("settings-aware turn".to_owned()),
+                    content: UserInputContent::text("settings-aware turn".to_owned()),
                 },
             },
         )
@@ -16087,7 +18452,7 @@ mod tests {
     #[test]
     fn inv033_transcript_turn_requires_model_settings_member() {
         assert_server_malformed(
-            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":"queued request"}}}"#,
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","state":{"type":"queued","accepted_input_id":"00000000-0000-0000-0000-000000000002","content":[{"type":"text","text":"queued request"}]}}}"#,
         );
     }
 
@@ -16380,7 +18745,7 @@ mod tests {
             ClientRequest::SubmitInput {
                 command_id: command(1).expect("fixture command identity is admitted"),
                 session_id: uuid(2),
-                content: InputContent::new(String::from("steer")),
+                content: UserInputContent::text(String::from("steer")),
                 expected_defaults_version: None,
                 model_settings,
                 delivery: Some(InputDelivery::Steer {

@@ -722,7 +722,12 @@ async fn run_case(
         InProcessToolDispatchGate::default(),
         suite.catalog.clone(),
         suite.executor.clone(),
-    );
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        database.pool.clone(),
+        None,
+        Vec::new(),
+    ));
     timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
         .await
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;
@@ -11853,6 +11858,8 @@ fn turn_snapshot_reports_ambiguous_model_recovery_as_infrastructure() {
     let state = ProcessTurnState::ActiveAwaitingModelCallRecovery {
         ended_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_TURN_ATTEMPT_ID)),
         recovery_call: ModelCallId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID)),
+        automatic_reconciliation_attempts: 0,
+        operator_action_required: false,
     };
 
     assert_eq!(

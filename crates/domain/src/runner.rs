@@ -542,7 +542,8 @@ pub enum RunnerSandboxProfile {
 pub enum RunnerToolPermissionOverride {
     /// The exact tool may run without per-attempt confirmation.
     Auto,
-    /// The exact tool requires confirmation by an exact user command.
+    /// The exact tool requires advance user confirmation: an exact user
+    /// command, or a one-shot user override of a delegate denial.
     Confirm,
 }
 
@@ -2981,6 +2982,19 @@ fn validate_dispatch(
     })
 }
 
+/// Whether the user confirmed this exact request in advance, through either
+/// the applied user command that decided it or the one-shot user override
+/// recorded against the delegate denial the request re-proposes. Both are
+/// per-request user agency exercised before dispatch. The frozen session
+/// blanket is excluded: it is standing daemon-local automation and never
+/// runner-dispatch authority (INV-035, INV-045).
+const fn confirmed_by_user(source: ToolDecisionSource) -> bool {
+    matches!(
+        source,
+        ToolDecisionSource::UserCommand | ToolDecisionSource::UserOverride
+    )
+}
+
 fn validate_authorized_attempt(
     session: SessionId,
     tool: &ToolName,
@@ -3006,7 +3020,7 @@ fn validate_authorized_attempt(
         || attempt.attempt() != correlation.attempt()
         || approved.approval().source() == ToolDecisionSource::SessionBlanket
         || (approval == CredentialToolApproval::SessionPolicy
-            && approved.approval().source() != ToolDecisionSource::UserCommand)
+            && !confirmed_by_user(approved.approval().source()))
     {
         return Err(RunnerDomainError::CorrelationMismatch);
     }
@@ -3718,7 +3732,7 @@ mod tests {
     use crate::{
         ApprovedToolRequest, DangerousToolAutoApproval, DecideToolRequest, DurableCommandId,
         ReconstitutedToolAttempt, ResolvedContextFrontierSnapshot, ToolApprovalDecision,
-        ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd,
+        ToolApprovalPosture, ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd,
         ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolExecutionErrorKind,
         ToolRequest, ToolRequestId, ToolRequestOrdinal, ToolRequestReconstitutionInput,
         test_support::{
@@ -4095,6 +4109,37 @@ mod tests {
         effect: RunnerToolEffectClass,
     ) -> RunnerToolAttemptAuthorization {
         let approved = blanket_approved_request(tool_name);
+        let authorized = approved
+            .prepare_attempt(attempt, turn_attempt_id(0x7b00), tool_effect_class(effect))
+            .authorize()
+            .expect("the prepared fixture attempt authorizes once");
+        RunnerToolAttemptAuthorization::try_new(approved, authorized)
+            .expect("the approved request binds the authorized attempt")
+    }
+
+    fn user_override_approved_request(tool_name: &str) -> ApprovedToolRequest {
+        const OVERRIDE_COMMAND: u128 = 0x7c00;
+        const DENIED_REQUEST: u128 = 0x7c01;
+
+        let request = request(tool_name);
+        let approval = ToolApprovalResolutionReconstitutionInput::user_override(
+            request.id(),
+            DurableCommandId::from_uuid(uuid::Uuid::from_u128(OVERRIDE_COMMAND)),
+            tool_request_id(DENIED_REQUEST),
+            ToolApprovalPosture::Delegated,
+        )
+        .reconstitute()
+        .expect("the fixture override consumes under the frozen delegated posture");
+        ApprovedToolRequest::try_from_resolution(request, approval)
+            .expect("the fixture approval matches its request")
+    }
+
+    fn user_override_authorized(
+        tool_name: &str,
+        attempt: ToolAttemptId,
+        effect: RunnerToolEffectClass,
+    ) -> RunnerToolAttemptAuthorization {
+        let approved = user_override_approved_request(tool_name);
         let authorized = approved
             .prepare_attempt(attempt, turn_attempt_id(0x7b00), tool_effect_class(effect))
             .authorize()
@@ -7039,6 +7084,33 @@ mod tests {
                 lease_offer_request("inspect"),
             ),
             Err(RunnerDomainError::CorrelationMismatch)
+        );
+    }
+
+    #[test]
+    fn s32_inv045_exact_confirm_override_accepts_user_override_approval() {
+        let (registration, pin) = pinned_with_confirm_override("admin");
+        let lease = pin
+            .placement
+            .offer_lease(
+                &enrollment_for_registration(&registration),
+                &registration,
+                pin.grant.as_ref(),
+                user_override_authorized(
+                    "inspect",
+                    tool_attempt_id(RETRY_ATTEMPT),
+                    RunnerToolEffectClass::Pure,
+                ),
+                lease_offer_request("inspect"),
+            )
+            .expect("a one-shot user override confirms the session-policy pair");
+
+        assert_eq!(
+            lease
+                .credential_authorization()
+                .expect("profile selection records pair posture")
+                .approval,
+            CredentialToolApproval::SessionPolicy
         );
     }
 

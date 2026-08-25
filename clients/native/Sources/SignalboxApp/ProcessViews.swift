@@ -2030,7 +2030,7 @@ final class ProcessSessionDetailViewModel: ObservableObject {
           id: acceptedInputID,
           turnID: turnID,
           acceptancePosition: acceptancePosition,
-          content: content
+          content: content.displayText
         )
         if terminalTurnIDs.contains(turnID) {
           pendingInputs.removeAll { $0.id == acceptedInputID }
@@ -2406,6 +2406,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       deciderLabel =
         "\(decisionLabel) by delegate; model selection \(modelSelectionID.rawValue); "
         + "call \(modelCallID.rawValue)"
+    case .userOverride(let commandID, let overriddenToolRequestID):
+      deciderLabel =
+        "\(decisionLabel) by user override; command \(commandID.rawValue); "
+        + "overrides denial of \(overriddenToolRequestID.rawValue)"
     }
     return .tool(
       SignalboxToolCard(
