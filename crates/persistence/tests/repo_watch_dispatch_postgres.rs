@@ -4,7 +4,11 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+mod support;
+
 use std::{error::Error, num::NonZeroU64, time::Duration};
+
+use support::record_empty_instruction_manifest;
 
 use signalbox_application::{
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
@@ -88,10 +92,6 @@ use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
-
-mod support;
-
-use support::record_empty_instruction_manifest;
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_repo_watch_dispatch";
@@ -1452,6 +1452,9 @@ async fn checkpoint_delegated_approval_at(
     };
     let turn = activated.turn();
     drop(activated);
+    // The daemon records a turn-start instruction manifest for every activated
+    // turn before any model work, so this fixture stands in for that write the
+    // way the other PostgreSQL fixtures do.
     record_empty_instruction_manifest(pool, session).await?;
 
     let repository = PostgresModelCallRepository::new(
