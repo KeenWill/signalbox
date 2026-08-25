@@ -1879,23 +1879,6 @@ const schemas = {
         ],
         "type": "string"
       },
-      "WebSearchCursor": {
-        "additionalProperties": false,
-        "description": "Stable opaque descending search keyset boundary.",
-        "properties": {
-          "address": {
-            "$ref": "#/$defs/WebTimelineAddress"
-          },
-          "projection_id": {
-            "$ref": "#/$defs/WebSearchProjectionId"
-          }
-        },
-        "required": [
-          "address",
-          "projection_id"
-        ],
-        "type": "object"
-      },
       "WebSearchHighlight": {
         "additionalProperties": false,
         "description": "One half-open UTF-8 byte range within a bounded snippet.",
@@ -2179,7 +2162,21 @@ const schemas = {
       "continuation": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebSearchCursor"
+            "additionalProperties": false,
+            "description": "Stable opaque descending search keyset boundary.",
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/WebTimelineAddress"
+              },
+              "projection_id": {
+                "$ref": "#/$defs/WebSearchProjectionId"
+              }
+            },
+            "required": [
+              "address",
+              "projection_id"
+            ],
+            "type": "object"
           },
           {
             "type": "null"
@@ -2195,7 +2192,8 @@ const schemas = {
       }
     },
     "required": [
-      "results"
+      "results",
+      "continuation"
     ],
     "title": "WebSearchPage",
     "type": "object"

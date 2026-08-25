@@ -184,11 +184,6 @@ export type WebModelSelection = {
 
 export type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_arguments" | "tool_result" | "session_metadata" | "attachment_filename" | "attachment_media_metadata" | "derived_text_artifact";
 
-export type WebSearchCursor = {
-  readonly address: WebTimelineAddress;
-  readonly projection_id: WebSearchProjectionId;
-};
-
 export type WebSearchHighlight = {
   readonly end_byte: number;
   readonly start_byte: number;
@@ -391,7 +386,10 @@ export type WebImportContinuationResponse = {
 };
 
 export type WebSearchPage = {
-  readonly continuation?: WebSearchCursor | null;
+  readonly continuation: {
+  readonly address: WebTimelineAddress;
+  readonly projection_id: WebSearchProjectionId;
+} | null;
   readonly results: ReadonlyArray<WebSearchResult>;
 };
 
