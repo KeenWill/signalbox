@@ -343,6 +343,12 @@ BEGIN
     RETURN NEW;
 END;
 $$;
+
+CREATE TRIGGER web_usage_projection_matches_its_source
+BEFORE INSERT ON web_usage_call_projection
+FOR EACH ROW
+EXECUTE FUNCTION require_web_usage_source_correlation();
+
 CREATE INDEX web_usage_by_recorded_call
     ON web_usage_call_projection (recorded_at DESC, model_call_id DESC);
 CREATE INDEX web_usage_by_session_recorded_call
