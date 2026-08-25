@@ -1045,9 +1045,10 @@ fn parse_dimension_with_sign(value: &str, allow_negative: bool) -> Result<Option
         return Ok(None);
     }
     if let Some(calculation) = parse_css_calculation(value) {
-        if calculation.value.is_some_and(|result| {
-            !result.is_finite() || (!allow_negative && result.is_sign_negative())
-        }) {
+        if calculation
+            .value
+            .is_some_and(|result| !result.is_finite() || (!allow_negative && result < 0.0))
+        {
             return Err(ParseIssue::Malformed);
         }
         return Ok(None);
@@ -1119,10 +1120,11 @@ impl<'a> CalculationParser<'a> {
         if ![b"calc".as_slice(), b"min", b"max", b"clamp"]
             .iter()
             .any(|expected| name.eq_ignore_ascii_case(expected))
-            || !self.consume(b'(')
+            || !self.peek_is(b'(')
         {
             return None;
         }
+        self.position += 1;
         let first = self.parse_sum()?;
         let mut arguments = vec![first.clone()];
         while self.consume(b',') {
@@ -1370,12 +1372,26 @@ impl<'a> CalculationParser<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        while self
-            .input
-            .get(self.position)
-            .is_some_and(u8::is_ascii_whitespace)
-        {
-            self.position += 1;
+        loop {
+            while self
+                .input
+                .get(self.position)
+                .is_some_and(u8::is_ascii_whitespace)
+            {
+                self.position += 1;
+            }
+            if self.input.get(self.position..self.position + 2) != Some(b"/*") {
+                return;
+            }
+            self.position += 2;
+            let comment_end = self.input[self.position..]
+                .windows(2)
+                .position(|window| window == b"*/");
+            let Some(comment_end) = comment_end else {
+                self.position = self.input.len();
+                return;
+            };
+            self.position += comment_end + 2;
         }
     }
 }

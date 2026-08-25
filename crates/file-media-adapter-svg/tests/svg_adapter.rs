@@ -938,6 +938,47 @@ async fn invalid_calculation_dimension_is_rejected() -> Result<(), Box<dyn Error
 }
 
 #[tokio::test]
+async fn calculation_function_name_must_touch_opening_parenthesis() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc (1px)"/>"#),
+        "malformed_svg",
+    )
+    .await?;
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="min (1px)"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn negative_zero_calculation_dimension_is_accepted() -> Result<(), Box<dyn Error>> {
+    let source =
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(-0px)"/>"#)
+            .into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Validated
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn calculation_treats_css_comments_as_whitespace() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(1px /* gap */ + 2px)"/>"#,
+    )
+    .into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Validated
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn calculation_addition_requires_surrounding_whitespace() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(1px+2px)"/>"#,),
