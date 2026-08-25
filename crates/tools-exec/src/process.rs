@@ -1123,8 +1123,9 @@ struct GitWorktreeIdentity {
 #[cfg(target_os = "linux")]
 impl WorkspaceDirectoryIdentity {
     fn duplicate(&self) -> Result<Self, ProcessSpawnFailure> {
-        let directory =
-            rustix::io::dup(&self._directory).map_err(|_| ProcessSpawnFailure::Other)?;
+        let directory = rustix::io::dup(&self._directory)
+            .and_then(inherited_descriptor_above_standard_streams)
+            .map_err(|_| ProcessSpawnFailure::Other)?;
         let bind_source = PathBuf::from(format!(
             "/proc/self/fd/{}",
             rustix::fd::AsRawFd::as_raw_fd(&directory)
@@ -1341,7 +1342,7 @@ fn git_arguments_select_repository(arguments: &[String]) -> bool {
             return true;
         }
         if !argument.starts_with('-') || argument == "-" {
-            return argument == "init";
+            return matches!(argument.as_str(), "init" | "clone");
         }
         if matches!(
             argument.as_str(),
@@ -3124,6 +3125,24 @@ mod tests {
 
     use super::*;
 
+    /// Names a filesystem fixture uniquely within this test process.
+    ///
+    /// The wall clock alone is not a unique name: parallel test threads can
+    /// observe the same nanosecond reading and then collide on `create_dir`,
+    /// so a process-wide sequence disambiguates concurrent fixtures.
+    #[cfg(target_os = "linux")]
+    static TEST_FIXTURE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(target_os = "linux")]
+    fn unique_fixture_identity() -> String {
+        let nanoseconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos())
+            .unwrap_or_default();
+        let sequence = TEST_FIXTURE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        format!("{}-{nanoseconds}-{sequence}", std::process::id())
+    }
+
     const SANDBOXED_STDOUT: &str = "checked";
     const SANDBOXED_WORKING_DIRECTORY: &str = "crate";
     const SETUP_CAPTURE_BYTES: usize = 4;
@@ -3192,6 +3211,16 @@ mod tests {
     #[test]
     fn git_repository_selection_parses_only_the_global_prefix_and_command() {
         assert!(git_arguments_select_repository(&[String::from("init")]));
+        assert!(git_arguments_select_repository(&[String::from("clone")]));
+        assert!(git_arguments_select_repository(&[
+            String::from("-c"),
+            String::from("protocol.file.allow=always"),
+            String::from("clone"),
+        ]));
+        assert!(!git_arguments_select_repository(&[
+            String::from("add"),
+            String::from("clone"),
+        ]));
         assert!(git_arguments_select_repository(&[
             String::from("--bare"),
             String::from("status"),
@@ -3413,12 +3442,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     impl ProbeShellFixture {
         fn new() -> Result<Self, Box<dyn Error>> {
-            let identity = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos();
             let root = std::env::temp_dir().join(format!(
-                "signalbox-exec-probe-shell-{}-{identity}",
-                std::process::id()
+                "signalbox-exec-probe-shell-{}",
+                unique_fixture_identity()
             ));
             let blocked_directory = root.join("blocked");
             let escaped_directory = root.join("escaped");
@@ -3465,13 +3491,9 @@ mod tests {
 
     impl ReplacementWorkspace {
         fn new() -> Result<Self, std::io::Error> {
-            let identity = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(std::io::Error::other)?
-                .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "signalbox-exec-workspace-{}-{identity}",
-                std::process::id()
+                "signalbox-exec-workspace-{}",
+                unique_fixture_identity()
             ));
             let retired = path.with_extension("retired");
             std::fs::create_dir(&path)?;
@@ -3495,13 +3517,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     impl ReplacementSupervisor {
         fn new() -> Result<Self, std::io::Error> {
-            let identity = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(std::io::Error::other)?
-                .as_nanos();
             let path = std::env::temp_dir().join(format!(
-                "signalbox-exec-supervisor-{}-{identity}",
-                std::process::id()
+                "signalbox-exec-supervisor-{}",
+                unique_fixture_identity()
             ));
             let retired = path.with_extension("retired");
             std::fs::copy(std::env::current_exe()?, &path)?;

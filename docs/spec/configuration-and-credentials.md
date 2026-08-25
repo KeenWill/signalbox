@@ -1178,6 +1178,9 @@ workspace root and supplies the pinned administration and worktree paths through
 Git's environment. Discovery stops at the first `.git` entry, so a nested clone
 or submodule never inherits an outer worktree's environment, and explicit Git
 repository selectors (`-C`, `--git-dir`, or `--work-tree`) suppress injection.
+The repository-creating commands `init` and `clone` also suppress injection,
+because each establishes a new repository rather than operating on the current
+one, and an inherited `GIT_WORK_TREE` makes `clone` refuse its destination.
 Before injection, execution atomically rewrites the linked-worktree
 administration directory's sandbox-only `gitdir` backlink to the corresponding
 host marker path so host-side worktree maintenance does not prune the live
