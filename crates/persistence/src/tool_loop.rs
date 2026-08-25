@@ -349,6 +349,35 @@ impl PostgresToolLoopRepository {
         Ok(turn.map(turn_id_from_uuid))
     }
 
+    /// Finds an active relevant turn that has not prepared its first model call.
+    pub async fn find_dispatch_start_turn(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<TurnId>, ToolLoopRepositoryError> {
+        let turn = sqlx::query_scalar::<_, Uuid>(
+            "SELECT lifecycle.turn_id
+               FROM turn_lifecycle AS lifecycle
+              WHERE lifecycle.session_id = $1
+                AND lifecycle.state_kind = 'active'
+                AND NOT lifecycle.delegation_runtime_terminal
+                AND goal_turn_is_runtime_relevant(
+                    lifecycle.session_id, lifecycle.turn_id
+                )
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM model_call AS call
+                     WHERE call.session_id = lifecycle.session_id
+                       AND call.turn_id = lifecycle.turn_id
+                )
+              ORDER BY lifecycle.acceptance_position
+              LIMIT 1",
+        )
+        .bind(session_id_to_uuid(session))
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(turn.map(turn_id_from_uuid))
+    }
+
     /// Atomically reopens one delivered foreground child wait as a fresh turn attempt.
     pub async fn resume_child_wait(
         &self,

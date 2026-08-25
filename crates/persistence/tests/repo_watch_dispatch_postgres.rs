@@ -6,10 +6,11 @@
 
 mod support;
 
-use std::{error::Error, num::NonZeroU64, time::Duration};
+use std::{collections::HashSet, error::Error, num::NonZeroU64, time::Duration};
 
 use support::record_empty_instruction_manifest;
 
+use rust_decimal::Decimal;
 use signalbox_application::{
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
     ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority, AuthorizeModelCallOutcome,
@@ -569,6 +570,16 @@ fn one_action_rule(cooldown: Duration) -> Result<RepoWatchRule, Box<dyn Error>> 
         }],
         cooldown,
     )
+}
+
+fn rule_with_dispatch_action_count(action_count: usize) -> Result<RepoWatchRule, Box<dyn Error>> {
+    let template = SessionTemplateName::try_new(TEMPLATE.to_owned())?;
+    let actions = (0..action_count)
+        .map(|_| RepoWatchRuleActionV1::DispatchSession {
+            template: template.clone(),
+        })
+        .collect();
+    rule_with_actions_and_cooldown(RepoWatchRuleVersion::V1, actions, Duration::ZERO)
 }
 
 fn eager_merge_forward_rule() -> Result<RepoWatchRule, Box<dyn Error>> {
@@ -1331,10 +1342,21 @@ async fn dispatch_fixture() -> Result<DispatchFixture, Box<dyn Error>> {
 }
 
 async fn dispatch_fixture_for(rule: RepoWatchRule) -> Result<DispatchFixture, Box<dyn Error>> {
+    dispatch_fixture_for_with_lease(rule, None).await
+}
+
+async fn dispatch_fixture_for_with_lease(
+    rule: RepoWatchRule,
+    dispatch_start_lease: Option<Duration>,
+) -> Result<DispatchFixture, Box<dyn Error>> {
     let (container, pool) = migrated_postgres().await?;
     let repository = repository()?;
     let event_store = PostgresRepoWatchStore::new(pool.clone());
     let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let dispatch_store = match dispatch_start_lease {
+        Some(lease) => dispatch_store.with_dispatch_start_lease(lease),
+        None => dispatch_store,
+    };
     let initial_observation = observation(context(INITIAL_HEAD)?)?;
     let initial = RepoWatchCursorCandidate::new(initial_observation);
     let first_generation = generation(
@@ -5717,6 +5739,325 @@ async fn terminal_cutoff_preserves_an_obligation_for_its_own_event() -> Result<(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn inv069_dispatch_admission_records_bounded_durable_start_leases()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        rule_with_dispatch_action_count(32)?,
+        Some(Duration::from_secs(10 * 60)),
+    )
+    .await?;
+    let loaded = fixture
+        .store
+        .load_unstarted_dispatch_sessions(&fixture.repository)
+        .await?;
+    let loaded = loaded.into_iter().collect::<HashSet<_>>();
+    let expected = fixture.sessions.iter().copied().collect::<HashSet<_>>();
+    let lease_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_start_lease")
+            .fetch_one(&fixture.pool)
+            .await?;
+    let longest_lease_seconds: Decimal = sqlx::query_scalar(
+        "SELECT max(extract(epoch FROM (expires_at - leased_at)))
+           FROM repo_watch_dispatch_start_lease",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(loaded, expected);
+    assert_eq!(lease_count, i64::try_from(fixture.sessions.len())?);
+    assert!(longest_lease_seconds > Decimal::ZERO);
+    assert!(longest_lease_seconds <= Decimal::from(5 * 60));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv069_retired_generation_one_turn_cannot_prepare_after_expiry()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        one_action_rule(Duration::ZERO)?,
+        Some(Duration::from_secs(1)),
+    )
+    .await?;
+    let session = fixture.session(0);
+    let mut activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(fixture.pool.clone()),
+    );
+    assert!(matches!(
+        activation.execute(session).await?,
+        StartEligibleTurnOutcome::Activated(_)
+    ));
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    assert!(
+        fixture
+            .store
+            .process_next_expired_start_lease(&fixture.repository, || {
+                DurableCommandId::from_uuid(Uuid::from_u128(0x5d_d00))
+            })
+            .await?
+    );
+
+    let repository = PostgresModelCallRepository::new(
+        fixture.pool.clone(),
+        model_targets(),
+        model_credential_reference(),
+    );
+    let outcome = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(0x5d_d01)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x5d_d02)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x5d_d03)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x5d_d04)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x5d_d05)),
+                    TurnId::from_uuid(Uuid::from_u128(0x5d_d06)),
+                )
+            },
+        )
+        .await?;
+
+    assert!(matches!(outcome, PrepareInitialModelCallOutcome::NoWork));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv069_expiry_retires_releases_and_rearms_the_dispatch() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        one_action_rule(Duration::ZERO)?,
+        Some(Duration::from_millis(1)),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let stop_command = DurableCommandId::from_uuid(Uuid::from_u128(0x5d_000));
+
+    assert!(
+        fixture
+            .store
+            .process_next_expired_start_lease(&fixture.repository, || stop_command)
+            .await?
+    );
+    assert!(
+        !fixture
+            .store
+            .process_next_expired_start_lease(&fixture.repository, || stop_command)
+            .await?
+    );
+    let expiration_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_start_lease_expiration")
+            .fetch_one(&fixture.pool)
+            .await?;
+    let current_goal_kind: String = sqlx::query_scalar(
+        "SELECT event_kind
+           FROM goal_event
+          WHERE session_id = $1
+          ORDER BY event_ordinal DESC
+          LIMIT 1",
+    )
+    .bind(fixture.session(0).as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let obligation = fixture
+        .store
+        .load_next_dispatch_obligation(
+            &fixture.repository,
+            fixture.rule.id(),
+            fixture.rule.version(),
+            immediate_retry_policy(),
+        )
+        .await?;
+
+    assert_eq!(expiration_count, 1);
+    assert_eq!(current_goal_kind, "user_stopped");
+    assert_eq!(release_count(&fixture).await?, 1);
+    assert_eq!(outstanding_obligation_count(&fixture.pool).await?, 1);
+    assert_eq!(
+        obligation
+            .as_ref()
+            .expect("expiry re-arms the dispatch obligation")
+            .latest_event(),
+        &fixture.event
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv069_quarantined_expired_lease_does_not_block_the_next_candidate()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        rule_with_dispatch_action_count(2)?,
+        Some(Duration::from_millis(1)),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let quarantined_session = fixture.session(0);
+
+    sqlx::query(
+        "INSERT INTO repo_watch_dispatch_start_lease_quarantine
+            (dispatch_id, action_ordinal, session_id, reason)
+         SELECT dispatch_id, action_ordinal, session_id, 'test corruption'
+           FROM repo_watch_dispatch_start_lease
+          WHERE session_id = $1",
+    )
+    .bind(quarantined_session.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    assert!(
+        fixture
+            .store
+            .process_next_expired_start_lease(&fixture.repository, || {
+                DurableCommandId::from_uuid(Uuid::from_u128(0x5d_e00))
+            })
+            .await?
+    );
+
+    let expired_sessions: Vec<Uuid> =
+        sqlx::query_scalar("SELECT session_id FROM repo_watch_dispatch_start_lease_expiration")
+            .fetch_all(&fixture.pool)
+            .await?;
+    assert_eq!(expired_sessions, vec![*fixture.session(1).as_uuid()]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_drain_skips_a_quarantined_expired_lease() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        rule_with_dispatch_action_count(2)?,
+        Some(Duration::from_millis(1)),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let quarantined_session = fixture.session(0);
+
+    sqlx::query(
+        "INSERT INTO repo_watch_dispatch_start_lease_quarantine
+            (dispatch_id, action_ordinal, session_id, reason)
+         SELECT dispatch_id, action_ordinal, session_id, 'test corruption'
+           FROM repo_watch_dispatch_start_lease
+          WHERE session_id = $1",
+    )
+    .bind(quarantined_session.as_uuid())
+    .execute(&fixture.pool)
+    .await?;
+
+    fixture
+        .store
+        .process_pending_expired_start_leases(|| {
+            DurableCommandId::from_uuid(Uuid::from_u128(0x5d_e01))
+        })
+        .await?;
+
+    let expired_sessions: Vec<Uuid> =
+        sqlx::query_scalar("SELECT session_id FROM repo_watch_dispatch_start_lease_expiration")
+            .fetch_all(&fixture.pool)
+            .await?;
+    assert_eq!(expired_sessions, vec![*fixture.session(1).as_uuid()]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv069_expiry_retires_a_lease_without_stopping_its_successor_goal()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        one_action_rule(Duration::ZERO)?,
+        Some(Duration::from_secs(1)),
+    )
+    .await?;
+    let session = fixture.session(0);
+    let mut predecessor_activation = StartEligibleTurnService::new(
+        UuidV7StartEligibleTurnIdGenerator,
+        StartEligibleTurnRepository::new(fixture.pool.clone()),
+    );
+    assert!(matches!(
+        predecessor_activation.execute(session).await?,
+        StartEligibleTurnOutcome::Activated(_)
+    ));
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let successor_turn = TurnId::from_uuid(Uuid::from_u128(0x5d_f02));
+    assert_applied_goal_command(
+        GoalRepository::new(fixture.pool.clone())
+            .handle_user_command(
+                GoalUserCommand::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0x5d_f00)),
+                    session,
+                    GoalUserAction::Supersede(GoalStatement::try_new(String::from(
+                        "a successor goal that must outlive its predecessor's lease",
+                    ))?),
+                ),
+                Some(GoalTurnCandidates::new(
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0x5d_f01)),
+                    successor_turn,
+                )),
+                |_| None,
+            )
+            .await?,
+    );
+    assert!(
+        fixture
+            .store
+            .process_next_expired_start_lease(&fixture.repository, || {
+                DurableCommandId::from_uuid(Uuid::from_u128(0x5d_f03))
+            })
+            .await?
+    );
+
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("the successor goal remains readable");
+    let expiration_command: Option<Uuid> = sqlx::query_scalar(
+        "SELECT goal_command_id
+           FROM repo_watch_dispatch_start_lease_expiration
+          WHERE session_id = $1",
+    )
+    .bind(session.as_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    record_empty_instruction_manifest(&fixture.pool, session).await?;
+    let model_calls = PostgresModelCallRepository::new(
+        fixture.pool.clone(),
+        model_targets(),
+        model_credential_reference(),
+    );
+    let resumed = model_calls
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(0x5d_f04)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x5d_f05)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x5d_f06)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0x5d_f07)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x5d_f08)),
+                    TurnId::from_uuid(Uuid::from_u128(0x5d_f09)),
+                )
+            },
+        )
+        .await?;
+
+    assert_eq!(goal.current().generation().get(), 2);
+    assert_eq!(goal.current().state(), &GoalState::Pursuing);
+    assert_eq!(expiration_command, None);
+    assert!(matches!(
+        resumed,
+        PrepareInitialModelCallOutcome::Checkpointed(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn terminal_event_remains_eligible_after_its_exact_head_converges()
 -> Result<(), Box<dyn Error>> {
     let fixture = dispatch_fixture_for(conflict_and_merged_event_rule()?).await?;
@@ -5786,6 +6127,137 @@ async fn terminal_event_remains_eligible_after_its_exact_head_converges()
     assert!(cutoff_processed);
     assert_eq!(goal.current().state(), &GoalState::Pursuing);
     assert_eq!(cutoff_goal_count, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_drain_expires_a_lease_after_repository_removal() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        one_action_rule(Duration::ZERO)?,
+        Some(Duration::from_millis(1)),
+    )
+    .await?;
+    let session = fixture.session(0);
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    fixture
+        .store
+        .deactivate_unconfigured_repositories(&[])
+        .await?;
+
+    fixture
+        .store
+        .process_pending_expired_start_leases(|| {
+            DurableCommandId::from_uuid(Uuid::from_u128(STARTUP_DRAIN_STOP_COMMAND_ID))
+        })
+        .await?;
+
+    let goal = GoalRepository::new(fixture.pool.clone())
+        .load_goal(session)
+        .await?
+        .expect("the removed repository goal remains readable");
+    let expiration_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_start_lease_expiration")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(goal.current().state(), &GoalState::UserStopped);
+    assert_eq!(expiration_count, 1);
+    assert_eq!(release_count(&fixture).await?, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn startup_drain_exhausts_more_than_sixteen_removed_repository_leases()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        rule_with_dispatch_action_count(17)?,
+        Some(Duration::from_millis(1)),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    fixture
+        .store
+        .deactivate_unconfigured_repositories(&[])
+        .await?;
+
+    fixture
+        .store
+        .process_pending_expired_start_leases(|| DurableCommandId::from_uuid(Uuid::now_v7()))
+        .await?;
+
+    let expiration_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_start_lease_expiration")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(usize::try_from(expiration_count)?, fixture.sessions.len());
+    Ok(())
+}
+
+/// A repository-watch task's own drain (`process_cutoffs`) calls
+/// `process_next_expired_start_lease` directly and concurrently with the
+/// global periodic drain (`process_pending_expired_start_leases`) for the
+/// same configured repository. Racing them against a repository with many
+/// expired leases makes the global drain's unlocked selection repeatedly
+/// observe a candidate that the racing task retires first, so more than one
+/// *different* candidate from the same repository legitimately vanishes in a
+/// row. That must resume the drain rather than fail it closed: only the
+/// exact same candidate vanishing twice in a row is a real predicate
+/// disagreement.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_repository_watch_drain_does_not_fail_the_global_drain_closed()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        rule_with_dispatch_action_count(24)?,
+        Some(Duration::from_millis(1)),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Each racer keeps contending for the repository lock past its first
+    // empty result: the production analogue (`repo_watch_runtime::
+    // process_cutoffs`) stops after one empty attempt, but is invoked again
+    // on the next attempt cycle while the global drain is still running, so a
+    // single racer that gave up permanently here would understate real
+    // contention against the drain's whole run.
+    let racers: Vec<_> = (0..3)
+        .map(|_| {
+            let store = fixture.store.clone();
+            let repository = fixture.repository.clone();
+            tokio::spawn(async move {
+                for _ in 0..64 {
+                    if let Err(error) = store
+                        .process_next_expired_start_lease(&repository, || {
+                            DurableCommandId::from_uuid(Uuid::now_v7())
+                        })
+                        .await
+                    {
+                        panic!("racing repository-watch drain failed: {error}");
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let drain_result = fixture
+        .store
+        .process_pending_expired_start_leases(|| DurableCommandId::from_uuid(Uuid::now_v7()))
+        .await;
+    for racer in racers {
+        racer.await?;
+    }
+    assert!(
+        drain_result.is_ok(),
+        "a concurrent repository-watch drain must not be reported as corruption: {:?}",
+        drain_result.err()
+    );
+
+    let expiration_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_start_lease_expiration")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(usize::try_from(expiration_count)?, fixture.sessions.len());
     Ok(())
 }
 

@@ -291,7 +291,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
               id: acceptedInputID,
               turnID: turn.turnID,
               acceptancePosition: turn.acceptancePosition,
-              content: content
+              content: content.displayText
             ))
         }
         if case .activeAwaitingToolApproval(let requestID) = turn.state {
