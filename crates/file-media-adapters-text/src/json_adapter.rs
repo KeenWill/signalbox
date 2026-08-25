@@ -28,7 +28,7 @@ pub(crate) async fn probe(
     let candidate = has_json_structure(&prefix, extent);
     if candidate {
         let strength = if matches!(extent, ProbeExtent::TruncatedPrefix)
-            && is_complete_json_document(&prefix)
+            && is_complete_json_probe_document(&prefix)
         {
             ProbeStrength::ProvisionalStructuralCandidate
         } else {
@@ -319,8 +319,12 @@ fn is_json_number_prefix(text: &str) -> bool {
 
     if bytes.get(index) == Some(&b'.') {
         index += 1;
+        let fraction_start = index;
         while matches!(bytes.get(index), Some(b'0'..=b'9')) {
             index += 1;
+        }
+        if index == fraction_start {
+            return index == bytes.len();
         }
         if index == bytes.len() {
             return true;
@@ -346,6 +350,11 @@ pub(crate) fn is_complete_json_document(prefix: &[u8]) -> bool {
         return false;
     };
     validate_json(text).is_ok()
+}
+
+fn is_complete_json_probe_document(prefix: &[u8]) -> bool {
+    let prefix = trim_ascii_start(prefix);
+    source::probe_utf8(prefix).is_some_and(|text| validate_json(text).is_ok())
 }
 
 fn parse_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {

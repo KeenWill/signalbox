@@ -210,6 +210,17 @@ async fn truncated_declared_json_exponent_preserves_the_size_reason() -> Result<
 }
 
 #[tokio::test]
+async fn impossible_declared_json_fraction_prefix_remains_unknown() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(b"1.e2".to_vec());
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 3;
+
+    let inspection = support::inspect_with_ceilings(&source, "application/json", ceilings).await?;
+    support::assert_unknown(inspection);
+    Ok(())
+}
+
+#[tokio::test]
 async fn oversized_declared_json_rejects_trailing_prefix_bytes() -> Result<(), Box<dyn Error>> {
     let mut bytes = b"true trailing".to_vec();
     bytes.resize(128 * 1_024 + 1, b' ');
@@ -475,6 +486,19 @@ async fn completed_json_prefix_followed_by_whitespace_is_structurally_detected()
             detected: "application/json",
         },
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_json_prefix_with_split_utf8_suffix_uses_text_fallback()
+-> Result<(), Box<dyn Error>> {
+    let mut bytes = b"{}".to_vec();
+    bytes.resize(4_095, b' ');
+    bytes.extend_from_slice("é prose".as_bytes());
+    let source = MemorySource::new(bytes);
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_validated_media(inspection, "text/plain");
     Ok(())
 }
 
