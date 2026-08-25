@@ -323,6 +323,21 @@ async fn excessive_element_count_is_a_typed_bounded_failure() -> Result<(), Box<
 }
 
 #[tokio::test]
+async fn self_closing_element_counts_against_depth_limit() -> Result<(), Box<dyn Error>> {
+    let mut document = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\">");
+    for _ in 1..128 {
+        document.push_str("<g>");
+    }
+    document.push_str("<path/>");
+    for _ in 1..128 {
+        document.push_str("</g>");
+    }
+    document.push_str("</svg>");
+
+    assert_malformed!(SvgFixture::raw(document.as_bytes()), "structure_limit").await
+}
+
+#[tokio::test]
 async fn excessive_text_is_a_typed_output_failure() -> Result<(), Box<dyn Error>> {
     let source = SvgFixture::output_bomb().into_source()?;
     let result = read(
@@ -340,6 +355,19 @@ async fn excessive_text_is_a_typed_output_failure() -> Result<(), Box<dyn Error>
 #[tokio::test]
 async fn oversized_source_is_a_typed_validation_limit() -> Result<(), Box<dyn Error>> {
     assert_malformed!(SvgFixture::oversized_source(), "source_size_limit").await
+}
+
+#[tokio::test]
+async fn oversized_non_svg_source_is_unknown() -> Result<(), Box<dyn Error>> {
+    let mut bytes = b"<foo>".to_vec();
+    bytes.resize(256 * 1024 + 1, b'a');
+    let source = SvgFixture::raw(&bytes).into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Unknown
+    );
+    Ok(())
 }
 
 #[tokio::test]
@@ -458,6 +486,18 @@ async fn leading_text_before_non_svg_root_is_unknown() -> Result<(), Box<dyn Err
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
+async fn leading_text_before_svg_root_is_recognized_as_malformed() -> Result<(), Box<dyn Error>> {
+    let source =
+        SvgFixture::raw(br#"junk<svg xmlns="http://www.w3.org/2000/svg"/>"#).into_source()?;
+    let inspection =
+        inspect_as(&DirectProcessor::new(), &source, "application/octet-stream").await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
+    assert_eq!(malformed_reason(&inspection)?, "malformed_svg");
     Ok(())
 }
 
@@ -791,6 +831,37 @@ async fn calculation_products_are_valid_without_numeric_metadata() -> Result<(),
 async fn calculation_allows_negative_dimension_intermediates() -> Result<(), Box<dyn Error>> {
     let source =
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(-1px + 2px)"/>"#)
+            .into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Validated
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn negative_constant_calculation_result_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(-1px)"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn division_by_zero_calculation_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(1px / 0)"/>"#,),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn calculated_e_prefixed_unit_is_accepted() -> Result<(), Box<dyn Error>> {
+    let source =
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(1em + 2px)"/>"#)
             .into_source()?;
 
     assert_eq!(

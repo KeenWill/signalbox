@@ -118,6 +118,20 @@ impl FileMediaProvider for SvgProvider {
             }
             let maximum_source_bytes = SOURCE_BYTES.min(request.maximum_source_bytes);
             if source.byte_length().get() > maximum_source_bytes {
+                if source.byte_length().get() > SOURCE_BYTES {
+                    let probe_length = source.byte_length().get().min(PROBE_BYTES);
+                    let prefix = read_range(
+                        source,
+                        SourceRange {
+                            offset: 0,
+                            length: probe_length,
+                        },
+                    )
+                    .await?;
+                    if matches!(probe_root(&prefix), ProbeRoot::Other) {
+                        return Ok(ProcessorValidationOutput::NoMatch);
+                    }
+                }
                 return Ok(malformed_validation(SOURCE_SIZE_REASON));
             }
             let bytes = read_all(source).await?;
@@ -337,7 +351,8 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
             }
             Ok((_, Event::Text(text))) => match text.xml10_content() {
                 Ok(text) if is_xml_whitespace(&text) => {}
-                _ => return ProbeRoot::Other,
+                Ok(_) => forbidden_prolog_event = true,
+                Err(_) => return ProbeRoot::Other,
             },
             Ok((_, Event::Eof)) | Err(_) => return ProbeRoot::Other,
             _ => {}
@@ -427,6 +442,10 @@ fn parse_svg(bytes: &[u8], mode: ParseMode) -> Result<ParsedSvg, ParseIssue> {
                 validate_qname(empty.name().as_ref())?;
                 let (namespace, _) = reader.resolver().resolve_element(empty.name());
                 prolog_event_seen = true;
+                let prospective_depth = depth.checked_add(1).ok_or(ParseIssue::StructureLimit)?;
+                if prospective_depth > MAX_DEPTH {
+                    return Err(ParseIssue::StructureLimit);
+                }
                 inspect_element(
                     &empty,
                     &namespace,
@@ -985,7 +1004,12 @@ fn parse_dimension_with_sign(value: &str, allow_negative: bool) -> Result<Option
     {
         return Ok(None);
     }
-    if valid_css_calculation(value) {
+    if let Some(calculation) = parse_css_calculation(value) {
+        if calculation.value.is_some_and(|result| {
+            !result.is_finite() || (!allow_negative && result.is_sign_negative())
+        }) {
+            return Err(ParseIssue::Malformed);
+        }
         return Ok(None);
     }
     let parse_number = if allow_negative {
@@ -1013,15 +1037,22 @@ fn parse_dimension_with_sign(value: &str, allow_negative: bool) -> Result<Option
     Err(ParseIssue::Malformed)
 }
 
-fn valid_css_calculation(value: &str) -> bool {
+fn parse_css_calculation(value: &str) -> Option<CalculationValue> {
     let mut parser = CalculationParser::new(value);
-    parser.parse_function() == Some(CalculationKind::Dimension) && parser.at_end()
+    let calculation = parser.parse_function()?;
+    (calculation.kind == CalculationKind::Dimension && parser.at_end()).then_some(calculation)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CalculationKind {
     Number,
     Dimension,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CalculationValue {
+    kind: CalculationKind,
+    value: Option<f64>,
 }
 
 struct CalculationParser<'a> {
@@ -1042,7 +1073,7 @@ impl<'a> CalculationParser<'a> {
         self.position == self.input.len()
     }
 
-    fn parse_function(&mut self) -> Option<CalculationKind> {
+    fn parse_function(&mut self) -> Option<CalculationValue> {
         let name = self.parse_identifier()?;
         if ![b"calc".as_slice(), b"min", b"max", b"clamp"]
             .iter()
@@ -1051,68 +1082,111 @@ impl<'a> CalculationParser<'a> {
         {
             return None;
         }
-        let kind = self.parse_sum()?;
-        let mut arguments = 1usize;
+        let first = self.parse_sum()?;
+        let mut arguments = vec![first];
         while self.consume(b',') {
-            if self.parse_sum()? != kind {
+            let argument = self.parse_sum()?;
+            if argument.kind != first.kind {
                 return None;
             }
-            arguments += 1;
+            arguments.push(argument);
         }
         let valid_arity = if name.eq_ignore_ascii_case(b"calc") {
-            arguments == 1
+            arguments.len() == 1
         } else if name.eq_ignore_ascii_case(b"min") || name.eq_ignore_ascii_case(b"max") {
-            arguments >= 1
+            !arguments.is_empty()
         } else {
-            name.eq_ignore_ascii_case(b"clamp") && arguments == 3
+            name.eq_ignore_ascii_case(b"clamp") && arguments.len() == 3
         };
-        (valid_arity && self.consume(b')')).then_some(kind)
+        if !valid_arity || !self.consume(b')') {
+            return None;
+        }
+        let value = if name.eq_ignore_ascii_case(b"calc") {
+            first.value
+        } else if arguments.iter().all(|argument| argument.value.is_some()) {
+            let values: Vec<f64> = arguments
+                .iter()
+                .filter_map(|argument| argument.value)
+                .collect();
+            if name.eq_ignore_ascii_case(b"min") {
+                values.into_iter().reduce(f64::min)
+            } else if name.eq_ignore_ascii_case(b"max") {
+                values.into_iter().reduce(f64::max)
+            } else {
+                Some(values[1].max(values[0]).min(values[2]))
+            }
+        } else {
+            None
+        };
+        Some(CalculationValue {
+            kind: first.kind,
+            value,
+        })
     }
 
-    fn parse_sum(&mut self) -> Option<CalculationKind> {
-        let kind = self.parse_product()?;
+    fn parse_sum(&mut self) -> Option<CalculationValue> {
+        let mut left = self.parse_product()?;
         loop {
             let whitespace_start = self.position;
             self.skip_whitespace();
             if !self.peek_is(b'+') && !self.peek_is(b'-') {
-                return Some(kind);
+                return Some(left);
             }
             if self.position == whitespace_start {
                 return None;
             }
+            let operator = self.input[self.position];
             self.position += 1;
             let whitespace_start = self.position;
             self.skip_whitespace();
-            if self.position == whitespace_start || self.parse_product()? != kind {
+            if self.position == whitespace_start {
                 return None;
             }
+            let right = self.parse_product()?;
+            if right.kind != left.kind {
+                return None;
+            }
+            left.value = match (left.value, right.value, operator) {
+                (Some(left), Some(right), b'+') => Some(left + right),
+                (Some(left), Some(right), b'-') => Some(left - right),
+                _ => None,
+            };
         }
     }
 
-    fn parse_product(&mut self) -> Option<CalculationKind> {
-        let mut kind = self.parse_value()?;
+    fn parse_product(&mut self) -> Option<CalculationValue> {
+        let mut left = self.parse_value()?;
         loop {
             let whitespace_start = self.position;
             self.skip_whitespace();
             let Some(operator) = self.input.get(self.position).copied() else {
-                return Some(kind);
+                return Some(left);
             };
             if operator != b'*' && operator != b'/' {
                 self.position = whitespace_start;
-                return Some(kind);
+                return Some(left);
             }
             self.position += 1;
             let right = self.parse_value()?;
-            kind = match (operator, kind, right) {
+            if operator == b'/' && right.value == Some(0.0) {
+                return None;
+            }
+            let kind = match (operator, left.kind, right.kind) {
                 (b'*', CalculationKind::Number, right) => right,
                 (b'*', left, CalculationKind::Number) => left,
                 (b'/', left, CalculationKind::Number) => left,
                 _ => return None,
             };
+            let value = match (operator, left.value, right.value) {
+                (b'*', Some(left), Some(right)) => Some(left * right),
+                (b'/', Some(left), Some(right)) => Some(left / right),
+                _ => None,
+            };
+            left = CalculationValue { kind, value };
         }
     }
 
-    fn parse_value(&mut self) -> Option<CalculationKind> {
+    fn parse_value(&mut self) -> Option<CalculationValue> {
         self.skip_whitespace();
         if self.consume(b'(') {
             let kind = self.parse_sum()?;
@@ -1133,7 +1207,7 @@ impl<'a> CalculationParser<'a> {
         self.parse_dimension_value()
     }
 
-    fn parse_dimension_value(&mut self) -> Option<CalculationKind> {
+    fn parse_dimension_value(&mut self) -> Option<CalculationValue> {
         self.skip_whitespace();
         let start = self.position;
         if self.peek_is(b'+') || self.peek_is(b'-') {
@@ -1165,21 +1239,20 @@ impl<'a> CalculationParser<'a> {
             return None;
         }
         if self.peek_is(b'e') || self.peek_is(b'E') {
-            self.position += 1;
-            if self.peek_is(b'+') || self.peek_is(b'-') {
-                self.position += 1;
-            }
-            let exponent_start = self.position;
-            while self
+            let mut exponent_end = self.position + 1;
+            if self
                 .input
-                .get(self.position)
-                .is_some_and(u8::is_ascii_digit)
+                .get(exponent_end)
+                .is_some_and(|byte| matches!(byte, b'+' | b'-'))
             {
-                self.position += 1;
+                exponent_end += 1;
             }
-            if self.position == exponent_start {
-                self.position = start;
-                return None;
+            let exponent_start = exponent_end;
+            while self.input.get(exponent_end).is_some_and(u8::is_ascii_digit) {
+                exponent_end += 1;
+            }
+            if exponent_end > exponent_start {
+                self.position = exponent_end;
             }
         }
         let unit_start = self.position;
@@ -1198,11 +1271,19 @@ impl<'a> CalculationParser<'a> {
             return None;
         };
         parse_dimension_with_sign(token, true).ok()?;
-        Some(if self.position == unit_start {
+        let kind = if self.position == unit_start {
             CalculationKind::Number
         } else {
             CalculationKind::Dimension
-        })
+        };
+        let value = if kind == CalculationKind::Number {
+            parse_finite(token).ok()
+        } else if let Some(number) = strip_ascii_case_suffix(token, "px") {
+            parse_finite(number).ok()
+        } else {
+            None
+        };
+        Some(CalculationValue { kind, value })
     }
 
     fn parse_identifier(&mut self) -> Option<&'a [u8]> {
