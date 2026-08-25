@@ -201,12 +201,17 @@ SELECT turn_id
  LIMIT $2
 "#;
 
+// Reconciliation does not gate later queue admission, so the newest turn may
+// be a queued or completed successor: filter for the reconciliation-required
+// terminal shape itself instead of inspecting only the latest turn.
 const RECONCILIATION_SQL: &str = r#"
 SELECT turn_id, state_kind, terminal_disposition_kind,
        terminal_model_call_id, terminal_tool_attempt_id
   FROM turn_lifecycle
  WHERE session_id = $1
    AND NOT delegation_runtime_terminal
+   AND state_kind = 'terminal'
+   AND terminal_disposition_kind = 'reconciliation_required'
    AND goal_turn_is_runtime_relevant(session_id, turn_id)
  ORDER BY acceptance_position DESC
  LIMIT 1

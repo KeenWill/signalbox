@@ -343,6 +343,39 @@ test("generated live stream decoder correlates durable cursor and address", () =
   );
 });
 
+test("generated live stream decoder bounds provider text fragments", () => {
+  const admitted = decodeWebSessionLiveStreamEvent({
+    kind: "provider_text_delta",
+    turn_id: "00000000-0000-0000-0000-000000000992",
+    model_call_id: "00000000-0000-0000-0000-000000000993",
+    part_index: 0,
+    content: "x".repeat(8192),
+  });
+  assert.equal(admitted.content.length, 8192);
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "provider_text_delta",
+        turn_id: "00000000-0000-0000-0000-000000000992",
+        model_call_id: "00000000-0000-0000-0000-000000000993",
+        part_index: 0,
+        content: "x".repeat(8193),
+      }),
+    /at most 8192 UTF-8 bytes/,
+  );
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "provider_text_delta",
+        turn_id: "00000000-0000-0000-0000-000000000992",
+        model_call_id: "00000000-0000-0000-0000-000000000993",
+        part_index: 0,
+        content: "\u{20AC}".repeat(2731),
+      }),
+    /at most 8192 UTF-8 bytes/,
+  );
+});
+
 test("generated live stream decoder requires a positive resynchronization cursor", () => {
   assert.throws(
     () =>

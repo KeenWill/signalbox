@@ -2,7 +2,8 @@
 
 use crate::*;
 use signalbox_application::{
-    SessionLiveActiveState, SessionLiveActiveTurn, max_session_live_queued_turns,
+    SessionLiveActiveState, SessionLiveActiveTurn, SessionLiveReconciliation,
+    max_session_live_queued_turns,
 };
 use signalbox_persistence::session_live::{SessionLiveRepository, SessionLiveRepositoryError};
 
@@ -190,6 +191,61 @@ async fn live_snapshot_caps_the_queue_preview() -> Result<(), Box<dyn Error>> {
     assert_eq!(snapshot.queued_turn_count, 33);
     assert_eq!(snapshot.queued_turns.len(), preview_limit);
     assert_eq!(snapshot.queued_turns, turns[..preview_limit]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A queued successor must not hide the latest outstanding terminal
+/// reconciliation: reconciliation does not gate later queue admission, so the
+/// projection filters for the reconciliation-required terminal shape instead
+/// of inspecting only the turn with the greatest acceptance position.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn live_snapshot_reports_reconciliation_behind_a_queued_successor()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let parked =
+        crate::model_call_execution_and_recovery::park_restart_ambiguity(&pool, 0xD7_0000).await?;
+    let reconciliation = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let batch = reconciliation.claim_due().await?;
+    let outcome = reconciliation.reconcile(batch.claimed()[0]).await?;
+    assert_eq!(outcome, ModelCallReconciliationOutcome::Reconciled);
+    let successor = TurnId::from_uuid(Uuid::from_u128(0xD7_1003));
+    let queued = SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0xD7_1001,
+                parked.session.into_uuid().as_u128(),
+                "successor queued behind the reconciliation",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xD7_1002)),
+            Some(successor),
+        )
+        .await?;
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(_),
+    )) = queued
+    else {
+        return Err("the successor input was not queued".into());
+    };
+    let snapshot = SessionLiveRepository::new(pool.clone())
+        .read_live_snapshot(parked.session)
+        .await?
+        .expect("the reconciliation-parked session has a live snapshot");
+
+    assert_eq!(snapshot.active, None);
+    assert_eq!(snapshot.queued_turns, [successor]);
+    assert_eq!(
+        snapshot.reconciliation,
+        Some(SessionLiveReconciliation::ModelCall {
+            turn: parked.turn,
+            call: parked.call,
+        })
+    );
 
     pool.close().await;
     drop(container);

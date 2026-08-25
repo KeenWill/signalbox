@@ -22,6 +22,11 @@ pub const WEB_CONTRACT_NAME: &str = "signalbox.web-http";
 pub const MAX_JSON_BODY_BYTES: usize = 64 * 1024;
 /// Hard safety ceiling protecting client and daemon memory per NDJSON item.
 pub const MAX_NDJSON_ITEM_BYTES: usize = 64 * 1024;
+/// Hard safety ceiling on one ephemeral provider text fragment. Production
+/// splits deltas at this bound, so the generated decoder rejects anything
+/// larger as a value the server cannot emit.
+// numeric-bound: hard safety - leaves room for worst-case JSON escaping and the event envelope
+pub const MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES: usize = 8_192;
 
 /// Identity of the one exact browser contract this daemon serves.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1220,6 +1225,12 @@ export function decodeWebSessionLiveStreamEvent(value) {{
   if (value.kind === "durable" && value.cursor !== value.address.event_sequence) {{
     fail("session_live_event.address.event_sequence", "equal to cursor");
   }}
+  if (
+    value.kind === "provider_text_delta" &&
+    new TextEncoder().encode(value.content).length > {provider_fragment_limit}
+  ) {{
+    fail("session_live_event.content", "at most {provider_fragment_limit} UTF-8 bytes");
+  }}
   return value;
 }}
 
@@ -1377,6 +1388,7 @@ function assertAttentionSummary(summary, path) {{
         max_title_scalars = MAX_ATTENTION_TITLE_SCALARS,
         contract_version = WEB_CONTRACT_VERSION,
         live_preview_limit = max_session_live_queued_turns(),
+        provider_fragment_limit = MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES,
     ))
 }
 

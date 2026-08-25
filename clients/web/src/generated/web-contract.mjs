@@ -1928,6 +1928,12 @@ export function decodeWebSessionLiveStreamEvent(value) {
   if (value.kind === "durable" && value.cursor !== value.address.event_sequence) {
     fail("session_live_event.address.event_sequence", "equal to cursor");
   }
+  if (
+    value.kind === "provider_text_delta" &&
+    new TextEncoder().encode(value.content).length > 8192
+  ) {
+    fail("session_live_event.content", "at most 8192 UTF-8 bytes");
+  }
   return value;
 }
 
