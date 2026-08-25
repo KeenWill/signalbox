@@ -1517,8 +1517,9 @@ mod tests {
 
     use signalbox_file_media_runtime::{
         CancellationSignal, CanonicalJsonObjectSchema, FileReadInput, MAX_READ_OPTIONS_BYTES,
-        ProbeDeclaration, ProcessorBoundaryFailure, ProcessorFailure, ReadAccessPattern,
-        ReadViewBounds, ReadViewDeclaration, ReadViewName, ValidationDeclaration,
+        ProbeDeclaration, ProbeDeclarationInput, ProcessorBoundaryFailure, ProcessorFailure,
+        ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName,
+        ValidationDeclaration,
     };
 
     use super::{
@@ -1596,16 +1597,20 @@ mod tests {
     #[test]
     fn direct_probe_envelope_rejects_compiled_ceiling_excess() {
         assert!(probe_envelope_fits(ProbeDeclaration::new(
-            MAX_PROBE_PREFIX_BYTES,
-            0,
-            0,
-            MAX_PROBE_CUMULATIVE_BYTES,
+            ProbeDeclarationInput {
+                prefix_bytes: MAX_PROBE_PREFIX_BYTES,
+                suffix_bytes: 0,
+                range_count: 0,
+                cumulative_bytes: MAX_PROBE_CUMULATIVE_BYTES,
+            }
         )));
         assert!(!probe_envelope_fits(ProbeDeclaration::new(
-            MAX_PROBE_PREFIX_BYTES + 1,
-            0,
-            0,
-            MAX_PROBE_CUMULATIVE_BYTES,
+            ProbeDeclarationInput {
+                prefix_bytes: MAX_PROBE_PREFIX_BYTES + 1,
+                suffix_bytes: 0,
+                range_count: 0,
+                cumulative_bytes: MAX_PROBE_CUMULATIVE_BYTES,
+            }
         )));
     }
 

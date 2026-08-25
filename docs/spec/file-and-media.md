@@ -7,8 +7,9 @@ and registry checks, detection and validation algorithm, untrusted
 processor-response boundary, stable agent tool contracts, visibility-authorizing
 application bridge, and fresh daemon-supervised worker runtime.
 
-The image-family adapter coverage is verified against PR #905
-(`agent/file-media-image-family`).
+The text-family adapter coverage is verified against PR #903
+(`agent/file-media-text-family`). The image-family adapter coverage is verified
+against PR #905 (`agent/file-media-image-family`).
 
 This page owns typed interpretation above immutable blob bytes. Blob identity,
 catalog placement, replica verification, raw reads, attachment visibility, and
@@ -87,21 +88,26 @@ settles conflicting claims.
 
 Incompatible strong claims return ambiguity. Compatible strong claims resolve to
 their sole type and reader and require strong-signature validation. With no
-strong claim, a sole compatible structural candidate receives structural
-validation. This ordering is the simplest interpretation of the accepted
-design's otherwise unplaced `StructuralCandidate` strength. With neither, a
-syntactically canonical declaration may nominate its exact reader for
-independent structural validation. Finally, the sole registered text fallback
-may claim only through complete streaming validation. No successful path returns
-an ordinary declaration as evidence.
+strong claim, a sole compatible structural or provisional structural candidate
+receives structural validation. A provisional structural candidate records a
+complete value at the end of a bounded prefix whose source continues, so full
+validation may disprove it and resume declaration or text fallback. This
+ordering is the simplest interpretation of the accepted design's otherwise
+unplaced `StructuralCandidate` strength. With neither, a syntactically canonical
+declaration may nominate its exact reader for independent structural validation.
+Finally, the sole registered text fallback may claim only through complete
+streaming validation. No successful path returns an ordinary declaration as
+evidence.
 
 A recognized-malformed probe is terminal; incompatible recognized types are
-ambiguous. Strong or structural validation cannot quietly return no-match and
-fall through. A declared or streaming candidate that does not validate becomes
-ordinary unknown. Successful detection that disagrees with a syntactically
-canonical caller declaration becomes `DeclaredTypeMismatch`, blocking typed
-reads without changing the blob or its metadata. Recognized encrypted or locked
-content is terminal `EncryptedOrLocked`; version one has no password channel.
+ambiguous. Strong or ordinary structural validation cannot quietly return
+no-match and fall through. A provisional structural, declared, or streaming
+candidate that does not validate resumes the remaining fallback path and becomes
+ordinary unknown when none succeeds. Successful detection that disagrees with a
+syntactically canonical caller declaration becomes `DeclaredTypeMismatch`,
+blocking typed reads without changing the blob or its metadata. Recognized
+encrypted or locked content is terminal `EncryptedOrLocked`; version one has no
+password channel.
 
 ## Agent tools
 
@@ -146,9 +152,10 @@ Each listed adapter is compiled into a dedicated worker and registered there as
 one provider declaration. Inputs remain whole-source bounded; adapter output is
 untrusted until the daemon-side registry sanitizer admits it.
 
-| Family | Canonical types                                      | Detection and validation                                                                         | Views                                              | Decoder choice                                                                        |
-| ------ | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------ | -------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| Image  | `image/png`, `image/jpeg`, `image/webp`, `image/gif` | Strong signatures followed by primary-raster decode with encoded, axis, pixel, and memory bounds | Bounded dimensions and channel count as `metadata` | Pure-Rust `image` with only PNG, JPEG, WebP, and GIF features; isolated in the worker |
+| Family | Canonical types                                      | Detection and validation                                                                                          | Views                                                                                | Decoder choice                                                                                    |
+| ------ | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| Text   | `text/plain`, `application/json`, `text/csv`         | Complete NUL-free UTF-8 fallback; structural JSON parse; strict rectangular CSV parse with row and column ceilings | Exact `text`; bounded JSON `structured`; bounded CSV headers and rows as `structured` | Standard-library UTF-8, `serde_json`, and pure-Rust `csv`; all execute only in the isolated worker |
+| Image  | `image/png`, `image/jpeg`, `image/webp`, `image/gif` | Strong signatures followed by primary-raster decode with encoded, axis, pixel, and memory bounds                   | Bounded dimensions and channel count as `metadata`                                   | Pure-Rust `image` with only PNG, JPEG, WebP, and GIF features; isolated in the worker              |
 
 ## Processor and durable media boundary
 

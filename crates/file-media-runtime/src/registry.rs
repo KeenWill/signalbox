@@ -38,6 +38,8 @@ const MAX_REGISTRY_REASON_CODES: usize = 4_096;
 const MAX_INSPECTION_PROBE_BYTES: u64 = 16 * 1_024 * 1_024;
 // numeric-bound: ceiling - bounds one inspection's aggregate probe request fan-out
 const MAX_INSPECTION_PROBE_READS: u32 = 1_024;
+// numeric-bound: ceiling - bounds collision-validation worker fan-out and source I/O
+const MAX_COLLISION_VALIDATION_CANDIDATES: usize = 2;
 // numeric-bound: ceiling - the tool contract permits this many input containers
 const MAX_READ_INPUT_CONTAINERS: u32 = 256;
 // numeric-bound: ceiling - every JSON node emits at least one serialized byte
@@ -257,29 +259,38 @@ impl FileMediaRegistry {
 
         let structural = candidates
             .iter()
-            .filter(|candidate| candidate.strength == ProbeStrength::StructuralCandidate)
+            .filter(|candidate| {
+                matches!(
+                    candidate.strength,
+                    ProbeStrength::ProvisionalStructuralCandidate
+                        | ProbeStrength::StructuralCandidate
+                )
+            })
             .cloned()
             .collect::<Vec<_>>();
         if !structural.is_empty() {
-            return self
+            let inspection = self
                 .resolve_candidates(
                     processor,
-                    request,
+                    request.clone(),
                     source,
                     cancellation,
                     structural,
                     ValidationEvidence::StructuralValidation,
                 )
-                .await;
+                .await?;
+            if !matches!(inspection, FileInspection::Unknown { .. }) {
+                return Ok(inspection);
+            }
         }
 
         if let Ok(declared) = request.source.declared_media_type().canonical_essence()
             && let Some(reader) = self.media_readers.get(&declared)
         {
-            return self
+            let inspection = self
                 .validate_candidate(
                     processor,
-                    request,
+                    request.clone(),
                     source,
                     cancellation,
                     Candidate {
@@ -289,7 +300,10 @@ impl FileMediaRegistry {
                     },
                     ValidationEvidence::DeclaredCandidateStructurallyValidated,
                 )
-                .await;
+                .await?;
+            if !matches!(inspection, FileInspection::Unknown { .. }) {
+                return Ok(inspection);
+            }
         }
 
         if let Some(reader) = self.streaming_text_reader.as_ref() {
@@ -346,6 +360,75 @@ impl FileMediaRegistry {
             .map(|candidate| candidate.reader.clone())
             .collect::<std::collections::BTreeSet<_>>();
         if media_types.len() != 1 || readers.len() != 1 {
+            if !collision_validation_allowed(evidence, candidates.len()) {
+                return Ok(FileInspection::Ambiguous {
+                    source: request.source,
+                    media_types,
+                });
+            }
+
+            let all_candidates_provisional = candidates.iter().all(|candidate| {
+                candidate.strength == ProbeStrength::ProvisionalStructuralCandidate
+            });
+            let validations = async {
+                let mut successful = Vec::new();
+                let mut malformed = Vec::new();
+                let mut encrypted = Vec::new();
+                for candidate in candidates {
+                    match self
+                        .validate_candidate(
+                            processor,
+                            request.clone(),
+                            source,
+                            cancellation,
+                            candidate,
+                            evidence,
+                        )
+                        .await?
+                    {
+                        inspection @ (FileInspection::Validated(_)
+                        | FileInspection::DeclaredMismatch { .. }) => successful.push(inspection),
+                        inspection @ FileInspection::Malformed { .. } => malformed.push(inspection),
+                        inspection @ FileInspection::EncryptedOrLocked { .. } => {
+                            encrypted.push(inspection);
+                        }
+                        FileInspection::Unknown { .. } => {}
+                        FileInspection::Ambiguous { .. } => {
+                            return Err(FileMediaFailure::ProcessorFailed);
+                        }
+                    }
+                }
+                Ok::<_, FileMediaFailure>((successful, malformed, encrypted))
+            };
+            let validations = Box::pin(validations);
+            let deadline = Box::pin(futures_timer::Delay::new(std::time::Duration::from_secs(
+                MAX_WORKER_WALL_SECONDS,
+            )));
+            let (mut successful, mut malformed, mut encrypted) =
+                match futures_util::future::select(validations, deadline).await {
+                    futures_util::future::Either::Left((result, _)) => result?,
+                    futures_util::future::Either::Right(((), _)) => {
+                        return Err(FileMediaFailure::ProcessorTimedOut);
+                    }
+                };
+            if successful.len() == 1 && encrypted.is_empty() {
+                return successful.pop().ok_or(FileMediaFailure::ProcessorFailed);
+            }
+            if successful.is_empty() && encrypted.is_empty() && malformed.len() == 1 {
+                return malformed.pop().ok_or(FileMediaFailure::ProcessorFailed);
+            }
+            if successful.is_empty() && malformed.is_empty() && encrypted.len() == 1 {
+                return encrypted.pop().ok_or(FileMediaFailure::ProcessorFailed);
+            }
+            if all_candidates_provisional
+                && successful.is_empty()
+                && malformed.is_empty()
+                && encrypted.is_empty()
+            {
+                return Ok(FileInspection::Unknown {
+                    source: request.source,
+                });
+            }
             return Ok(FileInspection::Ambiguous {
                 source: request.source,
                 media_types,
@@ -444,7 +527,8 @@ impl FileMediaRegistry {
                 media_type: candidate.media_type,
             }),
             SanitizedValidation::NoMatch
-                if evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated
+                if candidate.strength == ProbeStrength::ProvisionalStructuralCandidate
+                    || evidence == ValidationEvidence::DeclaredCandidateStructurallyValidated
                     || evidence == ValidationEvidence::StreamingTextValidation =>
             {
                 Ok(FileInspection::Unknown {
@@ -517,6 +601,7 @@ impl FileMediaRegistry {
                     input: request.input,
                     maximum_image_axis: self.ceilings.image_axis,
                     maximum_decoded_image_pixels: self.ceilings.decoded_image_pixels,
+                    maximum_container_entries: self.ceilings.observed_container_entries,
                 },
                 source,
                 cancellation,
@@ -622,8 +707,15 @@ struct Candidate {
 fn recognized_probe_strength(strength: ProbeStrength) -> bool {
     matches!(
         strength,
-        ProbeStrength::Strong | ProbeStrength::StructuralCandidate
+        ProbeStrength::Strong
+            | ProbeStrength::ProvisionalStructuralCandidate
+            | ProbeStrength::StructuralCandidate
     )
+}
+
+fn collision_validation_allowed(evidence: ValidationEvidence, candidate_count: usize) -> bool {
+    evidence == ValidationEvidence::StructuralValidation
+        && candidate_count <= MAX_COLLISION_VALIDATION_CANDIDATES
 }
 
 fn streaming_text_terminal_becomes_unknown(evidence: ValidationEvidence) -> bool {
@@ -784,8 +876,10 @@ fn sanitize_read(
             let maximum_nodes = nodes.min(ceilings.structured_nodes);
             let body = crate::value::parse_json_without_duplicate_members_bounded(
                 &body_json,
-                maximum_nodes,
-                ceilings.observed_container_entries,
+                crate::value::JsonParseLimits {
+                    maximum_nodes,
+                    maximum_container_entries: ceilings.observed_container_entries,
+                },
             )
             .map_err(|_| FileMediaFailure::ProcessorFailed)?;
             let canonical_bytes = serde_json::to_string(&body)
@@ -1237,6 +1331,26 @@ mod tests {
         ));
         assert!(recognized_probe_strength(ProbeStrength::Strong));
         assert!(!recognized_probe_strength(ProbeStrength::DeclaredCandidate));
+    }
+
+    #[test]
+    fn strong_signature_collisions_remain_ambiguous_without_validation() {
+        assert!(!collision_validation_allowed(
+            ValidationEvidence::StrongSignature,
+            2
+        ));
+    }
+
+    #[test]
+    fn structural_collision_validation_has_a_two_candidate_ceiling() {
+        assert!(collision_validation_allowed(
+            ValidationEvidence::StructuralValidation,
+            MAX_COLLISION_VALIDATION_CANDIDATES
+        ));
+        assert!(!collision_validation_allowed(
+            ValidationEvidence::StructuralValidation,
+            MAX_COLLISION_VALIDATION_CANDIDATES + 1
+        ));
     }
 
     #[test]

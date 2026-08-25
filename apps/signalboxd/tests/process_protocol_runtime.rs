@@ -2621,15 +2621,19 @@ fn start_fleet_scheduler(
     let configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
     let provider = RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog())
         .with_text_delta_sink(runtime.provider_text_delta_sink());
-    let (execution, fatal) = FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-        PostgresModelCallRepository::new(
-            runtime.pool.clone(),
-            configuration.target_catalog(),
-            ModelCallCredentialReference::new("fleet-soak-fixture"),
-        ),
-        InProcessAttemptDispatchGate::default(),
-        provider,
-    ));
+    let (execution, fatal) =
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    runtime.pool.clone(),
+                    configuration.target_catalog(),
+                    ModelCallCredentialReference::new("fleet-soak-fixture"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
+        ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
             UuidV7StartEligibleTurnIdGenerator,

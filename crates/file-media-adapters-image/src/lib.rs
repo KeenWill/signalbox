@@ -10,10 +10,10 @@ use signalbox_file_media_runtime::{
     CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider, FileMediaProviderDeclaration,
     FileMediaProviderFailure, FileMediaProviderFuture, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
-    ProbeDeclaration, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
-    ReaderDeclarationInput, ReaderIdentity, ReasonCode, StreamingTextFallback,
-    ValidationDeclaration, VerifiedBlobSource,
+    ProbeDeclaration, ProbeDeclarationInput, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
+    ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
+    StreamingTextFallback, ValidationDeclaration, VerifiedBlobSource,
 };
 pub use signalbox_file_media_runtime::{
     MAX_DECODED_IMAGE_PIXELS as MAX_IMAGE_DECODED_PIXELS, MAX_IMAGE_AXIS,
@@ -172,7 +172,12 @@ fn reader(
         reader: FileReaderName::try_new(format.reader_name())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(format.media_type())?],
-        probe: ProbeDeclaration::new(16, 0, 0, 16),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: 16,
+            suffix_bytes: 0,
+            range_count: 0,
+            cumulative_bytes: 16,
+        }),
         validation: ValidationDeclaration::new(MAX_IMAGE_SOURCE_BYTES, 1),
         views: vec![metadata_view()?],
         reason_codes: reasons,

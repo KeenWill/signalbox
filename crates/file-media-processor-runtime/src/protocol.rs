@@ -457,6 +457,7 @@ pub(crate) struct WireReadRequest {
     continuation: Option<String>,
     maximum_image_axis: u32,
     maximum_decoded_image_pixels: u64,
+    maximum_container_entries: u64,
 }
 
 impl From<&FileMediaProviderReadRequest> for WireReadRequest {
@@ -479,6 +480,7 @@ impl From<&FileMediaProviderReadRequest> for WireReadRequest {
             continuation,
             maximum_image_axis: request.maximum_image_axis,
             maximum_decoded_image_pixels: request.maximum_decoded_image_pixels,
+            maximum_container_entries: request.maximum_container_entries,
         }
     }
 }
@@ -506,6 +508,7 @@ impl TryFrom<WireReadRequest> for FileMediaProviderReadRequest {
             input,
             maximum_image_axis: value.maximum_image_axis,
             maximum_decoded_image_pixels: value.maximum_decoded_image_pixels,
+            maximum_container_entries: value.maximum_container_entries,
         })
     }
 }
@@ -532,8 +535,8 @@ mod tests {
     use signalbox_file_media_runtime::{
         CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProviderDeclaration,
         FileReaderName, FileReaderProviderName, FileReaderRevision, MAX_PROCESSOR_FRAME_BYTES,
-        MAX_TEXT_OR_JSON_BYTES, ProbeDeclaration, ProcessorReadOutput, ReadAccessPattern,
-        ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
+        MAX_TEXT_OR_JSON_BYTES, ProbeDeclaration, ProbeDeclarationInput, ProcessorReadOutput,
+        ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
         ReaderDeclarationInput, ReasonCode, StreamingTextFallback, ValidationDeclaration,
     };
 
@@ -640,7 +643,12 @@ mod tests {
                 .iter()
                 .map(|value| CanonicalMediaType::from_str(value).expect("valid media type"))
                 .collect(),
-            probe: ProbeDeclaration::new(1, 0, 1, 1),
+            probe: ProbeDeclaration::new(ProbeDeclarationInput {
+                prefix_bytes: 1,
+                suffix_bytes: 0,
+                range_count: 1,
+                cumulative_bytes: 1,
+            }),
             validation: ValidationDeclaration::new(64, 1),
             views: vec![view],
             reason_codes: reason_codes

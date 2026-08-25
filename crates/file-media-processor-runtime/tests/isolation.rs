@@ -18,10 +18,11 @@ use signalbox_file_media_runtime::{
     DeclaredMediaType, FileDigest, FileMediaCeilings, FileMediaFailure, FileMediaProcessCeilings,
     FileMediaProcessLimitOverrides, FileMediaProcessor, FileMediaProviderDeclaration,
     FileMediaRegistry, FileReaderName, FileReaderProviderName, FileReaderRevision, FileUse,
-    InspectionRequest, NeverCancelled, ProbeDeclaration, ProbeStrength, ProcessorBoundaryFailure,
-    ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput, ReadAccessPattern, ReadViewBounds,
-    ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity,
-    ReasonCode, SourceReadError, SourceReadFuture, StreamingTextFallback, VerifiedBlobSource,
+    InspectionRequest, NeverCancelled, ProbeDeclaration, ProbeDeclarationInput, ProbeStrength,
+    ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
+    ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
+    ReaderDeclarationInput, ReaderIdentity, ReasonCode, SourceReadError, SourceReadFuture,
+    StreamingTextFallback, VerifiedBlobSource,
 };
 
 struct BytesSource(Vec<u8>);
@@ -239,7 +240,12 @@ fn declaration() -> Result<(FileMediaProviderDeclaration, ReaderIdentity), Box<d
         media_types: vec![CanonicalMediaType::from_str(
             "application/x-signalbox-synthetic",
         )?],
-        probe: ProbeDeclaration::new(1, 0, 1, 1),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: 1,
+            suffix_bytes: 0,
+            range_count: 1,
+            cumulative_bytes: 1,
+        }),
         validation: signalbox_file_media_runtime::ValidationDeclaration::new(64, 1),
         views: vec![view],
         reason_codes: vec![ReasonCode::try_new("synthetic_failure")?],
