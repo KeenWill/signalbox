@@ -292,6 +292,17 @@ class RecordingImportCli(FakeReviewCli):
         outcome: str,
         context_digest: str | None,
     ) -> None:
+        # Mirrors the daemon's `validate_import`: a non-succeeded import claim
+        # is only compatible with a pass that was itself sealed with that
+        # same outcome (`ReviewPassState::Failed`/`Blocked`/`Cancelled`).
+        # Sealing the pass as `succeeded` and then reporting a `failed`
+        # import is exactly the incompatible combination the daemon rejects.
+        if outcome != "succeeded" and self.pass_outcomes[-1:] != [outcome]:
+            raise AssertionError(
+                "the daemon rejects a non-succeeded import outcome whose pass "
+                f"was not sealed with a matching outcome "
+                f"(pass_outcomes={self.pass_outcomes!r}, import outcome={outcome!r})"
+            )
         self.import_outcomes.append((outcome, context_digest))
 
 
@@ -546,7 +557,10 @@ class ReviewDriverTests(unittest.TestCase):
 
         # The terminal turn still authenticates the pass, but the workflow
         # operation must not advance the attempt on the turn lifecycle alone.
-        self.assertEqual(cli.pass_outcomes, ["succeeded"])
+        # The pass must be sealed with the same outcome ultimately reported
+        # to record-import-outcome, or the daemon's validate_import rejects
+        # the claim as an incompatible pass/import-outcome combination.
+        self.assertEqual(cli.pass_outcomes, ["failed"])
         self.assertEqual(cli.import_outcomes, [("failed", None)])
         self.assertEqual(caught.exception.code, "stage-terminal-unsuccessful")
         self.assertEqual(caught.exception.stage, "import")

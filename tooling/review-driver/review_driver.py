@@ -833,9 +833,12 @@ class ReviewDriver:
         # whenever the session reports that repository evidence was
         # unavailable, so the stage outcome additionally requires imported
         # context to exist before the attempt advances to concern fan-out.
-        pass_result = pass_outcome(completed.turn_state)
-        self.cli.complete_pass(completed, pass_result)
-        outcome = pass_result
+        # The daemon's `validate_import` requires a failed import claim to
+        # carry a canonically `Failed` pass, so the pass must be sealed with
+        # the same outcome this stage ultimately reports -- classify the
+        # outcome first and seal the pass with it, rather than sealing the
+        # pass from the raw turn lifecycle and reclassifying afterward.
+        outcome = pass_outcome(completed.turn_state)
         context_digest = None
         detail = f"import session ended as {completed.turn_state}"
         if outcome == "succeeded":
@@ -848,6 +851,7 @@ class ReviewDriver:
                 detail = (
                     "the import turn completed without producing imported context"
                 )
+        self.cli.complete_pass(completed, outcome)
         self.cli.record_import_outcome(
             attempt.attempt, completed, outcome, context_digest
         )
