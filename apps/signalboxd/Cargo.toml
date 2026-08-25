@@ -17,9 +17,10 @@ test-support = [
 axum = { version = "0.8.9", default-features = false, features = [
     "http1",
     "json",
+    "query",
     "tokio",
 ] }
-futures-util = { version = "0.3.34", default-features = false }
+futures-util = { version = "0.3.34", default-features = false, features = ["std"] }
 hmac = { version = "0.13.0", default-features = false }
 # Classifies the error `axum::body::to_bytes` returns: only its
 # `LengthLimitError` is an oversized body; anything else is transport failure.
