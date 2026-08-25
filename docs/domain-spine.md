@@ -55,7 +55,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-nine identities defined in `lib.rs`:
+The thirty identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -67,6 +67,7 @@ pub struct AcceptedInputId(/* private */);
 pub struct TurnId(/* private */);
 pub struct TurnAttemptId(/* private */);
 pub struct ModelCallId(/* private */);
+pub struct BlobDerivationId(/* private */);
 pub struct ProviderTargetEvidenceId(/* private */);
 pub struct ToolRequestId(/* private */);
 pub struct ToolAttemptId(/* private */);
@@ -125,6 +126,65 @@ pub enum BlobDigestParseFailure {
 pub struct BlobDigestParseError { /* private */ }
 impl BlobDigestParseError {
     // accessors: rejected(), failure()
+}
+
+pub struct BlobTransformationName(/* private */);
+impl BlobTransformationName {
+    pub fn try_new(value: impl Into<Arc<str>>) -> Result<Self, BlobTransformationError>;
+    // accessor: as_str()
+}
+
+pub struct BlobTransformation { /* private */ }
+impl BlobTransformation {
+    pub fn try_new(
+        name: BlobTransformationName,
+        version: u32,
+        parameters: &serde_json::Value,
+    ) -> Result<Self, BlobTransformationError>;
+    // accessors: name(), version(), parameters_json()
+}
+
+pub enum BlobTransformationError {
+    InvalidName,
+    ZeroVersion,
+    InvalidParameters,
+    ParametersTooLarge,
+}
+
+pub enum BlobDerivationProducer {
+    Deterministic { implementation: BlobDigest },
+    Executed { execution_id: uuid::Uuid, implementation: BlobDigest },
+    ModelDerived { model_call: ModelCallId },
+}
+
+pub struct DeterministicBlobDerivationKey(/* private BlobDigest */);
+impl DeterministicBlobDerivationKey {
+    pub fn try_derive(
+        inputs: &[BlobDigest],
+        transformation: &BlobTransformation,
+        implementation: BlobDigest,
+    ) -> Result<Self, BlobDerivationError>;
+    // accessor: digest()
+}
+
+pub struct BlobDerivation { /* private */ }
+impl BlobDerivation {
+    pub fn try_new(
+        id: BlobDerivationId,
+        inputs: impl Into<Box<[BlobDigest]>>,
+        transformation: BlobTransformation,
+        producer: BlobDerivationProducer,
+        outputs: impl Into<Box<[BlobDigest]>>,
+    ) -> Result<Self, BlobDerivationError>;
+    // accessors: id(), inputs(), transformation(), producer(), outputs(),
+    // deterministic_key()
+}
+
+pub enum BlobDerivationError {
+    EmptyInputs,
+    TooManyInputs,
+    EmptyOutputs,
+    TooManyOutputs,
 }
 ```
 
@@ -583,9 +643,13 @@ impl ImportedTranscriptEntry {
 }
 
 pub struct ImportedTranscriptFrontier { /* private */ }
-// sealed: ImportedConversation frontier methods
 // Copy; equality is the exact imported-conversation boundary.
 impl ImportedTranscriptFrontier {
+    pub const fn from_parts(
+        conversation: ImportedConversationId,
+        through_entry: ImportedTranscriptEntryId,
+        through_position: ImportedTranscriptPosition,
+    ) -> Self;
     // accessors: conversation(), through_entry(), through_position()
 }
 
@@ -6173,6 +6237,80 @@ pub trait ApprovalJudgeAuthorization {
 }
 ```
 
+## application: blob_derivation
+
+```rust
+pub trait BlobDerivationIdGenerator {
+    fn next_blob_derivation_id(&mut self) -> BlobDerivationId;
+}
+
+pub struct UuidV7BlobDerivationIdGenerator;
+
+pub trait BlobDerivationStore {
+    type Error;
+    fn find_deterministic(
+        &self,
+        key: DeterministicBlobDerivationKey,
+    ) -> impl Future<Output = Result<Option<BlobDerivation>, Self::Error>> + Send;
+    fn record_deterministic(
+        &self,
+        key: DeterministicBlobDerivationKey,
+        derivation: BlobDerivation,
+    ) -> impl Future<Output = Result<BlobDerivationRecordOutcome, Self::Error>> + Send;
+}
+
+pub enum BlobDerivationRecordOutcome {
+    Recorded(BlobDerivation),
+    Existing(BlobDerivation),
+}
+
+pub trait DeterministicBlobProducer {
+    type Error;
+    fn produce(
+        &mut self,
+        inputs: &[BlobDigest],
+        transformation: &BlobTransformation,
+    ) -> impl Future<Output = Result<Box<[BlobDigest]>, Self::Error>> + Send;
+    fn outputs_retrievable(
+        &mut self,
+        outputs: &[BlobDigest],
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+}
+
+pub struct DeterministicBlobDerivationRequest { /* private */ }
+impl DeterministicBlobDerivationRequest {
+    pub fn try_new(
+        inputs: impl Into<Box<[BlobDigest]>>,
+        transformation: BlobTransformation,
+        implementation: BlobDigest,
+    ) -> Result<Self, BlobDerivationError>;
+    // accessors: inputs(), transformation(), implementation(), key()
+}
+
+pub enum BlobDerivationServiceOutcome {
+    Reused(BlobDerivation),
+    Produced(BlobDerivation),
+}
+
+pub enum BlobDerivationServiceError<StoreError, ProducerError> {
+    Store(StoreError),
+    Producer(ProducerError),
+    InvalidProducerOutput(BlobDerivationError),
+}
+
+pub struct DeterministicBlobDerivationService<Ids, Store, Producer> { /* private */ }
+impl<Ids, Store, Producer> DeterministicBlobDerivationService<Ids, Store, Producer> {
+    pub const fn new(ids: Ids, store: Store, producer: Producer) -> Self;
+    pub async fn execute(
+        &mut self,
+        request: DeterministicBlobDerivationRequest,
+    ) -> Result<
+        BlobDerivationServiceOutcome,
+        BlobDerivationServiceError<Store::Error, Producer::Error>,
+    >;
+}
+```
+
 ## application: commissioned_dispatch
 
 ```rust
@@ -11754,9 +11892,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types                     |
 | -------------------------------------------------- | -------------------------------- |
-| domain: lib.rs identities                          | 29                               |
+| domain: lib.rs identities                          | 30                               |
 | domain: actor                                      | 1                                |
-| domain: blob                                       | 3                                |
+| domain: blob                                       | 10                               |
 | domain: program_journal                            | 25                               |
 | domain: imported_conversation                      | 32 (+5 free fn)                  |
 | domain: session_template                           | 6                                |
@@ -11795,9 +11933,10 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **833 (+12 free fn)**            |
+| **signalbox-domain total**                         | **841 (+12 free fn)**            |
 | application: attention                             | 12 (+3 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
+| application: blob_derivation                       | 9 (incl. 3 traits)               |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
 | application: create_session                        | 8 (incl. 2 traits)               |
@@ -11826,4 +11965,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 13                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **353 (+14 free fn)**            |
+| **signalbox-application total**                    | **362 (+14 free fn)**            |

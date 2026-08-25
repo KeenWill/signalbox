@@ -5,6 +5,8 @@ import { Link, useNavigate } from '@tanstack/react-router'
 import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AttentionSurface } from './AttentionSurface'
+import type { CommandContext, CommandId } from './commands'
+import { invokeCommand } from './commands'
 import {
   ProductRequestError,
   type ProductRouteId,
@@ -16,7 +18,6 @@ import {
 import {
   invokeProductCommand,
   type ProductCommandContext,
-  type ProductCommandId,
   productCommandAvailable,
   productCommandRegistry,
   productHotkeyBindings,
@@ -75,14 +76,28 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
   },
 }
 
-function ProductNavigation({
+const productNavigationCommandIds: Record<ProductRouteId, CommandId> = {
+  attention: 'navigate.attention',
+  sessions: 'navigate.sessions',
+  search: 'navigate.search',
+  activity: 'navigate.activity',
+  runners: 'navigate.runners',
+  reviews: 'navigate.reviews',
+  imports: 'navigate.imports',
+  usage: 'navigate.usage',
+  settings: 'navigate.settings',
+}
+
+export function ProductNavigation({
   active,
   context,
   onActivate,
+  disabled = false,
 }: {
   active: ProductRouteId
-  context: ProductCommandContext
+  context: CommandContext
   onActivate?: () => void
+  disabled?: boolean
 }) {
   return (
     <div className="product-navigation">
@@ -99,7 +114,13 @@ function ProductNavigation({
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
+            aria-disabled={disabled || undefined}
+            tabIndex={disabled ? -1 : undefined}
             onClick={(event) => {
+              if (disabled) {
+                event.preventDefault()
+                return
+              }
               if (
                 event.button !== 0 ||
                 event.metaKey ||
@@ -111,7 +132,7 @@ function ProductNavigation({
               }
               event.preventDefault()
               onActivate?.()
-              invokeProductCommand(`navigate.${route.id}` as ProductCommandId, context)
+              invokeCommand(productNavigationCommandIds[route.id], context)
             }}
           >
             <span>{route.label}</span>
@@ -123,7 +144,15 @@ function ProductNavigation({
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
-        onClick={onActivate}
+        aria-disabled={disabled || undefined}
+        tabIndex={disabled ? -1 : undefined}
+        onClick={(event) => {
+          if (disabled) {
+            event.preventDefault()
+            return
+          }
+          onActivate?.()
+        }}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>

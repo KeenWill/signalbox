@@ -9,6 +9,7 @@ import {
   invokeCommand,
 } from './commands'
 import { FleetTable } from './FleetTable'
+import { ArtifactWorkbench } from './features/artifacts/ArtifactRenderer'
 import {
   SCENARIO_FLEET_WINDOW_ITEMS,
   SCENARIO_TIMELINE_WINDOW_ITEMS,
@@ -106,10 +107,12 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       focusTimeline: () => {
         const active = document.activeElement
         if (active instanceof HTMLElement) active.blur()
-        document.querySelector<HTMLElement>('[aria-label="Session timeline"]')?.focus()
+        const target =
+          knownId === 'blobs' ? '[data-command-focus-target]' : '[aria-label="Session timeline"]'
+        document.querySelector<HTMLElement>(target)?.focus()
       },
     }),
-    [dispatch, navigate, timelineIds],
+    [dispatch, knownId, navigate, timelineIds],
   )
   useCommandHotkeys(commandContext)
 
@@ -204,12 +207,16 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
           <Toolbar context={commandContext} />
         </header>
         <div className="primary-stack">
-          <Transcript
-            key={`timeline-${knownId}`}
-            items={timeline.items}
-            context={commandContext}
-            autoFocus
-          />
+          {knownId === 'blobs' ? (
+            <ArtifactWorkbench />
+          ) : (
+            <Transcript
+              key={`timeline-${knownId}`}
+              items={timeline.items}
+              context={commandContext}
+              autoFocus
+            />
+          )}
           {app.layout === 'workbench' && (
             <FleetTable key={`fleet-${knownId}`} rows={fleet.items} totalCount={fleet.totalCount} />
           )}
