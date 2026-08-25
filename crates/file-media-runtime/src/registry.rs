@@ -479,8 +479,16 @@ impl FileMediaRegistry {
                     source: request.source.clone(),
                     media_type: candidate.media_type.clone(),
                     evidence,
-                    maximum_source_bytes: self.ceilings.validation_source_bytes,
-                    maximum_ranges: self.ceilings.validation_ranges,
+                    maximum_source_bytes: self
+                        .ceilings
+                        .validation_source_bytes
+                        .min(reader.validation().source_bytes()),
+                    maximum_ranges: self
+                        .ceilings
+                        .validation_ranges
+                        .min(reader.validation().range_count()),
+                    maximum_image_axis: self.ceilings.image_axis,
+                    maximum_decoded_image_pixels: self.ceilings.decoded_image_pixels,
                 },
                 source,
                 cancellation,
@@ -608,6 +616,8 @@ impl FileMediaRegistry {
                     metadata: validated.metadata().clone(),
                     view: request.view,
                     input: request.input,
+                    maximum_image_axis: self.ceilings.image_axis,
+                    maximum_decoded_image_pixels: self.ceilings.decoded_image_pixels,
                     maximum_container_entries: self.ceilings.observed_container_entries,
                 },
                 source,
@@ -1059,6 +1069,14 @@ fn validate_reader(
             .is_none_or(|minimum| minimum > probe.cumulative_bytes())
     {
         return Err(FileMediaRegistryConstructionError::ProbeBounds);
+    }
+    let validation = reader.validation();
+    if validation.source_bytes() == 0
+        || validation.source_bytes() > crate::MAX_VALIDATION_SOURCE_BYTES
+        || validation.range_count() == 0
+        || validation.range_count() > crate::MAX_VALIDATION_RANGES
+    {
+        return Err(FileMediaRegistryConstructionError::ViewBounds);
     }
     for view in reader.views() {
         validate_view(view.access(), view.bounds(), ceilings)?;

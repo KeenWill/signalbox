@@ -70,6 +70,9 @@ where
             fingerprint_u64(&mut fingerprint, probe.suffix_bytes());
             fingerprint_u64(&mut fingerprint, u64::from(probe.range_count()));
             fingerprint_u64(&mut fingerprint, probe.cumulative_bytes());
+            let validation = reader.validation();
+            fingerprint_u64(&mut fingerprint, validation.source_bytes());
+            fingerprint_u64(&mut fingerprint, u64::from(validation.range_count()));
             fingerprint_len(&mut fingerprint, reader.views().len());
             for view in reader.views() {
                 fingerprint_field(&mut fingerprint, view.name().as_str().as_bytes());
@@ -417,6 +420,8 @@ pub(crate) struct WireValidationRequest {
     evidence: ValidationEvidence,
     maximum_source_bytes: u64,
     maximum_ranges: u32,
+    maximum_image_axis: u32,
+    maximum_decoded_image_pixels: u64,
 }
 
 impl From<&FileMediaProviderValidationRequest> for WireValidationRequest {
@@ -427,6 +432,8 @@ impl From<&FileMediaProviderValidationRequest> for WireValidationRequest {
             evidence: request.evidence,
             maximum_source_bytes: request.maximum_source_bytes,
             maximum_ranges: request.maximum_ranges,
+            maximum_image_axis: request.maximum_image_axis,
+            maximum_decoded_image_pixels: request.maximum_decoded_image_pixels,
         }
     }
 }
@@ -442,6 +449,8 @@ impl TryFrom<WireValidationRequest> for FileMediaProviderValidationRequest {
             evidence: value.evidence,
             maximum_source_bytes: value.maximum_source_bytes,
             maximum_ranges: value.maximum_ranges,
+            maximum_image_axis: value.maximum_image_axis,
+            maximum_decoded_image_pixels: value.maximum_decoded_image_pixels,
         })
     }
 }
@@ -456,6 +465,8 @@ pub(crate) struct WireReadRequest {
     view: String,
     options: Option<serde_json::Value>,
     continuation: Option<String>,
+    maximum_image_axis: u32,
+    maximum_decoded_image_pixels: u64,
     maximum_container_entries: u64,
 }
 
@@ -477,6 +488,8 @@ impl From<&FileMediaProviderReadRequest> for WireReadRequest {
             view: request.view.as_str().to_owned(),
             options,
             continuation,
+            maximum_image_axis: request.maximum_image_axis,
+            maximum_decoded_image_pixels: request.maximum_decoded_image_pixels,
             maximum_container_entries: request.maximum_container_entries,
         }
     }
@@ -503,6 +516,8 @@ impl TryFrom<WireReadRequest> for FileMediaProviderReadRequest {
             metadata: BoundedMetadata::try_new(&value.metadata_json).map_err(map_value_error)?,
             view: ReadViewName::try_new(value.view).map_err(map_value_error)?,
             input,
+            maximum_image_axis: value.maximum_image_axis,
+            maximum_decoded_image_pixels: value.maximum_decoded_image_pixels,
             maximum_container_entries: value.maximum_container_entries,
         })
     }
@@ -532,10 +547,76 @@ mod tests {
         FileReaderName, FileReaderProviderName, FileReaderRevision, MAX_PROCESSOR_FRAME_BYTES,
         MAX_TEXT_OR_JSON_BYTES, ProbeDeclaration, ProbeDeclarationInput, ProcessorReadOutput,
         ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
-        ReaderDeclarationInput, ReasonCode, StreamingTextFallback,
+        ReaderDeclarationInput, ReasonCode, StreamingTextFallback, ValidationDeclaration,
     };
 
     use super::{WorkerFrame, declaration_fingerprint};
+
+    fn declaration_with_validation(
+        validation: ValidationDeclaration,
+    ) -> FileMediaProviderDeclaration {
+        let provider =
+            FileReaderProviderName::try_new("fixture").expect("fixture provider name is valid");
+        let view = ReadViewDeclaration::try_new(
+            ReadViewName::try_new("text").expect("fixture view name is valid"),
+            String::from("Reads fixture text."),
+            CanonicalJsonObjectSchema::try_new(r#"{"type":"object"}"#)
+                .expect("fixture schema is valid"),
+            ReadAccessPattern::Streaming { maximum_ranges: 1 },
+            ReadViewBounds::Text {
+                source_bytes: 64,
+                output_bytes: 64,
+            },
+        )
+        .expect("fixture view declaration is valid");
+        let reader = ReaderDeclaration::try_new(ReaderDeclarationInput {
+            provider: provider.clone(),
+            reader: FileReaderName::try_new("reader").expect("fixture reader name is valid"),
+            revision: FileReaderRevision::try_new("v1").expect("fixture revision is valid"),
+            media_types: vec![
+                "application/x-signalbox-fixture"
+                    .parse::<CanonicalMediaType>()
+                    .expect("fixture media type is valid"),
+            ],
+            probe: ProbeDeclaration::new(ProbeDeclarationInput {
+                prefix_bytes: 1,
+                suffix_bytes: 0,
+                range_count: 0,
+                cumulative_bytes: 1,
+            }),
+            validation,
+            views: vec![view],
+            reason_codes: vec![
+                ReasonCode::try_new("fixture_failure").expect("fixture reason is valid"),
+            ],
+            streaming_text_fallback: StreamingTextFallback::Disabled,
+        })
+        .expect("fixture reader declaration is valid");
+        FileMediaProviderDeclaration::try_new(provider, vec![reader])
+            .expect("fixture provider owns its reader")
+    }
+
+    #[test]
+    fn validation_source_bytes_change_declaration_fingerprint() {
+        let smaller = declaration_with_validation(ValidationDeclaration::new(64, 1));
+        let larger = declaration_with_validation(ValidationDeclaration::new(128, 1));
+
+        assert_ne!(
+            declaration_fingerprint(&[smaller]),
+            declaration_fingerprint(&[larger])
+        );
+    }
+
+    #[test]
+    fn validation_range_count_changes_declaration_fingerprint() {
+        let fewer = declaration_with_validation(ValidationDeclaration::new(64, 1));
+        let more = declaration_with_validation(ValidationDeclaration::new(64, 2));
+
+        assert_ne!(
+            declaration_fingerprint(&[fewer]),
+            declaration_fingerprint(&[more])
+        );
+    }
 
     #[test]
     fn maximum_escape_heavy_structured_output_fits_one_frame() {
@@ -583,6 +664,7 @@ mod tests {
                 range_count: 1,
                 cumulative_bytes: 1,
             }),
+            validation: ValidationDeclaration::new(64, 1),
             views: vec![view],
             reason_codes: reason_codes
                 .iter()

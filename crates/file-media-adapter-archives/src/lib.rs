@@ -18,7 +18,7 @@ use signalbox_file_media_runtime::{
     ProbeDeclarationInput, ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput,
     ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
     ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
-    StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    StreamingTextFallback, ValidationDeclaration, ValidationEvidence, VerifiedBlobSource,
 };
 use zip::{CompressionMethod, ZipArchive};
 
@@ -282,6 +282,10 @@ fn reader_declaration(
             range_count: 1,
             cumulative_bytes: SOURCE_BYTES,
         }),
+        // Validation reads at most two ranges: the bounded signature prefix and
+        // the single remainder read that completes the bounded whole source.
+        // Their cumulative bytes never exceed the whole-source ceiling.
+        validation: ValidationDeclaration::new(SOURCE_BYTES, 2),
         views: vec![entries_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
