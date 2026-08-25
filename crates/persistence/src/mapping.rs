@@ -27,6 +27,112 @@ use signalbox_domain::{
     TurnId, UpdateSessionPlacementRejectionKind, ValidatedModelSettings, WorkspaceOrigin,
 };
 
+pub(crate) const SESSION_CREATED: &str = "session_created";
+pub(crate) const SESSION_MODEL_SETTINGS_CHANGED: &str = "session_model_settings_changed";
+pub(crate) const TURN_MODEL_SETTINGS_RESOLVED: &str = "turn_model_settings_resolved";
+pub(crate) const INPUT_ACCEPTED: &str = "input_accepted";
+pub(crate) const GOAL_TURN_RETIRED: &str = "goal_turn_retired";
+pub(crate) const TURN_ACTIVATED: &str = "turn_activated";
+pub(crate) const TURN_FAILED: &str = "turn_failed";
+pub(crate) const MODEL_CALL_TRANSITION: &str = "model_call_transition";
+pub(crate) const TOOL_BATCH_TRANSITION: &str = "tool_batch_transition";
+pub(crate) const TOOL_APPROVAL_DECIDED: &str = "tool_approval_decided";
+pub(crate) const CONTEXT_COMPACTED: &str = "context_compacted";
+pub(crate) const TURN_COMPLETED: &str = "turn_completed";
+pub(crate) const TURN_REFUSED: &str = "turn_refused";
+pub(crate) const TURN_CANCELLED: &str = "turn_cancelled";
+pub(crate) const TURN_RECONCILIATION_REQUIRED: &str = "turn_reconciliation_required";
+pub(crate) const RUNNER_STATE_TRANSITION: &str = "runner_state_transition";
+pub(crate) const DELEGATION_UPDATE: &str = "delegation_update";
+pub(crate) const DELEGATION_WAKE: &str = "delegation_wake";
+
+const OUTBOX_EVENT_DISCRIMINATOR_SPELLINGS: [&str; 18] = [
+    SESSION_CREATED,
+    SESSION_MODEL_SETTINGS_CHANGED,
+    TURN_MODEL_SETTINGS_RESOLVED,
+    INPUT_ACCEPTED,
+    GOAL_TURN_RETIRED,
+    TURN_ACTIVATED,
+    TURN_FAILED,
+    MODEL_CALL_TRANSITION,
+    TOOL_BATCH_TRANSITION,
+    TOOL_APPROVAL_DECIDED,
+    CONTEXT_COMPACTED,
+    TURN_COMPLETED,
+    TURN_REFUSED,
+    TURN_CANCELLED,
+    TURN_RECONCILIATION_REQUIRED,
+    RUNNER_STATE_TRANSITION,
+    DELEGATION_UPDATE,
+    DELEGATION_WAKE,
+];
+
+const fn outbox_event_kind_utf8_byte_bounds() -> (u64, u64) {
+    let mut minimum = u64::MAX;
+    let mut maximum = 0_u64;
+    let mut index = 0;
+    while index < OUTBOX_EVENT_DISCRIMINATOR_SPELLINGS.len() {
+        let length = OUTBOX_EVENT_DISCRIMINATOR_SPELLINGS[index].len() as u64;
+        if length < minimum {
+            minimum = length;
+        }
+        if length > maximum {
+            maximum = length;
+        }
+        index += 1;
+    }
+    (minimum, maximum)
+}
+
+pub(crate) const OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS: (u64, u64) =
+    outbox_event_kind_utf8_byte_bounds();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutboxEventDiscriminator {
+    SessionCreated,
+    SessionModelSettingsChanged,
+    TurnModelSettingsResolved,
+    InputAccepted,
+    GoalTurnRetired,
+    TurnActivated,
+    TurnFailed,
+    ModelCallTransition,
+    ToolBatchTransition,
+    ToolApprovalDecided,
+    ContextCompacted,
+    TurnCompleted,
+    TurnRefused,
+    TurnCancelled,
+    TurnReconciliationRequired,
+    RunnerStateTransition,
+    DelegationUpdate,
+    DelegationWake,
+}
+
+pub(crate) fn outbox_event_discriminator_from_str(value: &str) -> Option<OutboxEventDiscriminator> {
+    Some(match value {
+        SESSION_CREATED => OutboxEventDiscriminator::SessionCreated,
+        SESSION_MODEL_SETTINGS_CHANGED => OutboxEventDiscriminator::SessionModelSettingsChanged,
+        TURN_MODEL_SETTINGS_RESOLVED => OutboxEventDiscriminator::TurnModelSettingsResolved,
+        INPUT_ACCEPTED => OutboxEventDiscriminator::InputAccepted,
+        GOAL_TURN_RETIRED => OutboxEventDiscriminator::GoalTurnRetired,
+        TURN_ACTIVATED => OutboxEventDiscriminator::TurnActivated,
+        TURN_FAILED => OutboxEventDiscriminator::TurnFailed,
+        MODEL_CALL_TRANSITION => OutboxEventDiscriminator::ModelCallTransition,
+        TOOL_BATCH_TRANSITION => OutboxEventDiscriminator::ToolBatchTransition,
+        TOOL_APPROVAL_DECIDED => OutboxEventDiscriminator::ToolApprovalDecided,
+        CONTEXT_COMPACTED => OutboxEventDiscriminator::ContextCompacted,
+        TURN_COMPLETED => OutboxEventDiscriminator::TurnCompleted,
+        TURN_REFUSED => OutboxEventDiscriminator::TurnRefused,
+        TURN_CANCELLED => OutboxEventDiscriminator::TurnCancelled,
+        TURN_RECONCILIATION_REQUIRED => OutboxEventDiscriminator::TurnReconciliationRequired,
+        RUNNER_STATE_TRANSITION => OutboxEventDiscriminator::RunnerStateTransition,
+        DELEGATION_UPDATE => OutboxEventDiscriminator::DelegationUpdate,
+        DELEGATION_WAKE => OutboxEventDiscriminator::DelegationWake,
+        _ => return None,
+    })
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProgramRequestStorageKind {
     Now,
@@ -183,6 +289,11 @@ pub(crate) fn program_reject_reason_from_str(value: &str) -> Option<RejectReason
 }
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
+
+use crate::repo_watch::{
+    RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome,
+    RepoWatchStaleReviewClearanceReason,
+};
 
 use crate::{
     approval_judge::FailedApprovalJudgeDisposition,
@@ -1507,6 +1618,73 @@ pub fn repo_watch_review_decision_from_str(value: &str) -> Option<RepoWatchRevie
     }
 }
 
+pub(crate) const fn repo_watch_stale_review_clearance_outcome_to_str(
+    value: RepoWatchStaleReviewClearanceOutcome,
+) -> &'static str {
+    match value {
+        RepoWatchStaleReviewClearanceOutcome::Dismissed => "dismissed",
+        RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed => "already_dismissed",
+        RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere => "cleared_elsewhere",
+        RepoWatchStaleReviewClearanceOutcome::Superseded => "superseded",
+    }
+}
+
+pub fn repo_watch_stale_review_clearance_outcome_from_str(
+    value: &str,
+) -> Option<RepoWatchStaleReviewClearanceOutcome> {
+    match value {
+        "dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::Dismissed),
+        "already_dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
+        "cleared_elsewhere" => Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
+        "superseded" => Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_stale_review_clearance_reason_to_str(
+    value: RepoWatchStaleReviewClearanceReason,
+) -> &'static str {
+    match value {
+        RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks => "only_stale_review_blocks",
+    }
+}
+
+pub(crate) fn repo_watch_stale_review_clearance_reason_from_str(
+    value: &str,
+) -> Option<RepoWatchStaleReviewClearanceReason> {
+    match value {
+        "only_stale_review_blocks" => {
+            Some(RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_observed_review_state_to_str(
+    value: RepoWatchObservedReviewState,
+) -> &'static str {
+    match value {
+        RepoWatchObservedReviewState::Approved => "approved",
+        RepoWatchObservedReviewState::ChangesRequested => "changes_requested",
+        RepoWatchObservedReviewState::Commented => "commented",
+        RepoWatchObservedReviewState::Dismissed => "dismissed",
+        RepoWatchObservedReviewState::Pending => "pending",
+    }
+}
+
+pub fn repo_watch_observed_review_state_from_str(
+    value: &str,
+) -> Option<RepoWatchObservedReviewState> {
+    match value {
+        "approved" => Some(RepoWatchObservedReviewState::Approved),
+        "changes_requested" => Some(RepoWatchObservedReviewState::ChangesRequested),
+        "commented" => Some(RepoWatchObservedReviewState::Commented),
+        "dismissed" => Some(RepoWatchObservedReviewState::Dismissed),
+        "pending" => Some(RepoWatchObservedReviewState::Pending),
+        _ => None,
+    }
+}
+
 pub(crate) const fn repo_watch_convergence_verdict_to_str(
     value: RepoWatchConvergenceVerdict,
 ) -> &'static str {
@@ -2513,6 +2691,7 @@ mod tests {
     use crate::{
         convergence_sweep::{ConvergenceSweepDecision, ConvergenceSweepFailureKind},
         outbox::DispatchedRunnerState,
+        repo_watch::{RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome},
     };
 
     use super::{
@@ -2559,11 +2738,13 @@ mod tests {
         repo_watch_event_kind_to_str, repo_watch_lifecycle_cutoff_disposition_from_str,
         repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_mergeable_state_from_str,
         repo_watch_mergeable_state_to_str, repo_watch_obligation_settlement_from_str,
-        repo_watch_obligation_settlement_to_str, repo_watch_pull_request_lifecycle_from_str,
+        repo_watch_obligation_settlement_to_str, repo_watch_observed_review_state_from_str,
+        repo_watch_observed_review_state_to_str, repo_watch_pull_request_lifecycle_from_str,
         repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
         repo_watch_reaction_change_to_str, repo_watch_review_decision_from_str,
         repo_watch_review_decision_to_str, repo_watch_review_state_from_str,
-        repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
+        repo_watch_review_state_to_str, repo_watch_stale_review_clearance_outcome_from_str,
+        repo_watch_stale_review_clearance_outcome_to_str, repo_watch_thread_state_from_str,
         repo_watch_thread_state_to_str, runner_loss_propagation_state_from_str,
         runner_loss_propagation_state_to_str, runner_placement_loss_source_from_str,
         runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
@@ -3777,6 +3958,81 @@ mod tests {
             Some(RepoWatchConvergenceVerdict::MergeReady),
         );
         assert_eq!(repo_watch_convergence_verdict_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn repository_watch_review_clearance_outcome_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::Dismissed,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::Dismissed),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::Superseded,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str("unknown"),
+            None
+        );
+    }
+
+    #[test]
+    fn repository_watch_observed_review_state_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Approved,
+            )),
+            Some(RepoWatchObservedReviewState::Approved),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::ChangesRequested,
+            ),),
+            Some(RepoWatchObservedReviewState::ChangesRequested),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Commented,
+            )),
+            Some(RepoWatchObservedReviewState::Commented),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Dismissed,
+            )),
+            Some(RepoWatchObservedReviewState::Dismissed),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Pending,
+            )),
+            Some(RepoWatchObservedReviewState::Pending),
+        );
+        assert_eq!(repo_watch_observed_review_state_from_str("unknown"), None);
     }
 
     #[test]

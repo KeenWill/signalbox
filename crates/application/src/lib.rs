@@ -21,6 +21,7 @@ mod review_workflow;
 mod scheduler;
 mod session_delegation;
 mod session_metadata;
+mod session_timeline;
 mod start_eligible_turn;
 mod startup_scan;
 mod submit_input;
@@ -106,9 +107,10 @@ pub use repo_watch::{
     RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
     RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
     RepoWatchReviewObservation, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchSingletonKey, RepoWatchTemplateResolver, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    RepoWatchSingletonKey, RepoWatchStaleReviewClearanceCandidate,
+    RepoWatchStaleReviewClearanceCandidateError, RepoWatchTemplateResolver,
+    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
     repo_watch_events_have_equal_identified_content,
 };
 pub use repo_watch_webhook::{
@@ -156,6 +158,13 @@ pub use session_metadata::{
     ReplaceSessionMetadataTransaction, SessionMetadataListItem, SessionMetadataListQuery,
     SessionMetadataListQueryError, SessionMetadataLister, SessionMetadataPageReader,
     SessionMetadataReader,
+};
+pub use session_timeline::{
+    ReadSessionTimelineService, SessionTimelineBounds, SessionTimelineDescriptor,
+    SessionTimelineEventKind, SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts,
+    SessionTimelineWindow, SessionWorkFacts, TimelineAddress, TimelineContinuation,
+    TimelineWindowAnchor, TimelineWindowLimitError, TimelineWindowLimits,
+    max_timeline_window_bytes, max_timeline_window_items, min_timeline_window_bytes,
 };
 pub use start_eligible_turn::{
     StartEligibleTurnIdGenerator, StartEligibleTurnOutcome, StartEligibleTurnService,
