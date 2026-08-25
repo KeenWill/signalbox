@@ -732,6 +732,7 @@ fn read_text_with_decoding_budget(
             *page_id,
             &mut decoded_sizes,
             &mut remaining_decoded_bytes,
+            cancellation,
         )? {
             return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
                 limit_kind: String::from(DECODED_CONTENT_LIMIT),
@@ -810,6 +811,10 @@ fn object_streams_fit_expansion_limit(
         })
         .collect::<BTreeSet<_>>();
     let mut total_decoded_bytes = 0_usize;
+    // Shared across every target so a /Length integer carried by one heavily
+    // compressed object stream is decoded once even when thousands of object
+    // streams reference it, instead of re-decoding the carrier per target.
+    let mut resolved_lengths = BTreeMap::new();
     for stream_object in stream_objects {
         let (stream_reference, stream_offset) =
             object_stream_offset(parsed, stream_object).ok_or(FileMediaProviderFailure::Failed)?;
@@ -823,8 +828,14 @@ fn object_streams_fit_expansion_limit(
         {
             StreamLength::Direct(_) => None,
             StreamLength::Indirect(reference) => {
-                let length = resolve_integer_object(bytes, parsed, reference, &mut BTreeSet::new())
-                    .ok_or(FileMediaProviderFailure::Failed)?;
+                let length = resolve_integer_object(
+                    bytes,
+                    parsed,
+                    reference,
+                    &mut BTreeSet::new(),
+                    &mut resolved_lengths,
+                )
+                .ok_or(FileMediaProviderFailure::Failed)?;
                 Some((reference, length))
             }
         };
@@ -860,7 +871,11 @@ fn resolve_integer_object(
     parsed: &ParsedXref,
     reference: IndirectReference,
     resolving: &mut BTreeSet<IndirectReference>,
+    cache: &mut BTreeMap<IndirectReference, u64>,
 ) -> Option<u64> {
+    if let Some(cached) = cache.get(&reference) {
+        return Some(*cached);
+    }
     if resolving.len() >= MAX_INDIRECT_LENGTH_DEPTH || !resolving.insert(reference) {
         return None;
     }
@@ -887,7 +902,13 @@ fn resolve_integer_object(
                         StreamLength::Direct(_) => None,
                         StreamLength::Indirect(length_reference) => Some((
                             length_reference,
-                            resolve_integer_object(bytes, parsed, length_reference, resolving)?,
+                            resolve_integer_object(
+                                bytes,
+                                parsed,
+                                length_reference,
+                                resolving,
+                                cache,
+                            )?,
                         )),
                     };
                 let object = object_stream_object(
@@ -903,6 +924,13 @@ fn resolve_integer_object(
         }
     })();
     resolving.remove(&reference);
+    // Cache only successful resolutions: a `None` here can reflect the
+    // current call's remaining cycle-detection depth rather than the
+    // reference itself being unresolvable, so caching it could poison a
+    // fresh top-level resolution that would otherwise succeed.
+    if let Some(value) = resolved {
+        cache.insert(reference, value);
+    }
     resolved
 }
 
@@ -1092,6 +1120,7 @@ fn charge_page_content_decoding(
     page_id: lopdf::ObjectId,
     decoded_sizes: &mut BTreeMap<lopdf::ObjectId, usize>,
     remaining: &mut usize,
+    cancellation: &dyn CancellationSignal,
 ) -> Result<bool, FileMediaProviderFailure> {
     let page = document
         .get_dictionary(page_id)
@@ -1124,6 +1153,10 @@ fn charge_page_content_decoding(
         _ => return Err(FileMediaProviderFailure::Failed),
     }
     for object_id in stream_ids {
+        // A page can reference many distinct compressed content streams; check
+        // cancellation between decodes so an authoritative signal is observed
+        // before this helper spends the full aggregate budget on one page.
+        require_active(cancellation)?;
         let size = match decoded_sizes.get(&object_id) {
             Some(size) => *size,
             None => {
@@ -1892,14 +1925,32 @@ async fn bounded_object_stream_targets(
         ));
     }
     ordered_targets.sort_by_key(|(stream_offset, ..)| *stream_offset);
+    let target_count = ordered_targets.len();
     let mut remaining_decoded_bytes = MAX_TOTAL_OBJECT_STREAM_BYTES;
-    for (stream_offset, stream_object, stream_reference, compressed_entries) in ordered_targets {
+    for (index, (stream_offset, stream_object, stream_reference, compressed_entries)) in
+        ordered_targets.into_iter().enumerate()
+    {
+        // Every target still to come after this one may need its own fresh
+        // range read plus an out-of-range length probe (2 ranges, worst
+        // case), so the reservation scales with the remaining uncached-
+        // stream count instead of a flat constant; otherwise the first range
+        // greedily starves later probes. This target's own probe needs only
+        // 1 more range beyond that, matching the prior flat constants when
+        // exactly one target remains.
+        let future_targets = u32::try_from(target_count - index - 1)
+            .map_err(|_| FileMediaProviderFailure::Failed)?;
+        let probe_reservation = (
+            u64::from(2 * future_targets) * ROOT_VALIDATION_BYTES,
+            2 * future_targets,
+        );
         if cached_range_at(&ranges, stream_offset).is_none() {
             let Some(available) = source.byte_length().get().checked_sub(stream_offset) else {
                 return Ok(None);
             };
-            let length =
-                available.min(budget.available_after_reserving(3 * ROOT_VALIDATION_BYTES, 3));
+            let length = available.min(budget.available_after_reserving(
+                probe_reservation.0 + ROOT_VALIDATION_BYTES,
+                probe_reservation.1 + 1,
+            ));
             if !budget.can_read(length) {
                 return Ok(None);
             }
@@ -1916,7 +1967,7 @@ async fn bounded_object_stream_targets(
             bytes,
             stream_offset,
             stream_reference,
-            (2 * ROOT_VALIDATION_BYTES, 2),
+            probe_reservation,
         )
         .await?;
         if !object_stream_coordinates_are_valid(
@@ -2021,13 +2072,19 @@ fn parse_xref_chain(bytes: &[u8], start: usize) -> Option<ParsedXref> {
         merge_complete_supplemental_xref(bytes, &mut previous, offset, &mut visited)?;
         merge_previous_xref(&mut parsed, previous);
     }
+    let mut resolved_lengths = BTreeMap::new();
     let lengths_match = parsed
         .facts
         .indirect_xref_lengths
         .iter()
         .all(|(reference, expected)| {
-            resolve_integer_object(bytes, &parsed, *reference, &mut BTreeSet::new())
-                == Some(*expected)
+            resolve_integer_object(
+                bytes,
+                &parsed,
+                *reference,
+                &mut BTreeSet::new(),
+                &mut resolved_lengths,
+            ) == Some(*expected)
         });
     (lengths_match && effective_size_contains_declarations(&parsed)).then_some(parsed)
 }
@@ -3931,6 +3988,7 @@ mod tests {
                     generation: 0,
                 },
                 &mut BTreeSet::new(),
+                &mut BTreeMap::new(),
             ),
             Some(42)
         );

@@ -76,7 +76,7 @@ duplicate-aware deserialization before structural excess is materialized.
 
 | Family | Exact types       | Views              | Decoder and enforced exclusions                                                                                                                                                                                                                              |
 | ------ | ----------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| PDF    | `application/pdf` | `text`, `metadata` | `lopdf` 0.44 with default features disabled, compiled only into `signalbox-file-media-pdf-worker`; 8 MiB source, 10,000-page/object, 1 MiB decompressed-page, and 174,000-byte text bounds; no rendering, OCR, embedded-file extraction, or password channel |
+| PDF    | `application/pdf` | `text`, `metadata` | `lopdf` 0.44 with default features disabled, compiled only into `signalbox-file-media-pdf-worker`; 8 MiB source, 10,000-page/object, 1 MiB decompressed-page, 256 MiB aggregate decompressed-content, and 174,000-byte text bounds; no rendering, OCR, embedded-file extraction, or password channel |
 
 ## Detection and validation
 
