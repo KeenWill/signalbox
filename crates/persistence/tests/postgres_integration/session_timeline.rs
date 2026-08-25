@@ -8,13 +8,15 @@
 use std::{error::Error, num::NonZeroU64};
 
 use signalbox_application::{
-    SessionTimelineDetailBody, TimelineAddress, TimelineContinuation, TimelineDelegationDetail,
-    TimelineDetailLimits, TimelineWindowAnchor, TimelineWindowLimits,
+    SessionTimelineDetailBody, TimelineAddress, TimelineBodyField, TimelineContinuation,
+    TimelineDelegationDetail, TimelineDetailCursor, TimelineDetailLimits, TimelineToolState,
+    TimelineWindowAnchor, TimelineWindowLimits, ToolCatalog,
 };
 use signalbox_domain::{
     CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
     SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    ToolApprovalDecision, ToolAttemptId, ToolEffectClass, TranscriptAncestry, TurnAttemptId,
+    ToolApprovalDecision, ToolAttemptId, ToolAttemptObservation, ToolEffectClass, ToolName,
+    TranscriptAncestry, TurnAttemptId,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
@@ -27,8 +29,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{
-    Decimal, checkpoint_confirmed_tool_round, commission_fixture_session_goal,
-    decide_tool_request, insert_frontier, migrated_postgres,
+    AMBIGUITY_FIXTURE_TOOL, Decimal, ambiguity_fixture_catalog, checkpoint_confirmed_tool_round,
+    commission_fixture_session_goal, decide_tool_request, insert_frontier, migrated_postgres,
     prepared_complete_delegation_outbox, stop_fixture_session_goal, test_session_credential_pin,
 };
 
@@ -292,6 +294,129 @@ async fn proposed_tool_detail_freezes_members_before_later_attempts() -> Result<
     assert_eq!(tools[0].request_id, request);
     assert_eq!(tools[0].attempt_id, None);
     assert_eq!(tools[0].sandbox_posture, None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A transition's projected attempt evidence is the snapshot taken when the
+/// transition committed, not the live mutable `tool_attempt` row.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn transition_detail_freezes_attempt_state_before_later_resolution()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x99b0;
+    let declared_effect_class = ambiguity_fixture_catalog()
+        .definition(
+            &ToolName::try_new(String::from(AMBIGUITY_FIXTURE_TOOL))
+                .expect("the fixture tool name is admitted"),
+        )
+        .expect("the fixture catalog declares the proposed tool")
+        .effect_class();
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, AMBIGUITY_FIXTURE_TOOL, "{}").await?;
+    let tool_loop = PostgresToolLoopRepository::new(pool.clone());
+    tool_loop
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xd0)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xe0)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xe1));
+    tool_loop
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            declared_effect_class,
+        )
+        .await?
+        .expect("the approved request prepares its physical attempt");
+    let authorized_attempt = tool_loop
+        .authorize_attempt(fixture.session, fixture.turn, attempt)
+        .await?;
+    tool_loop
+        .commit_observation(
+            authorized_attempt
+                .executor_fence()
+                .bind(ToolAttemptObservation::Ambiguous),
+        )
+        .await?;
+
+    // A later real recovery path updates the same attempt row in place; the
+    // committed recovery transition must keep projecting the evidence it saw.
+    sqlx::query(
+        "UPDATE tool_attempt
+            SET terminal_disposition_kind = 'completed',
+                result_content_kind = 'text',
+                result_text = 'resolved later'
+          WHERE attempt_id = $1",
+    )
+    .bind(attempt.into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT event_sequence::bigint
+           FROM tool_batch_transition_outbox_event
+          WHERE producing_model_call_id = $1
+            AND transition_kind = 'recovery_required'",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let address = TimelineAddress::new(
+        NonZeroU64::new(u64::try_from(sequence)?).expect("the durable event sequence is positive"),
+    );
+    let repository = SessionTimelineRepository::new(pool.clone());
+    let page = repository
+        .read_item_details(
+            fixture.session,
+            address,
+            None,
+            TimelineDetailLimits::new(1, 512).expect("fixture limits are bounded"),
+        )
+        .await?
+        .expect("the recovery transition detail exists");
+    let SessionTimelineDetailBody::ToolBatch {
+        tools,
+        projected_member_index,
+        ..
+    } = &page.items[0].body
+    else {
+        panic!("the selected event projects a tool-batch body");
+    };
+    assert_eq!(*projected_member_index, Some(0));
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].attempt_id, Some(attempt));
+    assert_eq!(tools[0].state, Some(TimelineToolState::Ambiguous));
+    assert_eq!(tools[0].result, None);
+    assert_eq!(tools[0].failure, None);
+    assert_eq!(page.continuation, None);
+
+    let stale_result_cursor = repository
+        .read_item_details(
+            fixture.session,
+            address,
+            Some(TimelineDetailCursor {
+                address,
+                field: Some(TimelineBodyField::ToolResult),
+                member_index: 0,
+                offset_bytes: 0,
+            }),
+            TimelineDetailLimits::new(1, 512).expect("fixture limits are bounded"),
+        )
+        .await;
+    assert!(matches!(
+        stale_result_cursor,
+        Err(SessionTimelineRepositoryError::InvalidDetailQuery)
+    ));
 
     pool.close().await;
     drop(container);

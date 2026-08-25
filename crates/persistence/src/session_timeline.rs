@@ -1404,7 +1404,9 @@ async fn project_tool_batch(
     };
     let row = sqlx::query(
         "WITH selected_member AS (
-            SELECT request_id, attempt_id, approval_judge_escalated
+            SELECT request_id, attempt_id, approval_judge_escalated,
+                   attempt_state_kind, attempt_terminal_disposition_kind,
+                   attempt_error_kind, attempt_has_result, attempt_has_failure
               FROM tool_batch_transition_detail_member
              WHERE event_sequence = $1
                AND member_kind = 'tool'
@@ -1413,14 +1415,21 @@ async fn project_tool_batch(
         SELECT request.request_id, request.tool_name,
                 CASE $3::text
                     WHEN 'tool_arguments' THEN request.arguments_text
-                    WHEN 'tool_result' THEN attempt.result_text
-                    WHEN 'tool_failure' THEN attempt.error_detail
+                    WHEN 'tool_result' THEN CASE
+                        WHEN selected.attempt_has_result THEN attempt.result_text
+                    END
+                    WHEN 'tool_failure' THEN CASE
+                        WHEN selected.attempt_has_failure THEN attempt.error_detail
+                    END
                 END AS selected_body,
-                request.approval_posture, attempt.attempt_id,
-                attempt.effect_class, attempt.state_kind,
-                attempt.terminal_disposition_kind, attempt.error_kind,
-                attempt.result_text IS NOT NULL AS has_result,
-                attempt.error_detail IS NOT NULL AS has_failure,
+                request.approval_posture, selected.attempt_id,
+                attempt.effect_class,
+                selected.attempt_state_kind AS state_kind,
+                selected.attempt_terminal_disposition_kind
+                    AS terminal_disposition_kind,
+                selected.attempt_error_kind AS error_kind,
+                COALESCE(selected.attempt_has_result, FALSE) AS has_result,
+                COALESCE(selected.attempt_has_failure, FALSE) AS has_failure,
                 EXISTS (
                     SELECT 1
                       FROM tool_batch_transition_detail_member AS probe
@@ -1809,10 +1818,23 @@ async fn project_tool_approval(
                 model_call_id: *call,
             }
         }
+        (ToolDecisionSource::UserOverride, ToolApprovalDecider::UserOverride { command, .. }) => {
+            TimelineApprovalActor::User {
+                command_id: *command,
+            }
+        }
         (ToolDecisionSource::PolicyAuto, _)
         | (ToolDecisionSource::SessionBlanket, _)
         | (ToolDecisionSource::SessionOverride, _) => TimelineApprovalActor::Policy,
-        (ToolDecisionSource::UserCommand, ToolApprovalDecider::Delegate { .. })
+        (
+            ToolDecisionSource::UserCommand | ToolDecisionSource::Delegate,
+            ToolApprovalDecider::UserOverride { .. },
+        )
+        | (
+            ToolDecisionSource::UserOverride,
+            ToolApprovalDecider::User { .. } | ToolApprovalDecider::Delegate { .. },
+        )
+        | (ToolDecisionSource::UserCommand, ToolApprovalDecider::Delegate { .. })
         | (ToolDecisionSource::Delegate, ToolApprovalDecider::User { .. }) => {
             return Err(
                 SessionTimelineCorruption::InvalidStoredValue("tool approval actor").into(),
