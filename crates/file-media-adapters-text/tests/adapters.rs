@@ -131,11 +131,17 @@ async fn top_level_json_scalar_uses_the_text_fallback() -> Result<(), Box<dyn Er
 }
 
 #[tokio::test]
-async fn unprobed_declared_json_candidate_is_unknown() -> Result<(), Box<dyn Error>> {
+async fn unprobed_declared_json_candidate_uses_text_fallback() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(b"hello".to_vec());
 
     let inspection = support::inspect(&source, "application/json").await?;
-    support::assert_unknown(inspection);
+    support::assert_declared_mismatch(
+        inspection,
+        DeclaredMismatchExpectation {
+            declared: "application/json",
+            detected: "text/plain",
+        },
+    );
     Ok(())
 }
 
@@ -729,11 +735,17 @@ async fn csv_rejects_truncated_quoted_field_as_typed_malformed() -> Result<(), B
 }
 
 #[tokio::test]
-async fn unprobed_declared_csv_candidate_is_unknown() -> Result<(), Box<dyn Error>> {
+async fn unprobed_declared_csv_candidate_uses_text_fallback() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(b"hello".to_vec());
 
     let inspection = support::inspect(&source, "text/csv").await?;
-    support::assert_unknown(inspection);
+    support::assert_declared_mismatch(
+        inspection,
+        DeclaredMismatchExpectation {
+            declared: "text/csv",
+            detected: "text/plain",
+        },
+    );
     Ok(())
 }
 

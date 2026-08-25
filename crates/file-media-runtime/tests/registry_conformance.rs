@@ -329,6 +329,7 @@ enum SelectionValidation {
     Malformed,
     EncryptedOrLocked,
     NoMatch,
+    DeclaredMissStreamingValidated,
 }
 
 struct SelectionProcessor {
@@ -400,6 +401,22 @@ impl FileMediaProcessor for SelectionProcessor {
                     }
                 }
                 SelectionValidation::NoMatch => ProcessorValidationOutput::NoMatch,
+                SelectionValidation::DeclaredMissStreamingValidated => match request.evidence {
+                    ValidationEvidence::DeclaredCandidateStructurallyValidated => {
+                        ProcessorValidationOutput::NoMatch
+                    }
+                    ValidationEvidence::StreamingTextValidation => {
+                        ProcessorValidationOutput::Validated {
+                            media_type: request.media_type.to_string(),
+                            evidence: request.evidence,
+                            metadata_json: String::from(r#"{"synthetic":true}"#),
+                        }
+                    }
+                    ValidationEvidence::StrongSignature
+                    | ValidationEvidence::StructuralValidation => {
+                        return Err(ProcessorFailure::Failed.into());
+                    }
+                },
             })
         })
     }
@@ -763,6 +780,23 @@ fn declared_validation_no_match_becomes_unknown() {
     let FileInspection::Unknown { .. } = outcome else {
         panic!("declared validation miss must produce unknown inspection");
     };
+}
+
+#[test]
+fn declared_validation_miss_resumes_streaming_text_fallback() {
+    let inspection = selection_inspection(
+        SelectionProbe::NoMatch,
+        SelectionValidation::DeclaredMissStreamingValidated,
+        "text/plain",
+        "text/plain",
+        StreamingTextFallback::Enabled,
+    )
+    .expect("declared validation miss resumes streaming text fallback");
+
+    assert_eq!(
+        validated_evidence(inspection),
+        ValidationEvidence::StreamingTextValidation
+    );
 }
 
 #[test]

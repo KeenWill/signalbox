@@ -287,10 +287,10 @@ impl FileMediaRegistry {
         if let Ok(declared) = request.source.declared_media_type().canonical_essence()
             && let Some(reader) = self.media_readers.get(&declared)
         {
-            return self
+            let inspection = self
                 .validate_candidate(
                     processor,
-                    request,
+                    request.clone(),
                     source,
                     cancellation,
                     Candidate {
@@ -300,7 +300,10 @@ impl FileMediaRegistry {
                     },
                     ValidationEvidence::DeclaredCandidateStructurallyValidated,
                 )
-                .await;
+                .await?;
+            if !matches!(inspection, FileInspection::Unknown { .. }) {
+                return Ok(inspection);
+            }
         }
 
         if let Some(reader) = self.streaming_text_reader.as_ref() {
