@@ -1,5 +1,8 @@
 # Sessions and the transcript
 
+The bounded browser session descriptor and historical timeline foundation are
+verified against this PR (`agent/web-session-timeline`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -40,7 +43,12 @@ current-head authentication is additionally verified against the parent slice
 (`agent/scoped-visibility`). The read-scope enforcement and process surface are
 verified against this PR (`agent/scoped-visibility-wiring`).
 Defaults-replacement settings admission and its locked expected-epoch handoff
-are verified against this PR (`agent/model-settings-execution`).
+are verified against this PR (`agent/model-settings-execution`). The
+automatic-reconciliation child outcome — the failed result carrying the
+`ChildResultUnavailable` reason and the exact reconciled child turn that the
+daemon's durable attempt seals for a parent whose delegated call the provider
+can never settle — is verified against this PR
+(`agent/turn-lifecycle-hardening`).
 
 ## Session identity and creation provenance
 
@@ -659,6 +667,57 @@ partial session.
 Why (fail closed): a fabricated or partial session would mask corruption and
 launder invalid durable state into valid-looking domain values.
 
+## Bounded browser session timeline
+
+The browser historical plane addresses every durable session event by the pair
+`(session_id, event_sequence)`. On the wire the session UUID is carried by the
+endpoint or result and `WebTimelineAddress.event_sequence` is the positive
+decimal string of the global durable outbox sequence. The sequence is allocated
+once across ordinary and delegation outbox events. It is append-only, totally
+ordered, independent of table offsets and query plans, and never renumbered.
+Another session's events may create gaps. A search or other navigator therefore
+carries both fields and can open an unloaded region with an `around` read;
+arithmetic adjacency is never required.
+
+`GET /api/sessions/{session_id}` returns the exact first and latest addresses,
+durable event count, current global observation cursor, active and queued turn
+counts, and explicit projected-size facts. Projected text bytes are the UTF-8
+bytes currently stored inline for accepted input, assistant text, and context
+summaries. Projected structured bytes sum a fixed 64-byte header envelope plus
+the UTF-8 event-kind spelling for every durable event. These values are loading
+policy estimates, not encoded-response promises. Referenced blob count and byte
+length are separate facts and are zero until a durable timeline-to-blob relation
+exists; a future nonzero byte length will still describe a reference, not
+materialized bytes.
+
+`GET /api/sessions/{session_id}/timeline` accepts `first`, `latest`, `before`,
+`after`, and `around` anchors. Addressed anchors require one positive decimal
+`address`. Every request supplies `max_items` from 1 through 256 and `max_bytes`
+from 256 through 65,536. Persistence reads at repeatable-read isolation, fetches
+at most 257 lightweight headers, enforces both requested limits, and returns
+items in address order. `continuation_before` is the first returned address only
+when earlier items exist; `continuation_after` is the last returned address only
+when later items exist. Thus truncation is explicit, and continuing repeats only
+the boundary address in the request, never an item in the next strict keyset
+window. The `around` query forms bounded candidates independently from the
+indexed prefix and suffix before choosing the nearest headers; it does not sort
+the session's lifetime event set.
+
+Each header retains one of the closed ordinary, goal, model, tool, runner, or
+delegation event categories. An unknown durable category is corruption rather
+than generic prose. This foundation intentionally exposes header facts rather
+than storage records or process frames. Browser DTOs are generated from the Rust
+web-contract schema; application values, persistence rows, browser DTOs, and
+presentation items remain distinct.
+
+The browser session-history adapter validates the generated DTOs, treats every
+64-bit value as a decimal string and `bigint`, clamps each request to the server
+ceilings, and retains at most 768 event headers. Every newly inspected window is
+retained preferentially, so moving among the first, latest, and an arbitrary
+million-event address never makes lifetime history a client-memory precondition.
+Transcript `full`, `condensed`, and `results` remain local presentation choices
+and do not alter any server query.
+
 ## Semantic transcript entries
 
 A semantic transcript entry is one immutable identified semantic-history fact:
@@ -1120,7 +1179,13 @@ carry the exact terminal child turn. Returned content is derived only from the
 proof-bearing completed call; independently supplied text cannot authorize a
 result. A completed turn with empty or oversized returned text records the
 distinct `ChildResultUnavailable` reason. Reconciliation-required work is not
-terminal delegation evidence and produces no outcome. **Committed unimplemented
+terminal delegation evidence on its own and produces no outcome while its
+ambiguity stands. Automatic reconciliation is the exception: the daemon's
+durable attempt seals the child as a failed result carrying that same
+`ChildResultUnavailable` reason and the exact reconciled child turn, in the
+transaction that commits the terminal transition, so a parent waiting on a call
+whose provider outcome can never be established is woken by evidence rather than
+left waiting on a turn that has already ended. **Committed unimplemented
 functionality.** Durable terminal-result reconstitution is not exposed by this
 foundation slice; the persistence slice must consume a sealed reconstituted
 ended-call/turn projection rather than accepting parallel raw identities or

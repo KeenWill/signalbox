@@ -16,6 +16,13 @@
 # requires, up to but never above the model's cap.
 version = 1
 
+# Omit this table for the fixed baseline of 16 concurrent per-session scheduler
+# passes. A smaller deployment override keeps provider and tool work bounded
+# when many durable sessions become eligible together. Zero keeps ingestion
+# and process services live while pausing authoritative session execution.
+# [scheduler]
+# max_in_flight_passes = 4
+
 # Blob bytes live outside PostgreSQL. Each deployment generates and then keeps
 # one namespace UUID per physical store. Both directories must already exist,
 # be owned by the daemon user, and have exact mode 0700.
@@ -312,6 +319,14 @@ allowed_origins = [
 # version = 1
 # signal_reviewers = ["signal-reviewer", "review-bot[bot]"]
 #
+# The sweep remains disabled unless this policy and at least one repository's
+# explicit pull-request list are both present. Deployments may lower, never
+# raise, the five-minute census and thirty-minute cool-off ceilings.
+# [repository_watch.convergence_sweep]
+# template = "review-response"
+# interval_seconds = 300
+# cool_off_seconds = 1800
+#
 # [repository_watch.webhook]
 # bind_address = "127.0.0.1:3333"
 # path = "/"
@@ -320,6 +335,7 @@ allowed_origins = [
 # repository = "namespace/project"
 # poll_interval_seconds = 60
 # credential_file = "/run/credentials/repository-watch-namespace-project"
+# convergence_pull_requests = [892]
 # webhook_hook_id = 123456789
 # webhook_secret_file = "/etc/signalbox/github-webhook-secret"
 #

@@ -12,14 +12,16 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use signalbox_application::{
-    ClassifyOperatorFailure, ConversationListCursor, ConversationListItem, ConversationListQuery,
-    ConversationOriginFilter, ConversationPageReader, CreateSessionError,
-    CreateSessionFromImportedFrontierOutcome, CreateSessionFromImportedFrontierRequest,
-    CreateSessionFromImportedFrontierService, CreateSessionOutcome, CreateSessionRequest,
-    CreateSessionService, DecideToolRequestService, EligibilityNudge, ImportConversationError,
-    ImportConversationOutcome, ImportConversationService, ImportedConversationConverter,
-    InProcessEligibilityNudge, InProcessToolDispatchGate, ListConversationsService,
-    ListSessionMetadataService, LoadSessionMetadataService, OperatorFailureClass,
+    ClassifyOperatorFailure, CommissionDispatchRequest,
+    CommissionedDispatchFence as ApplicationCommissionedDispatchFence, ConversationListCursor,
+    ConversationListItem, ConversationListQuery, ConversationOriginFilter, ConversationPageReader,
+    CreateSessionError, CreateSessionFromImportedFrontierOutcome,
+    CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
+    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
+    EligibilityNudge, ImportConversationError, ImportConversationOutcome,
+    ImportConversationService, ImportedConversationConverter, InProcessEligibilityNudge,
+    InProcessToolDispatchGate, ListConversationsService, ListSessionMetadataService,
+    LoadSessionMetadataService, OperatorFailureClass, OverrideDeniedToolRequestService,
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
     ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
     ReplaceSessionMetadataService, ReviewPassCompletionStatus, ReviewWorkflowCommand,
@@ -27,9 +29,9 @@ use signalbox_application::{
     ReviewWorkflowOperation, ReviewWorkflowOperationKind, SessionMetadataListItem,
     SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
     SubmitInputTransaction, UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest,
-    UpdateSessionPlacementService, UuidV7CreateSessionFromImportedFrontierIdGenerator,
-    UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
-    UuidV7ToolLoopIdGenerator,
+    UpdateSessionPlacementService, UuidV7CommissionedDispatchIdGenerator,
+    UuidV7CreateSessionFromImportedFrontierIdGenerator, UuidV7ImportedConversationIdGenerator,
+    UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
 };
 use signalbox_blob_store::ExpectedBlob;
 use signalbox_conversation_import_claude_code::{
@@ -40,9 +42,9 @@ use signalbox_conversation_import_codex::{
     CodexRolloutJsonlConverter,
 };
 use signalbox_domain::{
-    AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextCompactionId,
-    ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
-    DecideToolRequestRejectedResult, DecideToolRequestResult,
+    AcceptedInputId, Actor, BranchName, CancelledModelCallTurnIdentities, CommitSha,
+    ContextCompactionId, ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval,
+    DecideToolRequest, DecideToolRequestRejectedResult, DecideToolRequestResult,
     DelegationMessageDirection as DomainDelegationMessageDirection,
     DelegationOutcomeKind as DomainDelegationOutcomeKind,
     DelegationOutcomeReason as DomainDelegationOutcomeReason,
@@ -59,12 +61,14 @@ use signalbox_domain::{
     ModelChangeAdjustment as DomainModelChangeAdjustment, ModelSelectionOverride,
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,
-    ModelSettingsPrecedence as DomainModelSettingsPrecedence, ParentTerminationCommandSource,
-    PerInputConfigurationChoices, ReasoningLevel as DomainReasoningLevel,
-    ReplaceSessionDefaults as DomainReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
-    ReplaceSessionMetadataResult, ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal,
-    ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
+    ModelSettingsPrecedence as DomainModelSettingsPrecedence, OverrideDeniedToolRequest,
+    OverrideDeniedToolRequestRejectedResult, OverrideDeniedToolRequestResult,
+    ParentTerminationCommandSource, PerInputConfigurationChoices, PullRequestNumber,
+    ReasoningLevel as DomainReasoningLevel, ReplaceSessionDefaults as DomainReplaceSessionDefaults,
+    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
+    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult, RepositorySlug,
+    ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink,
+    ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
     ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
     ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
     ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
@@ -94,6 +98,10 @@ use signalbox_model_provider_runtime::{
 };
 use signalbox_persistence::{
     blob::BlobCatalogRepository,
+    commissioned_dispatch::{
+        CommissionDispatchOutcome, CommissionedDispatchRepositoryError,
+        PostgresCommissionedDispatchStore,
+    },
     context_compaction::{
         AppliedContextCompaction, ContextCompactionCommandLookup, ContextCompactionRepository,
         ContextCompactionRepositoryError, FailedContextCompactionDisposition,
@@ -109,6 +117,13 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError},
     goal_turn::GoalTurnCandidates,
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
+    operator_status::{
+        ProcessOperatorStatusConvergenceSeal, ProcessOperatorStatusConvergenceVerdict,
+        ProcessOperatorStatusError, ProcessOperatorStatusHeldSlotBlocker,
+        ProcessOperatorStatusHeldSlotOrigin, ProcessOperatorStatusItem,
+        ProcessOperatorStatusMergeableState, ProcessOperatorStatusRepository,
+        ProcessOperatorStatusReviewDecision, ProcessOperatorStatusSingletonScope,
+    },
     outbox::{
         DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
         DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
@@ -144,6 +159,7 @@ use signalbox_persistence::{
 use signalbox_process_protocol::{
     BillingRateVersion, BlobChunk, BoundChildAction as WireBoundChildAction, BulkIngestKind,
     CanonicalBlobDigest, CanonicalDollarAmount, CanonicalU64, CanonicalUuid, ClientRequest,
+    CommissionedSessionFence as WireCommissionedSessionFence,
     ConversationCursor as WireConversationCursor, ConversationImportFormat,
     ConversationImportRejectionClass, ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
@@ -168,8 +184,17 @@ use signalbox_process_protocol::{
     ModelChangeAdjustment as WireModelChangeAdjustment, ModelSelection as WireModelSelection,
     ModelSettingSource as WireModelSettingSource, ModelSettingsOverlay as WireModelSettingsOverlay,
     ModelSettingsPrecedence as WireModelSettingsPrecedence,
-    ModelSettingsSnapshot as WireModelSettingsSnapshot, PositiveCanonicalU64, ProtocolVersion,
-    ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
+    ModelSettingsSnapshot as WireModelSettingsSnapshot,
+    OperatorStatusConvergenceSeal as WireOperatorStatusConvergenceSeal,
+    OperatorStatusConvergenceVerdict as WireOperatorStatusConvergenceVerdict,
+    OperatorStatusEndMessage, OperatorStatusHeldSlotBlocker as WireOperatorStatusHeldSlotBlocker,
+    OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
+    OperatorStatusMergeableState as WireOperatorStatusMergeableState, OperatorStatusMessage,
+    OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
+    OperatorStatusQueuedObligationMessage,
+    OperatorStatusReviewDecision as WireOperatorStatusReviewDecision,
+    OperatorStatusSingletonScope as WireOperatorStatusSingletonScope, PositiveCanonicalU64,
+    ProtocolVersion, ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
     ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingEvent as WireReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
     ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle, ReviewPassSnapshot,
@@ -857,7 +882,7 @@ async fn serve_connection(
             !active_lifecycle_request,
         )
         .or_else(|| acquired_bulk_ingest_at.map(|started| started + BULK_INGEST_SESSION_TIMEOUT));
-        let request_result = handle_request(
+        let request_result = Box::pin(handle_request(
             &mut reader,
             &mut writer,
             version,
@@ -872,7 +897,7 @@ async fn serve_connection(
             },
             &services,
             shutdown.clone(),
-        );
+        ));
         tokio::select! {
             biased;
             () = wait_for_deadline(operation_deadline) => return Ok(()),
@@ -1025,8 +1050,10 @@ fn conversation_import_request_requires_permit(
         } => (1..=max_blob_bytes).contains(&expected_length_bytes.value()),
         ClientRequest::CreateSession { .. }
         | ClientRequest::CreateSessionFromTemplate { .. }
+        | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
         | ClientRequest::ListSessions {}
+        | ClientRequest::ReadOperatorStatus {}
         | ClientRequest::UpdateSessionPlacement { .. }
         | ClientRequest::AttachGoal { .. }
         | ClientRequest::ReadGoal { .. }
@@ -1080,7 +1107,8 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::RecordReviewPublicationOutcomes { .. }
         | ClientRequest::ReadReviewOrchestration { .. }
         | ClientRequest::StopTurn { .. }
-        | ClientRequest::DecideToolRequest { .. } => false,
+        | ClientRequest::DecideToolRequest { .. }
+        | ClientRequest::OverrideDeniedToolRequest { .. } => false,
     }
 }
 fn retain_inbound_frame_permit_during_import_admission(
@@ -1210,6 +1238,7 @@ impl SnapshotReaderAdmission {
     const fn for_request(request: &ClientRequest) -> Self {
         match request {
             ClientRequest::ListSessions {}
+            | ClientRequest::ReadOperatorStatus {}
             | ClientRequest::ReadGoal { .. }
             | ClientRequest::ReadTranscript { .. }
             | ClientRequest::FollowSession { .. }
@@ -1230,6 +1259,7 @@ impl SnapshotReaderAdmission {
             | ClientRequest::ReadReviewOrchestration { .. } => Self::OneConnection,
             ClientRequest::CreateSession { .. }
             | ClientRequest::CreateSessionFromTemplate { .. }
+            | ClientRequest::CommissionSession { .. }
             | ClientRequest::ListTemplates {}
             | ClientRequest::UpdateSessionPlacement { .. }
             | ClientRequest::AttachGoal { .. }
@@ -1275,7 +1305,8 @@ impl SnapshotReaderAdmission {
             | ClientRequest::RecordReviewRepairOutcomes { .. }
             | ClientRequest::RecordReviewPublicationOutcomes { .. }
             | ClientRequest::StopTurn { .. }
-            | ClientRequest::DecideToolRequest { .. } => Self::NotRequired,
+            | ClientRequest::DecideToolRequest { .. }
+            | ClientRequest::OverrideDeniedToolRequest { .. } => Self::NotRequired,
         }
     }
 }
@@ -1492,6 +1523,28 @@ where
             )
             .await
         }
+        ClientRequest::CommissionSession {
+            command_id,
+            template_name,
+            fence,
+            statement,
+            content,
+        } => {
+            handle_commission_session(
+                writer,
+                version,
+                request_id,
+                WireCommissionSessionRequest {
+                    command_uuid: command_id.into_uuid(),
+                    template_name,
+                    fence,
+                    statement,
+                    content,
+                },
+                services,
+            )
+            .await
+        }
         ClientRequest::CreateSessionFromImportedFrontier {
             command_id,
             imported_conversation_id,
@@ -1554,6 +1607,19 @@ where
                 return Ok(());
             };
             handle_list_sessions(writer, version, request_id, &services.pool, snapshot_permit).await
+        }
+        ClientRequest::ReadOperatorStatus {} => {
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            Box::pin(handle_operator_status(
+                writer,
+                version,
+                request_id,
+                &services.pool,
+                snapshot_permit,
+            ))
+            .await
         }
         ClientRequest::UpdateSessionPlacement {
             command_id,
@@ -2448,6 +2514,22 @@ where
                 decision,
                 &services.pool,
                 &services.eligibility_nudge,
+            )
+            .await
+        }
+        ClientRequest::OverrideDeniedToolRequest {
+            command_id,
+            session_id,
+            tool_request_id,
+        } => {
+            handle_override_denied_tool_request(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                tool_request_id,
+                &services.pool,
             )
             .await
         }
@@ -8464,6 +8546,262 @@ where
     .await
 }
 
+struct WireCommissionSessionRequest {
+    command_uuid: uuid::Uuid,
+    template_name: String,
+    fence: WireCommissionedSessionFence,
+    statement: String,
+    content: InputContent,
+}
+
+/// Admits one wire fence into its exact domain values.
+fn domain_commissioned_fence(
+    fence: WireCommissionedSessionFence,
+) -> Result<ApplicationCommissionedDispatchFence, ()> {
+    match fence {
+        WireCommissionedSessionFence::PullRequest {
+            repository,
+            pull_request,
+            head_sha,
+            head_repository,
+            head_branch,
+            base_branch,
+        } => Ok(ApplicationCommissionedDispatchFence::PullRequest {
+            repository: RepositorySlug::try_new(repository).map_err(|_| ())?,
+            pull_request: NonZeroU64::new(pull_request.value())
+                .map(PullRequestNumber::new)
+                .ok_or(())?,
+            head_sha: CommitSha::try_new(head_sha).map_err(|_| ())?,
+            head_repository: RepositorySlug::try_new(head_repository).map_err(|_| ())?,
+            head_branch: BranchName::try_new(head_branch).map_err(|_| ())?,
+            base_branch: BranchName::try_new(base_branch).map_err(|_| ())?,
+        }),
+        WireCommissionedSessionFence::Branch { repository, branch } => {
+            Ok(ApplicationCommissionedDispatchFence::Branch {
+                repository: RepositorySlug::try_new(repository).map_err(|_| ())?,
+                branch: BranchName::try_new(branch).map_err(|_| ())?,
+            })
+        }
+    }
+}
+
+async fn handle_commission_session<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    request: WireCommissionSessionRequest,
+    services: &ConnectionServices,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let WireCommissionSessionRequest {
+        command_uuid,
+        template_name,
+        fence,
+        statement,
+        content,
+    } = request;
+    let admitted = (|| {
+        let template_name = SessionTemplateName::try_new(template_name).map_err(|_| ())?;
+        let statement = GoalStatement::try_new(statement).map_err(|_| ())?;
+        let content = UserContent::try_text(content.into_string()).map_err(|_| ())?;
+        let fence = domain_commissioned_fence(fence)?;
+        CommissionDispatchRequest::try_new(
+            DurableCommandId::from_uuid(command_uuid),
+            template_name,
+            fence,
+            statement,
+            content,
+        )
+        .map_err(|_| ())
+    })();
+    let Ok(request) = admitted else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let store = PostgresCommissionedDispatchStore::new(
+        services.pool.clone(),
+        services.model_configuration.session_credential_pin(),
+    );
+    // Replay is resolved from the durable record before the live template
+    // catalog is consulted: a committed commission whose response was lost
+    // must stay discoverable through a retry of the exact command even after
+    // configuration removed or renamed the template it was commissioned from.
+    match store.load(request.command_id()).await {
+        Ok(Some(recorded)) => {
+            return if recorded.matches(&request) {
+                // A replay re-arms the queued turn's runnable hint too, so a
+                // retry recovers a hint the first response lost.
+                let _ = services.eligibility_nudge.nudge(recorded.session());
+                write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::SessionCommissioned {
+                        session_id: wire_uuid(recorded.session().into_uuid()),
+                        dispatch_id: wire_uuid(recorded.dispatch().into_uuid()),
+                    },
+                )
+                .await
+            } else {
+                write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+                )
+                .await
+            };
+        }
+        Ok(None) => {}
+        Err(error) => {
+            // The lookup is a pre-mutation read: infrastructure failure is the
+            // contractually retryable unavailable, and only a durable shape
+            // that cannot reconstruct its domain value is corruption.
+            let error = match commission_failure_ambiguity(&error) {
+                Some(commit_ambiguous) => ProtocolError::mutation_unavailable(commit_ambiguous),
+                None => internal_protocol_error(
+                    None,
+                    InternalDiagnostic::CommissionedDispatchCorruption,
+                ),
+            };
+            return write_error(writer, version, request_id, error).await;
+        }
+    }
+    let Some(template) = services.template_configuration.resolve(request.template()) else {
+        // The identity outranks the template. `load` above found no committed
+        // commission, so a registry claim on this identity names a conflicting
+        // reuse — another command kind, or an ordinary session creation — and
+        // `invalid_request` stays reserved for identities that claim nothing.
+        let refusal = match store.identity_claimed(request.command_id()).await {
+            Ok(true) => ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            Ok(false) => ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            Err(error) => match commission_failure_ambiguity(&error) {
+                Some(commit_ambiguous) => ProtocolError::mutation_unavailable(commit_ambiguous),
+                None => internal_protocol_error(
+                    None,
+                    InternalDiagnostic::CommissionedDispatchCorruption,
+                ),
+            },
+        };
+        return write_error(writer, version, request_id, refusal).await;
+    };
+    let mut ids = UuidV7CommissionedDispatchIdGenerator;
+    let Ok(prepared) = request.prepare(
+        &mut ids,
+        template.provenance().clone(),
+        template.defaults().clone(),
+    ) else {
+        // The template was resolved by the requested name, so a mismatch or a
+        // refused creation command is a daemon defect rather than caller error.
+        return write_error(
+            writer,
+            version,
+            request_id,
+            internal_protocol_error(None, InternalDiagnostic::CommissionedDispatchCorruption),
+        )
+        .await;
+    };
+    let outcome = store
+        .commission(prepared, |alias| {
+            services.model_configuration.resolve_alias(alias)
+        })
+        .await;
+    match outcome {
+        Ok(
+            CommissionDispatchOutcome::Dispatched { dispatch, session }
+            | CommissionDispatchOutcome::Replayed { dispatch, session },
+        ) => {
+            // The composite committed a queued turn; hint it runnable now
+            // rather than waiting for the periodic reconciliation sweep, as
+            // submit-input and repository-watch dispatch do post-commit.
+            let _ = services.eligibility_nudge.nudge(session);
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionCommissioned {
+                    session_id: wire_uuid(session.into_uuid()),
+                    dispatch_id: wire_uuid(dispatch.into_uuid()),
+                },
+            )
+            .await
+        }
+        Ok(CommissionDispatchOutcome::TargetBusy { session })
+        | Ok(CommissionDispatchOutcome::TargetCoolingOff { session }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::CommissionTargetBusy {
+                    session_id: wire_uuid(session.into_uuid()),
+                }),
+            )
+            .await
+        }
+        Ok(CommissionDispatchOutcome::ConflictingReuse)
+        | Err(CommissionedDispatchRepositoryError::SessionCreation(
+            CreateSessionRepositoryError::DifferentCommandKind { .. },
+        )) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(error) => {
+            let protocol_error = match commission_failure_ambiguity(&error) {
+                Some(commit_ambiguous) => ProtocolError::mutation_unavailable(commit_ambiguous),
+                None => internal_protocol_error(
+                    None,
+                    InternalDiagnostic::CommissionedDispatchCorruption,
+                ),
+            };
+            write_error(writer, version, request_id, protocol_error).await
+        }
+    }
+}
+
+/// Classifies one commission failure as a database outage, or none for the
+/// fail-closed remainder.
+fn commission_failure_ambiguity(error: &CommissionedDispatchRepositoryError) -> Option<bool> {
+    match error {
+        CommissionedDispatchRepositoryError::Database {
+            commit_ambiguous, ..
+        } => Some(*commit_ambiguous),
+        CommissionedDispatchRepositoryError::SessionCreation(error) => match error {
+            CreateSessionRepositoryError::Database(_) => Some(false),
+            CreateSessionRepositoryError::CommitAmbiguous(_) => Some(true),
+            CreateSessionRepositoryError::DifferentCommandKind { .. }
+            | CreateSessionRepositoryError::Corruption(_) => None,
+        },
+        CommissionedDispatchRepositoryError::InitialInput(error) => match error {
+            SubmitInputRepositoryError::Database(_) => Some(false),
+            SubmitInputRepositoryError::CommitAmbiguous(_) => Some(true),
+            SubmitInputRepositoryError::DifferentCommandKind { .. }
+            | SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. }
+            | SubmitInputRepositoryError::UnsupportedModelSetting(_)
+            | SubmitInputRepositoryError::Corruption(_)
+            | SubmitInputRepositoryError::ModelExecution(_) => None,
+        },
+        CommissionedDispatchRepositoryError::GoalCommission(error) => match error {
+            GoalRepositoryError::Database(_) => Some(false),
+            GoalRepositoryError::CommitAmbiguous(_) => Some(true),
+            GoalRepositoryError::DifferentCommandKind { .. }
+            | GoalRepositoryError::Corruption(_) => None,
+        },
+        CommissionedDispatchRepositoryError::Corruption(_) => None,
+    }
+}
+
 struct WireSessionPlacementUpdateRequest {
     command_id: signalbox_process_protocol::CommandId,
     session_id: CanonicalUuid,
@@ -8858,6 +9196,50 @@ where
     write_spooled_file(writer, &mut spool.file).await
 }
 
+async fn handle_operator_status<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let spool_result = spool_operator_status(
+        ProcessOperatorStatusRepository::new(pool.clone()),
+        version,
+        request_id,
+    )
+    .await;
+    drop(snapshot_permit);
+    let mut spool = match spool_result {
+        Ok(spool) => spool,
+        Err(OperatorStatusSpoolError::Read(ProcessOperatorStatusError::Database(_))) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await;
+        }
+        Err(OperatorStatusSpoolError::Read(ProcessOperatorStatusError::Corruption(_))) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(None, InternalDiagnostic::OperatorStatusCorruption),
+            )
+            .await;
+        }
+        Err(OperatorStatusSpoolError::Spool(error)) => {
+            return write_snapshot_spool_error(writer, version, request_id, error).await;
+        }
+    };
+    write_spooled_file(writer, &mut spool.file).await
+}
+
 async fn handle_list_model_aliases<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -8969,6 +9351,11 @@ struct SessionListSpool {
 
 enum SessionListSpoolError {
     Read(ProcessReadError),
+    Spool(SnapshotSpoolError),
+}
+
+enum OperatorStatusSpoolError {
+    Read(ProcessOperatorStatusError),
     Spool(SnapshotSpoolError),
 }
 
@@ -9089,6 +9476,284 @@ async fn spool_session_summaries(
         .map_err(SnapshotSpoolError::Io)
         .map_err(SessionListSpoolError::Spool)?;
     Ok(SessionListSpool { file })
+}
+
+async fn spool_operator_status(
+    repository: ProcessOperatorStatusRepository,
+    version: ProtocolVersion,
+    request_id: RequestId,
+) -> Result<SessionListSpool, OperatorStatusSpoolError> {
+    let mut reader = repository
+        .open()
+        .await
+        .map_err(OperatorStatusSpoolError::Read)?;
+    let standard_file = tempfile::tempfile()
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::Start {})),
+    )
+    .await
+    .map_err(OperatorStatusSpoolError::Spool)?;
+    while let Some(item) = reader
+        .next_item()
+        .await
+        .map_err(OperatorStatusSpoolError::Read)?
+    {
+        write_spool_message(
+            &mut file,
+            version,
+            request_id,
+            wire_operator_status_item(item),
+        )
+        .await
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    }
+    let counts = reader
+        .counts()
+        .ok_or(SnapshotSpoolError::EncodeInvariant)
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
+            OperatorStatusEndMessage {
+                held_slot_count: CanonicalU64::new(counts.held_slots()),
+                queued_obligation_count: CanonicalU64::new(counts.queued_obligations()),
+                pull_request_convergence_count: CanonicalU64::new(
+                    counts.pull_request_convergences(),
+                ),
+                pending_stale_review_clearance_count: CanonicalU64::new(
+                    counts.pending_stale_review_clearances(),
+                ),
+            },
+        )))),
+    )
+    .await
+    .map_err(OperatorStatusSpoolError::Spool)?;
+    file.flush()
+        .await
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    Ok(SessionListSpool { file })
+}
+
+fn wire_operator_status_item(item: ProcessOperatorStatusItem) -> ServerMessage {
+    match item {
+        ProcessOperatorStatusItem::HeldSlot(item) => {
+            let singleton = item.singleton();
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
+                OperatorStatusHeldSlotMessage {
+                    dispatch_id: wire_uuid(item.dispatch_id()),
+                    repository: item.repository().to_owned(),
+                    origin: wire_operator_status_held_slot_origin(item.origin()),
+                    rule_id: item.rule_id().to_owned(),
+                    rule_version: CanonicalU64::new(item.rule_version()),
+                    singleton_scope: wire_operator_status_singleton_scope(singleton.scope()),
+                    singleton_repository: singleton.repository().map(str::to_owned),
+                    singleton_pull_request_number: singleton
+                        .pull_request_number()
+                        .map(CanonicalU64::new),
+                    singleton_stack_root_pull_request_number: singleton
+                        .stack_root_pull_request_number()
+                        .map(CanonicalU64::new),
+                    held_for_seconds: CanonicalU64::new(item.held_for_seconds()),
+                    session_ids: item.session_ids().iter().copied().map(wire_uuid).collect(),
+                    blockers: item
+                        .blockers()
+                        .iter()
+                        .copied()
+                        .map(wire_operator_status_blocker)
+                        .collect(),
+                },
+            ))))
+        }
+        ProcessOperatorStatusItem::QueuedObligation(item) => {
+            let singleton = item.singleton();
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
+                Box::new(OperatorStatusQueuedObligationMessage {
+                    obligation_id: wire_uuid(item.obligation_id()),
+                    repository: item.repository().to_owned(),
+                    rule_id: item.rule_id().to_owned(),
+                    rule_version: CanonicalU64::new(item.rule_version()),
+                    singleton_scope: wire_operator_status_singleton_scope(singleton.scope()),
+                    singleton_repository: singleton.repository().map(str::to_owned),
+                    singleton_pull_request_number: singleton
+                        .pull_request_number()
+                        .map(CanonicalU64::new),
+                    singleton_stack_root_pull_request_number: singleton
+                        .stack_root_pull_request_number()
+                        .map(CanonicalU64::new),
+                    first_event_id: wire_uuid(item.first_event_id()),
+                    latest_event_id: wire_uuid(item.latest_event_id()),
+                    matched_event_count: CanonicalU64::new(item.matched_event_count()),
+                    waiting_for_seconds: CanonicalU64::new(item.waiting_for_seconds()),
+                    occupying_dispatch_id: item.occupying_dispatch_id().map(wire_uuid),
+                    occupying_session_ids: item
+                        .occupying_session_ids()
+                        .iter()
+                        .copied()
+                        .map(wire_uuid)
+                        .collect(),
+                    cooldown_remaining_seconds: item
+                        .cooldown_remaining_seconds()
+                        .map(CanonicalU64::new),
+                    cooldown_never_eligible: item.cooldown_never_eligible(),
+                    ready: item.ready(),
+                }),
+            )))
+        }
+        ProcessOperatorStatusItem::PullRequestConvergence(item) => {
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+                Box::new(OperatorStatusPullRequestConvergenceMessage {
+                    repository: item.repository().to_owned(),
+                    pull_request_number: CanonicalU64::new(item.pull_request_number()),
+                    head_sha: item.head_sha().to_owned(),
+                    base_branch: item.base_branch().to_owned(),
+                    base_revision: item.base_revision().to_owned(),
+                    mergeable_state: wire_operator_status_mergeable_state(item.mergeable_state()),
+                    review_decision: wire_operator_status_review_decision(item.review_decision()),
+                    unresolved_thread_count: CanonicalU64::new(item.unresolved_thread_count()),
+                    gating_check_count: CanonicalU64::new(item.gating_check_count()),
+                    non_green_gating_checks: item.non_green_gating_checks().to_vec(),
+                    verdict: wire_operator_status_verdict(item.verdict()),
+                    seal: item.seal().map(wire_operator_status_seal),
+                    assessed_seconds_ago: CanonicalU64::new(item.assessed_seconds_ago()),
+                }),
+            )))
+        }
+        ProcessOperatorStatusItem::PendingStaleReviewClearance(item) => {
+            ServerMessage::OperatorStatus(Box::new(
+                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
+                    OperatorStatusPendingStaleReviewClearanceMessage {
+                        repository: item.repository().to_owned(),
+                        pull_request_number: CanonicalU64::new(item.pull_request_number()),
+                        current_head_sha: item.current_head_sha().to_owned(),
+                        review_node_id: item.review_node_id().to_owned(),
+                        reviewer: item.reviewer().to_owned(),
+                        reviewed_head_sha: item.reviewed_head_sha().to_owned(),
+                        pending_for_seconds: CanonicalU64::new(item.pending_for_seconds()),
+                    },
+                )),
+            ))
+        }
+    }
+}
+
+fn wire_operator_status_held_slot_origin(
+    origin: &ProcessOperatorStatusHeldSlotOrigin,
+) -> OperatorStatusHeldSlotOrigin {
+    match origin {
+        ProcessOperatorStatusHeldSlotOrigin::PullRequest { number } => {
+            OperatorStatusHeldSlotOrigin::PullRequest {
+                pull_request_number: CanonicalU64::new(*number),
+            }
+        }
+        ProcessOperatorStatusHeldSlotOrigin::Branch { branch } => {
+            OperatorStatusHeldSlotOrigin::Branch {
+                branch: branch.clone(),
+            }
+        }
+    }
+}
+
+fn wire_operator_status_singleton_scope(
+    scope: ProcessOperatorStatusSingletonScope,
+) -> WireOperatorStatusSingletonScope {
+    match scope {
+        ProcessOperatorStatusSingletonScope::PullRequest => {
+            WireOperatorStatusSingletonScope::PullRequest
+        }
+        ProcessOperatorStatusSingletonScope::Stack => WireOperatorStatusSingletonScope::Stack,
+        ProcessOperatorStatusSingletonScope::Rule => WireOperatorStatusSingletonScope::Rule,
+        ProcessOperatorStatusSingletonScope::Repo => WireOperatorStatusSingletonScope::Repo,
+    }
+}
+
+fn wire_operator_status_blocker(
+    blocker: ProcessOperatorStatusHeldSlotBlocker,
+) -> WireOperatorStatusHeldSlotBlocker {
+    match blocker {
+        ProcessOperatorStatusHeldSlotBlocker::UndeliveredAction => {
+            WireOperatorStatusHeldSlotBlocker::UndeliveredAction
+        }
+        ProcessOperatorStatusHeldSlotBlocker::DeliveryTurnRuntimeRelevant => {
+            WireOperatorStatusHeldSlotBlocker::DeliveryTurnRuntimeRelevant
+        }
+        ProcessOperatorStatusHeldSlotBlocker::LiveRuntimeTurn => {
+            WireOperatorStatusHeldSlotBlocker::LiveRuntimeTurn
+        }
+        ProcessOperatorStatusHeldSlotBlocker::PursuingGoal => {
+            WireOperatorStatusHeldSlotBlocker::PursuingGoal
+        }
+    }
+}
+
+fn wire_operator_status_mergeable_state(
+    state: ProcessOperatorStatusMergeableState,
+) -> WireOperatorStatusMergeableState {
+    match state {
+        ProcessOperatorStatusMergeableState::Mergeable => {
+            WireOperatorStatusMergeableState::Mergeable
+        }
+        ProcessOperatorStatusMergeableState::Conflicting => {
+            WireOperatorStatusMergeableState::Conflicting
+        }
+        ProcessOperatorStatusMergeableState::Unknown => WireOperatorStatusMergeableState::Unknown,
+    }
+}
+
+fn wire_operator_status_review_decision(
+    decision: ProcessOperatorStatusReviewDecision,
+) -> WireOperatorStatusReviewDecision {
+    match decision {
+        ProcessOperatorStatusReviewDecision::None => WireOperatorStatusReviewDecision::None,
+        ProcessOperatorStatusReviewDecision::Approved => WireOperatorStatusReviewDecision::Approved,
+        ProcessOperatorStatusReviewDecision::ReviewRequired => {
+            WireOperatorStatusReviewDecision::ReviewRequired
+        }
+        ProcessOperatorStatusReviewDecision::ChangesRequested => {
+            WireOperatorStatusReviewDecision::ChangesRequested
+        }
+    }
+}
+
+fn wire_operator_status_verdict(
+    verdict: ProcessOperatorStatusConvergenceVerdict,
+) -> WireOperatorStatusConvergenceVerdict {
+    match verdict {
+        ProcessOperatorStatusConvergenceVerdict::NotConverged => {
+            WireOperatorStatusConvergenceVerdict::NotConverged
+        }
+        ProcessOperatorStatusConvergenceVerdict::InternallyConverged => {
+            WireOperatorStatusConvergenceVerdict::InternallyConverged
+        }
+        ProcessOperatorStatusConvergenceVerdict::MergeReady => {
+            WireOperatorStatusConvergenceVerdict::MergeReady
+        }
+    }
+}
+
+fn wire_operator_status_seal(
+    seal: ProcessOperatorStatusConvergenceSeal,
+) -> WireOperatorStatusConvergenceSeal {
+    match seal {
+        ProcessOperatorStatusConvergenceSeal::InternallyConverged => {
+            WireOperatorStatusConvergenceSeal::InternallyConverged
+        }
+        ProcessOperatorStatusConvergenceSeal::MergeReady => {
+            WireOperatorStatusConvergenceSeal::MergeReady
+        }
+    }
 }
 
 struct WireMetadataPageRequest {
@@ -11155,6 +11820,90 @@ fn wire_tool_decision(
     }
 }
 
+/// Records one user override of a delegate denial through the canonical
+/// override command.
+///
+/// A claimed command identity reaches the durable replay boundary
+/// unconditionally (INV-012). The session is part of the canonical override
+/// payload, so an other-session request is the transaction's recorded
+/// `request_not_in_session` rejection rather than a pre-command refusal, and
+/// every outcome is the recorded result of the canonical command.
+async fn handle_override_denied_tool_request<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: uuid::Uuid,
+    session_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let request = ToolRequestId::from_uuid(tool_request_id.into_uuid());
+    let command_id = DurableCommandId::from_uuid(command_id);
+    let Ok(command) = OverrideDeniedToolRequest::try_new(command_id, session, request) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let mut service = OverrideDeniedToolRequestService::new(repository);
+    match service.execute(command).await {
+        Ok(prepared) => match prepared.result() {
+            OverrideDeniedToolRequestResult::Applied(applied) => {
+                write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::ToolDenialOverridden {
+                        tool_request_id: wire_uuid(applied.recorded().denied_request().into_uuid()),
+                    },
+                )
+                .await
+            }
+            OverrideDeniedToolRequestResult::Rejected(rejected) => {
+                let detail = match *rejected {
+                    OverrideDeniedToolRequestRejectedResult::RequestNotFound { denied_request } => {
+                        RejectionDetail::ToolRequestNotFound {
+                            tool_request_id: wire_uuid(denied_request.into_uuid()),
+                        }
+                    }
+                    OverrideDeniedToolRequestRejectedResult::RequestNotInSession {
+                        session,
+                        denied_request,
+                    } => RejectionDetail::ToolRequestNotInSession {
+                        session_id: wire_uuid(session.into_uuid()),
+                        tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
+                    OverrideDeniedToolRequestRejectedResult::NotDelegateDenied {
+                        denied_request,
+                    } => RejectionDetail::ToolRequestNotDelegateDenied {
+                        tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
+                    OverrideDeniedToolRequestRejectedResult::NotTerminallyDenied {
+                        denied_request,
+                    } => RejectionDetail::ToolRequestNotTerminallyDenied {
+                        tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
+                    OverrideDeniedToolRequestRejectedResult::AlreadyOverridden {
+                        denied_request,
+                    } => RejectionDetail::ToolDenialAlreadyOverridden {
+                        tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
+                };
+                write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+            }
+        },
+        Err(error) => write_tool_loop_error(writer, version, request_id, session_id, error).await,
+    }
+}
+
 async fn write_tool_loop_error<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -12001,6 +12750,15 @@ where
                                         model_call_id: wire_uuid(call.into_uuid()),
                                     }
                                 }
+                                signalbox_domain::ToolApprovalDecider::UserOverride {
+                                    command,
+                                    denied_request,
+                                } => WireToolApprovalEventDecider::UserOverride {
+                                    command_id: wire_uuid(command.into_uuid()),
+                                    overridden_tool_request_id: wire_uuid(
+                                        denied_request.into_uuid(),
+                                    ),
+                                },
                             },
                             rationale: approval
                                 .rationale()
@@ -12951,9 +13709,15 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
         ProcessTurnState::ActiveAwaitingModelCallRecovery {
             ended_attempt,
             recovery_call,
+            automatic_reconciliation_attempts,
+            operator_action_required,
         } => TurnState::ActiveAwaitingModelCallRecovery {
             ended_attempt_id: wire_uuid(ended_attempt.into_uuid()),
             recovery_model_call_id: wire_uuid(recovery_call.into_uuid()),
+            automatic_reconciliation_attempts: CanonicalU64::new(u64::from(
+                *automatic_reconciliation_attempts,
+            )),
+            operator_action_required: *operator_action_required,
         },
         ProcessTurnState::ActiveAwaitingToolApproval { request } => {
             TurnState::ActiveAwaitingToolApproval {
@@ -13121,6 +13885,7 @@ enum InternalDiagnostic {
     ContextCompactionReadCorruption,
     ImportedFrontierRangeCorruption,
     TemplateSessionCreationCorruption,
+    CommissionedDispatchCorruption,
     SessionCreationPreparation,
     SessionCreationDatabase,
     SessionCreationCommitAmbiguous,
@@ -13150,6 +13915,7 @@ enum InternalDiagnostic {
     ToolLoopCorruption,
     ToolLoopInvalidTransition,
     ProcessReadCorruption,
+    OperatorStatusCorruption,
     GoalRepositoryCorruption,
 }
 
@@ -13209,6 +13975,7 @@ impl InternalDiagnostic {
             | Self::ContextCompactionReadCorruption
             | Self::ImportedFrontierRangeCorruption
             | Self::TemplateSessionCreationCorruption
+            | Self::CommissionedDispatchCorruption
             | Self::SessionCreationCorruption
             | Self::ConversationListingCorruption
             | Self::SessionMetadataCorruption
@@ -13218,6 +13985,7 @@ impl InternalDiagnostic {
             | Self::SubmitInputModelExecutionCorruption
             | Self::ToolLoopCorruption
             | Self::ProcessReadCorruption
+            | Self::OperatorStatusCorruption
             | Self::GoalRepositoryCorruption => OperatorFailureClass::FailClosedCorruption,
         }
     }
@@ -13259,6 +14027,7 @@ impl InternalDiagnostic {
             Self::ContextCompactionReadCorruption => "context_compaction_read_corruption",
             Self::ImportedFrontierRangeCorruption => "imported_frontier_range_corruption",
             Self::TemplateSessionCreationCorruption => "template_session_creation_corruption",
+            Self::CommissionedDispatchCorruption => "commissioned_dispatch_corruption",
             Self::SessionCreationPreparation => "session_creation_preparation",
             Self::SessionCreationDatabase => "session_creation_database",
             Self::SessionCreationCommitAmbiguous => "session_creation_commit_ambiguous",
@@ -13294,6 +14063,7 @@ impl InternalDiagnostic {
             Self::ToolLoopCorruption => "tool_loop_corruption",
             Self::ToolLoopInvalidTransition => "tool_loop_invalid_transition",
             Self::ProcessReadCorruption => "process_read_corruption",
+            Self::OperatorStatusCorruption => "operator_status_corruption",
             Self::GoalRepositoryCorruption => "goal_repository_corruption",
         }
     }
@@ -13669,6 +14439,31 @@ where
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Ok(GoalCommandHandlingOutcome::TargetBusy {
+            session: blocking_session,
+        }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::CommissionTargetBusy {
+                    session_id: CanonicalUuid::from_uuid(blocking_session.into_uuid()),
+                }),
+            )
+            .await
+        }
+        // A client goal command names no expected lineage head, so it applies
+        // to whatever state the session lock reveals. Reaching this answer
+        // means the repository decided a question this request never asked.
+        Ok(GoalCommandHandlingOutcome::LineageMoved) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
             )
             .await
         }
@@ -14409,6 +15204,13 @@ impl ProcessUpdateEvent {
                             model_call_id: wire_uuid(call.into_uuid()),
                         }
                     }
+                    signalbox_domain::ToolApprovalDecider::UserOverride {
+                        command,
+                        denied_request,
+                    } => WireToolApprovalEventDecider::UserOverride {
+                        command_id: wire_uuid(command.into_uuid()),
+                        overridden_tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
                 };
                 SessionEvent::ToolApprovalDecided {
                     turn_id: wire_uuid(turn.into_uuid()),
