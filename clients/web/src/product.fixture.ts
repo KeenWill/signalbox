@@ -7,6 +7,7 @@ export const webContractBootstrapFixture = {
     ndjson_streaming: true,
     bounded_session_timeline: true,
     bounded_lexical_search: true,
+    bounded_usage_cost: true,
   },
   limits: {
     max_json_body_bytes: 65_536,
@@ -16,5 +17,7 @@ export const webContractBootstrapFixture = {
     max_search_query_bytes: 512,
     max_search_page_items: 100,
     max_search_snippet_bytes: 512,
+    max_usage_aggregate_groups: 256,
+    max_usage_call_page_items: 100,
   },
 } as const
