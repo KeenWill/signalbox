@@ -5,13 +5,13 @@ boundary from its first operation: the daemon holds a distinct credential-file
 reference for each configured repository, reads secret bytes only for that
 repository's request, and never gives a dispatched session the watch credential.
 Per-repository tokens carry the least GitHub scope needed to read the configured
-signals. This is the C0 confused-deputy boundary: a credential for one
-repository cannot authorize a request to another repository. A repository
-without a credential-file reference is invalid configuration and is not watched;
-a repository absent from the list is not watched; an absent repository-watch
-section means that the subsystem does not start. Dispatched sessions retain the
-approval posture of their named session templates, without authority inherited
-from the watcher.
+signals and dismiss an eligible stale pull-request review. This is the C0
+confused-deputy boundary: a credential for one repository cannot authorize a
+request to another repository. A repository without a credential-file reference
+is invalid configuration and is not watched; a repository absent from the list
+is not watched; an absent repository-watch section means that the subsystem does
+not start. Dispatched sessions retain the approval posture of their named
+session templates, without authority inherited from the watcher.
 
 **Foundation contract.** This bottom specification diff owns the
 four-pull-request repository-watch stack. The version-one domain vocabulary and
@@ -52,7 +52,10 @@ of slow complete reconciliation is verified against this PR
 fence and unattended escalation release described below are verified against
 this PR (`agent/headless-approval-escalation`). The operator-commissioned
 dispatch fence and its unattended-escalation coverage are verified against this
-PR (`agent/commissioned-dispatch-fence`).
+PR (`agent/commissioned-dispatch-fence`). External commissioned-session
+obligation blocking and blocker replacement are verified against this PR
+(`agent/daemon-convergence-sweep`). Conservative stale blocking-review dismissal
+is verified against this PR (`agent/dispatch-autonomy-review-clearance`).
 
 ## Configuration and credential boundary
 
@@ -688,34 +691,39 @@ back the whole batch. Each record links the triggering event, rule identity and
 version, singleton key, action ordinal, session-template provenance, and newly
 created session. The action ordinal distinguishes sibling sessions without
 letting the first action suppress later actions from the same match. An occupied
-singleton refuses another match and atomically opens one durable delivery
-obligation for that singleton. Further matching facts join its latest-event
-projection and increment its count, including a match racing with release, so
-one singleton has at most one outstanding obligation. Their individual terminal
-evaluations remain append-only audit facts. The batch releases the singleton at
-the transition that makes every dispatched turn terminal or runtime-irrelevant,
-leaves no live runtime-relevant turn for its session, and leaves no pursuing
-goal. A goal-ending recheck is deferred to its transaction boundary so an active
-turn's stop cascade is visible. A blocked or user-stopped dispatch session, and
-an achieved session whose delivered state is no longer the pull request's latest
-durable head, opens the same latest-state obligation before release; sibling
-terminations and matching events collapse into that one obligation without
-regressing its latest event. A batch delivers its originating event when
-admission dispatched that event, and the target's collapsed current state when
-admission settled an obligation by replaying a still-matching earlier event.
-Achievement is terminal exactly when that delivered state is known and is still
-the pull request's latest durable head, so the successor that carried the newest
-head seals instead of owing another batch after every cooldown. A batch admitted
-before the delivered state was recorded has none, and achievement cannot seal
-it: reading its originating event as the delivered state would seal without
-delivery whenever a head returns to an earlier value. A branch target records no
-durable revision, only a workflow conclusion, so achievement is its own seal
-there. A batch owes at most one requeue, at its own release, and the terminal
-event deciding it is the one ending the generation the dispatch commissioned; a
-later goal generation its session accepts terminates without reopening one,
-including while a sibling action still holds the batch. Termination takes the
-singleton advisory key that admission takes, and locks the rule activation row
-that recording a deactivation shares, so a match racing a termination joins its
+singleton, or an independently commissioned live session owning the same pull
+request, refuses another match and atomically opens one durable delivery
+obligation for that singleton. The obligation records exactly one blocker: the
+occupying repository-watch dispatch or the external commissioned session. If an
+previous blocker terminates but another session is live at redispatch admission,
+the same obligation atomically replaces its blocker and remains non-ready.
+Further matching facts join its latest-event projection and increment its count,
+including a match racing with release, so one singleton has at most one
+outstanding obligation. Their individual terminal evaluations remain append-only
+audit facts. The batch releases the singleton at the transition that makes every
+dispatched turn terminal or runtime-irrelevant, leaves no live runtime-relevant
+turn for its session, and leaves no pursuing goal. A goal-ending recheck is
+deferred to its transaction boundary so an active turn's stop cascade is
+visible. A blocked or user-stopped dispatch session, and an achieved session
+whose delivered state is no longer the pull request's latest durable head, opens
+the same latest-state obligation before release; sibling terminations and
+matching events collapse into that one obligation without regressing its latest
+event. A batch delivers its originating event when admission dispatched that
+event, and the target's collapsed current state when admission settled an
+obligation by replaying a still-matching earlier event. Achievement is terminal
+exactly when that delivered state is known and is still the pull request's
+latest durable head, so the successor that carried the newest head seals instead
+of owing another batch after every cooldown. A batch admitted before the
+delivered state was recorded has none, and achievement cannot seal it: reading
+its originating event as the delivered state would seal without delivery
+whenever a head returns to an earlier value. A branch target records no durable
+revision, only a workflow conclusion, so achievement is its own seal there. A
+batch owes at most one requeue, at its own release, and the terminal event
+deciding it is the one ending the generation the dispatch commissioned; a later
+goal generation its session accepts terminates without reopening one, including
+while a sibling action still holds the batch. Termination takes the singleton
+advisory key that admission takes, and locks the rule activation row that
+recording a deactivation shares, so a match racing a termination joins its
 obligation and a racing deactivation cannot miss it. Termination does not take
 the repository key: it runs inside the transaction ending the goal, which holds
 that session row, and lifecycle-cutoff processing takes the repository key
@@ -989,20 +997,82 @@ collapsed obligation settles as `target_converged` only when its head is the
 latest assessed identity and that identity's head and base revision are sealed.
 An older identity cannot stop current work.
 
+**Implemented behavior.** `CHANGES_REQUESTED` gates merging, never dispatching:
+repository watch continues delivering matching findings while that aggregate
+decision remains. It may dismiss a blocking review only when GitHub reports it
+among the pull request's latest opinionated `CHANGES_REQUESTED` reviews and its
+associated commit differs from the exact current head. The current convergence
+evidence must otherwise pass: zero unresolved threads, at least one gating check
+and zero non-green ones, a settled head, and nonconflicting mergeability. An
+unsettled head has not finished registering and completing its exact-head
+checks, so its empty non-green list is the absence of evidence rather than
+evidence of a green head; requiring settlement keeps a dismissal from racing
+checks that have yet to report. A head carrying no gating check at all presents
+that same empty non-green list, which is why the reference convergence rule
+counts it blocked and why clearance refuses it: the dismissed review would be
+the only gate that head ever had. Both the in-memory candidate rule and the
+durable eligibility query enforce that count, the settled head, and
+mergeability, so neither admits an intent the other would refuse. The durable
+query proves each term against the recorded assessment rather than against the
+watcher that raised the candidate, because the assessment it reads is whichever
+watcher recorded one last: a newer assessment appended for the unchanged cursor
+while this watcher reconciled must carry the predicate itself, or the intent
+would claim the review was the head's only blocker while the evidence it names
+records another. Settlement is recorded only for a mergeability GitHub has
+decided, so the query admits `mergeable` alone and refuses nothing the in-memory
+rule admits. Every effective blocking review must target a superseded head; one
+current-head blocker prevents every dismissal for that assessment. A
+current-head review is never dismissed automatically. Why: a new review is live
+judgment, while a stale aggregate decision whose complete thread inventory is
+resolved is forge state that alone prevents an otherwise finished head from
+converging. The following ordinary poll observes the dismissal and may then seal
+convergence; dismissal itself does not stop dispatch.
+
+**Implemented behavior.** Before sending GitHub's review-dismissal mutation, the
+daemon appends a unique intent naming the assessment, repository, pull request,
+exact current and reviewed heads, review node, reviewer, fixed reason kind, and
+the exact human-readable dismissal message. That message identifies the review
+node, reviewer, superseded head, exact current head, and the resolved threads
+and green other gates that justify clearance. It then re-reads the pull request
+and proves the whole predicate again against live evidence, including
+settlement: the gating-check inventory this re-read observes must be the one the
+committed poll that raised the candidate recorded for the same head and update
+stamp. A check that appeared in between leaves the head unsettled and the review
+undismissed until a later poll sees the inventory hold still. It appends the
+provider's terminal result separately. Replaying equal evidence reuses the
+intent rather than creating or sending concurrent duplicate work. After an
+ambiguous process failure, a later poll observes the named review directly: an
+already dismissed review completes the audit, a newer pull-request head
+supersedes the intent, and a review decision cleared by another actor is
+recorded as cleared elsewhere. A still-blocking intent is retried only when a
+current poll again proves the full dismissal predicate. Recovery renews its
+ownership token immediately before observing each intent, because a deeply
+paginated batch can outlive the claim lease; an intent whose lease another
+watcher has since taken is left to that watcher, and a lease lost between the
+renewal and the terminal write likewise leaves that one intent to its new
+claimant rather than abandoning the rest of the batch. The pending-intent
+projection makes every unsettled external action directly observable. The next
+poll observes the dismissal through the ordinary review and convergence
+projections; no synthetic approval is created and no fresh review is requested.
+
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
-pull request, rule, singleton key, sessions, and held-since time; states each
-release clause independently; and names every failing clause in `blockers`.
+the origin fact its dispatch was admitted from, rule, singleton key, sessions,
+and held-since time; states each release clause independently; and names every
+failing clause in `blockers`. That origin is a pull request or a workflow branch
+and never both: a batch admitted from a branch workflow-run fact carries
+`workflow_branch` and a null `pull_request_number`, and every other batch
+carries `pull_request_number` and a null `workflow_branch`.
 
 **Implemented behavior.** Outstanding obligations are directly observable in the
 `repo_watch_outstanding_dispatch_obligation` projection. Each row identifies the
 repository, rule, singleton and pull request or stack root, first and latest
 matched events, collapsed count and timestamps, any occupying dispatch and its
-sessions, cooldown eligibility, present readiness, failed-attempt count, and
-parking stamp. Rule deactivation settles an obligation without dispatch rather
-than leaving permanently owed work for semantics that are no longer configured;
-terminal-target settlement likewise records why the obligation no longer remains
-owed.
+sessions or external blocking session, cooldown eligibility, present readiness,
+failed-attempt count, and parking stamp. Rule deactivation settles an obligation
+without dispatch rather than leaving permanently owed work for semantics that
+are no longer configured; terminal-target settlement likewise records why the
+obligation no longer remains owed.
 
 **Implemented behavior.** A newly configured rule activates immediately after
 the repository's current durable event tail, before its task polls, and consumes
