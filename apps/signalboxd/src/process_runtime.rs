@@ -595,6 +595,12 @@ impl ProcessMonitorSubscription {
         self.receiver.len()
     }
 
+    /// True when this subscriber's unread queue has reached the bounded
+    /// fan-out capacity, so the next broadcast drops its oldest unread record.
+    pub fn is_saturated(&self) -> bool {
+        self.receiver.len() >= PROCESS_UPDATE_CAPACITY
+    }
+
     pub async fn recv(&mut self) -> Result<ProcessMonitorUpdate, ProcessMonitorReceiveError> {
         self.receiver.recv().await.map_err(|error| match error {
             broadcast::error::RecvError::Lagged(skipped) => {

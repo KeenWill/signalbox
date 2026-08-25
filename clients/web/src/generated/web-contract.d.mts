@@ -96,7 +96,7 @@ type WebSessionId = string;
 
 type WebSessionLiveActiveState = {
   readonly kind: "running";
-  readonly model_call_id?: WebLiveResourceId | null;
+  readonly model_call_id: string | null;
 } | {
   readonly kind: "awaiting_model_call_recovery";
   readonly model_call_id: WebLiveResourceId;
@@ -116,12 +116,17 @@ type WebSessionLiveActiveState = {
   readonly runner_id: WebLiveResourceId;
 };
 
-type WebSessionLiveActiveTurn = {
+type WebSessionLiveRunnerConnectionHealth = "connected" | "suspect" | "shutdown" | "lost";
+
+type WebSessionLiveSnapshot = {
+  readonly active: {
   readonly state: WebSessionLiveActiveState;
   readonly turn_id: WebTurnId;
-};
-
-type WebSessionLiveReconciliation = {
+} | null;
+  readonly observed_through: WebPositiveU64;
+  readonly queued_turn_count: WebU64;
+  readonly queued_turn_ids: ReadonlyArray<WebTurnId>;
+  readonly reconciliation: {
   readonly kind: "model_call";
   readonly model_call_id: WebLiveResourceId;
   readonly turn_id: WebTurnId;
@@ -129,9 +134,8 @@ type WebSessionLiveReconciliation = {
   readonly kind: "tool_attempt";
   readonly tool_attempt_id: WebLiveResourceId;
   readonly turn_id: WebTurnId;
-};
-
-type WebSessionLiveRunner = {
+} | null;
+  readonly runner: {
   readonly placement_revision: WebPositiveU64;
   readonly state: "unpinned";
 } | {
@@ -151,17 +155,7 @@ type WebSessionLiveRunner = {
   readonly placement_revision: WebPositiveU64;
   readonly runner_id: WebLiveResourceId;
   readonly state: "runner_abandoned";
-};
-
-type WebSessionLiveRunnerConnectionHealth = "connected" | "suspect" | "shutdown" | "lost";
-
-type WebSessionLiveSnapshot = {
-  readonly active?: WebSessionLiveActiveTurn | null;
-  readonly observed_through: WebPositiveU64;
-  readonly queued_turn_count: WebU64;
-  readonly queued_turn_ids: ReadonlyArray<WebTurnId>;
-  readonly reconciliation?: WebSessionLiveReconciliation | null;
-  readonly runner?: WebSessionLiveRunner | null;
+} | null;
   readonly session_id: WebSessionId;
 };
 
@@ -259,12 +253,43 @@ export type WebAttentionStreamEvent = {
 };
 
 export type WebSessionLiveSnapshot = {
-  readonly active?: WebSessionLiveActiveTurn | null;
+  readonly active: {
+  readonly state: WebSessionLiveActiveState;
+  readonly turn_id: WebTurnId;
+} | null;
   readonly observed_through: WebPositiveU64;
   readonly queued_turn_count: WebU64;
   readonly queued_turn_ids: ReadonlyArray<WebTurnId>;
-  readonly reconciliation?: WebSessionLiveReconciliation | null;
-  readonly runner?: WebSessionLiveRunner | null;
+  readonly reconciliation: {
+  readonly kind: "model_call";
+  readonly model_call_id: WebLiveResourceId;
+  readonly turn_id: WebTurnId;
+} | {
+  readonly kind: "tool_attempt";
+  readonly tool_attempt_id: WebLiveResourceId;
+  readonly turn_id: WebTurnId;
+} | null;
+  readonly runner: {
+  readonly placement_revision: WebPositiveU64;
+  readonly state: "unpinned";
+} | {
+  readonly connection_health: WebSessionLiveRunnerConnectionHealth;
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "pinned";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "runner_lost_before_pin";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "runner_lost";
+} | {
+  readonly placement_revision: WebPositiveU64;
+  readonly runner_id: WebLiveResourceId;
+  readonly state: "runner_abandoned";
+} | null;
   readonly session_id: WebSessionId;
 };
 

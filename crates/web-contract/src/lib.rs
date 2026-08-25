@@ -457,6 +457,8 @@ where
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WebSessionLiveActiveState {
     Running {
+        #[serde(deserialize_with = "deserialize_present_option")]
+        #[schemars(required)]
         model_call_id: Option<WebLiveResourceId>,
     },
     AwaitingModelCallRecovery {
@@ -538,10 +540,16 @@ pub enum WebSessionLiveRunner {
 pub struct WebSessionLiveSnapshot {
     pub session_id: WebSessionId,
     pub observed_through: WebPositiveU64,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub active: Option<WebSessionLiveActiveTurn>,
     pub queued_turn_count: WebU64,
     pub queued_turn_ids: Vec<WebTurnId>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub reconciliation: Option<WebSessionLiveReconciliation>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub runner: Option<WebSessionLiveRunner>,
 }
 
@@ -843,6 +851,22 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     make_pointer_nullable(
         &mut schemas.attention_event,
         "/$defs/WebAttentionSummary/properties/current_turn_id",
+    )?;
+    make_pointer_nullable(
+        &mut schemas.live_event,
+        "/$defs/WebSessionLiveSnapshot/properties/active",
+    )?;
+    make_pointer_nullable(
+        &mut schemas.live_event,
+        "/$defs/WebSessionLiveSnapshot/properties/reconciliation",
+    )?;
+    make_pointer_nullable(
+        &mut schemas.live_event,
+        "/$defs/WebSessionLiveSnapshot/properties/runner",
+    )?;
+    make_pointer_nullable(
+        &mut schemas.live_event,
+        "/$defs/WebSessionLiveActiveState/oneOf/0/properties/model_call_id",
     )?;
     set_array_max_items(
         &mut schemas.live_event,

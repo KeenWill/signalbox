@@ -219,16 +219,61 @@ test("generated live decoder rejects simultaneous active and reconciliation stat
   );
 });
 
-test("generated live decoder treats omitted optional state as absent", () => {
-  const snapshot = decodeWebSessionLiveSnapshot({
+test("generated live decoder requires explicit nullable state fields", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+      }),
+    /must be present/,
+  );
+  const explicit = decodeWebSessionLiveSnapshot({
     session_id: "00000000-0000-0000-0000-000000000991",
     observed_through: "7",
+    active: null,
     queued_turn_count: "0",
     queued_turn_ids: [],
+    reconciliation: null,
+    runner: null,
   });
+  assert.equal(explicit.active, null);
+  assert.equal(explicit.reconciliation, null);
+  assert.equal(explicit.runner, null);
+});
 
-  assert.equal(snapshot.active, undefined);
-  assert.equal(snapshot.reconciliation, undefined);
+test("generated live decoder requires an explicit running model call", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: { kind: "running" },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /one recognized variant/,
+  );
+  const idle = decodeWebSessionLiveSnapshot({
+    session_id: "00000000-0000-0000-0000-000000000991",
+    observed_through: "7",
+    active: {
+      turn_id: "00000000-0000-0000-0000-000000000992",
+      state: { kind: "running", model_call_id: null },
+    },
+    queued_turn_count: "0",
+    queued_turn_ids: [],
+    reconciliation: null,
+    runner: null,
+  });
+  assert.equal(idle.active.state.model_call_id, null);
 });
 
 test("generated live decoder rejects malformed runner correlations", () => {

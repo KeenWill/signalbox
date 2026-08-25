@@ -79,6 +79,22 @@ impl SessionLiveRepository {
         &self,
         session: SessionId,
     ) -> Result<Option<SessionLiveSnapshot>, SessionLiveRepositoryError> {
+        self.read_live_snapshot_at_completion(session, || ())
+            .await
+            .map(|result| result.map(|(snapshot, ())| snapshot))
+    }
+
+    /// Reads one snapshot and samples caller-owned state immediately after the
+    /// last read inside its repeatable-read transaction. Everything the caller
+    /// observed before the sample point precedes what the snapshot's queries
+    /// could still change, so a broadcast record counted here belongs to work
+    /// the snapshot already reflects — but its durable cursor is NOT proven
+    /// covered by `observed_through`; use a pre-call sample for that proof.
+    pub async fn read_live_snapshot_at_completion<T>(
+        &self,
+        session: SessionId,
+        at_completion: impl FnOnce() -> T,
+    ) -> Result<Option<(SessionLiveSnapshot, T)>, SessionLiveRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             .execute(&mut *transaction)
@@ -152,8 +168,9 @@ impl SessionLiveRepository {
             reconciliation,
             runner,
         };
+        let completion = at_completion();
         transaction.commit().await?;
-        Ok(Some(snapshot))
+        Ok(Some((snapshot, completion)))
     }
 }
 

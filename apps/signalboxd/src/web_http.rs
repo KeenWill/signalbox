@@ -734,8 +734,16 @@ async fn session_live_follow(
     // record is proven covered. A record queued after this sample may carry a
     // cursor above the snapshot, so a lag reaching past this count must
     // resynchronize rather than be absorbed silently.
-    let queued_at_snapshot = subscription.queued_len();
-    let snapshot = match repository.read_live_snapshot(session).await {
+    let covered_at_snapshot = subscription.queued_len();
+    // Provider drafts use the opposite boundary: a delta broadcast before the
+    // snapshot's own reads finished may describe a call the snapshot already
+    // shows terminal, and no later durable record would clear it, so drafts
+    // queued through the snapshot's completion are discarded rather than
+    // emitted.
+    let snapshot = match repository
+        .read_live_snapshot_at_completion(session, || subscription.queued_len())
+        .await
+    {
         Ok(Some(snapshot)) => snapshot,
         Ok(None) => {
             return application_error(
@@ -746,6 +754,7 @@ async fn session_live_follow(
         }
         Err(error) => return live_projection_error(error),
     };
+    let (snapshot, queued_at_snapshot) = snapshot;
     let Some(observed_through) = std::num::NonZeroU64::new(snapshot.observed_through) else {
         return live_projection_corruption();
     };
@@ -761,6 +770,7 @@ async fn session_live_follow(
             subscription,
             session,
             observed_through,
+            covered_at_snapshot,
             queued_at_snapshot,
             pending,
             provider_fragment: None,
@@ -776,6 +786,12 @@ struct LiveFollowState {
     subscription: crate::ProcessMonitorSubscription,
     session: SessionId,
     observed_through: std::num::NonZeroU64,
+    /// Records queued before the snapshot was established: each is proven
+    /// covered by the snapshot cursor, so a lag confined to them is silent.
+    covered_at_snapshot: usize,
+    /// Records queued through the snapshot's completion: a provider draft
+    /// among them may precede state the snapshot already shows, so it is
+    /// discarded.
     queued_at_snapshot: usize,
     pending: VecDeque<WebSessionLiveStreamEvent>,
     provider_fragment: Option<PendingProviderTextDelta>,
@@ -823,11 +839,25 @@ async fn live_follow_next(
     if let Some(event) = state.pending.pop_front() {
         return Some((event, state));
     }
-    if let Some(mut fragment) = state.provider_fragment.take()
-        && let Some(event) = fragment.next_event()
-    {
-        state.provider_fragment = Some(fragment);
-        return Some((event, state));
+    if let Some(mut fragment) = state.provider_fragment.take() {
+        // The monitor is only polled once the retained text drains, and lag
+        // is only detectable at that poll, so a saturated queue must end
+        // incremental delivery here: draining the rest of an unbounded
+        // provider response first would keep emitting stale presentation the
+        // contract says a full follower queue stops.
+        if state.subscription.is_saturated() {
+            state.ended = true;
+            return Some((
+                WebSessionLiveStreamEvent::ResyncRequired {
+                    cursor: WebPositiveU64::from_nonzero(state.observed_through),
+                },
+                state,
+            ));
+        }
+        if let Some(event) = fragment.next_event() {
+            state.provider_fragment = Some(fragment);
+            return Some((event, state));
+        }
     }
     if state.ended {
         return None;
@@ -839,9 +869,10 @@ async fn live_follow_next(
         } {
             Ok(update) => update,
             Err(ProcessMonitorReceiveError::Lagged(skipped))
-                if skipped <= state.queued_at_snapshot =>
+                if skipped <= state.covered_at_snapshot =>
             {
-                state.queued_at_snapshot -= skipped;
+                state.covered_at_snapshot -= skipped;
+                state.queued_at_snapshot = state.queued_at_snapshot.saturating_sub(skipped);
                 continue;
             }
             Err(ProcessMonitorReceiveError::Lagged(_)) => {
@@ -855,6 +886,7 @@ async fn live_follow_next(
             }
             Err(ProcessMonitorReceiveError::Closed) => return None,
         };
+        state.covered_at_snapshot = state.covered_at_snapshot.saturating_sub(1);
         let queued_at_snapshot = if state.queued_at_snapshot == 0 {
             false
         } else {
@@ -2010,6 +2042,7 @@ mod tests {
             session: live_session(),
             observed_through: std::num::NonZeroU64::new(observed_through)
                 .expect("test snapshot cursors are positive"),
+            covered_at_snapshot: queued_at_snapshot,
             queued_at_snapshot,
             pending: std::collections::VecDeque::new(),
             provider_fragment: None,
@@ -2084,6 +2117,7 @@ mod tests {
             part_index: 0,
             text: Arc::from("stale draft"),
         });
+        state.covered_at_snapshot = state.subscription.queued_len();
         state.queued_at_snapshot = state.subscription.queued_len();
         monitor.publish_for_test(ProcessMonitorUpdate::Durable {
             cursor: 8,
@@ -2142,6 +2176,7 @@ mod tests {
             part_index: 0,
             text: Arc::from("stale draft"),
         });
+        state.covered_at_snapshot = state.subscription.queued_len();
         state.queued_at_snapshot = state.subscription.queued_len();
         monitor.publish_for_test(ProcessMonitorUpdate::Durable {
             cursor: 8,
@@ -2164,6 +2199,82 @@ mod tests {
                 event_kind: WebSessionTimelineEventKind::TurnCompleted,
             }
         );
+    }
+
+    /// A draft broadcast after the coverage sample but before the snapshot's
+    /// reads finished may describe a call the snapshot already shows terminal,
+    /// and no later durable record clears it, so the completion boundary
+    /// discards it while the earlier coverage bound governs lag absorption.
+    #[tokio::test]
+    async fn live_follow_discards_a_draft_raced_between_sample_and_snapshot() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        state.covered_at_snapshot = state.subscription.queued_len();
+        monitor.publish_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 0,
+            text: Arc::from("raced draft"),
+        });
+        state.queued_at_snapshot = state.subscription.queued_len();
+        monitor.publish_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnCompleted,
+        });
+        let (event, _) = live_follow_next(state)
+            .await
+            .expect("the post-snapshot durable event is delivered");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::Durable {
+                cursor: WebU64::from_u64(8),
+                address: WebTimelineAddress {
+                    event_sequence: WebTimelineEventSequence::from_nonzero(
+                        std::num::NonZeroU64::new(8).expect("the fixture cursor is positive"),
+                    ),
+                },
+                event_kind: WebSessionTimelineEventKind::TurnCompleted,
+            }
+        );
+    }
+
+    /// Lag is only detectable at a monitor poll, so a saturated queue ends
+    /// incremental delivery instead of draining the rest of an unbounded
+    /// provider response first.
+    #[tokio::test]
+    async fn live_follow_resyncs_a_saturated_monitor_before_draining_fragments() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        state.provider_fragment = Some(super::PendingProviderTextDelta {
+            turn_id: WebTurnId::from_uuid_bytes(live_turn().into_uuid().into_bytes()),
+            model_call_id: WebLiveResourceId::from_uuid_bytes(live_call().into_uuid().into_bytes()),
+            part_index: 0,
+            text: Arc::from("retained draft"),
+            offset: 0,
+            emitted_empty: false,
+        });
+        monitor.fill_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnActivated,
+        });
+        let (event, state) = live_follow_next(state)
+            .await
+            .expect("saturation produces one explicit terminal event");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::ResyncRequired {
+                cursor: WebPositiveU64::from_nonzero(
+                    std::num::NonZeroU64::new(7).expect("the fixture cursor is positive"),
+                ),
+            }
+        );
+        assert!(state.ended);
+        assert!(state.provider_fragment.is_none());
     }
 
     #[tokio::test]

@@ -879,7 +879,9 @@ const schemas = {
               "model_call_id": {
                 "anyOf": [
                   {
-                    "$ref": "#/$defs/WebLiveResourceId"
+                    "description": "Checked canonical UUID used for browser-visible live resource identities.",
+                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                    "type": "string"
                   },
                   {
                     "type": "null"
@@ -888,7 +890,8 @@ const schemas = {
               }
             },
             "required": [
-              "kind"
+              "kind",
+              "model_call_id"
             ],
             "type": "object"
           },
@@ -987,177 +990,6 @@ const schemas = {
           }
         ]
       },
-      "WebSessionLiveActiveTurn": {
-        "additionalProperties": false,
-        "properties": {
-          "state": {
-            "$ref": "#/$defs/WebSessionLiveActiveState"
-          },
-          "turn_id": {
-            "$ref": "#/$defs/WebTurnId"
-          }
-        },
-        "required": [
-          "turn_id",
-          "state"
-        ],
-        "type": "object"
-      },
-      "WebSessionLiveReconciliation": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "model_call",
-                "type": "string"
-              },
-              "model_call_id": {
-                "$ref": "#/$defs/WebLiveResourceId"
-              },
-              "turn_id": {
-                "$ref": "#/$defs/WebTurnId"
-              }
-            },
-            "required": [
-              "kind",
-              "turn_id",
-              "model_call_id"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "kind": {
-                "const": "tool_attempt",
-                "type": "string"
-              },
-              "tool_attempt_id": {
-                "$ref": "#/$defs/WebLiveResourceId"
-              },
-              "turn_id": {
-                "$ref": "#/$defs/WebTurnId"
-              }
-            },
-            "required": [
-              "kind",
-              "turn_id",
-              "tool_attempt_id"
-            ],
-            "type": "object"
-          }
-        ]
-      },
-      "WebSessionLiveRunner": {
-        "oneOf": [
-          {
-            "additionalProperties": false,
-            "properties": {
-              "placement_revision": {
-                "$ref": "#/$defs/WebPositiveU64"
-              },
-              "state": {
-                "const": "unpinned",
-                "type": "string"
-              }
-            },
-            "required": [
-              "state",
-              "placement_revision"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "connection_health": {
-                "$ref": "#/$defs/WebSessionLiveRunnerConnectionHealth"
-              },
-              "placement_revision": {
-                "$ref": "#/$defs/WebPositiveU64"
-              },
-              "runner_id": {
-                "$ref": "#/$defs/WebLiveResourceId"
-              },
-              "state": {
-                "const": "pinned",
-                "type": "string"
-              }
-            },
-            "required": [
-              "state",
-              "runner_id",
-              "placement_revision",
-              "connection_health"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "placement_revision": {
-                "$ref": "#/$defs/WebPositiveU64"
-              },
-              "runner_id": {
-                "$ref": "#/$defs/WebLiveResourceId"
-              },
-              "state": {
-                "const": "runner_lost_before_pin",
-                "type": "string"
-              }
-            },
-            "required": [
-              "state",
-              "runner_id",
-              "placement_revision"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "placement_revision": {
-                "$ref": "#/$defs/WebPositiveU64"
-              },
-              "runner_id": {
-                "$ref": "#/$defs/WebLiveResourceId"
-              },
-              "state": {
-                "const": "runner_lost",
-                "type": "string"
-              }
-            },
-            "required": [
-              "state",
-              "runner_id",
-              "placement_revision"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
-              "placement_revision": {
-                "$ref": "#/$defs/WebPositiveU64"
-              },
-              "runner_id": {
-                "$ref": "#/$defs/WebLiveResourceId"
-              },
-              "state": {
-                "const": "runner_abandoned",
-                "type": "string"
-              }
-            },
-            "required": [
-              "state",
-              "runner_id",
-              "placement_revision"
-            ],
-            "type": "object"
-          }
-        ]
-      },
       "WebSessionLiveRunnerConnectionHealth": {
         "enum": [
           "connected",
@@ -1174,7 +1006,20 @@ const schemas = {
           "active": {
             "anyOf": [
               {
-                "$ref": "#/$defs/WebSessionLiveActiveTurn"
+                "additionalProperties": false,
+                "properties": {
+                  "state": {
+                    "$ref": "#/$defs/WebSessionLiveActiveState"
+                  },
+                  "turn_id": {
+                    "$ref": "#/$defs/WebTurnId"
+                  }
+                },
+                "required": [
+                  "turn_id",
+                  "state"
+                ],
+                "type": "object"
               },
               {
                 "type": "null"
@@ -1197,7 +1042,50 @@ const schemas = {
           "reconciliation": {
             "anyOf": [
               {
-                "$ref": "#/$defs/WebSessionLiveReconciliation"
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "model_call",
+                        "type": "string"
+                      },
+                      "model_call_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "turn_id": {
+                        "$ref": "#/$defs/WebTurnId"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "turn_id",
+                      "model_call_id"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "tool_attempt",
+                        "type": "string"
+                      },
+                      "tool_attempt_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "turn_id": {
+                        "$ref": "#/$defs/WebTurnId"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "turn_id",
+                      "tool_attempt_id"
+                    ],
+                    "type": "object"
+                  }
+                ]
               },
               {
                 "type": "null"
@@ -1207,7 +1095,113 @@ const schemas = {
           "runner": {
             "anyOf": [
               {
-                "$ref": "#/$defs/WebSessionLiveRunner"
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "state": {
+                        "const": "unpinned",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "placement_revision"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "connection_health": {
+                        "$ref": "#/$defs/WebSessionLiveRunnerConnectionHealth"
+                      },
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "runner_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "state": {
+                        "const": "pinned",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "runner_id",
+                      "placement_revision",
+                      "connection_health"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "runner_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "state": {
+                        "const": "runner_lost_before_pin",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "runner_id",
+                      "placement_revision"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "runner_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "state": {
+                        "const": "runner_lost",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "runner_id",
+                      "placement_revision"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "placement_revision": {
+                        "$ref": "#/$defs/WebPositiveU64"
+                      },
+                      "runner_id": {
+                        "$ref": "#/$defs/WebLiveResourceId"
+                      },
+                      "state": {
+                        "const": "runner_abandoned",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "state",
+                      "runner_id",
+                      "placement_revision"
+                    ],
+                    "type": "object"
+                  }
+                ]
               },
               {
                 "type": "null"
@@ -1221,8 +1215,11 @@ const schemas = {
         "required": [
           "session_id",
           "observed_through",
+          "active",
           "queued_turn_count",
-          "queued_turn_ids"
+          "queued_turn_ids",
+          "reconciliation",
+          "runner"
         ],
         "type": "object"
       },
