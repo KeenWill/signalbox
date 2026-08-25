@@ -8,9 +8,9 @@ use std::{
 use rust_decimal::Decimal;
 use serde::Deserialize;
 
+use crate::GENERATED_PROJECTION_BANNER;
+
 const EXPECTED_SCHEMA_VERSION: u32 = 1;
-const PROJECTION_BANNER: &str =
-    "<!-- Generated from ../data/reference-catalog.json; do not edit by hand. -->\n\n";
 
 /// First-party provider represented by this initial reference-data slice.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -774,7 +774,7 @@ impl Catalog {
     pub(crate) fn render_models(&self) -> String {
         let mut models = self.raw.models.iter().collect::<Vec<_>>();
         models.sort_by(|left, right| left.id.cmp(&right.id));
-        let mut output = String::from(PROJECTION_BANNER);
+        let mut output = String::from(GENERATED_PROJECTION_BANNER);
         output.push_str("# Reference models and recorded capabilities\n\n");
         output.push_str(
             "These identities are non-routable reference data. An absent capability is\nunknown, not unsupported.\n\n```text\n",
@@ -817,7 +817,7 @@ impl Catalog {
     pub(crate) fn render_historical_pricing(&self) -> String {
         let mut sets = self.raw.rate_sets.iter().collect::<Vec<_>>();
         sets.sort_by(|left, right| left.id.cmp(&right.id));
-        let mut output = String::from(PROJECTION_BANNER);
+        let mut output = String::from(GENERATED_PROJECTION_BANNER);
         output.push_str("# Historical first-party API pricing\n\n");
         output.push_str(
             "Amounts are exact decimal USD per one million tokens unless the original unit\nsays otherwise.\n\n```text\n",
@@ -858,7 +858,7 @@ impl Catalog {
     pub(crate) fn render_consumer_equivalence(&self) -> String {
         let mut mappings = self.raw.consumer_mappings.iter().collect::<Vec<_>>();
         mappings.sort_by(|left, right| left.id.cmp(&right.id));
-        let mut output = String::from(PROJECTION_BANNER);
+        let mut output = String::from(GENERATED_PROJECTION_BANNER);
         output.push_str("# Consumer/subscription-to-API equivalence\n\n");
         output.push_str(
             "Equivalent API cost is the estimated first-party API cost of the observed usage\nat the contemporaneous applicable published API rate. It is not the user's\nactual subscription charge.\n\n```text\n",
@@ -892,7 +892,7 @@ impl Catalog {
     pub(crate) fn render_sources(&self) -> String {
         let mut sources = self.raw.sources.iter().collect::<Vec<_>>();
         sources.sort_by(|left, right| left.id.cmp(&right.id));
-        let mut output = String::from(PROJECTION_BANNER);
+        let mut output = String::from(GENERATED_PROJECTION_BANNER);
         output.push_str("# Source and provenance ledger\n\n");
         output.push_str("```text\n");
         output.push_str(
@@ -918,7 +918,7 @@ impl Catalog {
     pub(crate) fn render_research_gaps(&self) -> String {
         let mut gaps = self.raw.research_gaps.iter().collect::<Vec<_>>();
         gaps.sort_by(|left, right| left.id.cmp(&right.id));
-        let mut output = String::from(PROJECTION_BANNER);
+        let mut output = String::from(GENERATED_PROJECTION_BANNER);
         output.push_str("# Explicit research gaps\n\n");
         output.push_str(
             "Unknowns remain unknown; these records are not permission to infer missing rates\nor identities.\n\n```text\n",

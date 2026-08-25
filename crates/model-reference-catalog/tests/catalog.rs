@@ -6,6 +6,24 @@ use signalbox_model_reference_catalog::{
     render_projections,
 };
 
+fn exact_api_snapshot_rate_set_ids(
+    catalog: &Catalog,
+    model_hint: &str,
+    date: &str,
+) -> Option<Vec<String>> {
+    let resolution = catalog
+        .resolve(Provider::Openai, model_hint, date, CommercialChannel::Api)
+        .ok()?;
+    Some(
+        resolution
+            .price()?
+            .resolved_rate_sets()?
+            .iter()
+            .map(|rate_set| rate_set.id.clone())
+            .collect(),
+    )
+}
+
 #[test]
 fn actual_billing_kind_is_distinct_from_equivalent_api_pricing() {
     assert_eq!(
@@ -108,6 +126,28 @@ fn rolling_api_alias_uses_its_explicit_pricing_reference() {
         Some("openai:gpt-5-chat-latest")
     );
     assert_eq!(rate_set.id, "oai-gpt5-standard");
+}
+
+#[test]
+fn exact_api_snapshots_keep_their_recorded_rate_sets() {
+    let catalog = bundled_catalog().unwrap();
+
+    assert_eq!(
+        exact_api_snapshot_rate_set_ids(&catalog, "gpt-4-0314", "2023-03-14"),
+        Some(vec![String::from("oai-gpt4-launch")])
+    );
+    assert_eq!(
+        exact_api_snapshot_rate_set_ids(&catalog, "gpt-4-32k-0314", "2023-03-14"),
+        Some(vec![String::from("oai-gpt4-32k-launch")])
+    );
+    assert_eq!(
+        exact_api_snapshot_rate_set_ids(&catalog, "gpt-4-1106-preview", "2023-11-06"),
+        Some(vec![String::from("oai-gpt4-turbo-launch")])
+    );
+    assert_eq!(
+        exact_api_snapshot_rate_set_ids(&catalog, "gpt-4o-2024-08-06", "2024-10-01"),
+        Some(vec![String::from("oai-gpt4o-0806-caching")])
+    );
 }
 
 #[test]
