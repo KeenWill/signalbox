@@ -3318,9 +3318,34 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
         .frontier_entries()
         .map(signalbox_domain::SemanticTranscriptEntry::reference)
         .collect::<Vec<_>>();
+    let instruction_snapshot = signalbox_application::discover_workspace_instructions(Vec::new());
+    let instruction_manifest = signalbox_domain::TurnInstructionManifest::empty_turn_start(
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0xcd15)),
+        session,
+        turn,
+    );
+    let no_instruction_bundles = [];
+    let instruction_placement =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        )
+        .observe_session_runner_placement(session)
+        .await?;
+    let instruction_evidence = CountedActivationInstructionEvidence::new(
+        signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0xcd16)),
+        &instruction_manifest,
+        &instruction_snapshot,
+        &no_instruction_bundles,
+        &instruction_placement,
+    );
 
     let committed = activation
-        .commit_counted_preview(preview, counted_call, &model_calls)
+        .commit_counted_preview(
+            preview,
+            counted_call,
+            &model_calls,
+            Some(instruction_evidence),
+        )
         .await?;
     let CommitActivationPreviewOutcome::Activated(activated) = committed else {
         panic!("the unchanged counted activation must commit");
@@ -3385,6 +3410,118 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
     .fetch_one(&pool)
     .await?;
     assert_eq!(pending_steering, 1);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-061: authoritative revalidation that rejects a stale counted preview
+/// also rejects its prepared instruction evidence without retaining rows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv061_stale_counted_preview_retains_no_instruction_evidence() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0xcd20));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0xcd21));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xcd22));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            0xcd23,
+            0xcd20,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xcd24));
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0xcd25,
+                0xcd20,
+                "stale counted origin",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xcd26)),
+            Some(turn),
+        )
+        .await?;
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    let preview = activation
+        .preview(
+            session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd27)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xcd28)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xcd29)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(0xcd2a)),
+            ),
+        )
+        .await?
+        .expect("the queued origin has one exact activation preview");
+    insert_pending_compact_command(
+        &pool,
+        Uuid::from_u128(0xcd2e),
+        session.into_uuid(),
+        Uuid::from_u128(0xcd2f),
+        Uuid::from_u128(0xcd30),
+    )
+    .await?;
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one fixture target forms a catalog");
+    let model_calls =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let snapshot = signalbox_application::discover_workspace_instructions(Vec::new());
+    let manifest = signalbox_domain::TurnInstructionManifest::empty_turn_start(
+        signalbox_domain::TurnInstructionManifestId::from_uuid(Uuid::from_u128(0xcd2b)),
+        session,
+        turn,
+    );
+    let no_bundles = [];
+    let placement =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        )
+        .observe_session_runner_placement(session)
+        .await?;
+    let evidence = CountedActivationInstructionEvidence::new(
+        signalbox_domain::InstructionDiscoveryId::from_uuid(Uuid::from_u128(0xcd2c)),
+        &manifest,
+        &snapshot,
+        &no_bundles,
+        &placement,
+    );
+
+    let stale = activation
+        .commit_counted_preview(
+            preview,
+            ModelCallId::from_uuid(Uuid::from_u128(0xcd2d)),
+            &model_calls,
+            Some(evidence),
+        )
+        .await?;
+    let discovery_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM instruction_discovery WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let manifest_rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM turn_instruction_manifest WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(stale, CommitActivationPreviewOutcome::Stale);
+    assert_eq!(discovery_rows, 0);
+    assert_eq!(manifest_rows, 0);
 
     pool.close().await;
     drop(container);
