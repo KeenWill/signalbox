@@ -583,9 +583,13 @@ impl ImportedTranscriptEntry {
 }
 
 pub struct ImportedTranscriptFrontier { /* private */ }
-// sealed: ImportedConversation frontier methods
 // Copy; equality is the exact imported-conversation boundary.
 impl ImportedTranscriptFrontier {
+    pub const fn from_parts(
+        conversation: ImportedConversationId,
+        through_entry: ImportedTranscriptEntryId,
+        through_position: ImportedTranscriptPosition,
+    ) -> Self;
     // accessors: conversation(), through_entry(), through_position()
 }
 
@@ -2317,10 +2321,12 @@ impl NonEmptyUnicodeText {
     pub fn into_string(self) -> String;
     // accessors: as_str()
 }
+// Debug is content-redacted.
 
 pub enum NonEmptyUnicodeTextFailure {
     Empty,
     ContainsNull,
+    TooLong,
 }
 
 pub struct NonEmptyUnicodeTextError { /* private */ }
@@ -2328,13 +2334,88 @@ impl NonEmptyUnicodeTextError {
     pub fn into_parts(self) -> (String, NonEmptyUnicodeTextFailure);
     // accessors: failure(), value()
 }
+// Debug is content-redacted.
 
-pub enum UserContent {
-    Text { value: NonEmptyUnicodeText },
+pub enum AttachmentKind {
+    Image,
+    Document,
+    File,
 }
-impl UserContent {
+
+pub struct DeclaredMediaType(/* private String */);
+impl DeclaredMediaType {
+    pub const MAX_BYTES: usize;
+    pub fn try_new(value: String) -> Result<Self, DeclaredMediaTypeError>;
+    // accessor: as_str()
+}
+
+pub enum DeclaredMediaTypeFailure {
+    Empty,
+    TooLong,
+    NotVisibleAscii,
+}
+
+pub struct DeclaredMediaTypeError { /* private */ }
+impl DeclaredMediaTypeError {
+    // accessors: failure(), value()
+}
+
+pub struct AttachmentDisplayFilename(/* private String */);
+impl AttachmentDisplayFilename {
+    pub const MAX_BYTES: usize;
+    pub fn try_new(value: String) -> Result<Self, AttachmentDisplayFilenameError>;
+    // accessor: as_str()
+}
+// Debug is content-redacted.
+
+pub enum AttachmentDisplayFilenameFailure {
+    Empty,
+    TooLong,
+    ReservedBasename,
+    ContainsPathSeparator,
+    ContainsNull,
+}
+
+pub struct AttachmentDisplayFilenameError { /* private */ }
+impl AttachmentDisplayFilenameError {
+    // accessors: failure(), value()
+}
+// Debug is content-redacted.
+
+pub enum UserContentPart {
+    Text { value: NonEmptyUnicodeText },
+    Attachment {
+        digest: BlobDigest,
+        kind: AttachmentKind,
+        media_type: DeclaredMediaType,
+        display_filename: Option<AttachmentDisplayFilename>,
+    },
+}
+impl UserContentPart {
     pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
-    // accessors: text()
+}
+
+pub struct UserContent { /* private */ }
+impl UserContent {
+    pub const MAX_PARTS: usize;
+    pub const MAX_TEXT_BYTES: usize;
+    pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
+    pub fn try_parts(parts: Vec<UserContentPart>) -> Result<Self, UserContentError>;
+    pub fn into_parts(self) -> Vec<UserContentPart>;
+    // accessors: parts(), single_text()
+}
+
+pub struct UserContentError { /* private */ }
+impl UserContentError {
+    pub fn into_parts(self) -> (Vec<UserContentPart>, UserContentFailure);
+    // accessors: failure(), parts()
+}
+
+pub enum UserContentFailure {
+    Empty,
+    TooManyParts,
+    AdjacentTextParts,
+    TextTooLarge,
 }
 ```
 
@@ -8923,6 +9004,7 @@ impl<
 
 ```rust
 pub const fn scheduler_pass_admission_cap() -> usize;
+pub const fn scheduler_ordinary_pass_limit() -> usize;
 
 pub struct ReconciliationSweepInterval(/* private */);
 impl ReconciliationSweepInterval {
@@ -8938,12 +9020,14 @@ pub struct InvalidReconciliationSweepInterval;
 
 pub enum EligibilityNudgeOutcome {
     Enqueued,
+    Coalesced,
     DroppedAtCapacity,
     WorkSourceClosed,
 }
 
 pub trait EligibilityNudge {
     fn nudge(&self, session: SessionId) -> EligibilityNudgeOutcome;
+    fn nudge_dispatch_start(&self, session: SessionId) -> EligibilityNudgeOutcome;
 }
 
 pub trait EligibilitySweep {
@@ -8957,13 +9041,23 @@ pub trait EligibilitySweep {
 pub struct EligibilitySweepBatch { /* private */ }
 impl EligibilitySweepBatch {
     pub fn new(sessions: Vec<SessionId>, continuation: bool) -> Self;
-    pub fn into_parts(self) -> (Vec<SessionId>, bool);
+    pub fn with_dispatch_starts(
+        sessions: Vec<SessionId>,
+        dispatch_starts: HashSet<SessionId>,
+        continuation: bool,
+    ) -> Self;
+    pub fn into_parts(self) -> (Vec<SessionId>, HashSet<SessionId>, bool);
 }
 
 pub trait EligibilityWorkSource {
     type Error;
 
     fn next(&mut self) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
+    fn take_returned_dispatch_start(&mut self, _session: SessionId) -> bool;
+    fn take_pending_dispatch_start(&mut self) -> Option<SessionId>;
+    fn next_pending_dispatch_start(
+        &mut self,
+    ) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
 }
 
 pub trait EligibilityPass {
@@ -8973,6 +9067,10 @@ pub trait EligibilityPass {
     fn failure_turn(_error: &Self::Error) -> Option<TurnId>;
     fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>>;
     fn run(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+    fn run_dispatch_start(
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
@@ -11668,7 +11766,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: model_settings                             | 25                               |
 | domain: accepted_input                             | 5                                |
 | domain: delivery_request                           | 2                                |
-| domain: user_content                               | 4                                |
+| domain: user_content                               | 14                               |
 | domain: submit_input                               | 34                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
 | domain: repo_watch                                 | 51                               |
@@ -11694,7 +11792,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **833 (+12 free fn)**            |
+| **signalbox-domain total**                         | **843 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
@@ -11715,7 +11813,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
 | application: session_metadata                      | 12 (incl. 4 traits)              |
-| application: scheduler                             | 20 (+1 free fn) (incl. 7 traits) |
+| application: scheduler                             | 20 (+2 free fn) (incl. 7 traits) |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)               |
 | application: startup_scan                          | 7 (incl. 2 traits)               |
 | application: submit_input                          | 7 (incl. 2 traits)               |
@@ -11724,4 +11822,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 13                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **341 (+11 free fn)**            |
+| **signalbox-application total**                    | **341 (+12 free fn)**            |

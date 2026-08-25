@@ -14,7 +14,7 @@ against this PR (`agent/file-media-adapter-office`). The audio-family adapter
 coverage is verified against this PR (`agent/file-media-audio-family`).
 
 The image-family adapter coverage is verified against PR #905
-(`agent/file-media-image-family`; via PR #907 `agent/file-media-adapter-svg`).
+(`agent/file-media-image-family`).
 
 The SVG adapter is verified against this PR (`agent/file-media-adapter-svg`).
 
