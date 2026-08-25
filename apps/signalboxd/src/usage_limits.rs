@@ -217,6 +217,9 @@ where
                 ModelCallCapabilityPreparation::KnownFailure => {
                     ModelCallCapabilityPreparation::KnownFailure
                 }
+                ModelCallCapabilityPreparation::AttachmentFailure(failure) => {
+                    ModelCallCapabilityPreparation::AttachmentFailure(failure)
+                }
             })
     }
 
