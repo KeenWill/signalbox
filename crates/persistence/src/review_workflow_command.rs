@@ -160,6 +160,7 @@ async fn inspect_existing(
             | CommandKind::ReplaceSessionMetadata
             | CommandKind::SubmitInput
             | CommandKind::DecideToolRequest
+            | CommandKind::OverrideDeniedToolRequest
             | CommandKind::ReviewOrchestration
             | CommandKind::CompactSession
             | CommandKind::Goal

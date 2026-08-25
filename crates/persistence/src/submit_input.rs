@@ -11,13 +11,14 @@ use signalbox_domain::{
     AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
     AcceptedInputSchedulingReconstitutionFailure, AcceptedInputSchedulingReconstitutionInput,
     AcceptedInputStartingLineage, AcceptedInputTurnSchedulingRecord,
-    AcceptedInputTurnSchedulingRecordState, ActiveTurnSchedulingReconstitutionInput, Actor,
-    AppliedInterruptCommandResult, AssistantText, AttachmentDisplayFilename, AttachmentKind,
-    CancellationStopDisposition, CancelledModelCallTurnIdentities,
-    CancelledTurnExecutionReconstitutionInput, ConsumedSteeringReconstitutionInput,
-    ContextCompactionId, ContextCompactionModelCallReconstitutionInput,
-    ContextCompactionModelCallState, ContextCompactionRange, ContextCompactionReconstitutionInput,
-    ContextCompactionTokenUsage, ContextFrontierId, ContinuationRoundReconstitutionInput,
+    AcceptedInputTurnSchedulingRecordState, AcceptedInputTurnSchedulingStatus,
+    ActiveTurnSchedulingReconstitutionInput, Actor, AppliedInterruptCommandResult, AssistantText,
+    AttachmentDisplayFilename, AttachmentKind, BlobDigest, CancellationStopDisposition,
+    CancelledModelCallTurnIdentities, CancelledTurnExecutionReconstitutionInput,
+    ConsumedSteeringReconstitutionInput, ContextCompactionId,
+    ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
+    ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
+    ContextFrontierId, ContextFrontierProjection, ContinuationRoundReconstitutionInput,
     DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegationContent,
     DelegationMessageId, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
     DelegationProvenanceReconstitutionInput, DelegationWaitMode, DeliveryRequest,
@@ -700,6 +701,7 @@ impl SubmitInputRepository {
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -794,6 +796,7 @@ where
             | CommandKind::ReplaceSessionDefaults
             | CommandKind::ReplaceSessionMetadata
             | CommandKind::DecideToolRequest
+            | CommandKind::OverrideDeniedToolRequest
             | CommandKind::ReviewWorkflow
             | CommandKind::ReviewOrchestration
             | CommandKind::CompactSession
@@ -836,6 +839,7 @@ where
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -860,6 +864,13 @@ where
         return Ok(TransactionDecision::Commit(
             SubmitInputHandlingOutcome::Recorded(recorded),
         ));
+    }
+
+    let frontier_command = command.clone();
+    if attachment_maximum_bytes.is_some() {
+        sqlx::query("SAVEPOINT submit_input_attachment_frontier")
+            .execute(&mut *connection)
+            .await?;
     }
 
     if matches!(
@@ -889,6 +900,16 @@ where
         model_capabilities,
     )
     .await?;
+    let prior_queued_inputs = scheduling
+        .as_ref()
+        .map(|scheduling| {
+            scheduling
+                .turns()
+                .filter(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)
+                .map(|turn| turn.accepted_input().id())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let recorded = prepared.result().clone();
     let interrupt = match prepared.result() {
         SubmitInputResult::Applied(SubmitInputAppliedResult::TurnOrigin(origin)) => {
@@ -1653,9 +1674,239 @@ where
         }
         None => {}
     }
+    if let Some(maximum_bytes) = attachment_maximum_bytes {
+        if matches!(recorded, SubmitInputResult::Applied(_))
+            && prospective_attachment_frontier_exceeds_bound(
+                connection,
+                frontier_command.session(),
+                &prior_queued_inputs,
+                &recorded,
+                maximum_bytes,
+            )
+            .await?
+        {
+            sqlx::query("ROLLBACK TO SAVEPOINT submit_input_attachment_frontier")
+                .execute(&mut *connection)
+                .await?;
+            let rejected = frontier_command.prepare_attachment_byte_budget_exceeded(maximum_bytes);
+            let recorded = rejected.result().clone();
+            insert_prepared_command(connection, &rejected).await?;
+            insert_prepared_effects(connection, rejected).await?;
+            sqlx::query("RELEASE SAVEPOINT submit_input_attachment_frontier")
+                .execute(&mut *connection)
+                .await?;
+            return Ok(TransactionDecision::Commit(
+                SubmitInputHandlingOutcome::Recorded(recorded),
+            ));
+        }
+        sqlx::query("RELEASE SAVEPOINT submit_input_attachment_frontier")
+            .execute(&mut *connection)
+            .await?;
+    }
     Ok(TransactionDecision::Commit(
         SubmitInputHandlingOutcome::Recorded(recorded),
     ))
+}
+
+async fn prospective_attachment_frontier_exceeds_bound(
+    connection: &mut PgConnection,
+    session: SessionId,
+    prior_queued_inputs: &[AcceptedInputId],
+    result: &SubmitInputResult,
+    maximum_bytes: u64,
+) -> Result<bool, SubmitInputRepositoryError> {
+    let current = match load_session_from_connection(connection, session).await {
+        Ok(Some(session)) => session,
+        Ok(None) => {
+            return Err(SubmitInputCorruption::Inconsistent(
+                "provisionally applied input session disappeared",
+            )
+            .into());
+        }
+        Err(SessionRepositoryError::Database(error)) => return Err(error.into()),
+        Err(SessionRepositoryError::Corruption(error)) => {
+            return Err(SubmitInputCorruption::CurrentSession(error).into());
+        }
+    };
+    let scheduling = load_scheduling_projection(connection, current).await?;
+    let (base_origins, check_base) = match require_live_execution_for_restart(connection, session)
+        .await
+    {
+        Ok(execution) => {
+            let mut distinct = BTreeSet::new();
+            let complete_entries = execution.frontier_entries().cloned().collect::<Vec<_>>();
+            let projection = ContextFrontierProjection::from_complete_entries(&complete_entries)
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("prospective attachment context projection")
+                })?;
+            let entries_by_reference = complete_entries
+                .iter()
+                .map(|entry| (entry.reference(), entry))
+                .collect::<BTreeMap<_, _>>();
+            let mut projected_entries = Vec::new();
+            for reference in projection.ordered_entries() {
+                let Some(entry) = entries_by_reference.get(&reference) else {
+                    return Err(SubmitInputCorruption::Inconsistent(
+                        "prospective attachment projected entry",
+                    )
+                    .into());
+                };
+                projected_entries.push(*entry);
+            }
+            let mut origins = projected_entries
+                .into_iter()
+                .filter_map(|entry| match entry.payload() {
+                    InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                        accepted_input,
+                    }
+                    | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                        accepted_input,
+                        ..
+                    } => distinct.insert(*accepted_input).then_some(*accepted_input),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            origins.extend(
+                execution
+                    .active_turn()
+                    .pending_steering()
+                    .iter()
+                    .map(|pending| pending.accepted_input())
+                    .filter(|accepted_input| distinct.insert(*accepted_input)),
+            );
+            (
+                origins,
+                matches!(
+                    result,
+                    SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+                ),
+            )
+        }
+        Err(ModelCallRepositoryError::NoLiveExecution) => (
+            scheduling
+                .earliest_queued_rendered_base_origins()
+                .transpose()
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("prospective attachment context projection")
+                })?
+                .unwrap_or_default(),
+            false,
+        ),
+        Err(error) => return Err(error.into()),
+    };
+    let queued_inputs = scheduling
+        .turns()
+        .filter(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)
+        .map(|turn| turn.accepted_input().id())
+        .collect::<Vec<_>>();
+    let first_changed_queue = if check_base {
+        0
+    } else {
+        prior_queued_inputs
+            .iter()
+            .zip(&queued_inputs)
+            .take_while(|(before, after)| before == after)
+            .count()
+    };
+    if !check_base && first_changed_queue == queued_inputs.len() {
+        return Err(SubmitInputCorruption::Inconsistent(
+            "applied turn-origin input left the prospective queue unchanged",
+        )
+        .into());
+    }
+
+    let all_origins = base_origins
+        .iter()
+        .chain(&queued_inputs)
+        .map(|accepted_input| accepted_input.into_uuid())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        "SELECT part.accepted_input_id, part.blob_digest, blob.byte_length
+           FROM accepted_input_content_part AS part
+           JOIN blob ON blob.digest = part.blob_digest
+          WHERE part.accepted_input_id = ANY($1)
+            AND part.part_kind = 'attachment'
+          ORDER BY part.accepted_input_id, part.position",
+    )
+    .bind(&all_origins)
+    .fetch_all(&mut *connection)
+    .await?;
+    let mut attachments = BTreeMap::<AcceptedInputId, Vec<(BlobDigest, u64)>>::new();
+    for row in rows {
+        let accepted_input =
+            accepted_input_id_from_uuid(row.try_get::<Uuid, _>("accepted_input_id")?);
+        let digest = BlobDigest::from_bytes(
+            row.try_get::<Vec<u8>, _>("blob_digest")?
+                .try_into()
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("prospective attachment digest")
+                })?,
+        );
+        let length = positive_u64_from_numeric(row.try_get("byte_length")?).map_err(|_| {
+            SubmitInputCorruption::Inconsistent("prospective attachment byte length")
+        })?;
+        attachments
+            .entry(accepted_input)
+            .or_default()
+            .push((digest, length));
+    }
+
+    let mut digests = BTreeMap::<BlobDigest, u64>::new();
+    let mut total = 0_u64;
+    for accepted_input in &base_origins {
+        add_prospective_attachment_lengths(
+            &mut digests,
+            &mut total,
+            attachments
+                .get(accepted_input)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
+    }
+    if check_base && total > maximum_bytes {
+        return Ok(true);
+    }
+    for (index, accepted_input) in queued_inputs.iter().enumerate() {
+        add_prospective_attachment_lengths(
+            &mut digests,
+            &mut total,
+            attachments
+                .get(accepted_input)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
+        if index >= first_changed_queue && total > maximum_bytes {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn add_prospective_attachment_lengths(
+    digests: &mut BTreeMap<BlobDigest, u64>,
+    total: &mut u64,
+    attachments: &[(BlobDigest, u64)],
+) -> Result<(), SubmitInputRepositoryError> {
+    for (digest, length) in attachments {
+        match digests.get(digest) {
+            Some(recorded) if recorded != length => {
+                return Err(SubmitInputCorruption::Inconsistent(
+                    "prospective attachment length disagreement",
+                )
+                .into());
+            }
+            Some(_) => {}
+            None => {
+                *total = total
+                    .checked_add(*length)
+                    .ok_or(SubmitInputCorruption::Inconsistent(
+                        "prospective attachment byte length sum",
+                    ))?;
+                digests.insert(*digest, *length);
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn prepare_attachment_authority_rejection(
@@ -1676,9 +1927,6 @@ async fn prepare_attachment_authority_rejection(
         return Ok(None);
     }
 
-    let maximum_bytes = maximum_bytes.ok_or(SubmitInputCorruption::Inconsistent(
-        "attachment authority maximum is unavailable",
-    ))?;
     let mut total_bytes = 0_u64;
     for digest in digests {
         let row = sqlx::query(
@@ -1708,6 +1956,9 @@ async fn prepare_attachment_authority_rejection(
         let byte_length = positive_u64_from_numeric(required(&row, "byte_length")?)
             .map_err(|_| SubmitInputCorruption::Inconsistent("attachment blob byte length"))?;
         let Some(next_total) = total_bytes.checked_add(byte_length) else {
+            let maximum_bytes = maximum_bytes.ok_or(SubmitInputCorruption::Inconsistent(
+                "attachment authority maximum is unavailable",
+            ))?;
             return Ok(Some(
                 command
                     .clone()
@@ -1717,6 +1968,9 @@ async fn prepare_attachment_authority_rejection(
         total_bytes = next_total;
     }
 
+    let maximum_bytes = maximum_bytes.ok_or(SubmitInputCorruption::Inconsistent(
+        "attachment authority maximum is unavailable",
+    ))?;
     if total_bytes > maximum_bytes {
         return Ok(Some(
             command
@@ -2432,6 +2686,14 @@ pub(crate) async fn load_scheduling_projection(
             turn.terminal_model_call_id,
             turn.terminal_tool_attempt_id,
             turn.terminal_disposition_kind,
+            EXISTS (
+                SELECT 1
+                  FROM automatic_model_call_reconciliation AS recovery
+                 WHERE recovery.turn_id = turn.turn_id
+                   AND recovery.session_id = turn.session_id
+                   AND recovery.model_call_id = turn.terminal_model_call_id
+                   AND recovery.state_kind = 'reconciled'
+            ) AS automatic_reconciliation_authority,
             (
                 SELECT call.model_call_id
                   FROM model_call AS call
@@ -3433,6 +3695,8 @@ pub(crate) async fn load_scheduling_projection(
                         let attempt_state: String = required(&row, "attempt_state_kind")?;
                         let end_variant: Option<String> = row.try_get("end_variant")?;
                         let end_disposition: Option<String> = row.try_get("end_disposition")?;
+                        let automatic_reconciliation_authority: bool =
+                            required(&row, "automatic_reconciliation_authority")?;
                         if stored_attempt_id.into_uuid() != terminal_attempt
                             || attempt_turn != lifecycle_turn
                             || attempt_session != lifecycle_session
@@ -3447,24 +3711,38 @@ pub(crate) async fn load_scheduling_projection(
                             end_variant.as_deref(),
                             end_disposition.as_deref(),
                         ) {
-                            (Some("without_stop"), Some("ambiguous")) => (
-                                require_applied_interrupt_for_turn(
-                                    lifecycle_turn,
-                                    &recorded_commands,
-                                )?,
-                                TerminalAttemptEndReconstitutionInput::without_stop(
-                                    UnstoppedAttemptDisposition::Ambiguous,
-                                ),
-                            ),
-                            (Some("without_stop"), Some("lost")) => (
-                                require_applied_interrupt_for_turn(
-                                    lifecycle_turn,
-                                    &recorded_commands,
-                                )?,
-                                TerminalAttemptEndReconstitutionInput::without_stop(
-                                    UnstoppedAttemptDisposition::Lost,
-                                ),
-                            ),
+                            (Some("without_stop"), Some("ambiguous")) => {
+                                let interrupt = if automatic_reconciliation_authority {
+                                    None
+                                } else {
+                                    Some(require_applied_interrupt_for_turn(
+                                        lifecycle_turn,
+                                        &recorded_commands,
+                                    )?)
+                                };
+                                (
+                                    interrupt,
+                                    TerminalAttemptEndReconstitutionInput::without_stop(
+                                        UnstoppedAttemptDisposition::Ambiguous,
+                                    ),
+                                )
+                            }
+                            (Some("without_stop"), Some("lost")) => {
+                                let interrupt = if automatic_reconciliation_authority {
+                                    None
+                                } else {
+                                    Some(require_applied_interrupt_for_turn(
+                                        lifecycle_turn,
+                                        &recorded_commands,
+                                    )?)
+                                };
+                                (
+                                    interrupt,
+                                    TerminalAttemptEndReconstitutionInput::without_stop(
+                                        UnstoppedAttemptDisposition::Lost,
+                                    ),
+                                )
+                            }
                             (Some("after_cancellation"), Some("ambiguous")) => {
                                 let interrupt = require_applied_interrupt_from_attempt(
                                     &row,
@@ -3472,7 +3750,7 @@ pub(crate) async fn load_scheduling_projection(
                                     &recorded_commands,
                                 )?;
                                 (
-                                    interrupt,
+                                    Some(interrupt),
                                     TerminalAttemptEndReconstitutionInput::after_cancellation(
                                         CancellationStopDisposition::Ambiguous,
                                         interrupt,
@@ -3486,7 +3764,7 @@ pub(crate) async fn load_scheduling_projection(
                                     &recorded_commands,
                                 )?;
                                 (
-                                    interrupt,
+                                    Some(interrupt),
                                     TerminalAttemptEndReconstitutionInput::after_cancellation(
                                         CancellationStopDisposition::Lost,
                                         interrupt,
@@ -3502,11 +3780,11 @@ pub(crate) async fn load_scheduling_projection(
                                     &recorded_commands,
                                 )?;
                                 (
+                                    Some(interrupt),
+                                    TerminalAttemptEndReconstitutionInput::yielded_to_runner_recovery(
                                         interrupt,
-                                        TerminalAttemptEndReconstitutionInput::yielded_to_runner_recovery(
-                                            interrupt,
-                                        ),
-                                    )
+                                    ),
+                                )
                             }
                             _ => {
                                 return Err(SubmitInputCorruption::Inconsistent(
@@ -3530,6 +3808,9 @@ pub(crate) async fn load_scheduling_projection(
                                 }
                             }
                             (None, Some(terminal_tool_attempt)) => {
+                                let interrupt = interrupt.ok_or(SubmitInputCorruption::Missing(
+                                    "tool reconciliation applied interrupt",
+                                ))?;
                                 let batch = load_recovery_batch_by_attempt(
                                     connection,
                                     lifecycle_session,
@@ -3874,6 +4155,18 @@ pub(crate) async fn load_scheduling_projection(
             call.context_frontier_id,
             call.state_kind,
             call.terminal_disposition_kind,
+            manifest.turn_instruction_manifest_id,
+            manifest.boundary_kind AS instruction_manifest_boundary_kind,
+            manifest.eligibility_hash_algorithm
+                AS instruction_eligibility_hash_algorithm,
+            manifest.eligibility_hash AS instruction_eligibility_hash,
+            manifest.admitted_set_hash_algorithm
+                AS instruction_admitted_set_hash_algorithm,
+            manifest.admitted_set_hash AS instruction_admitted_set_hash,
+            manifest.manifest_hash_algorithm
+                AS instruction_manifest_hash_algorithm,
+            manifest.manifest_hash AS instruction_manifest_hash,
+            discovery.scan_complete AS instruction_discovery_complete,
             lifecycle.origin_kind AS turn_origin_kind,
             lifecycle.pinned_provider_model_identity_id,
             (attempt.continued_from_attempt_id IS NOT NULL)
@@ -3886,6 +4179,12 @@ pub(crate) async fn load_scheduling_projection(
            JOIN turn_lifecycle AS lifecycle
              ON lifecycle.turn_id = call.turn_id
             AND lifecycle.session_id = call.session_id
+      LEFT JOIN turn_instruction_manifest AS manifest
+             ON manifest.turn_instruction_manifest_id = call.turn_instruction_manifest_id
+            AND manifest.session_id = call.session_id
+            AND manifest.turn_id = call.turn_id
+      LEFT JOIN instruction_discovery AS discovery
+             ON discovery.instruction_discovery_id = manifest.instruction_discovery_id
           WHERE call.session_id = $1
             AND call.model_call_id = ANY($2)
           ORDER BY call.model_call_id",
@@ -3923,6 +4222,9 @@ pub(crate) async fn load_scheduling_projection(
         let frontier_uuid: Uuid = required(&row, "context_frontier_id")?;
         let turn_uuid: Uuid = required(&row, "turn_id")?;
         let turn = turn_id_from_uuid(turn_uuid);
+        crate::model_execution::authenticate_model_call_instruction_manifest(
+            &row, session_id, turn,
+        )?;
         let turn_origin_kind: String = required(&row, "turn_origin_kind")?;
         if turn_origin_kind == "delegation" {
             delegated_turns.insert(turn);
@@ -5436,7 +5738,7 @@ fn map_tool_loop_error(
     }
 }
 
-fn require_applied_interrupt_from_attempt(
+pub(crate) fn require_applied_interrupt_from_attempt(
     row: &PgRow,
     owning_turn: TurnId,
     recorded_commands: &BTreeMap<DurableCommandId, ReconstitutedSubmitInput>,

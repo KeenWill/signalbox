@@ -307,6 +307,11 @@ impl Error for ClientError {
 const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
     match cause {
         FailedModelCallCause::CredentialRejected => "the provider rejected the credential",
+        FailedModelCallCause::AttachmentTooLarge => {
+            "the attachment verification budget was exceeded"
+        }
+        FailedModelCallCause::AttachmentMissing => "a required attachment is missing",
+        FailedModelCallCause::AttachmentCorrupt => "a required attachment is corrupt",
         FailedModelCallCause::PermissionDenied => "the credential lacks permission",
         FailedModelCallCause::InvalidRequest => "the provider rejected the request as invalid",
         FailedModelCallCause::TargetNotFound => "the requested model or resource was not found",
@@ -436,6 +441,10 @@ impl fmt::Display for RejectionDisplay {
                 formatter,
                 "active_turn_present session={session_id} active_turn={active_turn_id}"
             ),
+            RejectionDetail::CommissionTargetBusy { session_id } => write!(
+                formatter,
+                "commission_target_busy live_session={session_id}"
+            ),
             RejectionDetail::ActiveTurnMismatch {
                 session_id,
                 expected_active_turn_id,
@@ -510,6 +519,18 @@ impl fmt::Display for RejectionDisplay {
             } => write!(
                 formatter,
                 "tool_request_not_in_session session={session_id} request={tool_request_id}"
+            ),
+            RejectionDetail::ToolRequestNotDelegateDenied { tool_request_id } => write!(
+                formatter,
+                "tool_request_not_delegate_denied request={tool_request_id}"
+            ),
+            RejectionDetail::ToolRequestNotTerminallyDenied { tool_request_id } => write!(
+                formatter,
+                "tool_request_not_terminally_denied request={tool_request_id}"
+            ),
+            RejectionDetail::ToolDenialAlreadyOverridden { tool_request_id } => write!(
+                formatter,
+                "tool_denial_already_overridden request={tool_request_id}"
             ),
             RejectionDetail::DelegationRequestNotInTurn {
                 session_id,
