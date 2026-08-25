@@ -5836,7 +5836,7 @@ async fn insert_prepared_command(
     .bind(actor.turn)
     .bind(actor.tool_request)
     .bind("text")
-    .bind(command.content().text().as_str())
+    .bind(required_single_text(command.content())?)
     .bind(delivery.kind)
     .bind(delivery.descendant_scope)
     .bind(delivery.expected_active_turn)
@@ -5905,7 +5905,7 @@ async fn insert_prepared_effects(
         .bind(durable_command_id_to_uuid(command.command_id()))
         .bind(session_id_to_uuid(applied.session()))
         .bind("text")
-        .bind(command.content().text().as_str())
+        .bind(required_single_text(command.content())?)
         .bind(delivery.kind)
         .bind(delivery.descendant_scope)
         .bind(delivery.expected_active_turn)
@@ -6015,7 +6015,7 @@ async fn insert_prepared_effects(
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
         .bind(durable_command_id_to_uuid(command.command_id()))
         .bind(session_id_to_uuid(applied.session()))
-        .bind(command.content().text().as_str())
+        .bind(required_single_text(command.content())?)
         .bind(turn_id_to_uuid(applied.binding().source_turn()))
         .bind(model_settings_overlay_to_json(
             signalbox_domain::ModelSettingsOverlay::inherit_all(),
@@ -6026,6 +6026,18 @@ async fn insert_prepared_effects(
     }
 
     Ok(())
+}
+
+fn required_single_text(content: &UserContent) -> Result<&str, SubmitInputRepositoryError> {
+    content
+        .single_text()
+        .map(signalbox_domain::NonEmptyUnicodeText::as_str)
+        .ok_or_else(|| {
+            SubmitInputCorruption::Inconsistent(
+                "multipart content requires the ordered-parts storage migration",
+            )
+            .into()
+        })
 }
 
 struct EncodedActor {

@@ -22,6 +22,10 @@ producing calls was re-verified against this PR
 The deployment-owned scheduler pass limit is verified against this PR
 (`agent/scheduler-pass-pause`).
 
+Repository-watch dispatch-start admission, nudge coalescing, and its reserved
+capacity within the unchanged scheduler ceiling are verified against this PR
+(`agent/dispatch-start-lease`).
+
 Tool-attempt reconciliation predecessor replay was verified against this PR
 (`agent/tool-reconciliation-origin-replay`).
 
@@ -429,7 +433,10 @@ the sweep (INV-007).
   origin (`Recorded(Applied(TurnOrigin))` — including user-global replay of an
   already-recorded command, whose transaction rolls back and commits nothing
   new), `SubmitInputService` hands the session to the in-process nudge port. The
-  buffer is bounded (1024); a full buffer or closed source drops only the hint,
+  buffer is bounded (1024) and coalesces equal pending sessions; a
+  dispatch-start nudge upgrades an equal ordinary hint without adding another
+  item. The observable outcomes distinguish enqueue, coalescing, capacity loss,
+  and a closed source. A full buffer or closed source drops only the hint,
   visibly, and never changes the command result.
 
 - **Sweep (backstop).** `PostgresEligibilitySweep` finds four durable shapes: a
@@ -448,33 +455,37 @@ the sweep (INV-007).
 
 - **Loop.** `SchedulerLoop::run_until` spawns at most 16 concurrent per-session
   passes. Every explicit nonzero application bound, including the deployment's
-  configured bound, is capped at that shared admission cap. The loop
-  deduplicates hints for a session already in flight (recording one rerun) and
-  keeps an in-progress sweep read alive across pass completions. A failed or
-  panicked pass is logged and retried by a later hint or sweep; nothing is lost
-  because the rows are the queue. A pass about to perform attachment store I/O
-  first tries the blob contract's separate attachment-preparation permit without
-  waiting. If none is immediately available, the pass relinquishes its
-  scheduler-pass capacity, ends, and leaves only the durable `Prepared` row for
-  a later sweep. After acquiring a permit, its task remains in flight for
-  per-session deduplication but relinquishes the scheduler-pass slot during
-  store I/O; after successful verification it reacquires a slot before send
-  authorization and its guarded transaction revalidates authority. A
-  model-originated `blob_read` uses the same slot handoff after it acquires the
-  blob contract's non-waiting direct-read permit: its physical attempt remains
-  in flight during store traversal, and it reacquires a slot before committing
-  correlated result evidence or crash-loss classification. The independent
-  direct-read admission budget remains fixed, so at most 16 direct reads can
-  wait at that reacquisition point regardless of the scheduler-pass override.
-  One admitted authoritative pass may occupy its slot for at most fifteen
-  minutes. A checked application bound may lower that compiled ceiling but
-  cannot raise it or admit zero or subsecond values. Expiry invokes a detached
-  daemon recovery handoff before dropping the pass future, then immediately
-  releases the admission slot. The handoff marks the correlated cancellation so
-  fatal supervision does not mistake the scheduler's bounded drop for an
-  unrelated failure, then spends four bounded database attempts, the first
-  immediate and the rest at two-minute intervals, across correlating the turn
-  and recovering it.
+  configured bound, is capped at that shared admission cap. For a bound above
+  one, one place inside that bound is reserved for a repository-watch dispatch
+  with no model-call evidence, so ordinary recovery and execution passes can
+  occupy at most 15 places under the production bound and cannot consume the
+  start lane. Dispatch-start hints precede ordinary pending hints. The loop
+  coalesces pending hints by session, deduplicates a session already in flight
+  while recording one priority-upgradable rerun, and keeps an in-progress sweep
+  read alive across pass completions. A failed or panicked pass is logged and
+  retried by a later hint or sweep; nothing is lost because the rows are the
+  queue. A pass about to perform attachment store I/O first tries the blob
+  contract's separate attachment-preparation permit without waiting. If none is
+  immediately available, the pass relinquishes its scheduler-pass capacity,
+  ends, and leaves only the durable `Prepared` row for a later sweep. After
+  acquiring a permit, its task remains in flight for per-session deduplication
+  but relinquishes the scheduler-pass slot during store I/O; after successful
+  verification it reacquires a slot before send authorization and its guarded
+  transaction revalidates authority. A model-originated `blob_read` uses the
+  same slot handoff after it acquires the blob contract's non-waiting
+  direct-read permit: its physical attempt remains in flight during store
+  traversal, and it reacquires a slot before committing correlated result
+  evidence or crash-loss classification. The independent direct-read admission
+  budget remains fixed, so at most 16 direct reads can wait at that
+  reacquisition point regardless of the scheduler-pass override. One admitted
+  authoritative pass may occupy its slot for at most fifteen minutes. A checked
+  application bound may lower that compiled ceiling but cannot raise it or admit
+  zero or subsecond values. Expiry invokes a detached daemon recovery handoff
+  before dropping the pass future, then immediately releases the admission slot.
+  The handoff marks the correlated cancellation so fatal supervision does not
+  mistake the scheduler's bounded drop for an unrelated failure, then spends
+  four bounded database attempts, the first immediate and the rest at two-minute
+  intervals, across correlating the turn and recovering it.
 
   Expiry bounds a pass's tenure, which is not the claim that its turn stopped
   progressing: one admitted pass drives a whole model/tools loop, including
