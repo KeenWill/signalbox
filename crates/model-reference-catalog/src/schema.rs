@@ -611,6 +611,9 @@ impl Catalog {
         commercial_channel: CommercialChannel,
     ) -> Result<ReferenceResolution, CatalogError> {
         validate_date(date, "query date")?;
+        if date > self.raw.verified_through.as_str() {
+            return Ok(ReferenceResolution::Unknown);
+        }
         if commercial_channel.is_api_rate_channel() {
             let candidates = self
                 .raw
@@ -1014,8 +1017,15 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
                 model.id
             )));
         }
+        let mut capabilities = BTreeSet::new();
         for capability in &model.capabilities {
             validate_nonempty(&capability.capability, "capability")?;
+            if !capabilities.insert(capability.capability.as_str()) {
+                return Err(CatalogError::new(format!(
+                    "model {} repeats capability {}",
+                    model.id, capability.capability
+                )));
+            }
             validate_source_refs(&capability.source_ids, &source_ids, &model.id)?;
             validate_source_providers(raw, model.provider, &capability.source_ids, &model.id)?;
         }
@@ -1168,6 +1178,14 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
                     mapping.id
                 )));
             }
+            if mapping.quality == MappingQuality::Exact
+                && model.provider_model_id.as_deref() != Some(mapping.observed_identity.as_str())
+            {
+                return Err(CatalogError::new(format!(
+                    "exact mapping {} does not use the target model's provider spelling",
+                    mapping.id
+                )));
+            }
         }
         if mapping.quality == MappingQuality::Unknown && mapping.normalized_model.is_some() {
             return Err(CatalogError::new(format!(
@@ -1301,6 +1319,21 @@ fn validate_window(window: &DateWindow, subject: &str) -> Result<(), CatalogErro
 }
 
 fn validate_rate(rate: &Rate, subject: &str) -> Result<(), CatalogError> {
+    for (field, value) in [
+        ("service_tier", rate.qualifier.service_tier.as_deref()),
+        ("context_band", rate.qualifier.context_band.as_deref()),
+        ("cache_ttl", rate.qualifier.cache_ttl.as_deref()),
+        ("region", rate.qualifier.region.as_deref()),
+    ] {
+        if let Some(value) = value {
+            validate_nonempty(value, field)?;
+            if value.contains(',') || value.contains('=') {
+                return Err(CatalogError::new(format!(
+                    "rate {subject} qualifier {field} contains a reserved delimiter"
+                )));
+            }
+        }
+    }
     validate_nonempty(&rate.original.amount, "original amount")?;
     validate_nonempty(&rate.original.currency, "original currency")?;
     validate_nonempty(&rate.original.unit, "original unit")?;

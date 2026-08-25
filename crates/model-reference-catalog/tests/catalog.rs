@@ -298,7 +298,7 @@ fn uncertain_launch_interval_remains_unknown_before_first_observation() {
         )
         .unwrap();
 
-    assert_eq!(before_observation.price(), Some(&PriceResolution::Unknown));
+    assert_eq!(before_observation, ReferenceResolution::Unknown);
     assert_eq!(
         first_observation
             .price()
@@ -423,6 +423,22 @@ fn missing_price_is_unknown_not_zero() {
 }
 
 #[test]
+fn query_after_the_evidence_horizon_is_unknown() {
+    let catalog = bundled_catalog().unwrap();
+
+    let resolution = catalog
+        .resolve(
+            Provider::Openai,
+            "gpt-5.6-sol",
+            "2026-08-25",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+
+    assert_eq!(resolution, ReferenceResolution::Unknown);
+}
+
+#[test]
 fn malformed_catalog_field_is_rejected() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
     raw["unsupported_authority"] = Value::Bool(true);
@@ -430,6 +446,49 @@ fn malformed_catalog_field_is_rejected() {
     let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
 
     assert!(error.to_string().contains("unsupported_authority"));
+}
+
+#[test]
+fn contradictory_capability_records_are_rejected() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    let mut contradiction = raw["models"][1]["capabilities"][0].clone();
+    assert_eq!(contradiction["capability"], "text_input_output");
+    contradiction["support"] = Value::String(String::from("unsupported"));
+    raw["models"][1]["capabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(contradiction);
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(error.to_string().contains("repeats capability"));
+}
+
+#[test]
+fn qualifier_values_cannot_collide_with_rendered_lookup_delimiters() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["rate_sets"][0]["id"], "oai-gpt35-launch");
+    raw["rate_sets"][0]["rates"][0]["qualifier"]["service_tier"] =
+        Value::String(String::from("standard, context=large"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(error.to_string().contains("reserved delimiter"));
+}
+
+#[test]
+fn exact_mapping_must_use_the_target_provider_spelling() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["consumer_mappings"][9]["id"], "oai-codex-cli-mini");
+    raw["consumer_mappings"][9]["observed_identity"] = Value::String(String::from("default"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not use the target model's provider spelling")
+    );
 }
 
 #[test]
