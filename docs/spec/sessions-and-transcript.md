@@ -1,8 +1,10 @@
 # Sessions and the transcript
 
 The bounded browser session descriptor and historical timeline foundation are
-verified against the parent PR (`agent/web-session-timeline`). The first typed
-detail slice is verified against this PR (`agent/web-timeline-detail`).
+verified against this PR (`agent/web-session-timeline`). The bounded browser
+session catalog is verified against this PR
+(`agent/web-session-catalog-follow`). The first typed detail slice is verified
+against this PR (`agent/web-timeline-detail`).
 
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
@@ -348,6 +350,29 @@ boundary. The predecessor's prepared or in-flight call retains its existing
 pins, so credential affinity and provider prompt-cache prefixes do not move
 mid-call (INV-046).
 
+**Committed unimplemented functionality — instruction-aware replacement.** Once
+workspace-instruction admission exists, a replacement for a session with a
+nonempty admitted set rejects its proposed model selection unless every target
+the current configuration can select from that direct selection or alias has a
+typed system-instruction transport and capacity for the complete retained
+workspace-instruction region. The replacement checks this before committing the
+successor defaults epoch. What this page requires is the atomicity, not a lock
+recipe: the replacement must resolve every possible target and validate the
+complete retained region under the same serialization it commits the successor
+epoch under, so an admission or activation occurs wholly before or after it and
+cannot invalidate the evidence it checked. Which rows that serialization takes,
+in what order, and in which mode belong to the
+[persistence lock protocol](persistence-protocol.md#lock-protocol), which owns
+that inventory for every transaction and is the only place it is stated.
+Rejection is typed and leaves the current defaults and admitted set unchanged.
+No present replacement path performs this check because no present surface
+admits a bundle. The owning
+[model-selection validation](configuration-and-credentials.md#model-selection-validation)
+also performs the same retained-region check when each later origin is accepted,
+after resolving its alias against the then-current catalog. Replacement-time
+validation therefore does not stand in for acceptance-time validation after an
+alias retarget or daemon restart.
+
 ### Session system prompt
 
 A present session system prompt (`SessionSystemPrompt`) is nonempty exact
@@ -644,6 +669,34 @@ partial session.
 
 Why (fail closed): a fabricated or partial session would mask corruption and
 launder invalid durable state into valid-looking domain values.
+
+## Bounded browser session catalog
+
+`GET /api/sessions` is the one fleet-wide session chooser and attention read
+model. It returns at most 16 rows from one read-only repeatable-read snapshot,
+the exact filtered total, and the durable attention-journal cursor. The total
+counts filtered session and metadata rows; it never scans transcript or timeline
+records. Each row carries session identity, a title summary of at most 128
+Unicode scalar values with an explicit truncation bit, archive posture, current
+turn, active and queued turn counts, the closed current attention state, exact
+operator action when one is owed, bounded blocked-goal and approval-judge facts,
+and the last explicitly timestamped durable activity. No timestamp is inferred
+from UUID identity bits.
+
+The default order is descending last activity with ascending session identity as
+the total tie-breaker. The alternate order is ascending session identity. Both
+use exclusive typed keyset continuations; a continuation for one order is
+invalid under the other. Search is an exact case-sensitive substring of title or
+canonical session UUID. A query may additionally require at most eight exact
+tags, whose combined UTF-8 bytes together with search text are at most 1,024,
+and may include archived sessions. Sort and filter state are client-local inputs
+to these bounded reads, not durable session state.
+
+This extends the fleet attention projection rather than maintaining a second
+session-state classifier. Runner loss, recovery ambiguity, reconciliation,
+approval wait, blocked goal, active, queued, and idle remain distinct. Page and
+change reads derive them from the same durable facts and fail closed on unknown
+states or inconsistent shapes.
 
 ## Bounded browser session timeline
 

@@ -59,6 +59,652 @@ const schemas = {
     "title": "WebApiErrorResponse",
     "type": "object"
   },
+  "WebAttentionSnapshot": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn",
+          "restore_runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_microseconds": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "unix_microseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Goal generations are strictly positive in the domain and its storage\nconstraint, so zero is not a valid wire spelling."
+          },
+          "need_summary": {
+            "description": "At least 1 and at most 128 Unicode scalar values; exact text is in\nsession detail. The stored goal need is never empty, so an empty\nsummary is contract-invalid.",
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "completed": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "escalated": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "failed": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionSort": {
+        "enum": [
+          "last_activity_descending",
+          "session_identity_ascending"
+        ],
+        "type": "string"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebAttentionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "active_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "current_turn_id": {
+            "anyOf": [
+              {
+                "description": "Checked canonical UUID used for browser-visible turn identities.",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebAttentionActivity"
+          },
+          "queued_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          },
+          "title_summary": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title_truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session_id",
+          "title_summary",
+          "title_truncated",
+          "archived",
+          "current_turn_id",
+          "active_turn_count",
+          "queued_turn_count",
+          "state",
+          "action",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "continuation": {
+        "anyOf": [
+          {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "last_activity",
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "$ref": "#/$defs/WebSessionId"
+                  },
+                  "unix_microseconds": {
+                    "$ref": "#/$defs/WebU64"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unix_microseconds",
+                  "session_id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "session_identity",
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "$ref": "#/$defs/WebSessionId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "session_id"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "cursor": {
+        "$ref": "#/$defs/WebU64"
+      },
+      "sort": {
+        "$ref": "#/$defs/WebAttentionSort"
+      },
+      "summaries": {
+        "items": {
+          "$ref": "#/$defs/WebAttentionSummary"
+        },
+        "maxItems": 16,
+        "type": "array"
+      },
+      "total": {
+        "$ref": "#/$defs/WebU64"
+      }
+    },
+    "required": [
+      "cursor",
+      "total",
+      "sort",
+      "summaries",
+      "continuation"
+    ],
+    "title": "WebAttentionSnapshot",
+    "type": "object"
+  },
+  "WebAttentionStreamEvent": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn",
+          "restore_runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_microseconds": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "unix_microseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "$ref": "#/$defs/WebPositiveU64",
+            "description": "Goal generations are strictly positive in the domain and its storage\nconstraint, so zero is not a valid wire spelling."
+          },
+          "need_summary": {
+            "description": "At least 1 and at most 128 Unicode scalar values; exact text is in\nsession detail. The stored goal need is never empty, so an empty\nsummary is contract-invalid.",
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "completed": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "escalated": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "failed": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "continuation": {
+            "anyOf": [
+              {
+                "oneOf": [
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "last_activity",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "$ref": "#/$defs/WebSessionId"
+                      },
+                      "unix_microseconds": {
+                        "$ref": "#/$defs/WebU64"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "unix_microseconds",
+                      "session_id"
+                    ],
+                    "type": "object"
+                  },
+                  {
+                    "additionalProperties": false,
+                    "properties": {
+                      "kind": {
+                        "const": "session_identity",
+                        "type": "string"
+                      },
+                      "session_id": {
+                        "$ref": "#/$defs/WebSessionId"
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "session_id"
+                    ],
+                    "type": "object"
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "cursor": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "sort": {
+            "$ref": "#/$defs/WebAttentionSort"
+          },
+          "summaries": {
+            "items": {
+              "$ref": "#/$defs/WebAttentionSummary"
+            },
+            "maxItems": 16,
+            "type": "array"
+          },
+          "total": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "cursor",
+          "total",
+          "sort",
+          "summaries",
+          "continuation"
+        ],
+        "type": "object"
+      },
+      "WebAttentionSort": {
+        "enum": [
+          "last_activity_descending",
+          "session_identity_ascending"
+        ],
+        "type": "string"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebAttentionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "active_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "current_turn_id": {
+            "anyOf": [
+              {
+                "description": "Checked canonical UUID used for browser-visible turn identities.",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebAttentionActivity"
+          },
+          "queued_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          },
+          "title_summary": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title_truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session_id",
+          "title_summary",
+          "title_truncated",
+          "archived",
+          "current_turn_id",
+          "active_turn_count",
+          "queued_turn_count",
+          "state",
+          "action",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "snapshot",
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/$defs/WebAttentionSnapshot"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshot"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "kind": {
+            "const": "update",
+            "type": "string"
+          },
+          "summaries": {
+            "items": {
+              "$ref": "#/$defs/WebAttentionSummary"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor",
+          "summaries"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "kind": {
+            "const": "resync_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WebAttentionStreamEvent"
+  },
   "WebContractBootstrap": {
     "$defs": {
       "WebContractCapabilities": {
@@ -1010,6 +1656,55 @@ function fail(path, expected) {
   throw new TypeError(`${path} must be ${expected}`);
 }
 
+function isWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        return false;
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function exceedsScalarLength(value, maxLength) {
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {
+    count += 1;
+    if (count > maxLength) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function scalarLengthAtLeast(value, minLength) {
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {
+    count += 1;
+    if (count >= minLength) {
+      return true;
+    }
+  }
+  return count >= minLength;
+}
+
+function scalarLength(value) {
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {
+    count += 1;
+  }
+  return count;
+}
+
 function resolveReference(root, reference) {
   const prefix = "#/$defs/";
   if (!reference.startsWith(prefix)) {
@@ -1072,17 +1767,11 @@ function assertSchema(root, schema, value, path) {
       return;
     }
     const concrete = schema.type.filter((candidate) => candidate !== "null");
-    const accepted = concrete.some((candidate) => {
-      try {
-        assertSchema(root, { ...schema, type: candidate }, value, path);
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    if (!accepted) {
+    const actual = Array.isArray(value) ? "array" : typeof value;
+    if (!concrete.includes(actual)) {
       fail(path, concrete.join(" or "));
     }
+    assertSchema(root, { ...schema, type: actual }, value, path);
     return;
   }
   if (schema.type === "object") {
@@ -1113,6 +1802,9 @@ function assertSchema(root, schema, value, path) {
     if (!Array.isArray(value)) {
       fail(path, "an array");
     }
+    if (schema.minItems !== undefined && value.length < schema.minItems) {
+      fail(path, `at least ${schema.minItems} items`);
+    }
     if (schema.maxItems !== undefined && value.length > schema.maxItems) {
       fail(path, `at most ${schema.maxItems} items`);
     }
@@ -1142,6 +1834,23 @@ function assertSchema(root, schema, value, path) {
   }
   if (typeof value !== schema.type) {
     fail(path, schema.type);
+  }
+  if (schema.type === "string" && !isWellFormedUnicode(value)) {
+    fail(path, "well-formed Unicode text");
+  }
+  if (
+    schema.type === "string" &&
+    schema.maxLength !== undefined &&
+    exceedsScalarLength(value, schema.maxLength)
+  ) {
+    fail(path, `at most ${schema.maxLength} Unicode scalar values`);
+  }
+  if (
+    schema.type === "string" &&
+    schema.minLength !== undefined &&
+    !scalarLengthAtLeast(value, schema.minLength)
+  ) {
+    fail(path, `at least ${schema.minLength} Unicode scalar values`);
   }
   if (
     schema.type === "string" &&
@@ -1418,4 +2127,144 @@ export function decodeWebSessionTimelineDetailPage(value) {
   assertSchema(schemas.WebSessionTimelineDetailPage, schemas.WebSessionTimelineDetailPage, value, "timeline_detail_page");
   assertTimelineDetailPage(value);
   return value;
+}
+
+export function decodeWebAttentionSnapshot(value) {
+  assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  assertAttentionSnapshot(value, "attention_snapshot");
+  return value;
+}
+
+export function decodeWebAttentionStreamEvent(value) {
+  assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  if (value.kind === "snapshot") {
+    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+    if (value.snapshot.sort !== "last_activity_descending") {
+      fail("attention_event.snapshot.sort", "the fixed hot-page activity sort");
+    }
+    assertUnarchivedSummaries(value.snapshot.summaries, "attention_event.snapshot.summaries");
+  } else {
+    value.summaries?.forEach((summary, index) =>
+      assertAttentionSummary(summary, `attention_event.summaries[${index}]`),
+    );
+    assertUnarchivedSummaries(value.summaries ?? [], "attention_event.summaries");
+    const identities = new Set();
+    for (const summary of value.summaries ?? []) {
+      if (identities.has(summary.session_id)) {
+        fail("attention_event.summaries", "at most one replacement per session");
+      }
+      identities.add(summary.session_id);
+    }
+  }
+  return value;
+}
+
+function assertUnarchivedSummaries(summaries, path) {
+  summaries.forEach((summary, index) => {
+    if (summary.archived) {
+      fail(`${path}[${index}].archived`, "false on the hot attention stream");
+    }
+  });
+}
+
+function assertAttentionSnapshot(snapshot, path) {
+  snapshot.summaries.forEach((summary, index) =>
+    assertAttentionSummary(summary, `${path}.summaries[${index}]`),
+  );
+  for (let index = 1; index < snapshot.summaries.length; index += 1) {
+    const previous = snapshot.summaries[index - 1];
+    const current = snapshot.summaries[index];
+    let ordered;
+    if (snapshot.sort === "session_identity_ascending") {
+      ordered = previous.session_id < current.session_id;
+    } else {
+      const previousActivity = BigInt(previous.last_activity.unix_microseconds);
+      const currentActivity = BigInt(current.last_activity.unix_microseconds);
+      ordered =
+        previousActivity > currentActivity ||
+        (previousActivity === currentActivity && previous.session_id < current.session_id);
+    }
+    if (!ordered) {
+      fail(`${path}.summaries[${index}]`, `strictly ordered by sort ${snapshot.sort}`);
+    }
+  }
+  if (BigInt(snapshot.total) < BigInt(snapshot.summaries.length)) {
+    fail(`${path}.total`, "at least the number of returned summaries");
+  }
+  const continuationKind = snapshot.continuation?.kind ?? null;
+  const expectedContinuationKind = {
+    last_activity_descending: "last_activity",
+    session_identity_ascending: "session_identity",
+  }[snapshot.sort];
+  if (continuationKind !== null && continuationKind !== expectedContinuationKind) {
+    fail(`${path}.continuation`, `the continuation required by sort ${snapshot.sort}`);
+  }
+  if (snapshot.continuation !== null) {
+    const boundary = snapshot.summaries[snapshot.summaries.length - 1];
+    if (boundary === undefined) {
+      fail(`${path}.continuation`, "absent when no summaries are returned");
+    }
+    if (snapshot.continuation.session_id !== boundary.session_id) {
+      fail(`${path}.continuation.session_id`, "the session of the last returned summary");
+    }
+    if (
+      snapshot.continuation.kind === "last_activity" &&
+      snapshot.continuation.unix_microseconds !== boundary.last_activity.unix_microseconds
+    ) {
+      fail(
+        `${path}.continuation.unix_microseconds`,
+        "the activity timestamp of the last returned summary",
+      );
+    }
+  }
+}
+
+function assertAttentionSummary(summary, path) {
+  const expectedAction = {
+    active: null,
+    queued: null,
+    blocked: "provide_goal_need",
+    awaiting_approval: "decide_approval",
+    ambiguous: "reconcile_turn",
+    awaiting_reconciliation: "reconcile_turn",
+    runner_lost: "restore_runner",
+    idle: null,
+  }[summary.state];
+  if (summary.action !== expectedAction) {
+    fail(`${path}.action`, `the action required by state ${summary.state}`);
+  }
+  const turnBacked = [
+    "active",
+    "queued",
+    "awaiting_approval",
+    "ambiguous",
+    "awaiting_reconciliation",
+  ].includes(summary.state);
+  if (turnBacked && summary.current_turn_id === null) {
+    fail(`${path}.current_turn_id`, `a turn identity for state ${summary.state}`);
+  }
+  const activeBacked = ["active", "awaiting_approval", "ambiguous"].includes(summary.state);
+  if (activeBacked && BigInt(summary.active_turn_count) === 0n) {
+    fail(`${path}.active_turn_count`, `at least one active turn for state ${summary.state}`);
+  }
+  if (summary.state === "queued" && BigInt(summary.queued_turn_count) === 0n) {
+    fail(`${path}.queued_turn_count`, "at least one queued turn for queued state");
+  }
+  const hasGoalBlock = Object.hasOwn(summary, "goal_block") && summary.goal_block !== null;
+  if ((summary.state === "blocked") !== hasGoalBlock) {
+    fail(`${path}.goal_block`, "present exactly for blocked state");
+  }
+  if (summary.title_summary === null && summary.title_truncated) {
+    fail(`${path}.title_truncated`, "false when title_summary is null");
+  }
+  if (
+    summary.title_truncated &&
+    summary.title_summary !== null &&
+    scalarLength(summary.title_summary) !== 128
+  ) {
+    fail(
+      `${path}.title_summary`,
+      "exactly 128 Unicode scalar values when title_truncated is true",
+    );
+  }
 }
