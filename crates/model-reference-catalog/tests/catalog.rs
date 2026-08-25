@@ -111,6 +111,24 @@ fn rolling_api_alias_uses_its_explicit_pricing_reference() {
 }
 
 #[test]
+fn exact_gpt4_snapshot_uses_its_recorded_rate_set() {
+    let catalog = bundled_catalog().unwrap();
+
+    let resolution = catalog
+        .resolve(
+            Provider::Openai,
+            "gpt-4-0314",
+            "2023-03-14",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+    let rate_set = &resolution.price().unwrap().resolved_rate_sets().unwrap()[0];
+
+    assert_eq!(resolution.resolved_model_id(), Some("openai:gpt-4-0314"));
+    assert_eq!(rate_set.id, "oai-gpt4-launch");
+}
+
+#[test]
 fn codex_subscription_model_resolves_only_to_approximate_api_analogue() {
     let catalog = bundled_catalog().unwrap();
 
