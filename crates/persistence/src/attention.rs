@@ -234,7 +234,8 @@ WITH RECURSIVE selected AS (
     SELECT DISTINCT ON (goal.session_id)
            goal.session_id, goal.event_ordinal,
            goal.generation::text AS generation, goal.event_kind,
-           goal.blocked_reason, LEFT(goal.need, $4) AS need_summary
+           goal.blocked_reason, goal.scheduler_turn_id,
+           LEFT(goal.need, $4) AS need_summary
       FROM goal_event AS goal JOIN selected USING (session_id)
      ORDER BY goal.session_id, goal.event_ordinal DESC
 ), automatic_resume_lineage AS (
@@ -243,6 +244,26 @@ WITH RECURSIVE selected AS (
       FROM latest_goal AS goal
      WHERE goal.event_kind = 'blocked'
        AND goal.blocked_reason = 'execution_failure'
+       -- A headless approval escalation blocks the goal without arming any
+       -- automatic resumption: it writes its `execution_failure` block outside
+       -- `PostgresGoalPassDisposition` precisely so that only an operator can
+       -- resume the session (`docs/spec/goal-mode.md`). Seeding the lineage
+       -- from such a block would report a resumption as pending forever and
+       -- suppress `ProvideGoalNeed`, hiding the one session that actually
+       -- needs the operator. The block names its scheduler turn, which is the
+       -- turn both escalation tables record.
+       AND NOT EXISTS (
+           SELECT 1
+             FROM repo_watch_headless_approval_escalation AS escalation
+            WHERE escalation.session_id = goal.session_id
+              AND escalation.turn_id = goal.scheduler_turn_id
+       )
+       AND NOT EXISTS (
+           SELECT 1
+             FROM commissioned_dispatch_headless_approval_escalation AS escalation
+            WHERE escalation.session_id = goal.session_id
+              AND escalation.turn_id = goal.scheduler_turn_id
+       )
     UNION ALL
     SELECT lineage.session_id, lineage.generation, blocked.event_ordinal,
            lineage.spent + 1

@@ -325,17 +325,24 @@ fn production_router_with_budget(
         snapshot_reader_budget,
         shutdown,
     };
+    // Every route that reads session data sits behind the loopback authority
+    // gate. The attention projection returns session identities, goal-need
+    // summaries, and operator state, so it belongs here for the same reason the
+    // descriptor and timeline reads do: the listener is unauthenticated, and a
+    // rebound origin must not reach session data with an attacker's authority.
+    // `/bootstrap` stays outside the gate because it carries only the static
+    // contract description and no session data.
     let session_reads = Router::new()
         .route("/sessions/{session_id}", get(session_descriptor))
         .route(
             "/sessions/{session_id}/timeline",
             get(session_timeline_window),
         )
+        .route("/attention", get(attention_snapshot))
+        .route("/attention/follow", get(attention_follow))
         .route_layer(middleware::from_fn(validate_loopback_host));
     let api = Router::new()
         .route("/bootstrap", get(contract_bootstrap))
-        .route("/attention", get(attention_snapshot))
-        .route("/attention/follow", get(attention_follow))
         .merge(session_reads)
         .with_state(state)
         .fallback(api_not_found);
@@ -1646,6 +1653,7 @@ mod tests {
     #[tokio::test]
     async fn attention_snapshot_requires_projection_configuration() {
         let request = Request::get("/api/attention")
+            .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
         let response = production_router(None, None)
@@ -1663,6 +1671,7 @@ mod tests {
     #[tokio::test]
     async fn attention_snapshot_query_rejection_uses_typed_transport_error() {
         let request = Request::get("/api/attention?unexpected=true")
+            .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
         let response = production_router(None, None)
@@ -1681,6 +1690,7 @@ mod tests {
     #[tokio::test]
     async fn attention_follow_requires_projection_configuration() {
         let request = Request::get("/api/attention/follow")
+            .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
         let response = production_router(None, None)
@@ -1866,6 +1876,54 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["kind"], "transport");
         assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    #[tokio::test]
+    async fn attention_reads_reject_non_loopback_host_authorities() {
+        // The attention projection returns session identities, goal-need text,
+        // and operator state across the whole fleet, so a rebound origin must
+        // not reach it any more than it may reach the per-session reads beside
+        // it. Both routes are asserted because they were registered outside
+        // the guarded router and had to be moved into it.
+        for path in ["/api/attention", "/api/attention/follow"] {
+            let request = Request::get(path)
+                .header(header::HOST, "attacker.example")
+                .body(Body::empty())
+                .expect("the request is valid");
+            let response = production_router(None, None)
+                .oneshot(request)
+                .await
+                .expect("the production router responds");
+            let status = response.status();
+            let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+                .expect("the rejection is structured JSON");
+
+            assert_eq!(
+                status,
+                StatusCode::FORBIDDEN,
+                "`{path}` must reject a non-loopback authority",
+            );
+            assert_eq!(body["error"]["kind"], "transport");
+            assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+        }
+    }
+
+    #[tokio::test]
+    async fn contract_bootstrap_admits_any_host_authority() {
+        // The bootstrap route carries only the static contract description and
+        // no session data, so it stays outside the loopback gate; pinning that
+        // keeps a future widening of the gate from breaking asset-origin
+        // discovery.
+        let request = Request::get("/api/bootstrap")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// Drives a session read at the loopback gate and reports only the status.
