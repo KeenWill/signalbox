@@ -25,8 +25,10 @@ twice-daily schedule and workflow-self-change trigger were verified through PR
 tool-authority preamble is verified against this PR
 (`agent/phantom-prohibition`). The composition root's pinned-version startup
 probe is verified against this PR (`agent/daemon-live-codex-pin-preflight`). The
-`signalboxd` names this page states for the composition root, its telemetry, and
-the production `FileCredentialAccess` were verified through PR #258
+Codex CLI adapter's preservation of malformed string-carried tool arguments is
+verified against this PR (`agent/daemon-live-codex-malformed-tool-arguments`).
+The `signalboxd` names this page states for the composition root, its telemetry,
+and the production `FileCredentialAccess` were verified through PR #258
 (`agent/signalboxd-rename`); the Anthropic and OpenAI adapter-scoped file
 catalogs are verified against this PR (`agent/credential-pools-parser`). The
 Anthropic adapter's server-side `fallback`-block recognition was verified
@@ -860,31 +862,30 @@ remain definitive completion material for the provider-independent structured
 decoder above to classify. The decoded envelope is checked against the shared
 JSON nesting bound independently of the escaped outer event; envelope decode
 errors are content-silent. The envelope distinguishes completion from refusal.
-Within the envelope each tool call carries its argument object as JSON text
+Within the envelope each tool call carries its provider-supplied argument text
 inside a string: strict structured-output validation refuses any schema object
 that does not supply `additionalProperties: false` and require all its
 properties, so a free-form argument object is not expressible in the output
-schema and the live API rejects one as `invalid_json_schema`. The adapter parses
-the string, requires exactly one JSON object within the provider nesting bound,
-and passes the contained text onward, so tool argument JSON still reaches the
-caller byte-verbatim when it is credential-shape clean. Caller JSON remains raw
-through serialization, preserving deep admitted values and their numeric
-lexemes. Buffered delivery retains its content without deltas; streamed delivery
-feeds raw bounded CLI reasoning and final-envelope text through the stateful
-redactor before emitting ordered deltas and the same terminal evidence. A
-provider failure message consults the same held lookbehind state before it
-enters provider-error evidence: a message that extends a held credential
-candidate, or that arrives during oversized-credential suppression, is
-suppressed whole rather than statelessly re-redacted. Usage comes only from
-`turn.completed`. The adapter maps `input_tokens`, `output_tokens`,
-`cache_write_input_tokens`, and `cached_input_tokens` exactly to Signalbox
-input, output, cache-creation input, and cache-read input axes. Each decoded
-field is independently optional: an omitted field remains unreported rather than
-becoming zero. A partial event records only its present axes, and a total-only
-event records none because the adapter never distributes a total. The pinned
-CLI's separate `reasoning_output_tokens` counter and additive `total_tokens`
-siblings have no existing Signalbox usage axis; neither is folded into output or
-another field.
+schema and the live API rejects one as `invalid_json_schema`. The adapter passes
+the contained text onward byte-verbatim when it is credential-shape clean,
+including malformed or non-object text; the provider-independent typed decoder
+owns its inert `invalid_arguments` result. Caller JSON remains raw through
+serialization, preserving deep admitted values and their numeric lexemes.
+Buffered delivery retains its content without deltas; streamed delivery feeds
+raw bounded CLI reasoning and final-envelope text through the stateful redactor
+before emitting ordered deltas and the same terminal evidence. A provider
+failure message consults the same held lookbehind state before it enters
+provider-error evidence: a message that extends a held credential candidate, or
+that arrives during oversized-credential suppression, is suppressed whole rather
+than statelessly re-redacted. Usage comes only from `turn.completed`. The
+adapter maps `input_tokens`, `output_tokens`, `cache_write_input_tokens`, and
+`cached_input_tokens` exactly to Signalbox input, output, cache-creation input,
+and cache-read input axes. Each decoded field is independently optional: an
+omitted field remains unreported rather than becoming zero. A partial event
+records only its present axes, and a total-only event records none because the
+adapter never distributes a total. The pinned CLI's separate
+`reasoning_output_tokens` counter and additive `total_tokens` siblings have no
+existing Signalbox usage axis; neither is folded into output or another field.
 
 The pinned CLI exposes no argv, configuration, or subscription request controls
 for output-token ceiling, temperature, top-p, or stop sequences. This adapter is

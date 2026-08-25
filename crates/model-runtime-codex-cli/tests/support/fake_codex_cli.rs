@@ -489,7 +489,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-deep","name":"{}","arguments":{}}}]}}"#,
                 fixtures::TOOL_NAME,
-                deeply_nested_arguments()
+                fixtures::deeply_nested_tool_arguments()
             ));
             completed();
         }
@@ -503,8 +503,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "tool_call_bad_arguments" => {
             envelope(&format!(
-                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-bad","name":"{}","arguments":"not an argument object"}}]}}"#,
-                fixtures::TOOL_NAME
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-bad","name":"{}","arguments":"{}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                fixtures::MALFORMED_TOOL_ARGUMENTS
+            ));
+            completed();
+        }
+        "tool_call_non_object_arguments" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-non-object","name":"{}","arguments":"{}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                fixtures::NON_OBJECT_TOOL_ARGUMENTS
             ));
             completed();
         }
@@ -512,7 +521,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-deep","name":"{}","arguments":"{}"}}]}}"#,
                 fixtures::TOOL_NAME,
-                json_escape(&deeply_nested_arguments())
+                json_escape(&fixtures::deeply_nested_tool_arguments())
             ));
             completed();
         }
@@ -1081,14 +1090,6 @@ fn completed_without_cache() {
         fixtures::INPUT_TOKENS,
         fixtures::OUTPUT_TOKENS
     ));
-}
-
-fn deeply_nested_arguments() -> String {
-    let mut value = "{}".to_string();
-    for _ in 0..130 {
-        value = format!(r#"{{"nested":{value}}}"#);
-    }
-    value
 }
 
 fn failed(message: &str) -> ! {
