@@ -48,6 +48,16 @@ pub struct ProbeDeclarationInput {
 }
 
 impl ProbeDeclaration {
+    /// Declares a probe that may read only one bounded source prefix.
+    pub const fn prefix_only(prefix_bytes: u64) -> Self {
+        Self {
+            prefix_bytes,
+            suffix_bytes: 0,
+            range_count: 0,
+            cumulative_bytes: prefix_bytes,
+        }
+    }
+
     /// Declares one finite probe envelope from labeled fields.
     pub const fn new(input: ProbeDeclarationInput) -> Self {
         Self {
