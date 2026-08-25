@@ -1076,43 +1076,78 @@ async fn usage_projection_retains_only_bounded_credential_identity() -> Result<(
     Ok(())
 }
 
-/// Projects one session-level compaction call directly so the recorded
-/// credential reference is exactly the supplied text; the canonical write
-/// pipeline resolves references through session credential pins, which is not
-/// the behavior under test here.
-async fn insert_compaction_projection_with_reference(
+/// Drives one session-level compaction call terminal with the supplied
+/// credential reference so the canonical trigger projects exactly that text.
+/// The projection cannot be written directly: the source-correlation guard
+/// fails any row without a matching terminal canonical record closed.
+async fn terminal_compaction_call_with_reference(
     pool: &PgPool,
     seed: u128,
     reference: &str,
-) -> Result<(), Box<dyn Error>> {
-    let call = Uuid::from_u128(seed + 1);
-    sqlx::query(
-        "INSERT INTO model_call_identity (model_call_id, call_kind)
-         VALUES ($1, 'context_compaction')",
+) -> Result<SessionId, Box<dyn Error>> {
+    let fixture = terminal_reported_usage_call(
+        pool,
+        seed,
+        ProviderReportedTokenUsage::unreported().with_input_tokens(Some(FIRST_INPUT_TOKENS)),
     )
-    .bind(call)
+    .await?;
+    let source_frontier = Uuid::from_u128(seed + 0x80);
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(source_frontier)
     .execute(pool)
     .await?;
+    let call = Uuid::from_u128(seed + 0x81);
     sqlx::query(
-        "INSERT INTO web_usage_call_projection (
-             model_call_id, call_kind, session_id, turn_id,
-             resolved_provider_model_identity_id, credential_profile_label,
-             usage_provenance_kind, usage_input_includes_cache_tokens,
-             input_tokens, output_tokens,
-             cache_creation_input_tokens, cache_read_input_tokens
-         ) VALUES (
-             $1, 'context_compaction', $2, NULL, $3,
-             bounded_web_usage_profile($4), 'reported', false,
-             11, NULL, NULL, NULL
-         )",
+        "INSERT INTO context_compaction_model_call
+            (model_call_id, session_id, direct_model_selection_id,
+             resolved_provider_model_identity_id, source_frontier_id,
+             credential_reference, usage_input_includes_cache_tokens, state_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, false, 'prepared')",
     )
     .bind(call)
-    .bind(Uuid::from_u128(seed + 2))
-    .bind(Uuid::from_u128(seed + 3))
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(seed + 0x82))
+    .bind(Uuid::from_u128(seed + 0x83))
+    .bind(source_frontier)
     .bind(reference)
     .execute(pool)
     .await?;
-    Ok(())
+    sqlx::query(
+        "UPDATE context_compaction_model_call
+         SET state_kind = 'in_flight'
+         WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE context_compaction_model_call
+         SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+             input_tokens = 11, output_tokens = 5
+         WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .execute(pool)
+    .await?;
+    Ok(fixture.session)
+}
+
+fn compaction_scope_query(session: SessionId) -> UsageQuery {
+    UsageQuery {
+        time: UsageTimeRange::all(),
+        selection: UsageSelection {
+            session: Some(session),
+            turn: None,
+            model: None,
+            provenance: None,
+            call_kind: Some(signalbox_application::UsageCallKind::ContextCompaction),
+        },
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1123,10 +1158,19 @@ async fn usage_reads_reconstruct_a_mapped_reference_within_the_profile_ceiling()
     // 251 bytes: above the 250-byte exact-label bound, within the 256-byte
     // configured-profile ceiling, so reads reconstruct it from the mapping.
     let reference = "r".repeat(251);
-    insert_compaction_projection_with_reference(&pool, 0x95_a00, &reference).await?;
+    let session = terminal_compaction_call_with_reference(&pool, 0x95_a00, &reference).await?;
     let repository = UsageRepository::new(pool.clone());
-    let page = repository.calls(call_query(1, None)).await?;
-    let report = repository.aggregate(all_usage_query()).await?;
+    let page = repository
+        .calls(UsageCallQuery {
+            scope: compaction_scope_query(session),
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(1).expect("fixture page limit fits"),
+            after: None,
+        })
+        .await?;
+    let report = repository
+        .aggregate(compaction_scope_query(session))
+        .await?;
 
     assert!(
         page.calls()[0]
@@ -1157,10 +1201,19 @@ async fn usage_reads_report_an_over_ceiling_reference_instead_of_materializing_i
     // configured profile can match and reads never copy the reference out of
     // the mapping.
     let reference = "s".repeat(257);
-    insert_compaction_projection_with_reference(&pool, 0x95_b00, &reference).await?;
+    let session = terminal_compaction_call_with_reference(&pool, 0x95_b00, &reference).await?;
     let repository = UsageRepository::new(pool.clone());
-    let page = repository.calls(call_query(1, None)).await?;
-    let report = repository.aggregate(all_usage_query()).await?;
+    let page = repository
+        .calls(UsageCallQuery {
+            scope: compaction_scope_query(session),
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(1).expect("fixture page limit fits"),
+            after: None,
+        })
+        .await?;
+    let report = repository
+        .aggregate(compaction_scope_query(session))
+        .await?;
 
     assert!(
         page.calls()[0]
