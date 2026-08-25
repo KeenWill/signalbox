@@ -1,7 +1,7 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { Menu } from 'lucide-react'
+import { Command as IconCommandGlyph, Menu, Moon, PanelLeftClose, Rows3, Sun } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   type CommandContext,
@@ -21,7 +21,7 @@ import type {
 import { ProductNavigation } from '../ProductApp'
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
-import { store } from '../state'
+import { selectApp, store, useAppSelector } from '../state'
 import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
@@ -67,7 +67,12 @@ const byteLabel = (bytes: number): string => {
 export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: boolean }) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
+  const app = useAppSelector(selectApp)
   const queryScope = scenario ? 'scenario' : 'production'
+  useEffect(() => {
+    document.documentElement.dataset.theme = app.theme
+    document.documentElement.dataset.density = app.density
+  }, [app.density, app.theme])
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
   const [sourceSessionFilterEnabled, setSourceSessionFilterEnabled] = useState(false)
@@ -160,9 +165,19 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     [entryWindow?.items],
   )
 
+  // A refetch rebuilds `anchorFrontier` identity without changing the window, so only fall back to
+  // the anchor when the operator's selection is absent from the returned window.
   useEffect(() => {
-    if (!hasRetainedCommand) setSelectedFrontier(anchorFrontier)
-  }, [anchorFrontier, hasRetainedCommand])
+    if (hasRetainedCommand) return
+    setSelectedFrontier((current) =>
+      current !== null &&
+      entryWindow?.items.some(
+        (entry) => entry.frontier.imported_entry_id === current.imported_entry_id,
+      )
+        ? current
+        : anchorFrontier,
+    )
+  }, [anchorFrontier, entryWindow?.items, hasRetainedCommand])
 
   const continuation = useMutation({
     mutationFn: (request: WebImportContinuationRequest) =>
@@ -362,6 +377,13 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
     setSelectedFrontier(null)
   }
 
+  const requestedPosition = Number(positionInput)
+  const requestedPositionInRange =
+    positionInput.trim() !== '' &&
+    Number.isSafeInteger(requestedPosition) &&
+    requestedPosition > 0 &&
+    requestedPosition <= (descriptor?.entry_count ?? 0)
+
   const showPosition = () => {
     const position = Number(positionInput)
     if (
@@ -410,7 +432,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
             <IconCommand
               id="navigation.open"
               context={commandContext}
-              label={scenario ? 'Open scenarios' : 'Open product navigation'}
+              label={scenario ? 'Open scenarios' : 'Open navigation'}
               className="icon-button imports-mobile-navigation"
             >
               <Menu />
@@ -420,6 +442,38 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
               <h1>Imports</h1>
             </div>
             <span className="window-count">100-row keyset pages · 101-entry windows</span>
+            {scenario ? null : (
+              <div className="toolbar" role="toolbar" aria-label="Application controls">
+                <IconCommand
+                  id="density.toggle"
+                  context={commandContext}
+                  label={`Use ${app.density === 'compact' ? 'comfortable' : 'compact'} density`}
+                >
+                  <Rows3 />
+                </IconCommand>
+                <IconCommand
+                  id="layout.toggle"
+                  context={commandContext}
+                  label={`Switch to ${app.layout === 'focus' ? 'workbench' : 'focus'} layout`}
+                >
+                  <PanelLeftClose />
+                </IconCommand>
+                <IconCommand
+                  id="theme.toggle"
+                  context={commandContext}
+                  label={`Use ${app.theme === 'dark' ? 'light' : 'dark'} theme`}
+                >
+                  {app.theme === 'dark' ? <Sun /> : <Moon />}
+                </IconCommand>
+                <IconCommand
+                  id="palette.open"
+                  context={commandContext}
+                  label="Open command palette"
+                >
+                  <IconCommandGlyph />
+                </IconCommand>
+              </div>
+            )}
           </header>
           <section className="imports-catalog" aria-labelledby="imports-catalog-heading">
             <header className="section-header imports-catalog-header">
@@ -546,7 +600,11 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
                     }}
                   />
                 </label>
-                <button type="button" disabled={hasRetainedCommand} onClick={showPosition}>
+                <button
+                  type="button"
+                  disabled={hasRetainedCommand || !requestedPositionInRange}
+                  onClick={showPosition}
+                >
                   Go
                 </button>
               </div>

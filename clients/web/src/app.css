@@ -572,11 +572,11 @@ kbd {
   border-bottom: 1px solid var(--border);
   background: var(--surface-1);
 }
-.imports-header > div {
+.imports-header > div:first-of-type {
   display: grid;
   gap: 0.15rem;
 }
-.imports-mobile-navigation {
+.imports-header > .imports-mobile-navigation {
   display: none;
 }
 .imports-catalog,
@@ -863,7 +863,7 @@ kbd {
   .imports-navigation {
     display: none;
   }
-  .imports-mobile-navigation {
+  .imports-header > .imports-mobile-navigation {
     display: inline-grid;
     flex: 0 0 auto;
   }
