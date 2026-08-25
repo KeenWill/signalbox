@@ -583,9 +583,13 @@ impl ImportedTranscriptEntry {
 }
 
 pub struct ImportedTranscriptFrontier { /* private */ }
-// sealed: ImportedConversation frontier methods
 // Copy; equality is the exact imported-conversation boundary.
 impl ImportedTranscriptFrontier {
+    pub const fn from_parts(
+        conversation: ImportedConversationId,
+        through_entry: ImportedTranscriptEntryId,
+        through_position: ImportedTranscriptPosition,
+    ) -> Self;
     // accessors: conversation(), through_entry(), through_position()
 }
 

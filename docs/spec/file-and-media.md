@@ -1,7 +1,7 @@
 # File and media interpretation
 
 The provider-neutral core is verified against PR #898 (`agent/file-media-core`).
-Its isolated processor implementation is verified against this PR
+Its isolated processor implementation is verified against PR #900
 (`agent/file-media-worker`). Together they include the type model, declaration
 and registry checks, detection and validation algorithm, untrusted
 processor-response boundary, stable agent tool contracts, visibility-authorizing
@@ -9,7 +9,14 @@ application bridge, and fresh daemon-supervised worker runtime. The PDF adapter
 is verified against this PR (`agent/file-media-adapter-pdf`).
 
 The text-family adapter coverage is verified against PR #903
-(`agent/file-media-text-family`).
+(`agent/file-media-text-family`). The Office Open XML adapter is verified
+against this PR (`agent/file-media-adapter-office`). The audio-family adapter
+coverage is verified against this PR (`agent/file-media-audio-family`).
+
+The image-family adapter coverage is verified against PR #905
+(`agent/file-media-image-family`; via PR #907 `agent/file-media-adapter-svg`).
+
+The SVG adapter is verified against this PR (`agent/file-media-adapter-svg`).
 
 This page owns typed interpretation above immutable blob bytes. Blob identity,
 catalog placement, replica verification, raw reads, attachment visibility, and
@@ -54,26 +61,29 @@ The daemon-side registry stores checked declarations and calls only
 
 Registry construction sorts unsigned-ASCII provider/reader identities and
 rejects duplicate providers or readers, duplicate exact media-type claims,
-duplicate per-reader types, views, or reason codes, absent or excessive probe
-and output bounds, read source work or range fan-out above their compiled
-lowerable ceilings, contradictory image bounds, ambiguous streaming-text
-fallback, unavailable isolation when any provider is present, and any effective
-ceiling above the compiled version-one value. An empty registry is valid.
-Configuration can therefore disable providers or lower bounds but cannot add a
-media-type mapping, alias, executable, or precedence rule.
+duplicate per-reader types, views, or reason codes, absent or excessive probe,
+validation, and output bounds, read source work or range fan-out above their
+compiled lowerable ceilings, contradictory image bounds, ambiguous
+streaming-text fallback, unavailable isolation when any provider is present, and
+any effective ceiling above the compiled version-one value. An empty registry is
+valid. Configuration can therefore disable providers or lower bounds but cannot
+add a media-type mapping, alias, executable, or precedence rule.
 
 An adapter author supplies one provider declaration with exact owned canonical
-types, probe budget, view schemas and resource envelopes, registered sanitized
-reason codes, and immutable reader revision. Probe, inspect, and read methods
-receive only a placement-free `VerifiedBlobSource`, cooperative cancellation,
-and their checked request. An adapter may report only adapter execution failure;
-the daemon supervisor originates process availability, timeout, cancellation,
-and framing failures. Validation requests carry effective lowerable source-byte
-and exact-range ceilings for broker enforcement. They return raw processor
-outputs: the registry reparses and cross-checks every type, evidence claim,
-reason, metadata object, body, JSON tree, continuation, and bound before
-admitting it. Structured output node and per-container entry ceilings stop
-duplicate-aware deserialization before structural excess is materialized.
+types, probe budget, validation source-byte and range envelope, view schemas and
+resource envelopes, registered sanitized reason codes, and immutable reader
+revision. The daemon clamps each validation request and its source broker to
+both the effective deployment ceilings and the reader-declared validation
+envelope. Probe, inspect, and read methods receive only a placement-free
+`VerifiedBlobSource`, cooperative cancellation, and their checked request. An
+adapter may report only adapter execution failure; the daemon supervisor
+originates process availability, timeout, cancellation, and framing failures.
+Validation requests carry effective lowerable source-byte and exact-range
+ceilings for broker enforcement. They return raw processor outputs: the registry
+reparses and cross-checks every type, evidence claim, reason, metadata object,
+body, JSON tree, continuation, and bound before admitting it. Structured output
+node and per-container entry ceilings stop duplicate-aware deserialization
+before structural excess is materialized.
 
 ## Detection and validation
 
@@ -149,10 +159,14 @@ Each listed adapter is compiled into a dedicated worker and registered there as
 one provider declaration. Inputs remain whole-source bounded; adapter output is
 untrusted until the daemon-side registry sanitizer admits it.
 
-| Family | Canonical types                              | Detection and validation                                                                                           | Views                                                                                 | Decoder choice                                                                                     |
-| ------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| Text   | `text/plain`, `application/json`, `text/csv` | Complete NUL-free UTF-8 fallback; structural JSON parse; strict rectangular CSV parse with row and column ceilings | Exact `text`; bounded JSON `structured`; bounded CSV headers and rows as `structured` | Standard-library UTF-8, `serde_json`, and pure-Rust `csv`; all execute only in the isolated worker |
-| PDF    | `application/pdf`                            | Exact declared-type match against the verified source digest and length; bounded object and page parse             | Exact `text`; bounded `metadata`                                                      | `lopdf` 0.44 with default features disabled, compiled only into `signalbox-file-media-pdf-worker`; 8 MiB source, 10,000-page/object, 1 MiB decompressed-page, 256 MiB aggregate decompressed-content, and 174,000-byte text bounds; no rendering, OCR, embedded-file extraction, or password channel |
+| Family          | Canonical types                                                                                                                                                                                                             | Detection and validation                                                                                                                    | Views                                                                                 | Decoder choice                                                                                                                                                                                                                                                                                       |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Text            | `text/plain`, `application/json`, `text/csv`                                                                                                                                                                                | Complete NUL-free UTF-8 fallback; structural JSON parse; strict rectangular CSV parse with row and column ceilings                          | Exact `text`; bounded JSON `structured`; bounded CSV headers and rows as `structured` | Standard-library UTF-8, `serde_json`, and pure-Rust `csv`; all execute only in the isolated worker                                                                                                                                                                                                   |
+| Image           | `image/png`, `image/jpeg`, `image/webp`, `image/gif`                                                                                                                                                                        | Strong signatures followed by primary-raster decode with encoded, axis, pixel, and memory bounds                                            | Bounded dimensions and channel count as `metadata`                                    | Pure-Rust `image` with only PNG, JPEG, WebP, and GIF features; isolated in the worker                                                                                                                                                                                                                |
+| PDF             | `application/pdf`                                                                                                                                                                                                           | Exact declared-type match against the verified source digest and length; bounded object and page parse                                      | Exact `text`; bounded `metadata`                                                      | `lopdf` 0.44 with default features disabled, compiled only into `signalbox-file-media-pdf-worker`; 8 MiB source, 10,000-page/object, 1 MiB decompressed-page, 256 MiB aggregate decompressed-content, and 174,000-byte text bounds; no rendering, OCR, embedded-file extraction, or password channel |
+| Office Open XML | `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `application/vnd.openxmlformats-officedocument.presentationml.presentation` | Exact declared-type match; bounded ZIP container and XML part parse                                                                         | Exact `text`; bounded `metadata`                                                      | `zip` 8 with only its Rust `flate2` backend and `quick-xml` 0.41, compiled only into `signalbox-file-media-office-worker`; macro-enabled and legacy OLE formats, formulas, macros, rendering, OCR, external entities, links, and embedded recursive containers are excluded                          |
+| SVG             | `image/svg+xml`                                                                                                                                                                                                             | Structural `<svg>` root detection over a bounded 64 KiB prefix; bounded XML parse rejecting malformed and active content                    | Exact `text`; bounded `metadata`                                                      | `quick-xml` 0.41, compiled only into `signalbox-file-media-svg-worker`; 256 KiB source bound; rendering, scripts, event handlers, styles, DTDs, non-built-in entities, external or embedded resources, nested SVG containers, OCR, animation, and resource fetching are excluded                     |
+| Audio           | `audio/wav`, `audio/mpeg`, `audio/flac`, `audio/ogg`                                                                                                                                                                        | Strong signatures followed by full decode under a 64 MiB hard whole-source memory ceiling plus channel, rate, and presented-duration bounds | Bounded channel count and sample rate as `metadata`                                   | Feature-limited pure-Rust Symphonia for WAV/MP3/FLAC; pure-Rust `ogg` and `opus-rs` for Ogg/Opus, all isolated                                                                                                                                                                                       |
 
 ## Processor and durable media boundary
 
