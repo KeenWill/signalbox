@@ -5,6 +5,7 @@
 
 mod approval_judge;
 mod attention;
+mod blob_derivation;
 mod commissioned_dispatch;
 mod convergence_reconciliation;
 mod conversation_import;
@@ -47,6 +48,11 @@ pub use attention::{
     AttentionChanges, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts, AttentionReader,
     AttentionSnapshot, AttentionState, AttentionSummary, max_attention_change_items,
     max_attention_goal_summary_characters, max_attention_snapshot_items,
+};
+pub use blob_derivation::{
+    BlobDerivationIdGenerator, BlobDerivationRecordOutcome, BlobDerivationServiceError,
+    BlobDerivationServiceOutcome, BlobDerivationStore, DeterministicBlobDerivationRequest,
+    DeterministicBlobDerivationService, DeterministicBlobProducer, UuidV7BlobDerivationIdGenerator,
 };
 pub use commissioned_dispatch::{
     CommissionDispatchPreparationError, CommissionDispatchRequest, CommissionedDispatchFence,

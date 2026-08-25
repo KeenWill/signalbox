@@ -53,7 +53,11 @@ pub use accepted_input::{
 };
 pub use actor::Actor;
 pub use applied_interrupt::{AppliedInterruptCommandResult, AppliedInterruptProof};
-pub use blob::{BlobDigest, BlobDigestParseError, BlobDigestParseFailure};
+pub use blob::{
+    BlobDerivation, BlobDerivationError, BlobDerivationProducer, BlobDigest, BlobDigestParseError,
+    BlobDigestParseFailure, BlobTransformation, BlobTransformationError, BlobTransformationName,
+    DeterministicBlobDerivationKey,
+};
 pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
@@ -435,6 +439,11 @@ define_identity!(
     ///
     /// This identity does not prove that the command was applied.
     DurableCommandId
+);
+
+define_identity!(
+    /// Identifies one immutable blob-to-blob derivation fact.
+    BlobDerivationId
 );
 
 define_identity!(
