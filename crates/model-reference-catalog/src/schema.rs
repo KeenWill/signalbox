@@ -1245,7 +1245,7 @@ fn validate_source(source: &Source) -> Result<(), CatalogError> {
     Ok(())
 }
 
-fn validate_window(window: &DateWindow, owner: &str) -> Result<(), CatalogError> {
+fn validate_window(window: &DateWindow, subject: &str) -> Result<(), CatalogError> {
     validate_date(&window.first_observed_new_rate, "first_observed_new_rate")?;
     if let Some(date) = &window.effective_from {
         validate_date(date, "effective_from")?;
@@ -1258,26 +1258,26 @@ fn validate_window(window: &DateWindow, owner: &str) -> Result<(), CatalogError>
     }
     if window.precision == DatePrecision::ExactDay && window.effective_from.is_none() {
         return Err(CatalogError::new(format!(
-            "exact-day window {owner} has no effective_from"
+            "exact-day window {subject} has no effective_from"
         )));
     }
     if window.precision == DatePrecision::ObservationWindow && window.effective_from.is_some() {
         return Err(CatalogError::new(format!(
-            "observation window {owner} claims an exact effective_from"
+            "observation window {subject} claims an exact effective_from"
         )));
     }
     if window.precision == DatePrecision::ExactDay
         && window.effective_from.as_deref() != Some(window.first_observed_new_rate.as_str())
     {
         return Err(CatalogError::new(format!(
-            "exact-day window {owner} has inconsistent effective and observation dates"
+            "exact-day window {subject} has inconsistent effective and observation dates"
         )));
     }
     if let (Some(from), Some(until)) = (&window.effective_from, &window.effective_until)
         && from >= until
     {
         return Err(CatalogError::new(format!(
-            "window {owner} is empty or reversed"
+            "window {subject} is empty or reversed"
         )));
     }
     if window
@@ -1286,7 +1286,7 @@ fn validate_window(window: &DateWindow, owner: &str) -> Result<(), CatalogError>
         .is_some_and(|until| window.first_observed_new_rate.as_str() >= until)
     {
         return Err(CatalogError::new(format!(
-            "window {owner} observes its rate after the window ends"
+            "window {subject} observes its rate after the window ends"
         )));
     }
     if window.precision == DatePrecision::ObservationWindow
@@ -1294,52 +1294,52 @@ fn validate_window(window: &DateWindow, owner: &str) -> Result<(), CatalogError>
         && last_old >= &window.first_observed_new_rate
     {
         return Err(CatalogError::new(format!(
-            "window {owner} does not leave an ordered observation boundary"
+            "window {subject} does not leave an ordered observation boundary"
         )));
     }
     Ok(())
 }
 
-fn validate_rate(rate: &Rate, owner: &str) -> Result<(), CatalogError> {
+fn validate_rate(rate: &Rate, subject: &str) -> Result<(), CatalogError> {
     validate_nonempty(&rate.original.amount, "original amount")?;
     validate_nonempty(&rate.original.currency, "original currency")?;
     validate_nonempty(&rate.original.unit, "original unit")?;
-    let original = decimal(&rate.original.amount, owner)?;
+    let original = decimal(&rate.original.amount, subject)?;
     if original.is_sign_negative() {
-        return Err(CatalogError::new(format!("rate {owner} is negative")));
+        return Err(CatalogError::new(format!("rate {subject} is negative")));
     }
     match (&rate.usd_per_million_tokens, rate.dimension) {
         (Some(_amount), RateDimension::Operation) => {
             return Err(CatalogError::new(format!(
-                "operation rate {owner} is forced into a token-rate field"
+                "operation rate {subject} is forced into a token-rate field"
             )));
         }
         (None, RateDimension::Operation) => {}
         (Some(amount), _) => {
-            let normalized = decimal(amount, owner)?;
+            let normalized = decimal(amount, subject)?;
             if normalized.is_sign_negative() {
-                return Err(CatalogError::new(format!("rate {owner} is negative")));
+                return Err(CatalogError::new(format!("rate {subject} is negative")));
             }
             let expected = match rate.original.unit.as_str() {
                 "usd_per_million_tokens" => original,
                 "usd_per_thousand_tokens" => original
                     .checked_mul(Decimal::from(1_000_u32))
-                    .ok_or_else(|| CatalogError::new(format!("rate {owner} overflows")))?,
+                    .ok_or_else(|| CatalogError::new(format!("rate {subject} overflows")))?,
                 other => {
                     return Err(CatalogError::new(format!(
-                        "token rate {owner} has incomparable original unit {other}"
+                        "token rate {subject} has incomparable original unit {other}"
                     )));
                 }
             };
             if rate.original.currency != "USD" || normalized != expected {
                 return Err(CatalogError::new(format!(
-                    "rate {owner} normalized amount disagrees with original"
+                    "rate {subject} normalized amount disagrees with original"
                 )));
             }
         }
         (None, _) => {
             return Err(CatalogError::new(format!(
-                "token rate {owner} lacks a comparable normalized amount"
+                "token rate {subject} lacks a comparable normalized amount"
             )));
         }
     }
@@ -1452,9 +1452,9 @@ fn resolve_rate_set(set: &RateSet) -> Result<ResolvedRateSet, CatalogError> {
     })
 }
 
-fn decimal(value: &str, owner: &str) -> Result<Decimal, CatalogError> {
+fn decimal(value: &str, subject: &str) -> Result<Decimal, CatalogError> {
     Decimal::from_str_exact(value)
-        .map_err(|_| CatalogError::new(format!("{owner} contains an invalid exact decimal")))
+        .map_err(|_| CatalogError::new(format!("{subject} contains an invalid exact decimal")))
 }
 
 fn unique_ids<'a>(
@@ -1474,17 +1474,17 @@ fn unique_ids<'a>(
 fn validate_source_refs(
     references: &[String],
     sources: &BTreeSet<&str>,
-    owner: &str,
+    subject: &str,
 ) -> Result<(), CatalogError> {
     if references.is_empty() {
         return Err(CatalogError::new(format!(
-            "{owner} has no provenance source"
+            "{subject} has no provenance source"
         )));
     }
     for source in references {
         if !sources.contains(source.as_str()) {
             return Err(CatalogError::new(format!(
-                "{owner} names unknown source {source}"
+                "{subject} names unknown source {source}"
             )));
         }
     }
@@ -1495,7 +1495,7 @@ fn validate_source_providers(
     raw: &RawCatalog,
     provider: Provider,
     references: &[String],
-    owner: &str,
+    subject: &str,
 ) -> Result<(), CatalogError> {
     for reference in references {
         let source = raw
@@ -1503,11 +1503,11 @@ fn validate_source_providers(
             .iter()
             .find(|source| source.id == *reference)
             .ok_or_else(|| {
-                CatalogError::new(format!("{owner} names unknown source {reference}"))
+                CatalogError::new(format!("{subject} names unknown source {reference}"))
             })?;
         if source.provider != provider {
             return Err(CatalogError::new(format!(
-                "{owner} cites a source from another provider"
+                "{subject} cites a source from another provider"
             )));
         }
     }
@@ -1518,7 +1518,7 @@ fn validate_model_ref(
     raw: &RawCatalog,
     provider: Provider,
     reference: Option<&str>,
-    owner: &str,
+    subject: &str,
 ) -> Result<(), CatalogError> {
     let Some(reference) = reference else {
         return Ok(());
@@ -1527,10 +1527,10 @@ fn validate_model_ref(
         .models
         .iter()
         .find(|model| model.id == reference)
-        .ok_or_else(|| CatalogError::new(format!("{owner} names unknown model {reference}")))?;
+        .ok_or_else(|| CatalogError::new(format!("{subject} names unknown model {reference}")))?;
     if model.provider != provider {
         return Err(CatalogError::new(format!(
-            "{owner} crosses provider boundary through {reference}"
+            "{subject} crosses provider boundary through {reference}"
         )));
     }
     Ok(())
