@@ -9,7 +9,9 @@ publish.workspace = true
 
 [features]
 default = []
-postgres-integration = ["dep:testcontainers-modules"]
+# The integration suites state the durable rows they need through the typed
+# seeding in `test_support`, so enabling them enables it.
+postgres-integration = ["dep:testcontainers-modules", "test-support"]
 test-support = []
 
 [dependencies]

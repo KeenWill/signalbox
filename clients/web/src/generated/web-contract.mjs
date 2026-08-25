@@ -69,6 +69,10 @@ const schemas = {
             "description": "Ordinary bounded JSON responses are available under `/api/`.",
             "type": "boolean"
           },
+          "bounded_session_timeline": {
+            "description": "Stable bounded session descriptors and historical windows are available.",
+            "type": "boolean"
+          },
           "ndjson_streaming": {
             "description": "Incremental response items use newline-delimited JSON.",
             "type": "boolean"
@@ -81,7 +85,8 @@ const schemas = {
         "required": [
           "bounded_json",
           "same_origin_json_mutations",
-          "ndjson_streaming"
+          "ndjson_streaming",
+          "bounded_session_timeline"
         ],
         "type": "object"
       },
@@ -119,11 +124,25 @@ const schemas = {
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "max_timeline_window_bytes": {
+            "description": "Maximum projected structured item bytes in one timeline window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_timeline_window_items": {
+            "description": "Maximum durable event headers returned in one timeline window.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
           "max_json_body_bytes",
-          "max_ndjson_item_bytes"
+          "max_ndjson_item_bytes",
+          "max_timeline_window_items",
+          "max_timeline_window_bytes"
         ],
         "type": "object"
       }
@@ -172,6 +191,263 @@ const schemas = {
       "message"
     ],
     "title": "WebContractExample",
+    "type": "object"
+  },
+  "WebSessionTimelineDescriptor": {
+    "$defs": {
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebSessionTimelineSizeFacts": {
+        "additionalProperties": false,
+        "description": "Explicit lifetime size facts used only for browser loading policy.",
+        "properties": {
+          "item_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "projected_structured_bytes": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "projected_text_bytes": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "referenced_blob_bytes": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "referenced_blob_count": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "item_count",
+          "projected_text_bytes",
+          "projected_structured_bytes",
+          "referenced_blob_count",
+          "referenced_blob_bytes"
+        ],
+        "type": "object"
+      },
+      "WebSessionWorkFacts": {
+        "additionalProperties": false,
+        "description": "Current work facts carried by the lightweight session descriptor.",
+        "properties": {
+          "active_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "queued_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "active_turn_count",
+          "queued_turn_count"
+        ],
+        "type": "object"
+      },
+      "WebTimelineAddress": {
+        "additionalProperties": false,
+        "description": "Stable browser-visible location of one durable session event.",
+        "properties": {
+          "event_sequence": {
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+          }
+        },
+        "required": [
+          "event_sequence"
+        ],
+        "type": "object"
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Browser descriptor for one authoritative bounded session projection.",
+    "properties": {
+      "first_address": {
+        "$ref": "#/$defs/WebTimelineAddress"
+      },
+      "latest_address": {
+        "$ref": "#/$defs/WebTimelineAddress"
+      },
+      "observed_through": {
+        "$ref": "#/$defs/WebU64"
+      },
+      "session_id": {
+        "$ref": "#/$defs/WebSessionId"
+      },
+      "sizes": {
+        "$ref": "#/$defs/WebSessionTimelineSizeFacts"
+      },
+      "work": {
+        "$ref": "#/$defs/WebSessionWorkFacts"
+      }
+    },
+    "required": [
+      "session_id",
+      "sizes",
+      "first_address",
+      "latest_address",
+      "work",
+      "observed_through"
+    ],
+    "title": "WebSessionTimelineDescriptor",
+    "type": "object"
+  },
+  "WebSessionTimelineWindow": {
+    "$defs": {
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebSessionTimelineEventKind": {
+        "description": "Closed durable event categories in the browser timeline foundation.",
+        "enum": [
+          "session_created",
+          "session_model_settings_changed",
+          "turn_model_settings_resolved",
+          "input_accepted",
+          "goal_turn_retired",
+          "turn_activated",
+          "turn_failed",
+          "model_call_transition",
+          "tool_batch_transition",
+          "tool_approval_decided",
+          "context_compacted",
+          "turn_completed",
+          "turn_refused",
+          "turn_cancelled",
+          "turn_reconciliation_required",
+          "runner_state_transition",
+          "delegation_update",
+          "delegation_wake"
+        ],
+        "type": "string"
+      },
+      "WebSessionTimelineItem": {
+        "additionalProperties": false,
+        "description": "One typed, header-only event in a bounded browser window.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebSessionTimelineEventKind"
+          },
+          "projected_structured_bytes": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "address",
+          "kind",
+          "projected_structured_bytes"
+        ],
+        "type": "object"
+      },
+      "WebTimelineAddress": {
+        "additionalProperties": false,
+        "description": "Stable browser-visible location of one durable session event.",
+        "properties": {
+          "event_sequence": {
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+          }
+        },
+        "required": [
+          "event_sequence"
+        ],
+        "type": "object"
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded, logically ordered browser timeline window.",
+    "properties": {
+      "continuation_after": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "description": "Stable browser-visible location of one durable session event.",
+            "properties": {
+              "event_sequence": {
+                "$ref": "#/$defs/WebTimelineEventSequence",
+                "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+              }
+            },
+            "required": [
+              "event_sequence"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "continuation_before": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "description": "Stable browser-visible location of one durable session event.",
+            "properties": {
+              "event_sequence": {
+                "$ref": "#/$defs/WebTimelineEventSequence",
+                "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+              }
+            },
+            "required": [
+              "event_sequence"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "items": {
+        "items": {
+          "$ref": "#/$defs/WebSessionTimelineItem"
+        },
+        "type": "array"
+      },
+      "projected_structured_bytes": {
+        "format": "uint32",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "session_id": {
+        "$ref": "#/$defs/WebSessionId"
+      }
+    },
+    "required": [
+      "session_id",
+      "items",
+      "projected_structured_bytes",
+      "continuation_before",
+      "continuation_after"
+    ],
+    "title": "WebSessionTimelineWindow",
     "type": "object"
   }
 };
@@ -223,6 +499,38 @@ function assertSchema(root, schema, value, path) {
     }
     return;
   }
+  if (schema.anyOf !== undefined) {
+    const accepted = schema.anyOf.some((candidate) => {
+      try {
+        assertSchema(root, candidate, value, path);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (!accepted) {
+      fail(path, "one recognized variant");
+    }
+    return;
+  }
+  if (Array.isArray(schema.type)) {
+    if (value === null && schema.type.includes("null")) {
+      return;
+    }
+    const concrete = schema.type.filter((candidate) => candidate !== "null");
+    const accepted = concrete.some((candidate) => {
+      try {
+        assertSchema(root, { ...schema, type: candidate }, value, path);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (!accepted) {
+      fail(path, concrete.join(" or "));
+    }
+    return;
+  }
   if (schema.type === "object") {
     if (value === null || typeof value !== "object" || Array.isArray(value)) {
       fail(path, "an object");
@@ -269,8 +577,31 @@ function assertSchema(root, schema, value, path) {
     }
     return;
   }
+  if (schema.type === "null") {
+    if (value !== null) {
+      fail(path, "null");
+    }
+    return;
+  }
   if (typeof value !== schema.type) {
     fail(path, schema.type);
+  }
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    value.length > 20
+  ) {
+    fail(path, "an unsigned 64-bit integer");
+  }
+  if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {
+    fail(path, `a string matching ${schema.pattern}`);
+  }
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    BigInt(value) > 18446744073709551615n
+  ) {
+    fail(path, "an unsigned 64-bit integer");
   }
 }
 
@@ -289,5 +620,15 @@ export function decodeWebContractExample(value) {
 
 export function decodeWebApiErrorResponse(value) {
   assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "error_response");
+  return value;
+}
+
+export function decodeWebSessionTimelineDescriptor(value) {
+  assertSchema(schemas.WebSessionTimelineDescriptor, schemas.WebSessionTimelineDescriptor, value, "session_descriptor");
+  return value;
+}
+
+export function decodeWebSessionTimelineWindow(value) {
+  assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "timeline_window");
   return value;
 }
