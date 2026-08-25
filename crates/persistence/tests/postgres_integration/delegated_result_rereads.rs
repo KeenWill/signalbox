@@ -1586,6 +1586,7 @@ async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<
     else {
         panic!("the unchanged delegated child activation must commit");
     };
+    record_empty_instruction_manifest(&pool, SessionId::from_uuid(child)).await?;
     let delegated = activated
         .delegated()
         .expect("activation preserves its delegated origin family");

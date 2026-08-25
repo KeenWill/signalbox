@@ -4,18 +4,18 @@ use crate::{
     BoundedMetadata, CanonicalMediaType, FileInspection, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProviderDeclaration, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileReadRequest, FileReadResult, InspectionRequest,
-    ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadAccessPattern, ReadContinuation, ReadContinuationCursor, ReadViewBounds, ReaderDeclaration,
-    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidatedFile, ValidationEvidence,
-    VerifiedBlobSource,
+    MAX_READ_OPTIONS_BYTES, MAX_WORKER_WALL_SECONDS, ProbeStrength, ProcessorProbeOutput,
+    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadContinuation,
+    ReadContinuationCursor, ReadViewBounds, ReaderDeclaration, ReaderIdentity, ReasonCode,
+    StreamingTextFallback, ValidatedFile, ValidationEvidence, VerifiedBlobSource,
 };
 
 // numeric-bound: ceiling - bounds process-lifetime provider inventory memory
 const MAX_REGISTRY_PROVIDERS: usize = 256;
 // numeric-bound: ceiling - bounds per-provider reader inventory memory and startup work
-const MAX_READERS_PER_PROVIDER: usize = 256;
+pub const MAX_READERS_PER_PROVIDER: usize = 256;
 // numeric-bound: ceiling - bounds aggregate process-lifetime reader inventory memory
-const MAX_REGISTRY_READERS: usize = 256;
+pub const MAX_REGISTRY_READERS: usize = 256;
 // numeric-bound: ceiling - bounds per-reader media-claim memory and conflict checks
 const MAX_MEDIA_TYPES_PER_READER: usize = 256;
 // numeric-bound: ceiling - bounds aggregate process-lifetime media-claim memory
@@ -38,6 +38,10 @@ const MAX_REGISTRY_REASON_CODES: usize = 4_096;
 const MAX_INSPECTION_PROBE_BYTES: u64 = 16 * 1_024 * 1_024;
 // numeric-bound: ceiling - bounds one inspection's aggregate probe request fan-out
 const MAX_INSPECTION_PROBE_READS: u32 = 1_024;
+// numeric-bound: ceiling - the tool contract permits this many input containers
+const MAX_READ_INPUT_CONTAINERS: u32 = 256;
+// numeric-bound: ceiling - every JSON node emits at least one serialized byte
+const MAX_READ_OPTIONS_NODES: usize = MAX_READ_OPTIONS_BYTES;
 // numeric-bound: ceiling - reserves processor-frame space for structured-body JSON escaping
 const MAX_STRUCTURED_BODY_BYTES: usize = 500 * 1_024;
 /// Immutable process-lifetime registry snapshot.
@@ -175,23 +179,37 @@ impl FileMediaRegistry {
             });
         }
 
-        let mut candidates = Vec::new();
-        let mut malformed = Vec::new();
-        for reader in self.readers.values() {
-            let raw = processor
-                .probe(reader.identity(), source, cancellation)
-                .await?;
-            match sanitize_probe(reader, raw)? {
-                SanitizedProbe::NoMatch => {}
-                SanitizedProbe::Candidate(candidate) => candidates.push(candidate),
-                SanitizedProbe::Malformed {
-                    media_type,
-                    reason_code,
-                } => {
-                    malformed.push((media_type, reason_code));
+        let probes = async {
+            let mut candidates = Vec::new();
+            let mut malformed = Vec::new();
+            for reader in self.readers.values() {
+                let raw = processor
+                    .probe(reader.identity(), source, cancellation)
+                    .await?;
+                match sanitize_probe(reader, raw)? {
+                    SanitizedProbe::NoMatch => {}
+                    SanitizedProbe::Candidate(candidate) => candidates.push(candidate),
+                    SanitizedProbe::Malformed {
+                        media_type,
+                        reason_code,
+                    } => {
+                        malformed.push((media_type, reason_code));
+                    }
                 }
             }
-        }
+            Ok::<_, FileMediaFailure>((candidates, malformed))
+        };
+        let probes = Box::pin(probes);
+        let deadline = Box::pin(futures_timer::Delay::new(std::time::Duration::from_secs(
+            MAX_WORKER_WALL_SECONDS,
+        )));
+        let (candidates, mut malformed) = match futures_util::future::select(probes, deadline).await
+        {
+            futures_util::future::Either::Left((result, _)) => result?,
+            futures_util::future::Either::Right(((), _)) => {
+                return Err(FileMediaFailure::ProcessorTimedOut);
+            }
+        };
         if !malformed.is_empty() {
             malformed.sort();
             malformed.dedup();
@@ -438,7 +456,7 @@ impl FileMediaRegistry {
         cancellation: &dyn crate::CancellationSignal,
     ) -> Result<FileReadResult, FileMediaFailure> {
         let initial_request = match &request.input {
-            crate::FileReadInput::Initial { options } if options.is_object() => true,
+            crate::FileReadInput::Initial { options } if read_options_fit(options) => true,
             crate::FileReadInput::Initial { .. } => {
                 return Err(FileMediaFailure::InvalidViewArguments);
             }
@@ -483,7 +501,10 @@ impl FileMediaRegistry {
             .read(
                 validated.reader(),
                 FileMediaProviderReadRequest {
-                    file: validated.clone(),
+                    source: validated.source().clone(),
+                    detected_media_type: validated.detected_media_type().clone(),
+                    validation: validated.validation(),
+                    metadata: validated.metadata().clone(),
                     view: request.view,
                     input: request.input,
                 },
@@ -492,6 +513,92 @@ impl FileMediaRegistry {
             )
             .await?;
         sanitize_read(reader, view, self.ceilings, initial_request, raw)
+    }
+}
+
+/// Checks read options against their object, nesting, and encoded-byte bounds.
+pub fn read_options_fit(options: &serde_json::Value) -> bool {
+    // The outer file_read argument object consumes one contract container.
+    if !options.is_object() || !json_value_work_fits(options, MAX_READ_INPUT_CONTAINERS - 1) {
+        return false;
+    }
+    serde_json::to_writer(
+        LimitedWriter {
+            written: 0,
+            maximum: MAX_READ_OPTIONS_BYTES,
+        },
+        options,
+    )
+    .is_ok()
+}
+
+fn json_value_work_fits(value: &serde_json::Value, maximum_containers: u32) -> bool {
+    let mut pending = vec![(value, 0_u32)];
+    let mut visited = 0_usize;
+    while let Some((value, depth)) = pending.pop() {
+        visited += 1;
+        if visited > MAX_READ_OPTIONS_NODES {
+            return false;
+        }
+        let (children, next_depth): (usize, Option<u32>) = match value {
+            serde_json::Value::Array(values) => {
+                let Some(next) = depth
+                    .checked_add(1)
+                    .filter(|next| *next <= maximum_containers)
+                else {
+                    return false;
+                };
+                (values.len(), Some(next))
+            }
+            serde_json::Value::Object(values) => {
+                let Some(next) = depth
+                    .checked_add(1)
+                    .filter(|next| *next <= maximum_containers)
+                else {
+                    return false;
+                };
+                (values.len(), Some(next))
+            }
+            serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_) => (0, None),
+        };
+        if children > MAX_READ_OPTIONS_NODES.saturating_sub(visited + pending.len()) {
+            return false;
+        }
+        if let Some(next) = next_depth {
+            match value {
+                serde_json::Value::Array(values) => {
+                    pending.extend(values.iter().map(|child| (child, next)));
+                }
+                serde_json::Value::Object(values) => {
+                    pending.extend(values.values().map(|child| (child, next)));
+                }
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
+struct LimitedWriter {
+    written: usize,
+    maximum: usize,
+}
+
+impl std::io::Write for LimitedWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.written = self
+            .written
+            .checked_add(bytes.len())
+            .filter(|total| *total <= self.maximum)
+            .ok_or_else(|| std::io::Error::other("serialized value exceeds its byte ceiling"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
@@ -876,48 +983,76 @@ const fn inspection_output_kind(kind: crate::ReadOutputKind) -> &'static str {
     }
 }
 
-fn validate_aggregate_inventory(
-    providers: &[FileMediaProviderDeclaration],
-) -> Result<(), FileMediaRegistryConstructionError> {
+/// Checks provider declarations against registry-compatible inventory bounds.
+pub fn provider_declaration_inventory_fits<'a>(
+    providers: impl IntoIterator<Item = &'a FileMediaProviderDeclaration>,
+) -> bool {
     let mut readers = 0_usize;
     let mut media_types = 0_usize;
     let mut views = 0_usize;
     let mut schema_bytes = 0_usize;
     let mut reason_codes = 0_usize;
     for provider in providers {
-        readers = readers
-            .checked_add(provider.readers().len())
-            .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+        if provider.readers().len() > MAX_READERS_PER_PROVIDER {
+            return false;
+        }
+        let Some(next_readers) = readers.checked_add(provider.readers().len()) else {
+            return false;
+        };
+        readers = next_readers;
         if readers > MAX_REGISTRY_READERS {
-            return Err(FileMediaRegistryConstructionError::Inventory);
+            return false;
         }
         for reader in provider.readers() {
-            media_types = media_types
-                .checked_add(reader.media_types().len())
-                .ok_or(FileMediaRegistryConstructionError::Inventory)?;
-            views = views
-                .checked_add(reader.views().len())
-                .ok_or(FileMediaRegistryConstructionError::Inventory)?;
-            reason_codes = reason_codes
-                .checked_add(reader.reason_codes().len())
-                .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+            if reader.media_types().len() > MAX_MEDIA_TYPES_PER_READER
+                || reader.views().len() > MAX_VIEWS_PER_READER
+                || reader.reason_codes().len() > MAX_REASON_CODES_PER_READER
+            {
+                return false;
+            }
+            let Some(next_media_types) = media_types.checked_add(reader.media_types().len()) else {
+                return false;
+            };
+            media_types = next_media_types;
+            let Some(next_views) = views.checked_add(reader.views().len()) else {
+                return false;
+            };
+            views = next_views;
+            let Some(next_reason_codes) = reason_codes.checked_add(reader.reason_codes().len())
+            else {
+                return false;
+            };
+            reason_codes = next_reason_codes;
             if media_types > MAX_REGISTRY_MEDIA_TYPES
                 || views > MAX_REGISTRY_VIEWS
                 || reason_codes > MAX_REGISTRY_REASON_CODES
             {
-                return Err(FileMediaRegistryConstructionError::Inventory);
+                return false;
             }
             for view in reader.views() {
-                schema_bytes = schema_bytes
-                    .checked_add(view.arguments_schema().as_str().len())
-                    .ok_or(FileMediaRegistryConstructionError::Inventory)?;
+                let Some(next_schema_bytes) =
+                    schema_bytes.checked_add(view.arguments_schema().as_str().len())
+                else {
+                    return false;
+                };
+                schema_bytes = next_schema_bytes;
                 if schema_bytes > MAX_REGISTRY_SCHEMA_BYTES {
-                    return Err(FileMediaRegistryConstructionError::Inventory);
+                    return false;
                 }
             }
         }
     }
-    Ok(())
+    true
+}
+
+fn validate_aggregate_inventory(
+    providers: &[FileMediaProviderDeclaration],
+) -> Result<(), FileMediaRegistryConstructionError> {
+    if provider_declaration_inventory_fits(providers) {
+        Ok(())
+    } else {
+        Err(FileMediaRegistryConstructionError::Inventory)
+    }
 }
 
 fn validate_aggregate_probe_budget(
@@ -1066,6 +1201,17 @@ mod tests {
         })
     }
 
+    fn binary_json_tree(null_leaves: usize) -> serde_json::Value {
+        let mut level = vec![serde_json::Value::Null; null_leaves];
+        while level.len() > 1 {
+            level = level
+                .chunks(2)
+                .map(|pair| serde_json::Value::Array(pair.to_vec()))
+                .collect();
+        }
+        level.pop().expect("the fixture has at least one leaf")
+    }
+
     #[test]
     fn malformed_ambiguity_includes_structural_and_strong_claims() {
         assert!(recognized_probe_strength(
@@ -1093,5 +1239,55 @@ mod tests {
         observe_json(&body, 0, &mut observed).expect("the bounded fixture is observable");
 
         assert_eq!(observed.depth, crate::MAX_STRUCTURED_DEPTH);
+    }
+
+    #[test]
+    fn read_option_serialization_stops_at_its_byte_ceiling() {
+        let options = serde_json::json!({ "value": "x".repeat(MAX_READ_OPTIONS_BYTES) });
+
+        assert!(!read_options_fit(&options));
+    }
+
+    #[test]
+    fn read_options_honor_the_input_container_boundary() {
+        let options = serde_json::json!({
+            "nested": nested_arrays(MAX_READ_INPUT_CONTAINERS - 2)
+        });
+        assert!(read_options_fit(&options));
+
+        let options = serde_json::json!({
+            "nested": nested_arrays(MAX_READ_INPUT_CONTAINERS - 1)
+        });
+        assert!(!read_options_fit(&options));
+    }
+
+    #[test]
+    fn read_options_reject_broad_work_before_growing_the_frontier() {
+        let options = serde_json::json!({
+            "values": vec![serde_json::Value::Null; MAX_READ_OPTIONS_NODES]
+        });
+
+        assert!(!json_value_work_fits(
+            &options,
+            MAX_READ_INPUT_CONTAINERS - 1
+        ));
+    }
+
+    #[test]
+    fn binary_json_tree_preserves_odd_leaf_groups() {
+        assert_eq!(
+            binary_json_tree(3),
+            serde_json::json!([[null, null], [null]])
+        );
+    }
+
+    #[test]
+    fn read_options_reject_balanced_work_with_a_small_frontier() {
+        let options = serde_json::json!({ "tree": binary_json_tree(32_769) });
+
+        assert!(!json_value_work_fits(
+            &options,
+            MAX_READ_INPUT_CONTAINERS - 1
+        ));
     }
 }

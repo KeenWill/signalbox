@@ -32,9 +32,10 @@ use signalbox_domain::{
     CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
     DelegatedModelCallRecoveryReconstitutionInput, DelegatedTurnActivationInput,
     DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
-    DelegationOutcomeReason, DirectModelSelection, DurableCommandId, FailedModelCallTurn,
-    FailedModelCallTurnIdentities, FastMode, FrozenAliasDefinition, FrozenModelSelection,
-    ModelAlias, ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    DelegationOutcomeReason, DirectModelSelection, DurableCommandId,
+    EmptyTurnInstructionManifestEvidence, FailedModelCallTurn, FailedModelCallTurnIdentities,
+    FastMode, FrozenAliasDefinition, FrozenModelSelection, InstructionDigest, ModelAlias,
+    ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
     ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
     ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
@@ -49,7 +50,8 @@ use signalbox_domain::{
     SemanticTranscriptEntryPayload, SemanticTranscriptEntryReconstitutionInput,
     SemanticTranscriptEntryRef, SessionId, StopRequestedModelCallTurn, ToolApprovalDecision,
     ToolApprovalResolution, ToolDecisionSource, ToolRequest, ToolResultAttemptCorrelation,
-    ToolRoundModelCallTurn, TurnAttemptId, TurnId, UserContent,
+    ToolRoundModelCallTurn, TurnAttemptId, TurnId, TurnInstructionManifest,
+    TurnInstructionManifestId, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, postgres::PgRow, types::Uuid};
 
@@ -1543,14 +1545,32 @@ impl PostgresModelCallRepository {
         let result = async {
             lock_session(&mut transaction, session).await?;
             let stored = sqlx::query(
-                "SELECT model_call_id, turn_id, turn_attempt_id,
-                        selection_kind, direct_model_selection_id,
-                        frozen_model_alias_id, frozen_alias_selected_direct_id,
-                        resolved_provider_model_identity_id, context_frontier_id,
-                        state_kind, terminal_disposition_kind
-                   FROM model_call
-                  WHERE session_id = $1
-                    AND model_call_id = $2",
+                "SELECT call.model_call_id, call.turn_id, call.turn_attempt_id,
+                        call.selection_kind, call.direct_model_selection_id,
+                        call.frozen_model_alias_id, call.frozen_alias_selected_direct_id,
+                        call.resolved_provider_model_identity_id, call.context_frontier_id,
+                        call.state_kind, call.terminal_disposition_kind,
+                        manifest.turn_instruction_manifest_id,
+                        manifest.boundary_kind AS instruction_manifest_boundary_kind,
+                        manifest.eligibility_hash_algorithm
+                            AS instruction_eligibility_hash_algorithm,
+                        manifest.eligibility_hash AS instruction_eligibility_hash,
+                        manifest.admitted_set_hash_algorithm
+                            AS instruction_admitted_set_hash_algorithm,
+                        manifest.admitted_set_hash AS instruction_admitted_set_hash,
+                        manifest.manifest_hash_algorithm
+                            AS instruction_manifest_hash_algorithm,
+                        manifest.manifest_hash AS instruction_manifest_hash,
+                        discovery.scan_complete AS instruction_discovery_complete
+                   FROM model_call AS call
+              LEFT JOIN turn_instruction_manifest AS manifest
+                     ON manifest.turn_instruction_manifest_id = call.turn_instruction_manifest_id
+                    AND manifest.session_id = call.session_id
+                    AND manifest.turn_id = call.turn_id
+              LEFT JOIN instruction_discovery AS discovery
+                     ON discovery.instruction_discovery_id = manifest.instruction_discovery_id
+                  WHERE call.session_id = $1
+                    AND call.model_call_id = $2",
             )
             .bind(session_id_to_uuid(session))
             .bind(prepared.call().id().into_uuid())
@@ -1559,7 +1579,7 @@ impl PostgresModelCallRepository {
             .ok_or(ModelCallCorruption::Missing(
                 "ambiguous authorization model call",
             ))?;
-            let stored = decode_model_call(stored)?;
+            let stored = decode_model_call(stored, session)?;
             if stored.state()
                 == ModelCallReconstitutionState::Terminal(ModelCallDisposition::Cancelled)
             {
@@ -5274,19 +5294,37 @@ async fn load_live_turn_calls(
     });
     let recovery_call: Option<Uuid> = lifecycle.try_get("recovery_model_call_id")?;
     let rows = sqlx::query(
-        "SELECT model_call_id, turn_id, turn_attempt_id,
-                selection_kind, direct_model_selection_id,
-                frozen_model_alias_id, frozen_alias_selected_direct_id,
-                resolved_provider_model_identity_id, context_frontier_id,
-                state_kind, terminal_disposition_kind
-           FROM model_call
-         WHERE session_id = $1
-            AND turn_id = $2
+        "SELECT call.model_call_id, call.turn_id, call.turn_attempt_id,
+                call.selection_kind, call.direct_model_selection_id,
+                call.frozen_model_alias_id, call.frozen_alias_selected_direct_id,
+                call.resolved_provider_model_identity_id, call.context_frontier_id,
+                call.state_kind, call.terminal_disposition_kind,
+                manifest.turn_instruction_manifest_id,
+                manifest.boundary_kind AS instruction_manifest_boundary_kind,
+                manifest.eligibility_hash_algorithm
+                    AS instruction_eligibility_hash_algorithm,
+                manifest.eligibility_hash AS instruction_eligibility_hash,
+                manifest.admitted_set_hash_algorithm
+                    AS instruction_admitted_set_hash_algorithm,
+                manifest.admitted_set_hash AS instruction_admitted_set_hash,
+                manifest.manifest_hash_algorithm
+                    AS instruction_manifest_hash_algorithm,
+                manifest.manifest_hash AS instruction_manifest_hash,
+                discovery.scan_complete AS instruction_discovery_complete
+           FROM model_call AS call
+      LEFT JOIN turn_instruction_manifest AS manifest
+             ON manifest.turn_instruction_manifest_id = call.turn_instruction_manifest_id
+            AND manifest.session_id = call.session_id
+            AND manifest.turn_id = call.turn_id
+      LEFT JOIN instruction_discovery AS discovery
+             ON discovery.instruction_discovery_id = manifest.instruction_discovery_id
+         WHERE call.session_id = $1
+            AND call.turn_id = $2
             AND (
-                state_kind <> 'terminal'
-                OR model_call_id = $3
+                call.state_kind <> 'terminal'
+                OR call.model_call_id = $3
             )
-          ORDER BY model_call_id",
+          ORDER BY call.model_call_id",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
@@ -5296,12 +5334,17 @@ async fn load_live_turn_calls(
     Ok((
         pinned_target,
         rows.into_iter()
-            .map(decode_model_call)
+            .map(|row| decode_model_call(row, session))
             .collect::<Result<_, _>>()?,
     ))
 }
 
-fn decode_model_call(row: PgRow) -> Result<ModelCallReconstitutionInput, ModelCallRepositoryError> {
+fn decode_model_call(
+    row: PgRow,
+    session: SessionId,
+) -> Result<ModelCallReconstitutionInput, ModelCallRepositoryError> {
+    let turn = TurnId::from_uuid(required(&row, "turn_id")?);
+    authenticate_model_call_instruction_manifest(&row, session, turn)?;
     let state_kind: String = required(&row, "state_kind")?;
     let terminal: Option<String> = row.try_get("terminal_disposition_kind")?;
     let state = match (state_kind.as_str(), terminal.as_deref()) {
@@ -5324,7 +5367,7 @@ fn decode_model_call(row: PgRow) -> Result<ModelCallReconstitutionInput, ModelCa
     };
     Ok(ModelCallReconstitutionInput::new(
         ModelCallId::from_uuid(required(&row, "model_call_id")?),
-        TurnId::from_uuid(required(&row, "turn_id")?),
+        turn,
         signalbox_domain::TurnAttemptId::from_uuid(required(&row, "turn_attempt_id")?),
         decode_selection(
             required(&row, "selection_kind")?,
@@ -5339,6 +5382,56 @@ fn decode_model_call(row: PgRow) -> Result<ModelCallReconstitutionInput, ModelCa
         signalbox_domain::ContextFrontierId::from_uuid(required(&row, "context_frontier_id")?),
         state,
     ))
+}
+
+pub(crate) fn authenticate_model_call_instruction_manifest(
+    row: &PgRow,
+    session: SessionId,
+    turn: TurnId,
+) -> Result<(), ModelCallRepositoryError> {
+    let manifest_id =
+        TurnInstructionManifestId::from_uuid(required(row, "turn_instruction_manifest_id")?);
+    let boundary_kind: String = required(row, "instruction_manifest_boundary_kind")?;
+    if boundary_kind != "turn_start" {
+        return Err(ModelCallCorruption::Inconsistent("turn instruction manifest boundary").into());
+    }
+    if !required::<bool>(row, "instruction_discovery_complete")? {
+        return Err(ModelCallCorruption::Inconsistent("instruction discovery completeness").into());
+    }
+    if required::<String>(row, "instruction_eligibility_hash_algorithm")? != "sha256_v1"
+        || required::<String>(row, "instruction_admitted_set_hash_algorithm")? != "sha256_v1"
+        || required::<String>(row, "instruction_manifest_hash_algorithm")? != "sha256_v1"
+    {
+        return Err(
+            ModelCallCorruption::Inconsistent("turn instruction manifest hash algorithm").into(),
+        );
+    }
+    let eligibility_hash: Vec<u8> = required(row, "instruction_eligibility_hash")?;
+    let admitted_set_hash: Vec<u8> = required(row, "instruction_admitted_set_hash")?;
+    let manifest_hash: Vec<u8> = required(row, "instruction_manifest_hash")?;
+    let eligibility_hash: [u8; 32] = eligibility_hash
+        .try_into()
+        .map_err(|_| ModelCallCorruption::Inconsistent("instruction eligibility hash"))?;
+    let admitted_set_hash: [u8; 32] = admitted_set_hash
+        .try_into()
+        .map_err(|_| ModelCallCorruption::Inconsistent("instruction admitted-set hash"))?;
+    let manifest_hash: [u8; 32] = manifest_hash
+        .try_into()
+        .map_err(|_| ModelCallCorruption::Inconsistent("instruction manifest hash"))?;
+    TurnInstructionManifest::reconstitute_empty_turn_start(
+        manifest_id,
+        session,
+        turn,
+        EmptyTurnInstructionManifestEvidence {
+            eligibility_hash: InstructionDigest::from_sha256(eligibility_hash),
+            admitted_set_hash: InstructionDigest::from_sha256(admitted_set_hash),
+            manifest_hash: InstructionDigest::from_sha256(manifest_hash),
+        },
+    )
+    .ok_or(ModelCallCorruption::Inconsistent(
+        "turn instruction manifest authentication",
+    ))?;
+    Ok(())
 }
 
 fn decode_selection(
@@ -5967,15 +6060,71 @@ pub(crate) async fn insert_prepared_call(
     .await?
     .rows_affected();
     require_single(pinned_rows, "turn-level provider target pin")?;
+    let instruction_manifest = sqlx::query(
+        "SELECT m.turn_instruction_manifest_id,
+                m.eligibility_hash_algorithm, m.eligibility_hash,
+                m.admitted_set_hash_algorithm, m.admitted_set_hash,
+                m.manifest_hash_algorithm, m.manifest_hash, d.scan_complete
+           FROM turn_instruction_manifest AS m
+           JOIN instruction_discovery AS d
+             ON d.instruction_discovery_id = m.instruction_discovery_id
+          WHERE m.session_id = $1
+            AND m.turn_id = $2
+            AND m.boundary_kind = 'turn_start'",
+    )
+    .bind(session_id_to_uuid(prepared.session()))
+    .bind(turn_id_to_uuid(prepared.turn()))
+    .fetch_optional(&mut *connection)
+    .await?
+    .ok_or(ModelCallCorruption::Missing("turn instruction manifest"))?;
+    if !instruction_manifest.try_get::<bool, _>("scan_complete")? {
+        return Err(ModelCallCorruption::Inconsistent("instruction discovery completeness").into());
+    }
+    if instruction_manifest.try_get::<String, _>("eligibility_hash_algorithm")? != "sha256_v1"
+        || instruction_manifest.try_get::<String, _>("admitted_set_hash_algorithm")? != "sha256_v1"
+        || instruction_manifest.try_get::<String, _>("manifest_hash_algorithm")? != "sha256_v1"
+    {
+        return Err(
+            ModelCallCorruption::Inconsistent("turn instruction manifest hash algorithm").into(),
+        );
+    }
+    let instruction_manifest_id = TurnInstructionManifestId::from_uuid(
+        instruction_manifest.try_get("turn_instruction_manifest_id")?,
+    );
+    let eligibility_hash: Vec<u8> = instruction_manifest.try_get("eligibility_hash")?;
+    let admitted_set_hash: Vec<u8> = instruction_manifest.try_get("admitted_set_hash")?;
+    let manifest_hash: Vec<u8> = instruction_manifest.try_get("manifest_hash")?;
+    let eligibility_hash: [u8; 32] = eligibility_hash
+        .try_into()
+        .map_err(|_| ModelCallCorruption::Inconsistent("instruction eligibility hash"))?;
+    let admitted_set_hash: [u8; 32] = admitted_set_hash
+        .try_into()
+        .map_err(|_| ModelCallCorruption::Inconsistent("instruction admitted-set hash"))?;
+    let manifest_hash: [u8; 32] = manifest_hash
+        .try_into()
+        .map_err(|_| ModelCallCorruption::Inconsistent("instruction manifest hash"))?;
+    TurnInstructionManifest::reconstitute_empty_turn_start(
+        instruction_manifest_id,
+        prepared.session(),
+        prepared.turn(),
+        EmptyTurnInstructionManifestEvidence {
+            eligibility_hash: InstructionDigest::from_sha256(eligibility_hash),
+            admitted_set_hash: InstructionDigest::from_sha256(admitted_set_hash),
+            manifest_hash: InstructionDigest::from_sha256(manifest_hash),
+        },
+    )
+    .ok_or(ModelCallCorruption::Inconsistent(
+        "turn instruction manifest authentication",
+    ))?;
     sqlx::query(
         "INSERT INTO model_call
             (model_call_id, turn_id, session_id, turn_attempt_id,
              selection_kind, direct_model_selection_id, frozen_model_alias_id,
              frozen_alias_selected_direct_id, resolved_provider_model_identity_id,
              context_frontier_id, credential_reference,
-             usage_input_includes_cache_tokens, state_kind,
+             usage_input_includes_cache_tokens, turn_instruction_manifest_id, state_kind,
              terminal_disposition_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'prepared', NULL)",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'prepared', NULL)",
     )
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(prepared.turn()))
@@ -5989,6 +6138,7 @@ pub(crate) async fn insert_prepared_call(
     .bind(call.frontier().snapshot().into_uuid())
     .bind(credential_reference.as_str())
     .bind(input_includes_cache_tokens)
+    .bind(instruction_manifest_id.into_uuid())
     .execute(&mut *connection)
     .await?;
     freeze_recorded_user_overrides(connection, prepared.session(), call.id()).await?;

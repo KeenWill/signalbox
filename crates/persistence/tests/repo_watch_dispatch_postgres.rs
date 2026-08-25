@@ -4,7 +4,11 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+mod support;
+
 use std::{collections::HashSet, error::Error, num::NonZeroU64, time::Duration};
+
+use support::record_empty_instruction_manifest;
 
 use rust_decimal::Decimal;
 use signalbox_application::{
@@ -1470,6 +1474,10 @@ async fn checkpoint_delegated_approval_at(
     };
     let turn = activated.turn();
     drop(activated);
+    // Model-call preparation authenticates the turn-start instruction
+    // manifest the daemon records after activation; this fixture drives
+    // preparation directly, so it records the empty manifest itself.
+    record_empty_instruction_manifest(pool, session).await?;
 
     let repository = PostgresModelCallRepository::new(
         pool.clone(),
@@ -5971,6 +5979,7 @@ async fn inv069_expiry_retires_a_lease_without_stopping_its_successor_goal()
     .bind(session.as_uuid())
     .fetch_one(&fixture.pool)
     .await?;
+    record_empty_instruction_manifest(&fixture.pool, session).await?;
     let model_calls = PostgresModelCallRepository::new(
         fixture.pool.clone(),
         model_targets(),

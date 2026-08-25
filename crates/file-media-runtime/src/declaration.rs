@@ -3,8 +3,7 @@ use std::{error::Error, fmt, future::Future, pin::Pin};
 use crate::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileReaderName,
     FileReaderProviderName, FileReaderRevision, FileUse, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode, ValidatedFile,
-    VerifiedBlobSource,
+    ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode, VerifiedBlobSource,
 };
 
 // numeric-bound: ceiling - bounds retained model-facing view-description memory
@@ -395,8 +394,14 @@ pub struct FileMediaProviderValidationRequest {
 /// Provider request to interpret one validated file through one view.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileMediaProviderReadRequest {
-    /// Registry-produced validation evidence.
-    pub file: ValidatedFile,
+    /// Exact semantic use whose bytes the registry validated.
+    pub source: FileUse,
+    /// Registry-selected canonical media type.
+    pub detected_media_type: CanonicalMediaType,
+    /// Registry-admitted validation evidence.
+    pub validation: crate::ValidationEvidence,
+    /// Registry-sanitized provider metadata.
+    pub metadata: crate::BoundedMetadata,
     /// Exact provider-owned view.
     pub view: ReadViewName,
     /// Closed initial-options or continuation input.

@@ -31,6 +31,9 @@ profile does and does not provide are verified against this PR
 (`agent/exec-sandbox-net-fence`). Its explicit container-process-namespace
 variant is verified against this PR (`agent/kubernetes-bwrap-proc`).
 
+Direct unsandboxed Git execution from sandbox-created linked worktrees is
+verified against this PR (`agent/unsandboxed-worktree-gitdir`).
+
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
 
@@ -52,6 +55,9 @@ implementing child stack.
 
 The configured workspace-instruction root grammar below is verified against PR
 #798 (`agent/agent-docs-skills-foundation`).
+
+The daemon-tool `workspace_root` canonical grammar below is re-verified against
+PR #810 (`agent/agent-docs-skills-model-call-followup`).
 
 The runtime-bridge invalid-schema diagnostic fields and redaction boundary are
 verified against this PR (`agent/tool-evals-mcp`).
@@ -848,8 +854,10 @@ four deployment-mapped tool families in the same closed-table style as
   credential-free job-log redirect remains the bounded public-HTTPS exception
   owned by [tool-loop](tool-loop.md);
 - `github` selects the same adapter, profile, and policy;
-- `workspace` selects adapter `local` and supplies one absolute
-  `workspace_root`; and
+- `workspace` selects adapter `local` and supplies one nonempty, absolute,
+  lexically canonical UTF-8 `workspace_root` of at most 4,096 bytes with no NUL;
+  it begins with `/`, has one or more nonempty components separated by single
+  `/` characters, and has no `.`, `..`, or trailing-separator component; and
 - `conversations` selects adapter `application` and has no credential, egress,
   or filesystem field.
 
@@ -859,8 +867,9 @@ preserves the base catalog, including the code-host suite, without constructing
 pull-request, workspace, conversation, local Git, or execution dependencies.
 When the array is present it must already be complete: an unknown, missing, or
 duplicate family; an unknown field; any fixed value with another spelling; a
-relative workspace root; or a dependency field on the wrong family is a
-sanitized configuration failure.
+relative, filesystem-root, noncanonical, overlong, or NUL-containing workspace
+root; or a dependency field on the wrong family is a sanitized configuration
+failure.
 
 The complete mapped composition also requires one `[git_identity]` table with
 exactly `author_name` and `author_email`. Both are nonempty, at most the Git
@@ -1169,6 +1178,26 @@ the durable approval wait are owned by
 [Approval policy and decision sources](tool-loop.md#approval-policy-and-decision-sources).
 Only the explicit `[tool_approval_postures]` table changes a declaration's
 resolved posture; family composition itself does not.
+
+On Linux, `unsandboxed_exec` pins the requested host working directory before
+launch. When the direct program is Git and that directory is a linked worktree
+whose `.git` marker names an administration directory below the sandbox-only
+`/workspace` path, execution pins the corresponding directory below the injected
+workspace root and supplies the pinned administration and worktree paths through
+Git's environment. Discovery stops at the first `.git` entry, so a nested clone
+or submodule never inherits an outer worktree's environment, and explicit Git
+repository selectors (`-C`, `--git-dir`, or `--work-tree`) suppress injection.
+The repository-creating commands `init` and `clone` also suppress injection,
+because each establishes a new repository rather than operating on the current
+one, and an inherited `GIT_WORK_TREE` makes `clone` refuse its destination.
+Before injection, execution atomically rewrites the linked-worktree
+administration directory's sandbox-only `gitdir` backlink to the corresponding
+host marker path so host-side worktree maintenance does not prune the live
+worktree. That durable metadata write exposes the host workspace path to the
+sandbox-side view and can make sandbox-side worktree maintenance unable to
+resolve the backlink; callers needing that view must recreate the linked
+worktree there. Other programs and other `.git` marker shapes receive no
+Git-specific environment or metadata mutation.
 
 `sandboxed_exec` and `cargo_diagnostics` share one daemon-local bubblewrap
 profile. Its name claims more than it delivers, so this page recites the launch
