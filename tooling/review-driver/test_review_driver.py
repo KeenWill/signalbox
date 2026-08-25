@@ -13,6 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent))
 
 from review_driver import (  # noqa: E402
+    CONCERNS,
     CompletedPass,
     DriverFailure,
     PassIdentities,
@@ -20,8 +21,11 @@ from review_driver import (  # noqa: E402
     ReviewDriver,
     TranscriptSnapshot,
     attempt_identities,
+    frozen_configuration_digest,
     parser,
+    reserved_template_names,
     run_process,
+    template_catalog_versions,
     transcript_snapshot,
 )
 
@@ -129,6 +133,9 @@ class FakeSessions:
         self.transcript_reads = 0
         self.terminal_after_interruption = False
 
+    def template_versions(self, names):
+        return {name: "1" for name in names}
+
     def commission(
         self,
         facts: PullRequestFacts,
@@ -159,6 +166,9 @@ class FakeSessions:
 
 
 class UnusedSessions:
+
+    def template_versions(self, names):
+        return {name: "1" for name in names}
     def commission(self, *args, **kwargs) -> str:
         raise AssertionError("a complete attempt must not commission a session")
 
@@ -172,6 +182,9 @@ class TerminalRecheckSessions:
     def __init__(self) -> None:
         self.read_index = 0
         self.turn_id = str(uuid.UUID(int=3))
+
+    def template_versions(self, names):
+        return {name: "1" for name in names}
 
     def commission(
         self,
@@ -202,6 +215,112 @@ class TerminalRecheckSessions:
             turn_state=state,
             terminal_frontier_id=frontier,
             assistant_text="imported context",
+        )
+
+
+class ConcernFanoutCli(FakeReviewCli):
+    def __init__(self) -> None:
+        super().__init__(state="awaiting_concerns")
+        self.recorded_concerns: list[tuple[str, str]] = []
+
+    def record_import_outcome(
+        self,
+        attempt_id: str,
+        completed: CompletedPass,
+        outcome: str,
+        context_digest: str | None,
+    ) -> None:
+        raise AssertionError("the fan-out fixture starts after import")
+
+    def record_concern_outcome(
+        self, attempt_id: str, concern: str, completed: CompletedPass, outcome: str
+    ) -> None:
+        self.recorded_concerns.append((concern, outcome))
+
+
+class ConcernFanoutSessions:
+    """Terminalizes one chosen member unsuccessfully and the rest normally."""
+
+    def __init__(self, failing_index: int = 0) -> None:
+        self.commissioned: list[str] = []
+        self.failing_index = failing_index
+
+    def template_versions(self, names):
+        return {name: "1" for name in names}
+
+    def commission(
+        self,
+        facts: PullRequestFacts,
+        template: str,
+        command_id: str,
+        statement: str,
+        content: str,
+    ) -> str:
+        session = str(uuid.uuid5(uuid.NAMESPACE_URL, command_id))
+        if session not in self.commissioned:
+            self.commissioned.append(session)
+        return session
+
+    def transcript(
+        self, session_id: str, turn_id: str | None = None
+    ) -> TranscriptSnapshot:
+        failing = self.commissioned.index(session_id) == self.failing_index
+        return TranscriptSnapshot(
+            session_id=session_id,
+            accepted_input_id=str(uuid.UUID(int=2)),
+            turn_id=str(uuid.UUID(int=3)),
+            turn_state="failed" if failing else "completed",
+            terminal_frontier_id=str(uuid.UUID(int=4)),
+            assistant_text="concern output",
+        )
+
+
+class RecordingImportCli(FakeReviewCli):
+    def __init__(self) -> None:
+        super().__init__(state="awaiting_import")
+        self.pass_outcomes: list[str] = []
+        self.import_outcomes: list[tuple[str, str | None]] = []
+
+    def complete_pass(self, completed: CompletedPass, outcome: str) -> None:
+        super().complete_pass(completed, outcome)
+        self.pass_outcomes.append(outcome)
+
+    def record_import_outcome(
+        self,
+        attempt_id: str,
+        completed: CompletedPass,
+        outcome: str,
+        context_digest: str | None,
+    ) -> None:
+        self.import_outcomes.append((outcome, context_digest))
+
+
+class ContextlessImportSessions:
+    """A turn that reaches `completed` without producing imported context."""
+
+    def template_versions(self, names):
+        return {name: "1" for name in names}
+
+    def commission(
+        self,
+        facts: PullRequestFacts,
+        template: str,
+        command_id: str,
+        statement: str,
+        content: str,
+    ) -> str:
+        return str(uuid.UUID(int=1))
+
+    def transcript(
+        self, session_id: str, turn_id: str | None = None
+    ) -> TranscriptSnapshot:
+        return TranscriptSnapshot(
+            session_id=session_id,
+            accepted_input_id=str(uuid.UUID(int=2)),
+            turn_id=str(uuid.UUID(int=3)),
+            turn_state="completed",
+            terminal_frontier_id=str(uuid.UUID(int=4)),
+            assistant_text="   \n  ",
         )
 
 
@@ -239,7 +358,12 @@ class ReviewDriverTests(unittest.TestCase):
         sessions.terminal_after_interruption = True
         resumed = driver.run(REPOSITORY, PULL_REQUEST)
 
-        expected = attempt_identities(facts)
+        expected = attempt_identities(
+            facts,
+            frozen_configuration_digest(
+                sessions.template_versions(reserved_template_names())
+            ),
+        )
         self.assertTrue(cli.activation_interrupted)
         self.assertEqual(resumed, expected)
         self.assertEqual(len(cli.targets), 1)
@@ -269,13 +393,11 @@ class ReviewDriverTests(unittest.TestCase):
                 },
             },
             {
-                "type": "transcript_text_entry",
+                "type": "transcript_user_entry",
                 "entry_index": "1",
-                "entry": {
-                    "type": "user",
-                    "accepted_input_id": first_input,
-                    "turn_id": first_turn,
-                },
+                "accepted_input_id": first_input,
+                "turn_id": first_turn,
+                "content": [],
             },
             {
                 "type": "transcript_text_entry",
@@ -288,13 +410,11 @@ class ReviewDriverTests(unittest.TestCase):
                 "content_fragment": "first output",
             },
             {
-                "type": "transcript_text_entry",
+                "type": "transcript_user_entry",
                 "entry_index": "3",
-                "entry": {
-                    "type": "user",
-                    "accepted_input_id": str(uuid.UUID(int=4)),
-                    "turn_id": second_turn,
-                },
+                "accepted_input_id": str(uuid.UUID(int=4)),
+                "turn_id": second_turn,
+                "content": [],
             },
             {
                 "type": "transcript_text_entry",
@@ -315,6 +435,51 @@ class ReviewDriverTests(unittest.TestCase):
         self.assertEqual(snapshot.turn_state, "active_running")
         self.assertEqual(snapshot.assistant_text, "first output")
 
+    def test_transcript_recovers_accepted_input_after_the_turn_leaves_queued(
+        self,
+    ) -> None:
+        turn = str(uuid.UUID(int=3))
+        accepted_input = str(uuid.UUID(int=2))
+        # Only `queued` carries `accepted_input_id` on the turn projection, so a
+        # turn that has already started exposes that identity exclusively
+        # through its native `transcript_user_entry` member.
+        messages = [
+            {
+                "type": "transcript_turn",
+                "turn_id": turn,
+                "acceptance_position": "1",
+                "state": {"type": "active_running"},
+            },
+            {
+                "type": "transcript_user_entry",
+                "entry_index": "1",
+                "accepted_input_id": accepted_input,
+                "turn_id": turn,
+                "content": [],
+            },
+        ]
+
+        snapshot = transcript_snapshot(messages, str(uuid.UUID(int=1)))
+
+        self.assertEqual(snapshot.accepted_input_id, accepted_input)
+        self.assertEqual(snapshot.turn_id, turn)
+        self.assertEqual(snapshot.turn_state, "active_running")
+
+    def test_duration_arguments_reject_non_finite_values(self) -> None:
+        for option in ("--timeout-seconds", "--poll-seconds"):
+            for value in ("nan", "inf", "-inf", "0"):
+                with self.subTest(option=option, value=value):
+                    with self.assertRaises(SystemExit):
+                        parser().parse_args(
+                            [
+                                REPOSITORY,
+                                str(PULL_REQUEST),
+                                "/tmp/signalbox.sock",
+                                option,
+                                value,
+                            ]
+                        )
+
     def test_complete_pass_rechecks_exact_turn_terminality(self) -> None:
         facts = pull_request_facts(HEAD_ONE)
         cli = FakeReviewCli(state="awaiting_import")
@@ -326,6 +491,87 @@ class ReviewDriverTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.code, "terminal-evidence-invalid")
         self.assertEqual(len(cli.completed_passes), 0)
+
+    def test_fanout_commissions_every_concern_despite_an_early_failure(self) -> None:
+        facts = pull_request_facts(HEAD_ONE)
+        cli = ConcernFanoutCli()
+        sessions = ConcernFanoutSessions(failing_index=0)
+        driver = ReviewDriver(FakeGitHub(facts), cli, sessions, 1.0, 0.001)
+
+        with self.assertRaises(DriverFailure) as caught:
+            driver.run(REPOSITORY, PULL_REQUEST)
+
+        # Every durable concern slot must carry a recorded claim; the daemon
+        # holds the attempt at `awaiting_concerns` until all of them do, so a
+        # member skipped here could never be recorded by a replay.
+        self.assertEqual(len(sessions.commissioned), len(CONCERNS))
+        self.assertEqual(
+            [concern for concern, _ in cli.recorded_concerns],
+            [concern for concern, _ in CONCERNS],
+        )
+        self.assertEqual(cli.recorded_concerns[0][1], "failed")
+        self.assertEqual(
+            [outcome for _, outcome in cli.recorded_concerns[1:]],
+            ["succeeded"] * (len(CONCERNS) - 1),
+        )
+        self.assertEqual(caught.exception.code, "stage-terminal-unsuccessful")
+
+    def test_import_without_context_is_not_a_successful_operation(self) -> None:
+        facts = pull_request_facts(HEAD_ONE)
+        cli = RecordingImportCli()
+        driver = ReviewDriver(
+            FakeGitHub(facts), cli, ContextlessImportSessions(), 1.0, 0.001
+        )
+
+        with self.assertRaises(DriverFailure) as caught:
+            driver.run(REPOSITORY, PULL_REQUEST)
+
+        # The terminal turn still authenticates the pass, but the workflow
+        # operation must not advance the attempt on the turn lifecycle alone.
+        self.assertEqual(cli.pass_outcomes, ["succeeded"])
+        self.assertEqual(cli.import_outcomes, [("failed", None)])
+        self.assertEqual(caught.exception.code, "stage-terminal-unsuccessful")
+        self.assertEqual(caught.exception.stage, "import")
+
+    def test_changed_frozen_configuration_creates_a_new_attempt(self) -> None:
+        facts = pull_request_facts(HEAD_ONE)
+        catalog = {name: "1" for name in reserved_template_names()}
+        before = attempt_identities(facts, frozen_configuration_digest(catalog))
+        moved_template = attempt_identities(
+            facts,
+            frozen_configuration_digest({**catalog, "review-import": "2"}),
+        )
+        with patch(
+            "review_driver.CONCERNS",
+            CONCERNS + (("performance", "review-concern-performance"),),
+        ):
+            widened_set = attempt_identities(
+                facts, frozen_configuration_digest(catalog)
+            )
+        with patch("review_driver.CONCERN_SET_VERSION", "initial-six-v1"):
+            bumped_version = attempt_identities(
+                facts, frozen_configuration_digest(catalog)
+            )
+
+        # The target is the immutable snapshot and must not fork per
+        # configuration; the attempt and every command it owns must.
+        for changed in (moved_template, widened_set, bumped_version):
+            self.assertEqual(before.target, changed.target)
+            self.assertNotEqual(before.attempt, changed.attempt)
+
+    def test_template_catalog_projects_only_the_reserved_templates(self) -> None:
+        messages = [
+            {"type": "templates_start"},
+            {"type": "template_summary", "name": "review-import", "version": "3"},
+            {"type": "template_summary", "name": "unrelated-template", "version": "9"},
+            {"type": "templates_end", "template_count": "2"},
+        ]
+
+        projected = template_catalog_versions(
+            messages, reserved_template_names()
+        )
+
+        self.assertEqual(projected, {"review-import": "3"})
 
     def test_moved_head_creates_a_new_target_and_attempt(self) -> None:
         first_facts = pull_request_facts(HEAD_ONE)

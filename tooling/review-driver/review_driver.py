@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import socket
@@ -114,6 +115,17 @@ class TranscriptSnapshot:
 
 
 @dataclass(frozen=True)
+class BoundPass:
+    """One commissioned pass whose durable run and activation already exist."""
+
+    identities: PassIdentities
+    stage: str
+    session_id: str
+    accepted_input_id: str
+    origin_turn_id: str
+
+
+@dataclass(frozen=True)
 class CompletedPass:
     identities: PassIdentities
     session_id: str
@@ -177,8 +189,40 @@ class SessionBoundary(Protocol):
         self, session_id: str, turn_id: str | None = None
     ) -> TranscriptSnapshot: ...
 
+    def template_versions(self, names: Sequence[str]) -> dict[str, str]: ...
+
+
+def frozen_configuration_digest(template_versions: dict[str, str]) -> str:
+    """Digests every orchestration input this client freezes into one attempt.
+
+    The reserved template names are constants, so they alone cannot witness a
+    change of template content.  The catalog version each reserved name resolves
+    to can: it is the only content-correlated template fact reachable before the
+    attempt exists, because a resolved `ReviewTemplateDigest` is reported only
+    by `read-orchestration`, on an attempt that has already been started.
+    """
+    material = json.dumps(
+        {
+            "concern_set_version": CONCERN_SET_VERSION,
+            "stage_templates": STAGE_TEMPLATES,
+            "concerns": [list(concern) for concern in CONCERNS],
+            "template_versions": template_versions,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def reserved_template_names() -> tuple[str, ...]:
+    """The exact templates whose content this attempt freezes."""
+    return tuple(
+        sorted({*STAGE_TEMPLATES.values(), *(template for _, template in CONCERNS)})
+    )
+
 
 def stable_id(facts: PullRequestFacts, role: str) -> str:
+    """Identity of one fact of the immutable pull-request snapshot alone."""
     material = (
         f"signalbox-review-driver:v1:{facts.repository}:{facts.number}:"
         f"{facts.head_sha}:{facts.base_sha}:{role}"
@@ -186,22 +230,50 @@ def stable_id(facts: PullRequestFacts, role: str) -> str:
     return str(uuid.uuid5(IDENTITY_NAMESPACE, material))
 
 
-def attempt_identities(facts: PullRequestFacts) -> AttemptIdentities:
+def configured_id(facts: PullRequestFacts, configuration: str, role: str) -> str:
+    """Identity of one fact of the snapshot under the frozen configuration.
+
+    An unchanged payload replayed under the same command identity returns the
+    daemon's recorded receipt before it resolves any template, so an attempt
+    whose identity ignored the frozen configuration would report the superseded
+    attempt as complete instead of running the new one.
+    """
+    material = (
+        f"signalbox-review-driver:v1:{facts.repository}:{facts.number}:"
+        f"{facts.head_sha}:{facts.base_sha}:{configuration}:{role}"
+    )
+    return str(uuid.uuid5(IDENTITY_NAMESPACE, material))
+
+
+def attempt_identities(facts: PullRequestFacts, configuration: str) -> AttemptIdentities:
+    # The target is the immutable external snapshot and is therefore not
+    # configuration-scoped; one snapshot must not accumulate a target per
+    # configuration. Only the attempt and the commands it owns are.
     return AttemptIdentities(
         target=stable_id(facts, "target"),
-        attempt=stable_id(facts, "orchestration-attempt"),
+        attempt=configured_id(facts, configuration, "orchestration-attempt"),
     )
 
 
-def pass_identities(facts: PullRequestFacts, stage: str) -> PassIdentities:
+def pass_identities(
+    facts: PullRequestFacts, configuration: str, stage: str
+) -> PassIdentities:
     return PassIdentities(
-        commission_command=stable_id(facts, f"{stage}:commission-command"),
-        run=stable_id(facts, f"{stage}:run"),
-        review_pass=stable_id(facts, f"{stage}:pass"),
-        start_command=stable_id(facts, f"{stage}:start-command"),
-        activate_command=stable_id(facts, f"{stage}:activate-command"),
-        complete_command=stable_id(facts, f"{stage}:complete-command"),
-        stage_outcome_command=stable_id(facts, f"{stage}:outcome-command"),
+        commission_command=configured_id(
+            facts, configuration, f"{stage}:commission-command"
+        ),
+        run=configured_id(facts, configuration, f"{stage}:run"),
+        review_pass=configured_id(facts, configuration, f"{stage}:pass"),
+        start_command=configured_id(facts, configuration, f"{stage}:start-command"),
+        activate_command=configured_id(
+            facts, configuration, f"{stage}:activate-command"
+        ),
+        complete_command=configured_id(
+            facts, configuration, f"{stage}:complete-command"
+        ),
+        stage_outcome_command=configured_id(
+            facts, configuration, f"{stage}:outcome-command"
+        ),
     )
 
 
@@ -437,7 +509,9 @@ class UnixSessionClient:
         self.socket_path = socket_path
         self.timeout_seconds = timeout_seconds
 
-    def _request(self, request: dict[str, object], *, sequence: bool) -> list[dict[str, object]]:
+    def _request(
+        self, request: dict[str, object], *, terminator: str | None = None
+    ) -> list[dict[str, object]]:
         frame = {"version": 1, "request_id": "1", "request": request}
         encoded = json.dumps(frame, separators=(",", ":")).encode("utf-8") + b"\n"
         messages: list[dict[str, object]] = []
@@ -488,10 +562,7 @@ class UnixSessionClient:
                                 f"{message.get('code', 'unknown')}",
                             )
                         messages.append(message)
-                        if (
-                            not sequence
-                            or message["type"] == "transcript_snapshot_end"
-                        ):
+                        if terminator is None or message["type"] == terminator:
                             return messages
         except TimeoutError as error:
             raise DriverFailure(
@@ -530,8 +601,7 @@ class UnixSessionClient:
                 },
                 "statement": statement,
                 "content": content,
-            },
-            sequence=False,
+            }
         )
         message = messages[0]
         session_id = message.get("session_id")
@@ -547,9 +617,43 @@ class UnixSessionClient:
         self, session_id: str, turn_id: str | None = None
     ) -> TranscriptSnapshot:
         messages = self._request(
-            {"type": "read_transcript", "session_id": session_id}, sequence=True
+            {"type": "read_transcript", "session_id": session_id},
+            terminator="transcript_snapshot_end",
         )
         return transcript_snapshot(messages, session_id, turn_id)
+
+    def template_versions(self, names: Sequence[str]) -> dict[str, str]:
+        messages = self._request(
+            {"type": "list_templates"}, terminator="templates_end"
+        )
+        return template_catalog_versions(messages, names)
+
+
+def template_catalog_versions(
+    messages: Sequence[dict[str, object]], names: Sequence[str]
+) -> dict[str, str]:
+    """Project the catalog versions of exactly the named reserved templates.
+
+    A name the catalog does not carry is simply absent, which changes this
+    material and lets the daemon's own fail-closed template resolution report
+    the missing library rather than inventing a second diagnostic here.
+    """
+    wanted = set(names)
+    versions: dict[str, str] = {}
+    for message in messages:
+        if message["type"] != "template_summary":
+            continue
+        name = message.get("name")
+        version = message.get("version")
+        if not isinstance(name, str) or not isinstance(version, str):
+            raise DriverFailure(
+                "socket-response-invalid",
+                "list-templates",
+                "daemon catalog contained an invalid template summary",
+            )
+        if name in wanted:
+            versions[name] = version
+    return versions
 
 
 def transcript_snapshot(
@@ -594,17 +698,22 @@ def transcript_snapshot(
                 frontiers[candidate_turn] = state["terminal_frontier_id"]
             if isinstance(state.get("accepted_input_id"), str):
                 accepted_inputs[candidate_turn] = state["accepted_input_id"]
+        elif message_type == "transcript_user_entry":
+            # The native accepted-input member is its own top-level message; it
+            # is the only transcript evidence of the accepted input once the
+            # owning turn has advanced past `queued`, whose state object is the
+            # sole turn projection carrying `accepted_input_id`.
+            entry_turn = message.get("turn_id")
+            accepted_input = message.get("accepted_input_id")
+            if isinstance(entry_turn, str) and isinstance(accepted_input, str):
+                accepted_inputs[entry_turn] = accepted_input
         elif message_type == "transcript_text_entry":
             entry = message.get("entry")
             index = message.get("entry_index")
             if not isinstance(entry, dict) or not isinstance(index, str):
                 continue
             entry_turn = entry.get("turn_id")
-            if entry.get("type") == "user" and isinstance(entry_turn, str):
-                accepted_input = entry.get("accepted_input_id")
-                if isinstance(accepted_input, str):
-                    accepted_inputs[entry_turn] = accepted_input
-            elif entry.get("type") == "assistant" and isinstance(entry_turn, str):
+            if entry.get("type") == "assistant" and isinstance(entry_turn, str):
                 assistant_entry_turns[index] = entry_turn
         elif message_type == "transcript_content":
             index = message.get("entry_index")
@@ -665,20 +774,23 @@ class ReviewDriver:
 
     def run(self, repository: str, pull_request: int) -> AttemptIdentities:
         facts = self.github.read_pull_request(repository, pull_request)
-        identities = attempt_identities(facts)
+        configuration = frozen_configuration_digest(
+            self.sessions.template_versions(reserved_template_names())
+        )
+        identities = attempt_identities(facts, configuration)
         self.cli.create_target(
             facts, identities.target, stable_id(facts, "create-target-command")
         )
         self.cli.start_orchestration(
             identities.target,
             identities.attempt,
-            stable_id(facts, "start-orchestration-command"),
+            configured_id(facts, configuration, "start-orchestration-command"),
         )
         state = self.cli.read_orchestration_state(identities.attempt)
         if state == "complete":
             return identities
         if state == "awaiting_import":
-            self._drive_import(facts, identities)
+            self._drive_import(facts, identities, configuration)
             state = self.cli.read_orchestration_state(identities.attempt)
         if state == "complete":
             return identities
@@ -689,7 +801,7 @@ class ReviewDriver:
                 "the durable orchestration attempt cannot advance",
             )
         if state == "awaiting_concerns":
-            self._drive_concerns_to_typed_boundary(facts, identities)
+            self._drive_concerns_to_typed_boundary(facts, identities, configuration)
         raise DriverFailure(
             "resume-stage-not-implemented",
             state,
@@ -697,7 +809,10 @@ class ReviewDriver:
         )
 
     def _drive_import(
-        self, facts: PullRequestFacts, attempt: AttemptIdentities
+        self,
+        facts: PullRequestFacts,
+        attempt: AttemptIdentities,
+        configuration: str,
     ) -> None:
         content = (
             f"Import repository evidence for {facts.repository} pull request "
@@ -705,59 +820,107 @@ class ReviewDriver:
         )
         completed = self._drive_session_pass(
             facts=facts,
+            configuration=configuration,
             stage="import",
             template=STAGE_TEMPLATES["import"],
             workflow="import-external-context",
             statement=f"Import exact review context for pull request {facts.number}.",
             content=content,
         )
-        outcome = pass_outcome(completed.turn_state)
-        self.cli.complete_pass(completed, outcome)
+        # The turn lifecycle authenticates the pass, never the workflow
+        # operation.  `ReviewImportOutcome::Incomplete` is exactly "import did
+        # not produce usable context", a state a `completed` turn reaches
+        # whenever the session reports that repository evidence was
+        # unavailable, so the stage outcome additionally requires imported
+        # context to exist before the attempt advances to concern fan-out.
+        pass_result = pass_outcome(completed.turn_state)
+        self.cli.complete_pass(completed, pass_result)
+        outcome = pass_result
         context_digest = None
+        detail = f"import session ended as {completed.turn_state}"
         if outcome == "succeeded":
-            context_digest = hashlib.sha256(
-                completed.assistant_text.encode("utf-8")
-            ).hexdigest()
+            if completed.assistant_text.strip():
+                context_digest = hashlib.sha256(
+                    completed.assistant_text.encode("utf-8")
+                ).hexdigest()
+            else:
+                outcome = "failed"
+                detail = (
+                    "the import turn completed without producing imported context"
+                )
         self.cli.record_import_outcome(
             attempt.attempt, completed, outcome, context_digest
         )
         if outcome != "succeeded":
-            raise DriverFailure(
-                "stage-terminal-unsuccessful",
-                "import",
-                f"import session ended as {completed.turn_state}",
-            )
+            raise DriverFailure("stage-terminal-unsuccessful", "import", detail)
 
     def _drive_concerns_to_typed_boundary(
-        self, facts: PullRequestFacts, attempt: AttemptIdentities
+        self,
+        facts: PullRequestFacts,
+        attempt: AttemptIdentities,
+        configuration: str,
     ) -> None:
-        successful: list[str] = []
+        # Commission every configured member before collecting any terminal
+        # outcome.  The daemon holds the attempt at `awaiting_concerns` until
+        # all members carry a recorded claim, and every command identity here is
+        # derived from the immutable snapshot, so aborting the loop on the first
+        # unsuccessful member would strand the remaining durable slots forever:
+        # the replay reaches the same failed member and stops at the same point.
+        # Fanning out first also lets the daemon run the members concurrently
+        # rather than serializing each behind its predecessor's terminal turn.
+        bound: list[tuple[str, BoundPass]] = []
+        failures: list[str] = []
         for concern, template in CONCERNS:
-            completed = self._drive_session_pass(
-                facts=facts,
-                stage=f"concern:{concern}",
-                template=template,
-                workflow="read-only-review",
-                statement=(
-                    f"Review pull request {facts.number} for the {concern} concern."
-                ),
-                content=(
-                    f"Review exact head {facts.head_sha} against base {facts.base_sha}. "
-                    "Return findings through the daemon's typed review-result contract."
-                ),
-            )
-            outcome = pass_outcome(completed.turn_state)
-            if outcome != "succeeded":
+            try:
+                bound.append(
+                    (
+                        concern,
+                        self._commission_pass(
+                            facts=facts,
+                            configuration=configuration,
+                            stage=f"concern:{concern}",
+                            template=template,
+                            workflow="read-only-review",
+                            statement=(
+                                f"Review pull request {facts.number} for the "
+                                f"{concern} concern."
+                            ),
+                            content=(
+                                f"Review exact head {facts.head_sha} against base "
+                                f"{facts.base_sha}. Return findings through the "
+                                "daemon's typed review-result contract."
+                            ),
+                        ),
+                    )
+                )
+            except DriverFailure as error:
+                failures.append(f"{concern}:{error.code}")
+        successful: list[str] = []
+        unsuccessful: list[str] = []
+        for concern, pending in bound:
+            try:
+                completed = self._collect_pass(pending)
+                outcome = pass_outcome(completed.turn_state)
                 self.cli.complete_pass(completed, outcome)
                 self.cli.record_concern_outcome(
                     attempt.attempt, concern, completed, outcome
                 )
-                raise DriverFailure(
-                    "stage-terminal-unsuccessful",
-                    concern,
-                    f"concern session ended as {completed.turn_state}",
-                )
-            successful.append(concern)
+            except DriverFailure as error:
+                failures.append(f"{concern}:{error.code}")
+                continue
+            if outcome == "succeeded":
+                successful.append(concern)
+            else:
+                unsuccessful.append(f"{concern}={outcome}")
+        if failures or unsuccessful:
+            raise DriverFailure(
+                "stage-terminal-unsuccessful",
+                "concerns",
+                "the concern fan-out completed with members that did not succeed "
+                f"(succeeded: {','.join(successful) or 'none'}; "
+                f"unsuccessful: {','.join(unsuccessful) or 'none'}; "
+                f"errors: {','.join(failures) or 'none'})",
+            )
         raise DriverFailure(
             "typed-stage-output-unavailable",
             "concerns",
@@ -770,13 +933,39 @@ class ReviewDriver:
         self,
         *,
         facts: PullRequestFacts,
+        configuration: str,
         stage: str,
         template: str,
         workflow: str,
         statement: str,
         content: str,
     ) -> CompletedPass:
-        identities = pass_identities(facts, stage)
+        return self._collect_pass(
+            self._commission_pass(
+                facts=facts,
+                configuration=configuration,
+                stage=stage,
+                template=template,
+                workflow=workflow,
+                statement=statement,
+                content=content,
+            )
+        )
+
+    def _commission_pass(
+        self,
+        *,
+        facts: PullRequestFacts,
+        configuration: str,
+        stage: str,
+        template: str,
+        workflow: str,
+        statement: str,
+        content: str,
+    ) -> BoundPass:
+        """Commissions one pass and binds its durable run without waiting for
+        the terminal turn, so a fan-out can start every member first."""
+        identities = pass_identities(facts, configuration, stage)
         session_id = self.sessions.commission(
             facts,
             template,
@@ -821,6 +1010,22 @@ class ReviewDriver:
                     "the commissioned turn terminalized before its pass could be activated",
                 ) from error
             raise
+        return BoundPass(
+            identities=identities,
+            stage=stage,
+            session_id=session_id,
+            accepted_input_id=accepted_input_id,
+            origin_turn_id=origin_turn_id,
+        )
+
+    def _collect_pass(self, bound: BoundPass) -> CompletedPass:
+        """Waits for one already-commissioned pass to terminalize and
+        re-verifies its exact turn."""
+        stage = bound.stage
+        session_id = bound.session_id
+        accepted_input_id = bound.accepted_input_id
+        origin_turn_id = bound.origin_turn_id
+        identities = bound.identities
         snapshot = self._wait_for(
             session_id,
             stage,
@@ -883,7 +1088,7 @@ class ReviewDriver:
 
 
 def facts_target_id(facts: PullRequestFacts) -> str:
-    return attempt_identities(facts).target
+    return stable_id(facts, "target")
 
 
 def pass_outcome(turn_state: str) -> str:
@@ -946,9 +1151,15 @@ def positive_float(value: str) -> float:
     try:
         parsed = float(value)
     except ValueError as error:
-        raise argparse.ArgumentTypeError("value must be positive") from error
-    if parsed <= 0:
-        raise argparse.ArgumentTypeError("value must be positive")
+        raise argparse.ArgumentTypeError(
+            "value must be a positive finite number"
+        ) from error
+    # `float` admits nan and inf, neither of which `parsed <= 0` rejects. Both
+    # reach socket, sleep, and subprocess timeouts as an uncaught ValueError or
+    # OverflowError, or make a deadline comparison that can never succeed,
+    # instead of the promised typed REVIEW_DRIVER_FAILURE line.
+    if not math.isfinite(parsed) or parsed <= 0:
+        raise argparse.ArgumentTypeError("value must be a positive finite number")
     return parsed
 
 
