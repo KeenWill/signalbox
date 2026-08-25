@@ -40,19 +40,20 @@ export interface LivePresentation {
   snapshot: WebSessionLiveSnapshot | null
   durable: ReadonlyArray<Extract<WebSessionLiveStreamEvent, { kind: 'durable' }>>
   drafts: ReadonlyArray<ProviderDraft>
-  durableGap: boolean
+  /**
+   * The timeline address of the newest durable header evicted from the bounded
+   * overlay, or null when no evicted header is missing from loaded history.
+   * Global sequences are noncontiguous per session, so the gap is keyed by the
+   * exact evicted address rather than derived from the oldest retained one.
+   */
+  durableGap: string | null
   resyncing: boolean
 }
 
 const historyCoversDurableGap = (
-  durable: LivePresentation['durable'],
+  durableGap: LivePresentation['durableGap'],
   historicalEventSequences?: ReadonlySet<string>,
-): boolean => {
-  const oldestRetained = durable[0]
-  if (!oldestRetained || historicalEventSequences === undefined) return false
-  const requiredThrough = BigInt(oldestRetained.address.event_sequence) - 1n
-  return historicalEventSequences.has(String(requiredThrough))
-}
+): boolean => durableGap !== null && (historicalEventSequences?.has(durableGap) ?? false)
 
 export type FollowConnectionState = 'connecting' | 'live' | 'retrying'
 
@@ -65,7 +66,7 @@ export const EMPTY_LIVE_PRESENTATION: LivePresentation = {
   snapshot: null,
   durable: [],
   drafts: [],
-  durableGap: false,
+  durableGap: null,
   resyncing: false,
 }
 
@@ -323,6 +324,31 @@ export const replaceCatalog = (snapshot: WebAttentionSnapshot): CatalogPresentat
   summaries: uniqueSummaries(snapshot.summaries),
 })
 
+/**
+ * True when installing a snapshot at [incomingCursor] would replace an already
+ * installed presentation with an older attention projection, which the follow
+ * stream will never replay.
+ */
+export const catalogSnapshotRegresses = (
+  current: CatalogPresentation,
+  incomingCursor: string,
+): boolean => current.snapshot !== null && BigInt(incomingCursor) < BigInt(current.snapshot.cursor)
+
+/**
+ * True when the live snapshot has observed durable events beyond the loaded
+ * historical descriptor: events committed between the history read and the
+ * follow subscription are folded into the initial live snapshot and are never
+ * emitted as later durable records, so history must be refreshed to include
+ * them.
+ */
+export const liveSnapshotOutrunsHistory = (
+  historyObservedThrough: string | undefined,
+  liveObservedThrough: string | undefined,
+): boolean =>
+  historyObservedThrough !== undefined &&
+  liveObservedThrough !== undefined &&
+  BigInt(liveObservedThrough) > BigInt(historyObservedThrough)
+
 export const appendCatalog = (
   current: CatalogPresentation,
   page: WebAttentionSnapshot,
@@ -354,7 +380,7 @@ export const beginLiveResync = (current: LivePresentation): LivePresentation => 
   ...current,
   durable: [],
   drafts: [],
-  durableGap: false,
+  durableGap: null,
   resyncing: true,
 })
 
@@ -382,8 +408,9 @@ export const applyLiveEvent = (
       snapshot: event.snapshot,
       durable,
       drafts: [],
-      durableGap:
-        current.durableGap && !historyCoversDurableGap(current.durable, historicalEventSequences),
+      durableGap: historyCoversDurableGap(current.durableGap, historicalEventSequences)
+        ? null
+        : current.durableGap,
       resyncing: false,
     }
   }
@@ -408,10 +435,11 @@ export const applyLiveEvent = (
       (item) => item.address.event_sequence !== event.address.event_sequence,
     )
     const durable = [...withoutDuplicate, event]
+    const evicted = durable.length > MAX_LIVE_DURABLE_ITEMS ? durable[0] : undefined
     return {
       ...current,
       durable: durable.slice(-MAX_LIVE_DURABLE_ITEMS),
-      durableGap: current.durableGap || durable.length > MAX_LIVE_DURABLE_ITEMS,
+      durableGap: evicted?.address.event_sequence ?? current.durableGap,
     }
   }
   if (current.snapshot === null) {

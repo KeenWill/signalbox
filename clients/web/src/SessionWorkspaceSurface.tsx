@@ -31,10 +31,12 @@ import {
   beginLiveResync,
   type CatalogPresentation,
   type CatalogSort,
+  catalogSnapshotRegresses,
   EMPTY_CATALOG_PRESENTATION,
   EMPTY_LIVE_PRESENTATION,
   HttpSessionProjectionSource,
   type LivePresentation,
+  liveSnapshotOutrunsHistory,
   MAX_CATALOG_ROWS,
   replaceCatalog,
   SessionProjectionSynchronizer,
@@ -150,6 +152,39 @@ export const boundarySessionItemId = (
   return boundary?.address.event_sequence ?? null
 }
 
+export interface DurableKindConflict {
+  eventSequence: string
+  historicalKind: string
+  liveKind: string
+}
+
+/**
+ * Correlates the event kinds of the durable live overlay and the loaded
+ * historical window wherever both planes state the same timeline address. A
+ * disagreement means an inconsistent daemon changed the meaning of an
+ * authoritative event, and the workspace fails closed instead of silently
+ * preferring either plane.
+ */
+export const conflictingDurableKind = (
+  historical: WebSessionTimelineWindow['items'],
+  durable: LivePresentation['durable'],
+): DurableKindConflict | null => {
+  const historicalKinds = new Map(
+    historical.map((item) => [item.address.event_sequence, item.kind]),
+  )
+  for (const item of durable) {
+    const historicalKind = historicalKinds.get(item.address.event_sequence)
+    if (historicalKind !== undefined && historicalKind !== item.event_kind) {
+      return {
+        eventSequence: item.address.event_sequence,
+        historicalKind,
+        liveKind: item.event_kind,
+      }
+    }
+  }
+  return null
+}
+
 export const pruneExpandedSessionItems = (
   expanded: ReadonlySet<string>,
   items: WebSessionTimelineWindow['items'],
@@ -224,6 +259,8 @@ export function SessionWorkspaceSurface({
   const catalogPageRequest = useRef(0)
   const catalogPageAbort = useRef<AbortController | null>(null)
   const catalogRetainedTarget = useRef(0)
+  const catalogPresentationRef = useRef<CatalogPresentation>(EMPTY_CATALOG_PRESENTATION)
+  const refreshSessionFactsRef = useRef<(() => void) | null>(null)
   const catalogRefreshInFlight = useRef(false)
   const catalogRefreshPending = useRef(false)
   const catalogRefreshAbort = useRef<AbortController | null>(null)
@@ -244,6 +281,10 @@ export function SessionWorkspaceSurface({
     queryKey: ['production', 'session-catalog', search, sort],
     queryFn: ({ signal }) => source.catalogPage({ search, sort }, undefined, signal),
     enabled: timelineCapability === 'available',
+    // Superseded search/sort entries are collected as soon as they lose their
+    // observer, so retained catalog pages stay bounded by the active query
+    // instead of growing with every distinct submitted search.
+    gcTime: 0,
   })
   const session = useQuery({
     queryKey: sessionWorkspaceQueryKey(sessionId),
@@ -276,6 +317,7 @@ export function SessionWorkspaceSurface({
   })
   const catalogRows = catalogPresentation.summaries
   catalogRetainedTarget.current = catalogRows.length
+  catalogPresentationRef.current = catalogPresentation
   const catalogVirtualizer = useVirtualizer({
     count: catalogRows.length,
     getScrollElement: () => catalogRef.current,
@@ -296,12 +338,16 @@ export function SessionWorkspaceSurface({
       BigInt(left.address.event_sequence) < BigInt(right.address.event_sequence) ? -1 : 1,
     )
   }, [livePresentation.durable, session.data?.window.items])
+  const timelineKindConflict = useMemo(
+    () => conflictingDurableKind(session.data?.window.items ?? [], livePresentation.durable),
+    [livePresentation.durable, session.data?.window.items],
+  )
   const refetchSession = session.refetch
   const refetchSessionRef = useRef(refetchSession)
   refetchSessionRef.current = refetchSession
   const items = useMemo(
-    () => visibleSessionItems(combinedItems, app.detail),
-    [app.detail, combinedItems],
+    () => (timelineKindConflict !== null ? [] : visibleSessionItems(combinedItems, app.detail)),
+    [app.detail, combinedItems, timelineKindConflict],
   )
   const timelineIds = useMemo(() => items.map((item) => item.address.event_sequence), [items])
   const loadWindow = useCallback(
@@ -323,12 +369,18 @@ export function SessionWorkspaceSurface({
 
   useEffect(() => {
     if (!catalog.data) return
+    // A slower base query must not replace a newer presentation installed by
+    // the attention-follow refresh: the follow stream has already advanced
+    // past that cursor and will never replay the summaries it covered.
+    if (catalogSnapshotRegresses(catalogPresentationRef.current, catalog.data.cursor)) return
     catalogPageAbort.current?.abort()
     catalogPageAbort.current = null
     catalogPageRequest.current += 1
     setLoadingMore(false)
     setCatalogPageError(false)
-    setCatalogPresentation(replaceCatalog(catalog.data))
+    const replaced = replaceCatalog(catalog.data)
+    catalogPresentationRef.current = replaced
+    setCatalogPresentation(replaced)
     setSelectedCatalogId((current) =>
       catalog.data.summaries.some((summary) => summary.session_id === current)
         ? current
@@ -370,11 +422,18 @@ export function SessionWorkspaceSurface({
           refreshed = next
         }
         if (generation !== catalogQueryGeneration.current) return
+        if (
+          refreshed.snapshot !== null &&
+          catalogSnapshotRegresses(catalogPresentationRef.current, refreshed.snapshot.cursor)
+        ) {
+          continue
+        }
         catalogPageAbort.current?.abort()
         catalogPageAbort.current = null
         catalogPageRequest.current += 1
         setLoadingMore(false)
         setCatalogPageError(false)
+        catalogPresentationRef.current = refreshed
         setCatalogPresentation(refreshed)
         setSelectedCatalogId((current) =>
           refreshed.summaries.some((summary) => summary.session_id === current)
@@ -466,6 +525,7 @@ export function SessionWorkspaceSurface({
         refreshInFlight = false
       }
     }
+    refreshSessionFactsRef.current = () => void refreshSessionFacts()
     const stop = synchronizer.followSession(
       sessionId,
       (event) => {
@@ -483,11 +543,23 @@ export function SessionWorkspaceSurface({
     )
     return () => {
       disposed = true
+      refreshSessionFactsRef.current = null
       refreshController.abort()
       if (refreshRetry !== undefined) window.clearTimeout(refreshRetry)
       stop()
     }
   }, [sessionId, source, synchronizer, timelineCapability, updateLivePresentation])
+  const historyObservedThrough = session.data?.descriptor.observed_through
+  const liveObservedThrough = livePresentation.snapshot?.observed_through
+  useEffect(() => {
+    // A durable event committed between the descriptor/window read and the
+    // follow subscription is folded into the initial live snapshot and never
+    // replayed as a durable record, so history is refreshed whenever the live
+    // snapshot has observed past the loaded historical descriptor.
+    if (liveSnapshotOutrunsHistory(historyObservedThrough, liveObservedThrough)) {
+      refreshSessionFactsRef.current?.()
+    }
+  }, [historyObservedThrough, liveObservedThrough])
   useEffect(() => onTimelineIds(timelineIds), [onTimelineIds, timelineIds])
   useEffect(() => () => onTimelineIds([]), [onTimelineIds])
   useEffect(() => {
@@ -935,6 +1007,12 @@ export function SessionWorkspaceSurface({
           <p className="session-load-state" role="alert">
             The daemon could not provide this bounded session window: {session.error.message}
           </p>
+        ) : timelineKindConflict !== null ? (
+          <p className="session-load-state" role="alert">
+            The live stream and durable history disagree about event{' '}
+            {timelineKindConflict.eventSequence} ({timelineKindConflict.liveKind} versus{' '}
+            {timelineKindConflict.historicalKind}); refusing to render the inconsistent timeline.
+          </p>
         ) : !session.data ? (
           <p className="session-load-state">Loading descriptor and bounded history…</p>
         ) : (
@@ -1008,7 +1086,7 @@ export function SessionWorkspaceSurface({
                 queued
               </span>
             </div>
-            {livePresentation.durableGap && (
+            {livePresentation.durableGap !== null && (
               <p className="session-load-state" role="status">
                 Live timeline gap detected; bounded history is refreshing.
               </p>

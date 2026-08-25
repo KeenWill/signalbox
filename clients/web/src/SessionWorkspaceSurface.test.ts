@@ -3,6 +3,7 @@ import { decodeWebSessionTimelineWindow } from './generated/web-contract.mjs'
 import {
   activityLabel,
   boundarySessionItemId,
+  conflictingDurableKind,
   pruneExpandedSessionItems,
   reconcileVisibleSessionSelection,
   sessionHasLiveWork,
@@ -91,5 +92,37 @@ describe('Session Workspace projection', () => {
 
   it('falls back to the raw value outside the JavaScript Date range', () => {
     expect(activityLabel('9000000000000000000')).toBe('9000000000000000000')
+  })
+
+  it('reports a durable header whose kind contradicts the loaded historical window', () => {
+    const contradicting = {
+      address: { event_sequence: '42' },
+      cursor: '42',
+      event_kind: 'turn_failed' as const,
+      kind: 'durable' as const,
+    }
+
+    expect(conflictingDurableKind(fixture.items, [contradicting])).toEqual({
+      eventSequence: '42',
+      historicalKind: fixture.items[1]?.kind,
+      liveKind: 'turn_failed',
+    })
+  })
+
+  it('accepts durable headers that agree with or extend the loaded historical window', () => {
+    const agreeing = {
+      address: { event_sequence: '42' },
+      cursor: '42',
+      event_kind: 'turn_completed' as const,
+      kind: 'durable' as const,
+    }
+    const beyondWindow = {
+      address: { event_sequence: '45' },
+      cursor: '45',
+      event_kind: 'turn_failed' as const,
+      kind: 'durable' as const,
+    }
+
+    expect(conflictingDurableKind(fixture.items, [agreeing, beyondWindow])).toBe(null)
   })
 })

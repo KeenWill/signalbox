@@ -4,9 +4,12 @@ import {
   appendCatalog,
   applyAttentionEvent,
   applyLiveEvent,
+  catalogSnapshotRegresses,
   catalogUrl,
+  EMPTY_CATALOG_PRESENTATION,
   EMPTY_LIVE_PRESENTATION,
   HttpSessionProjectionSource,
+  liveSnapshotOutrunsHistory,
   MAX_CATALOG_ROWS,
   MAX_LIVE_DURABLE_ITEMS,
   MAX_PROVIDER_DRAFT_BYTES,
@@ -58,10 +61,10 @@ const catalogBeyondClientCeiling = () => {
   }
 }
 
-const durablePresentation = (count: number) => {
+const durablePresentation = (count: number, sequenceOf = (index: number) => String(index + 1)) => {
   const events = Array.from({ length: count }, (_, index) => ({
-    address: { event_sequence: String(index + 1) },
-    cursor: String(index + 1),
+    address: { event_sequence: sequenceOf(index) },
+    cursor: sequenceOf(index),
     event_kind: 'model_call_transition' as const,
     kind: 'durable' as const,
   }))
@@ -153,6 +156,16 @@ describe('session catalog projection', () => {
     expect(result.summaries.at(-1)).toBe(fixture.expectedLast)
   })
 
+  it('rejects replacing an installed presentation with an older attention cursor', () => {
+    const current = replaceCatalog(catalog([summary('s-1')]))
+
+    expect(current.snapshot?.cursor).toBe('42')
+    expect(catalogSnapshotRegresses(current, '41')).toBe(true)
+    expect(catalogSnapshotRegresses(current, '42')).toBe(false)
+    expect(catalogSnapshotRegresses(current, '43')).toBe(false)
+    expect(catalogSnapshotRegresses(EMPTY_CATALOG_PRESENTATION, '1')).toBe(false)
+  })
+
   it('uses the fleet follow stream only to update rows already admitted by the query', () => {
     const current = replaceCatalog(catalog([summary('visible', 'Old title')]))
 
@@ -240,6 +253,14 @@ describe('session live projection', () => {
     expect(present.durable).toEqual([])
   })
 
+  it('detects a live snapshot that observed past the loaded historical descriptor', () => {
+    expect(liveSnapshotOutrunsHistory('42', '43')).toBe(true)
+    expect(liveSnapshotOutrunsHistory('42', '42')).toBe(false)
+    expect(liveSnapshotOutrunsHistory('42', '41')).toBe(false)
+    expect(liveSnapshotOutrunsHistory(undefined, '43')).toBe(false)
+    expect(liveSnapshotOutrunsHistory('42', undefined)).toBe(false)
+  })
+
   it('rejects a snapshot whose observed cursor regresses', () => {
     const initial = applyLiveEvent(
       EMPTY_LIVE_PRESENTATION,
@@ -276,8 +297,28 @@ describe('session live projection', () => {
       new Set(['1']),
     )
 
-    expect(stillGapped.durableGap).toBe(true)
-    expect(covered.durableGap).toBe(false)
+    expect(stillGapped.durableGap).toBe('1')
+    expect(covered.durableGap).toBe(null)
+  })
+
+  it('keys the eviction gap on the exact evicted address, not the retained boundary', () => {
+    const fixture = durablePresentation(MAX_LIVE_DURABLE_ITEMS + 1, (index) =>
+      String((index + 1) * 2),
+    )
+    const nextSnapshot = {
+      ...liveSnapshot,
+      observed_through: String((MAX_LIVE_DURABLE_ITEMS + 1) * 2),
+    }
+
+    const covered = applyLiveEvent(
+      fixture.presentation,
+      { kind: 'snapshot', snapshot: nextSnapshot },
+      liveSnapshot.session_id,
+      new Set(['2']),
+    )
+
+    expect(fixture.presentation.durableGap).toBe('2')
+    expect(covered.durableGap).toBe(null)
   })
 
   it('discards all transient presentation while a lagged stream resynchronizes', () => {
@@ -313,7 +354,7 @@ describe('session live projection', () => {
 
     expect(fixture.presentation.durable).toHaveLength(MAX_LIVE_DURABLE_ITEMS)
     expect(fixture.presentation.durable[0]).toBe(fixture.events[1])
-    expect(fixture.presentation.durableGap).toBe(true)
+    expect(fixture.presentation.durableGap).toBe(fixture.events[0]?.address.event_sequence)
   })
 
   it('rejects durable records before a snapshot or without an advancing cursor', () => {

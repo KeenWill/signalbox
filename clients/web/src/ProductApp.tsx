@@ -165,6 +165,30 @@ function ProductNavigation({
   )
 }
 
+/**
+ * These overlays are controlled dialogs without a `Dialog.Trigger`, so Radix
+ * has no element to restore focus to on close. The opener is recorded before
+ * Radix moves focus into the content, and close autofocus returns keyboard
+ * users to it while it is still rendered.
+ */
+function useDialogOpenerFocus() {
+  const openerRef = useRef<HTMLElement | null>(null)
+  return {
+    onOpenAutoFocus: () => {
+      openerRef.current =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null
+    },
+    onCloseAutoFocus: (event: Event) => {
+      const opener = openerRef.current
+      openerRef.current = null
+      if (opener?.getClientRects().length) {
+        event.preventDefault()
+        opener.focus()
+      }
+    },
+  }
+}
+
 function CommandPalette({
   context,
   onOpenNavigation,
@@ -173,6 +197,7 @@ function CommandPalette({
   onOpenNavigation: () => void
 }) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
+  const openerFocus = useDialogOpenerFocus()
   return (
     <Dialog.Root
       open={open}
@@ -185,6 +210,8 @@ function CommandPalette({
         <Dialog.Content
           className="dialog-content product-palette"
           aria-describedby="product-palette-description"
+          onOpenAutoFocus={openerFocus.onOpenAutoFocus}
+          onCloseAutoFocus={openerFocus.onCloseAutoFocus}
         >
           <div className="dialog-heading">
             <div>
@@ -228,6 +255,7 @@ function CommandPalette({
 
 function KeyboardHelp({ context }: { context: CommandContext }) {
   const open = useAppSelector((state) => state.app.overlay === 'help')
+  const openerFocus = useDialogOpenerFocus()
   return (
     <Dialog.Root
       open={open}
@@ -240,6 +268,8 @@ function KeyboardHelp({ context }: { context: CommandContext }) {
         <Dialog.Content
           className="dialog-content product-palette"
           aria-describedby="keyboard-help-description"
+          onOpenAutoFocus={openerFocus.onOpenAutoFocus}
+          onCloseAutoFocus={openerFocus.onCloseAutoFocus}
         >
           <div className="dialog-heading">
             <div>
