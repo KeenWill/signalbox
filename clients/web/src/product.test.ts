@@ -239,7 +239,7 @@ describe('SameOriginProductTransport', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
-      'attention_snapshot.cursor must be a string matching',
+      'attention_snapshot.cursor must be matching',
     )
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
     await expect(events.next()).rejects.toThrow('attention_event must be one recognized variant')
@@ -487,10 +487,10 @@ describe('SameOriginProductTransport', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
-      'attention_snapshot.summaries[0].session_id must be a string matching',
+      'attention_snapshot.summaries[0].session_id must be matching',
     )
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
-      'attention_snapshot.summaries[0].judge.failed must be a string matching',
+      'attention_snapshot.summaries[0].judge.failed must be matching',
     )
   })
 

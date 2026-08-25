@@ -8,7 +8,8 @@ import {
   type WebContractBootstrap,
 } from './generated/web-contract.mjs'
 
-// The version-one browser contract fixes the NDJSON item ceiling at 65,536 bytes.
+// The browser contract fixes the NDJSON item ceiling at 65,536 bytes. The generated bootstrap
+// decoder owns the contract identity, capability, and limit pin.
 const MAX_ATTENTION_EVENT_BYTES = 65_536
 export const MAX_BOOTSTRAP_BYTES = 65_536
 export const MAX_ATTENTION_SNAPSHOT_BYTES = 65_536
@@ -22,21 +23,6 @@ const validateCursor = (cursor: string): void => {
   if (!CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(cursor) || BigInt(cursor) > MAX_UNSIGNED_64) {
     throw new TypeError('attention cursor must be a canonical unsigned 64-bit integer')
   }
-}
-
-const validateBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
-  if (
-    bootstrap.contract.name !== 'signalbox.web-http' ||
-    bootstrap.contract.version !== '1' ||
-    !bootstrap.capabilities.bounded_json ||
-    !bootstrap.capabilities.same_origin_json_mutations ||
-    !bootstrap.capabilities.ndjson_streaming ||
-    bootstrap.limits.max_json_body_bytes !== MAX_BOOTSTRAP_BYTES ||
-    bootstrap.limits.max_ndjson_item_bytes !== MAX_ATTENTION_EVENT_BYTES
-  ) {
-    throw new TypeError('bootstrap carries an incompatible web contract')
-  }
-  return bootstrap
 }
 
 type AttentionSummary = WebAttentionSnapshot['summaries'][number]
@@ -376,10 +362,8 @@ export class SameOriginProductTransport implements ProductTransport {
         `Bootstrap request failed with status ${response.status}.`,
       )
     }
-    return validateBootstrap(
-      decodeWebContractBootstrap(
-        await readBoundedJson(response, MAX_BOOTSTRAP_BYTES, 'bootstrap response', signal),
-      ),
+    return decodeWebContractBootstrap(
+      await readBoundedJson(response, MAX_BOOTSTRAP_BYTES, 'bootstrap response', signal),
     )
   }
 
