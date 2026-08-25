@@ -754,6 +754,89 @@ pub(crate) async fn insert_fresh_commissioned_goal(
     .await
 }
 
+/// Composes a parent-only stop for a repository-watch commission that is still
+/// the session's original pursuing generation.
+///
+/// Repository watch owns the commission it created, but it must not stop a
+/// later user-authored generation or a goal that has already ended. The session
+/// lock makes that check and the stop one atomic decision. The ordinary durable
+/// stop receipt, termination cascade, and event shapes are retained.
+pub(crate) async fn insert_repo_watch_composed_stop(
+    connection: &mut PgConnection,
+    command: GoalUserCommand,
+) -> Result<bool, GoalRepositoryError> {
+    if !matches!(
+        command.action(),
+        GoalUserAction::Stop {
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+        }
+    ) {
+        return Err(GoalCorruption::Inconsistent(
+            "repository-watch cutoff command is not a parent-only stop",
+        )
+        .into());
+    }
+    if !lock_session(connection, command.session()).await? {
+        return Err(GoalCorruption::Missing("dispatched cutoff session").into());
+    }
+    let Some(goal) = load_goal_from_connection(connection, command.session()).await? else {
+        return Err(GoalCorruption::Missing("dispatched cutoff goal").into());
+    };
+    if goal.current().generation().get() != 1
+        || !matches!(
+            goal.current().state(),
+            GoalState::Pursuing | GoalState::Blocked { .. }
+        )
+    {
+        return Ok(false);
+    }
+    let claimed = sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, $2, $3, transaction_timestamp())
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(durable_command_id_to_uuid(command.command_id()))
+    .bind(GOAL_KIND)
+    .bind(STORAGE_VERSION)
+    .execute(&mut *connection)
+    .await?
+    .rows_affected()
+        == 1;
+    if !claimed {
+        return Err(
+            GoalCorruption::Inconsistent("fresh repository-watch cutoff command identity").into(),
+        );
+    }
+    let result = apply_user_command(connection, &command).await?;
+    let GoalCommandResult::Applied(event) = &result else {
+        return Err(GoalCorruption::Inconsistent(
+            "repository-watch cutoff stop was rejected after locking",
+        )
+        .into());
+    };
+    lock_scheduler(connection, command.session()).await?;
+    insert_command(connection, &command, &result).await?;
+    insert_event(connection, command.session(), event).await?;
+    if let Some(retired) =
+        retired_queued_goal_turn_without_outbox(connection, command.session()).await?
+    {
+        outbox::append(
+            connection,
+            OutboxEvent::GoalTurnRetired {
+                session: command.session(),
+                turn: retired,
+            },
+        )
+        .await?;
+    }
+    sqlx::query("SELECT materialize_session_delegation_termination_cascade($1)")
+        .bind(durable_command_id_to_uuid(command.command_id()))
+        .execute(&mut *connection)
+        .await?;
+    Ok(true)
+}
+
 fn event_starts_pursuit(event: &GoalEvent) -> bool {
     match event.kind() {
         GoalEventKind::Commissioned { .. }
@@ -975,7 +1058,15 @@ async fn block_goal_continuation(
     })
 }
 
-async fn lock_session(
+/// Locks the session row `FOR NO KEY UPDATE`, returning whether it exists.
+///
+/// Every goal transition serializes on this row and nothing else, so a
+/// transaction outside this module that must exclude goal transitions —
+/// approval-judge completion, which rechecks the authority in force before
+/// committing a decision — takes this lock, and takes it before any
+/// `session_scheduler` lock, following the session-before-scheduler pair
+/// order stated in `lock_inventory`.
+pub(crate) async fn lock_session(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<bool, sqlx::Error> {

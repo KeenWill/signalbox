@@ -10,6 +10,7 @@
 //! that yields a tool-request batch without terminalizing the turn.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
@@ -244,6 +245,7 @@ pub struct ModelCallExecutionReconstitutionInput {
     tool_result_correlations: Vec<ToolResultAttemptCorrelation>,
     tool_denial_correlations: Vec<ToolApprovalResolution>,
     uncommitted_tool_result_projection: Option<PreparedToolResultProjection>,
+    availability_successor: bool,
 }
 
 impl ModelCallExecutionReconstitutionInput {
@@ -271,6 +273,7 @@ impl ModelCallExecutionReconstitutionInput {
             tool_result_correlations: Vec::new(),
             tool_denial_correlations: Vec::new(),
             uncommitted_tool_result_projection: None,
+            availability_successor: false,
         }
     }
 
@@ -334,6 +337,13 @@ impl ModelCallExecutionReconstitutionInput {
         continuation_snapshot: ResolvedContextFrontierReconstitutionInput,
     ) -> Self {
         self.continuation_snapshot = Some(continuation_snapshot);
+        self
+    }
+
+    /// Supplies durable proof that a call-free pinned attempt is the distinct
+    /// successor of an availability-failed predecessor.
+    pub fn with_availability_successor(mut self) -> Self {
+        self.availability_successor = true;
         self
     }
 
@@ -1066,6 +1076,63 @@ impl ModelCallExecution {
         )
     }
 
+    /// Ends one availability-failed call and prepares its distinct successor
+    /// attempt without terminalizing the logical turn.
+    ///
+    /// The caller must first validate the call-pinned credential-pool policy
+    /// and select a different admitted member. This aggregate transition owns
+    /// only the lifecycle proof required by
+    /// `docs/spec/model-call-execution.md#availability-successor-calls`: the
+    /// predecessor remains `KnownFailed`, one authorization is never reused,
+    /// and the successor receives a fresh physical attempt.
+    pub fn apply_availability_successor(
+        self,
+        observation: CorrelatedModelCallTerminalObservation,
+        successor_attempt: TurnAttemptId,
+    ) -> Result<AvailabilitySuccessorModelCallTurn, ModelCallClosureError> {
+        let Some(call) = self.current_call else {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        };
+        if observation.correlation
+            != (IssuedModelCallCorrelation {
+                session: self.session,
+                turn: self.turn,
+                attempt: self.current_attempt.id(),
+                call: call.id(),
+                target: call.target(),
+                frontier: call.frontier().snapshot(),
+            })
+            || observation.observation != ModelCallTerminalObservation::KnownFailed
+            || !matches!(
+                observation.provider_failure_cause,
+                Some(
+                    ProviderModelCallFailureCause::RateLimited
+                        | ProviderModelCallFailureCause::QuotaExhausted
+                        | ProviderModelCallFailureCause::Overloaded
+                )
+            )
+            || self.current_attempt.state() != &CurrentTurnAttemptState::Running
+            || call.state() != CurrentModelCallState::InFlight
+            || successor_attempt == self.current_attempt.id()
+        {
+            return Err(ModelCallClosureError::ObservationCorrelationMismatch);
+        }
+        let ended_call = call
+            .end_classified(ModelCallDisposition::KnownFailed)
+            .map_err(|_| ModelCallClosureError::CallStateMismatch)?;
+        let ended_attempt = self
+            .current_attempt
+            .end_without_stop(UnstoppedAttemptDisposition::KnownFailure)
+            .map_err(|_| ModelCallClosureError::AttemptStateMismatch)?;
+        Ok(AvailabilitySuccessorModelCallTurn {
+            session: self.session,
+            turn: self.turn,
+            predecessor_call: ended_call,
+            predecessor_attempt: ended_attempt,
+            successor_attempt: CurrentTurnAttempt::prepared(successor_attempt),
+        })
+    }
+
     /// Closes target-resolution failure before a model call exists.
     pub fn fail_target_resolution(
         self,
@@ -1097,6 +1164,39 @@ impl ModelCallExecution {
             UnstoppedAttemptDisposition::KnownFailure,
             reclassified_pending_steering,
         )
+    }
+
+    /// Closes a call-free attempt when its frozen credential pool admits no
+    /// member, preserving exhaustion as a cause distinct from any member's
+    /// provider failure.
+    ///
+    /// The selection and evidence rules are owned by
+    /// `docs/spec/credential-availability.md#the-credential-availability-machine`.
+    pub fn fail_credential_pool_exhausted(
+        self,
+        pool_name: String,
+        identities: FailedModelCallTurnIdentities,
+    ) -> Result<CredentialPoolExhaustedModelCallTurn, ModelCallClosureError> {
+        if self.current_call.is_some() || !self.attempt_accepts_prepared_call() {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        }
+        let reclassified_pending_steering = reclassify_pending_steering(
+            &self.active_turn,
+            &identities.pending_steering_reclassifications,
+        )?;
+        let failed = close_failed_turn(
+            ModelCallTurnScope {
+                session: self.session,
+                turn: self.turn,
+            },
+            self.current_attempt,
+            None,
+            self.current_snapshot,
+            identities,
+            UnstoppedAttemptDisposition::KnownFailure,
+            reclassified_pending_steering,
+        )?;
+        Ok(CredentialPoolExhaustedModelCallTurn { pool_name, failed })
     }
 
     /// Closes a trustworthy local capability-preparation failure before send.
@@ -1654,6 +1754,8 @@ impl IssuedModelCallCorrelation {
             observation,
             usage,
             provider_failure_cause: None,
+            retry_after: None,
+            non_acceptance_proven: false,
         }
     }
 
@@ -1664,11 +1766,25 @@ impl IssuedModelCallCorrelation {
         cause: ProviderModelCallFailureCause,
         usage: ProviderReportedTokenUsage,
     ) -> CorrelatedModelCallTerminalObservation {
+        self.bind_provider_failure_observation_with_retry_after(cause, usage, None, false)
+    }
+
+    /// Binds a classified provider error and its optional provider-directed
+    /// retry delay without retaining provider-authored error material.
+    pub fn bind_provider_failure_observation_with_retry_after(
+        self,
+        cause: ProviderModelCallFailureCause,
+        usage: ProviderReportedTokenUsage,
+        retry_after: Option<Duration>,
+        non_acceptance_proven: bool,
+    ) -> CorrelatedModelCallTerminalObservation {
         CorrelatedModelCallTerminalObservation {
             correlation: self,
             observation: ModelCallTerminalObservation::KnownFailed,
             usage,
             provider_failure_cause: Some(cause),
+            retry_after,
+            non_acceptance_proven,
         }
     }
 }
@@ -1784,6 +1900,8 @@ pub struct CorrelatedModelCallTerminalObservation {
     observation: ModelCallTerminalObservation,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    retry_after: Option<Duration>,
+    non_acceptance_proven: bool,
 }
 
 impl CorrelatedModelCallTerminalObservation {
@@ -1811,6 +1929,17 @@ impl CorrelatedModelCallTerminalObservation {
     /// error caused this known failure.
     pub const fn provider_failure_cause(&self) -> Option<ProviderModelCallFailureCause> {
         self.provider_failure_cause
+    }
+
+    /// Returns the provider-directed minimum delay before another
+    /// availability attempt, when the provider supplied one.
+    pub const fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+
+    /// Reports whether adapter protocol evidence authorizes substitution.
+    pub const fn non_acceptance_proven(&self) -> bool {
+        self.non_acceptance_proven
     }
 }
 
@@ -2694,6 +2823,43 @@ pub struct ToolRoundModelCallTurn {
     next_phase: ActiveTurnPhase,
 }
 
+/// One availability-failed call and the distinct prepared attempt succeeding it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AvailabilitySuccessorModelCallTurn {
+    session: SessionId,
+    turn: TurnId,
+    predecessor_call: EndedModelCall,
+    predecessor_attempt: EndedTurnAttempt,
+    successor_attempt: CurrentTurnAttempt,
+}
+
+impl AvailabilitySuccessorModelCallTurn {
+    /// Returns the owning session.
+    pub const fn session(&self) -> SessionId {
+        self.session
+    }
+
+    /// Returns the continuing logical turn.
+    pub const fn turn(&self) -> TurnId {
+        self.turn
+    }
+
+    /// Borrows the terminal failed predecessor call.
+    pub const fn predecessor_call(&self) -> &EndedModelCall {
+        &self.predecessor_call
+    }
+
+    /// Borrows the terminal failed predecessor attempt.
+    pub const fn predecessor_attempt(&self) -> &EndedTurnAttempt {
+        &self.predecessor_attempt
+    }
+
+    /// Borrows the fresh prepared successor attempt.
+    pub const fn successor_attempt(&self) -> &CurrentTurnAttempt {
+        &self.successor_attempt
+    }
+}
+
 impl ToolRoundModelCallTurn {
     /// Returns the owning session.
     pub const fn session(&self) -> SessionId {
@@ -2898,6 +3064,30 @@ impl FailedModelCallTurn {
     /// Returns queued turns created from every pending steering input.
     pub fn reclassified_pending_steering(&self) -> &[ReclassifiedPendingSteeringTurn] {
         &self.reclassified_pending_steering
+    }
+}
+
+/// Typed terminal failure for a pool that admitted no credential member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CredentialPoolExhaustedModelCallTurn {
+    pool_name: String,
+    failed: FailedModelCallTurn,
+}
+
+impl CredentialPoolExhaustedModelCallTurn {
+    /// Borrows the deployment-owned pool name whose members were unavailable.
+    pub fn pool_name(&self) -> &str {
+        &self.pool_name
+    }
+
+    /// Borrows the ordinary failed-turn projection committed for the client.
+    pub const fn failed(&self) -> &FailedModelCallTurn {
+        &self.failed
+    }
+
+    /// Consumes the typed cause into its failed-turn persistence payload.
+    pub fn into_failed(self) -> FailedModelCallTurn {
+        self.failed
     }
 }
 
@@ -3462,21 +3652,25 @@ fn reconstitute(
         input.pinned_target,
         input.calls.first(),
         input.continuation_snapshot.as_ref(),
+        input.availability_successor,
     ) {
-        (None, None, None) => None,
-        (None, None, Some(_)) | (None, Some(_), _) => {
+        (None, None, None, false) => None,
+        (None, None, Some(_), _) | (None, Some(_), _, _) => {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::PinnedTargetMissing,
             ));
         }
-        (Some(_), None, None) => {
+        (Some(_), None, None, false) | (None, None, None, true) => {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::PinnedTargetUnexpected,
             ));
         }
-        (Some(stored), Some(_), None) | (Some(stored), None, Some(_)) => {
+        (Some(stored), Some(_), None, false)
+        | (Some(stored), Some(_), None, true)
+        | (Some(stored), None, Some(_), false)
+        | (Some(stored), None, None, true) => {
             let Some(pinned) = stored.reconstitute_for_turn(turn) else {
                 return Err(fail(
                     input,
@@ -3485,7 +3679,7 @@ fn reconstitute(
             };
             Some(pinned)
         }
-        (Some(_), Some(_), Some(_)) => {
+        (Some(_), Some(_), Some(_), _) | (Some(_), None, Some(_), true) => {
             return Err(fail(
                 input,
                 ModelCallExecutionReconstitutionFailure::ContinuationSnapshotUnexpected,
@@ -5424,6 +5618,8 @@ mod tests {
             observation,
             usage: ProviderReportedTokenUsage::unreported(),
             provider_failure_cause: None,
+            retry_after: None,
+            non_acceptance_proven: false,
         }
     }
 

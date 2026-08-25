@@ -846,6 +846,7 @@ async fn commit_blob_upload(
 struct CommittedBlobReadFixture {
     runtime: RunningRuntime,
     connection: Connection,
+    bytes: &'static [u8],
     digest: BlobDigest,
     wire_digest: CanonicalBlobDigest,
     expected_length: CanonicalU64,
@@ -862,6 +863,7 @@ impl CommittedBlobReadFixture {
         Ok(Self {
             runtime,
             connection,
+            bytes,
             digest,
             wire_digest,
             expected_length,
@@ -875,6 +877,27 @@ impl CommittedBlobReadFixture {
             .expect("the fixture owns one blob store")
             .store
             .join(BlobObjectKey::for_digest(self.digest).as_str())
+    }
+
+    fn expected_replica_count(&self) -> CanonicalU64 {
+        CanonicalU64::new(1)
+    }
+
+    fn expected_range(
+        &self,
+        offset_bytes: CanonicalU64,
+        length_bytes: CanonicalU64,
+    ) -> &'static [u8] {
+        let offset =
+            usize::try_from(offset_bytes.value()).expect("the fixture range offset fits in usize");
+        let length =
+            usize::try_from(length_bytes.value()).expect("the fixture range length fits in usize");
+        let end = offset
+            .checked_add(length)
+            .expect("the fixture range end is representable");
+        self.bytes
+            .get(offset..end)
+            .expect("the fixture contains the expected range")
     }
 
     async fn stop(self) -> Result<(), Box<dyn Error>> {
@@ -1025,7 +1048,7 @@ async fn inv060_blob_metadata_reports_exact_catalog_facts() -> Result<(), Box<dy
         &ServerMessage::BlobMetadata {
             digest: fixture.wire_digest,
             byte_length: fixture.expected_length,
-            replica_count: CanonicalU64::new(1),
+            replica_count: fixture.expected_replica_count(),
         }
     );
 
@@ -1040,7 +1063,7 @@ async fn inv060_blob_range_returns_exact_verified_bytes() -> Result<(), Box<dyn 
     let mut fixture = CommittedBlobReadFixture::start(b"verified direct blob range").await?;
     let offset_bytes = CanonicalU64::new(9);
     let length_bytes = CanonicalU64::new(6);
-    let expected_bytes = b"direct";
+    let expected_bytes = fixture.expected_range(offset_bytes, length_bytes);
 
     fixture
         .connection
@@ -1091,7 +1114,6 @@ async fn inv060_blob_range_out_of_bounds_is_typed() -> Result<(), Box<dyn Error>
             code: ErrorCode::InvalidRequest,
             message: String::from("blob read was rejected"),
             detail: ErrorDetail::invalid_request(RejectionDetail::BlobReadRangeOutOfBounds {
-                digest: fixture.wire_digest,
                 offset_bytes,
                 length_bytes,
                 blob_length_bytes: fixture.expected_length,
@@ -5146,7 +5168,7 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
 /// S07 / INV-029: stopping an issued call records the durable cancellation
 /// request and retains the slot for lifecycle closure, and a distinct second
 /// stop is refused with the exact prior stop authority named.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_once()
 -> Result<(), Box<dyn Error>> {

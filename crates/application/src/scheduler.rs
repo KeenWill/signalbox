@@ -12,6 +12,7 @@ use std::{
     future::{Future, ready},
     num::NonZeroUsize,
     pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
@@ -39,8 +40,11 @@ use crate::{
 ///
 /// The composition root may supply another nonzero interval after validating
 /// deployment configuration through [`ReconciliationSweepInterval::try_new`].
+// numeric-bound: tunable - controls the baseline reconciliation cadence
 const BASELINE_RECONCILIATION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+// numeric-bound: tunable - controls baseline scheduler nudge backpressure
 const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
+// numeric-bound: tunable - controls baseline reconciliation concurrency
 const BASELINE_MAX_IN_FLIGHT_PASSES: usize = 16;
 
 tokio::task_local! {
@@ -49,15 +53,15 @@ tokio::task_local! {
 
 #[derive(Clone, Debug)]
 struct SchedulerPassCapacity {
-    semaphore: std::sync::Arc<Semaphore>,
-    held: std::sync::Arc<AsyncMutex<Option<OwnedSemaphorePermit>>>,
+    semaphore: Arc<Semaphore>,
+    held: Arc<AsyncMutex<Option<OwnedSemaphorePermit>>>,
 }
 
 impl SchedulerPassCapacity {
-    fn new(semaphore: std::sync::Arc<Semaphore>, permit: OwnedSemaphorePermit) -> Self {
+    fn new(semaphore: Arc<Semaphore>, permit: OwnedSemaphorePermit) -> Self {
         Self {
             semaphore,
-            held: std::sync::Arc::new(AsyncMutex::new(Some(permit))),
+            held: Arc::new(AsyncMutex::new(Some(permit))),
         }
     }
 
@@ -71,7 +75,7 @@ impl SchedulerPassCapacity {
         };
         drop(released);
         let output = work.await;
-        if let Ok(permit) = std::sync::Arc::clone(&self.semaphore).acquire_owned().await {
+        if let Ok(permit) = Arc::clone(&self.semaphore).acquire_owned().await {
             *self.held.lock().await = Some(permit);
         }
         output
@@ -725,11 +729,11 @@ where
         let mut in_flight_sessions = HashSet::new();
         let mut pending_hints = VecDeque::new();
         let mut pending_reruns = HashSet::new();
-        let capacity = std::sync::Arc::new(Semaphore::new(self.max_in_flight_passes));
+        let capacity = Arc::new(Semaphore::new(self.max_in_flight_passes));
 
         'scheduler: loop {
             if let Some(session) = pending_hints.front().copied() {
-                let available = std::sync::Arc::clone(&capacity).acquire_owned();
+                let available = Arc::clone(&capacity).acquire_owned();
                 pin!(available);
                 select! {
                     biased;
@@ -758,7 +762,7 @@ where
                                 .run(session)
                                 .instrument(session_work_span(session));
                             let pass_capacity = SchedulerPassCapacity::new(
-                                std::sync::Arc::clone(&capacity),
+                                Arc::clone(&capacity),
                                 permit,
                             );
                             let task = passes.spawn(

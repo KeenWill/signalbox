@@ -250,6 +250,16 @@ itself made, while media type and filename are caller-supplied strings, and a
 caller-supplied string must not select which infrastructure gains authority over
 bytes.
 
+**Committed unimplemented functionality.** No present surface stores program
+frame payloads. The closed routing-class vocabulary gains one `program_journal`
+class for over-threshold journal payloads written by the
+[program substrate](program-substrate.md)'s host: derived by the daemon from the
+writing surface exactly as every class is, never operation-selected, and added
+to the routes table's required set when the substrate lands. This constrains
+present change: the class vocabulary and route-validation surface must stay
+extensible to that addition without loosening the closed-set rejection of
+unknown classes.
+
 Blobs are large: the substrate supports multi-gigabyte objects, so every daemon
 path — ingest, verification, replica copy, read — streams and none materializes
 a whole blob in memory. Bounded in-memory materialization exists only at

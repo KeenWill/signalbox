@@ -65,6 +65,49 @@ const MAX_BLOB_READ_TOOL_BYTES: u64 = 524_288;
 const MAX_BLOB_READ_TURN_BYTES: u64 = 2_097_152;
 const MAX_BLOB_READ_REQUESTS_PER_TURN: i64 = 64;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlobReadAdmission {
+    Admitted,
+    NotVisible,
+    TurnByteBudgetExceeded,
+    TurnReadCountExceeded,
+}
+
+impl BlobReadAdmission {
+    const fn detail(self) -> Option<&'static str> {
+        match self {
+            Self::Admitted => None,
+            Self::NotVisible => Some("blob_not_visible"),
+            Self::TurnByteBudgetExceeded => Some("blob_turn_byte_budget_exceeded"),
+            Self::TurnReadCountExceeded => Some("blob_turn_read_count_exceeded"),
+        }
+    }
+
+    fn into_detail(self) -> Result<Option<ToolExecutionErrorDetail>, ToolLoopRepositoryError> {
+        self.detail()
+            .map(|detail| {
+                ToolExecutionErrorDetail::try_new(String::from(detail)).map_err(|_| {
+                    ToolLoopCorruption::Inconsistent("blob read rejection detail").into()
+                })
+            })
+            .transpose()
+    }
+
+    fn from_charge(
+        admitted: bool,
+        rejection_reason: Option<String>,
+    ) -> Result<Self, ToolLoopRepositoryError> {
+        match (admitted, rejection_reason.as_deref()) {
+            (true, None) => Ok(Self::Admitted),
+            (false, Some("blob_turn_byte_budget_exceeded")) => Ok(Self::TurnByteBudgetExceeded),
+            (false, Some("blob_turn_read_count_exceeded")) => Ok(Self::TurnReadCountExceeded),
+            (true, Some(_)) | (false, None) | (false, Some(_)) => {
+                Err(ToolLoopCorruption::Inconsistent("blob read rejection reason").into())
+            }
+        }
+    }
+}
+
 const STORAGE_VERSION: i16 = 1;
 
 /// Stored tool-loop facts failed checked domain reconstruction.
@@ -214,6 +257,7 @@ pub struct PostgresToolLoopRepository {
     continuation_targets: Option<signalbox_domain::ModelTargetCatalog>,
     continuation_credential: Option<ModelCallCredentialReference>,
     credential_families: Option<crate::ModelCredentialFamilyCatalog>,
+    credential_pools: crate::model_execution::CredentialPoolRuntimeCatalog,
     cache_inclusive_input_targets: HashSet<signalbox_domain::ResolvedProviderTarget>,
 }
 
@@ -225,6 +269,7 @@ impl PostgresToolLoopRepository {
             continuation_targets: None,
             continuation_credential: None,
             credential_families: None,
+            credential_pools: Default::default(),
             cache_inclusive_input_targets: HashSet::new(),
         }
     }
@@ -241,6 +286,7 @@ impl PostgresToolLoopRepository {
             continuation_targets: Some(targets),
             continuation_credential: Some(credential_reference),
             credential_families: None,
+            credential_pools: Default::default(),
             cache_inclusive_input_targets: HashSet::new(),
         }
     }
@@ -259,6 +305,15 @@ impl PostgresToolLoopRepository {
         credential_families: Option<crate::ModelCredentialFamilyCatalog>,
     ) -> Self {
         self.credential_families = credential_families;
+        self
+    }
+
+    /// Enables pool selection for every same-turn continuation call.
+    pub fn with_credential_pools(
+        mut self,
+        credential_pools: crate::model_execution::CredentialPoolRuntimeCatalog,
+    ) -> Self {
+        self.credential_pools = credential_pools;
         self
     }
 
@@ -631,7 +686,7 @@ impl PostgresToolLoopRepository {
             .await?
         {
             ToolAttemptAuthorizationOutcome::Authorized(authorized) => Ok(*authorized),
-            ToolAttemptAuthorizationOutcome::PreauthorizationRejected => {
+            ToolAttemptAuthorizationOutcome::PreauthorizationRejected { .. } => {
                 Err(ToolLoopCorruption::Inconsistent("unmetered tool preauthorization").into())
             }
         }
@@ -654,16 +709,16 @@ impl PostgresToolLoopRepository {
             let authorized = batch.authorize_dispatch(attempt).map_err(|_| {
                 ToolLoopRepositoryError::InvalidTransition("tool attempt is not prepared")
             })?;
-            if !admit_tool_preauthorization(
+            let admission = admit_tool_preauthorization(
                 &mut transaction,
                 session,
                 turn,
                 authorized.attempt().request(),
                 preauthorization,
             )
-            .await?
-            {
-                return Ok(ToolAttemptAuthorizationOutcome::PreauthorizationRejected);
+            .await?;
+            if let Some(detail) = admission.into_detail()? {
+                return Ok(ToolAttemptAuthorizationOutcome::PreauthorizationRejected { detail });
             }
             mark_issuing_turn_attempt_running(&mut transaction, authorized.attempt()).await?;
             let rows = sqlx::query(
@@ -1055,6 +1110,7 @@ impl PostgresToolLoopRepository {
                 &mut transaction,
                 prepared,
                 credential_reference,
+                None,
                 self.cache_inclusive_input_targets
                     .contains(&prepared.call().target()),
             )
@@ -1193,6 +1249,7 @@ impl PostgresToolLoopRepository {
                 targets,
                 credential_reference,
                 self.credential_families.as_ref(),
+                &self.credential_pools,
                 &self.cache_inclusive_input_targets,
                 &projection,
                 identities.call(),
@@ -1720,40 +1777,50 @@ async fn load_tool_round_result_window(
     trailing_member_count: Decimal,
 ) -> Result<Option<(Decimal, Decimal)>, ToolLoopRepositoryError> {
     let candidate_rounds = sqlx::query(
-        "SELECT round.producing_model_call_id,
-                boundary.member_count AS boundary_member_count,
-                round.request_count
-           FROM tool_round AS round
-           JOIN context_frontier AS boundary
-             ON boundary.owning_session_id = round.session_id
-            AND boundary.context_frontier_id = round.boundary_frontier_id
-           JOIN context_frontier AS terminal
-             ON terminal.owning_session_id = round.session_id
-            AND terminal.context_frontier_id = $3
-          WHERE round.session_id = $1
-            AND round.turn_id = $2
-            AND round.boundary_kind = 'continuing'
-            AND terminal.member_count =
-                    boundary.member_count + round.request_count + $4
-            AND NOT EXISTS (
-                SELECT 1
-                  FROM context_frontier_member AS boundary_member
-                  LEFT JOIN context_frontier_member AS terminal_member
-                    ON terminal_member.owning_session_id =
-                            boundary_member.owning_session_id
-                   AND terminal_member.context_frontier_id = $3
-                   AND terminal_member.member_position =
-                            boundary_member.member_position
-                   AND terminal_member.source_session_id =
-                            boundary_member.source_session_id
-                   AND terminal_member.semantic_entry_id =
-                            boundary_member.semantic_entry_id
-                 WHERE boundary_member.owning_session_id = round.session_id
-                   AND boundary_member.context_frontier_id =
-                            round.boundary_frontier_id
-                   AND terminal_member.semantic_entry_id IS NULL
+        "WITH candidate_round AS MATERIALIZED (
+            SELECT round.producing_model_call_id,
+                   round.session_id,
+                   round.boundary_frontier_id,
+                   boundary.member_count AS boundary_member_count,
+                   round.request_count
+              FROM tool_round AS round
+              JOIN context_frontier AS boundary
+                ON boundary.owning_session_id = round.session_id
+               AND boundary.context_frontier_id = round.boundary_frontier_id
+              JOIN context_frontier AS terminal
+                ON terminal.owning_session_id = round.session_id
+               AND terminal.context_frontier_id = $3
+             WHERE round.session_id = $1
+               AND round.turn_id = $2
+               AND round.boundary_kind = 'continuing'
+               AND terminal.member_count =
+                       boundary.member_count + round.request_count + $4
+         ), terminal_member AS MATERIALIZED (
+            SELECT member_position,
+                   source_session_id,
+                   semantic_entry_id
+              FROM context_frontier_member
+             WHERE owning_session_id = $1
+               AND context_frontier_id = $3
+         )
+         SELECT candidate.producing_model_call_id,
+                candidate.boundary_member_count,
+                candidate.request_count
+           FROM candidate_round AS candidate
+          WHERE NOT EXISTS (
+                (SELECT member_position,
+                        source_session_id,
+                        semantic_entry_id
+                   FROM context_frontier_member
+                  WHERE owning_session_id = candidate.session_id
+                    AND context_frontier_id = candidate.boundary_frontier_id)
+                EXCEPT
+                (SELECT member_position,
+                        source_session_id,
+                        semantic_entry_id
+                   FROM terminal_member)
             )
-          ORDER BY round.producing_model_call_id",
+          ORDER BY candidate.producing_model_call_id",
     )
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
@@ -2245,17 +2312,16 @@ async fn decode_approval(
                 .ok_or(ToolLoopCorruption::Missing("delegate approval request"))?;
             let recommendation = match decision {
                 ToolApprovalDecision::Approve => DelegateApprovalRecommendation::Approve,
-                ToolApprovalDecision::Deny { ref reason } if reason.is_none() => {
-                    DelegateApprovalRecommendation::Deny
-                }
-                ToolApprovalDecision::Deny { .. } => {
-                    return Err(ToolLoopCorruption::Inconsistent("delegate denial payload").into());
-                }
+                ToolApprovalDecision::Deny { .. } => DelegateApprovalRecommendation::Deny,
             };
             let rationale = signalbox_domain::ToolDecisionRationale::try_new(
                 rationale.ok_or(ToolLoopCorruption::Missing("delegate rationale"))?,
             )
             .map_err(|_| ToolLoopCorruption::Inconsistent("delegate rationale"))?;
+            let stored_denial_reason = match &decision {
+                ToolApprovalDecision::Approve => None,
+                ToolApprovalDecision::Deny { reason } => reason.clone(),
+            };
             let approval = DelegateToolApproval::try_new(
                 request_record,
                 DirectModelSelection::from_uuid(
@@ -2268,7 +2334,7 @@ async fn decode_approval(
                 rationale,
             )
             .map_err(|_| ToolLoopCorruption::Inconsistent("delegate authority"))?;
-            ToolApprovalResolutionReconstitutionInput::delegate(approval)
+            ToolApprovalResolutionReconstitutionInput::delegate(approval, stored_denial_reason)
         }
         ToolApprovalDecisionSourceStorageKind::PolicyAuto
         | ToolApprovalDecisionSourceStorageKind::SessionBlanket => {
@@ -3565,9 +3631,9 @@ async fn admit_tool_preauthorization(
     turn: TurnId,
     request: ToolRequestId,
     preauthorization: ToolPreauthorization,
-) -> Result<bool, ToolLoopRepositoryError> {
+) -> Result<BlobReadAdmission, ToolLoopRepositoryError> {
     let (digest, decoded_bytes) = match preauthorization {
-        ToolPreauthorization::Unmetered => return Ok(true),
+        ToolPreauthorization::Unmetered => return Ok(BlobReadAdmission::Admitted),
         ToolPreauthorization::BlobMetadata { digest } => (digest, None),
         ToolPreauthorization::BlobRead {
             digest,
@@ -3599,17 +3665,18 @@ async fn admit_tool_preauthorization(
     .fetch_one(&mut **transaction)
     .await?;
     if !visible {
-        return Ok(false);
+        return Ok(BlobReadAdmission::NotVisible);
     }
     let Some(decoded_bytes) = decoded_bytes else {
-        return Ok(true);
+        return Ok(BlobReadAdmission::Admitted);
     };
     if decoded_bytes.get() > MAX_BLOB_READ_TOOL_BYTES {
         return Err(ToolLoopCorruption::Inconsistent("blob read request byte bound").into());
     }
 
     let existing = sqlx::query(
-        "SELECT session_id, turn_id, blob_digest, decoded_byte_count, admitted
+        "SELECT session_id, turn_id, blob_digest, decoded_byte_count, admitted,
+                rejection_reason
            FROM blob_read_tool_charge
           WHERE request_id = $1",
     )
@@ -3626,7 +3693,10 @@ async fn admit_tool_preauthorization(
         {
             return Err(ToolLoopCorruption::Inconsistent("blob read request charge").into());
         }
-        return required(&row, "admitted");
+        return BlobReadAdmission::from_charge(
+            required(&row, "admitted")?,
+            row.try_get::<Option<String>, _>("rejection_reason")?,
+        );
     }
 
     let totals = sqlx::query(
@@ -3645,11 +3715,13 @@ async fn admit_tool_preauthorization(
     }
     let decoded_total = u64::try_from(decoded_total)
         .map_err(|_| ToolLoopCorruption::Inconsistent("blob read turn charged bytes"))?;
-    let admitted = blob_read_charge_admitted(request_count, decoded_total, decoded_bytes);
+    let admission = blob_read_charge_admission(request_count, decoded_total, decoded_bytes);
+    let admitted = admission == BlobReadAdmission::Admitted;
     let rows = sqlx::query(
         "INSERT INTO blob_read_tool_charge
-            (request_id, session_id, turn_id, blob_digest, decoded_byte_count, admitted)
-         VALUES ($1, $2, $3, $4, $5, $6)",
+            (request_id, session_id, turn_id, blob_digest, decoded_byte_count, admitted,
+             rejection_reason)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(tool_request_id_to_uuid(request))
     .bind(session_id_to_uuid(session))
@@ -3657,22 +3729,29 @@ async fn admit_tool_preauthorization(
     .bind(digest.as_bytes().as_slice())
     .bind(Decimal::from(decoded_bytes.get()))
     .bind(admitted)
+    .bind(admission.detail())
     .execute(&mut **transaction)
     .await?
     .rows_affected();
     require_single(rows, "blob read request charge")?;
-    Ok(admitted)
+    Ok(admission)
 }
 
-fn blob_read_charge_admitted(
+fn blob_read_charge_admission(
     request_count: i64,
     decoded_total: u64,
     requested: NonZeroU64,
-) -> bool {
-    request_count < MAX_BLOB_READ_REQUESTS_PER_TURN
-        && decoded_total
-            .checked_add(requested.get())
-            .is_some_and(|total| total <= MAX_BLOB_READ_TURN_BYTES)
+) -> BlobReadAdmission {
+    if request_count >= MAX_BLOB_READ_REQUESTS_PER_TURN {
+        BlobReadAdmission::TurnReadCountExceeded
+    } else if decoded_total
+        .checked_add(requested.get())
+        .is_none_or(|total| total > MAX_BLOB_READ_TURN_BYTES)
+    {
+        BlobReadAdmission::TurnByteBudgetExceeded
+    } else {
+        BlobReadAdmission::Admitted
+    }
 }
 
 fn required<T>(row: &PgRow, column: &'static str) -> Result<T, ToolLoopRepositoryError>
@@ -3719,28 +3798,37 @@ mod blob_read_budget_tests {
 
     #[test]
     fn exact_blob_read_turn_byte_bound_is_admitted() {
-        assert!(blob_read_charge_admitted(
-            3,
-            MAX_BLOB_READ_TURN_BYTES - MAX_BLOB_READ_TOOL_BYTES,
-            NonZeroU64::new(MAX_BLOB_READ_TOOL_BYTES).expect("the tool bound is positive"),
-        ));
+        assert_eq!(
+            blob_read_charge_admission(
+                3,
+                MAX_BLOB_READ_TURN_BYTES - MAX_BLOB_READ_TOOL_BYTES,
+                NonZeroU64::new(MAX_BLOB_READ_TOOL_BYTES).expect("the tool bound is positive"),
+            ),
+            BlobReadAdmission::Admitted
+        );
     }
 
     #[test]
     fn blob_read_turn_byte_overflow_is_rejected() {
-        assert!(!blob_read_charge_admitted(
-            4,
-            MAX_BLOB_READ_TURN_BYTES,
-            NonZeroU64::new(1).expect("one is positive"),
-        ));
+        assert_eq!(
+            blob_read_charge_admission(
+                4,
+                MAX_BLOB_READ_TURN_BYTES,
+                NonZeroU64::new(1).expect("one is positive"),
+            ),
+            BlobReadAdmission::TurnByteBudgetExceeded
+        );
     }
 
     #[test]
     fn blob_read_turn_request_count_bound_is_rejected() {
-        assert!(!blob_read_charge_admitted(
-            MAX_BLOB_READ_REQUESTS_PER_TURN,
-            0,
-            NonZeroU64::new(1).expect("one is positive"),
-        ));
+        assert_eq!(
+            blob_read_charge_admission(
+                MAX_BLOB_READ_REQUESTS_PER_TURN,
+                0,
+                NonZeroU64::new(1).expect("one is positive"),
+            ),
+            BlobReadAdmission::TurnReadCountExceeded
+        );
     }
 }
