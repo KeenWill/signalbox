@@ -2742,42 +2742,7 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     Ok(())
 }
 
-/// The persistence contract mirrors the one-mebibyte accepted-input
-/// content bound is one contract enforced at correlated layers — oversized
-/// text fails application admission before the typed command and never reaches SQL,
-/// exact-bound text commits through the real adapter, and a direct SQL
-/// insert of oversized content is refused by the schema checks.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
--> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-
-    let oversized = UserContent::try_text("a".repeat(1_048_577))
-        .expect("domain text is intentionally unbounded");
-    let error = SubmitInputRequest::try_new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0x320)),
-        SessionId::from_uuid(Uuid::from_u128(0x720)),
-        oversized,
-        DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
-        },
-    )
-    .expect_err("text over the provisional bound fails application admission");
-    assert_eq!(
-        error,
-        SubmitInputRequestError::OversizedContent {
-            utf8_byte_length: 1_048_577,
-        }
-    );
-    let claimed: i64 = sqlx::query_scalar("SELECT count(*) FROM durable_command")
-        .fetch_one(&pool)
-        .await?;
-    assert_eq!(
-        claimed, 0,
-        "content rejected before typed-command construction claims no durable identifier"
-    );
-
+async fn persist_at_bound_content(pool: &PgPool) -> Result<usize, Box<dyn Error>> {
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0x321, 0x721, direct(0x821)))
         .await?;
@@ -2795,6 +2760,16 @@ async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
             Some(TurnId::from_uuid(Uuid::from_u128(0xa21))),
         )
         .await?;
+    Ok(at_bound.len())
+}
+
+/// The persistence adapter and both mirrored rows admit the domain's exact
+/// one-mebibyte text bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn content_size_bound_commits_at_exact_maximum() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let expected_length = i32::try_from(persist_at_bound_content(&pool).await?)?;
     let stored_lengths: Vec<i32> = sqlx::query_scalar(
         "SELECT octet_length(content_text) FROM submit_input_command
          UNION ALL
@@ -2804,9 +2779,22 @@ async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
     .await?;
     assert_eq!(
         stored_lengths,
-        vec![1_048_576, 1_048_576],
+        vec![expected_length, expected_length],
         "the schema must admit the domain's exact maximum"
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The submit-command satellite refuses content one byte above the domain
+/// maximum even when SQL bypasses domain construction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn submit_command_schema_rejects_content_above_maximum() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    persist_at_bound_content(&pool).await?;
 
     let mut transaction = pool.begin().await?;
     sqlx::query(
@@ -2860,7 +2848,28 @@ async fn content_size_bound_rejects_oversized_text_at_application_and_schema()
     );
     transaction.rollback().await?;
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The accepted-input satellite refuses content one byte above the domain
+/// maximum even when SQL bypasses domain construction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn accepted_input_schema_rejects_content_above_maximum() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    persist_at_bound_content(&pool).await?;
+
     let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'submit_input', 1, transaction_timestamp())",
+    )
+    .bind(Uuid::from_u128(0x323))
+    .execute(&mut *transaction)
+    .await?;
     let accepted_error = sqlx::query(
         "INSERT INTO accepted_input
             (accepted_input_id, accepting_command_id, session_id,
