@@ -48,6 +48,16 @@ pub struct ProbeDeclarationInput {
 }
 
 impl ProbeDeclaration {
+    /// Declares a probe that may read only one bounded source prefix.
+    pub const fn prefix_only(prefix_bytes: u64) -> Self {
+        Self {
+            prefix_bytes,
+            suffix_bytes: 0,
+            range_count: 0,
+            cumulative_bytes: prefix_bytes,
+        }
+    }
+
     /// Declares one finite probe envelope from labeled fields.
     pub const fn new(input: ProbeDeclarationInput) -> Self {
         Self {
@@ -76,6 +86,33 @@ impl ProbeDeclaration {
     /// Returns the cumulative byte budget.
     pub const fn cumulative_bytes(self) -> u64 {
         self.cumulative_bytes
+    }
+}
+
+/// Finite source-read envelope for one validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ValidationDeclaration {
+    source_bytes: u64,
+    range_count: u32,
+}
+
+impl ValidationDeclaration {
+    /// Declares one finite validation envelope. Registry construction checks ceilings.
+    pub const fn new(source_bytes: u64, range_count: u32) -> Self {
+        Self {
+            source_bytes,
+            range_count,
+        }
+    }
+
+    /// Returns the cumulative source-byte budget.
+    pub const fn source_bytes(self) -> u64 {
+        self.source_bytes
+    }
+
+    /// Returns the exact-range request budget.
+    pub const fn range_count(self) -> u32 {
+        self.range_count
     }
 }
 
@@ -272,6 +309,7 @@ pub struct ReaderDeclaration {
     identity: ReaderIdentity,
     media_types: Vec<CanonicalMediaType>,
     probe: ProbeDeclaration,
+    validation: ValidationDeclaration,
     views: Vec<ReadViewDeclaration>,
     reason_codes: Vec<ReasonCode>,
     streaming_text_fallback: StreamingTextFallback,
@@ -290,6 +328,8 @@ pub struct ReaderDeclarationInput {
     pub media_types: Vec<CanonicalMediaType>,
     /// Finite probe envelope.
     pub probe: ProbeDeclaration,
+    /// Finite validation envelope.
+    pub validation: ValidationDeclaration,
     /// Nonempty provider-owned view inventory.
     pub views: Vec<ReadViewDeclaration>,
     /// Nonempty sanitized reason-code inventory.
@@ -308,6 +348,7 @@ impl ReaderDeclaration {
             identity: ReaderIdentity::new(input.provider, input.reader, input.revision),
             media_types: input.media_types,
             probe: input.probe,
+            validation: input.validation,
             views: input.views,
             reason_codes: input.reason_codes,
             streaming_text_fallback: input.streaming_text_fallback,
@@ -327,6 +368,11 @@ impl ReaderDeclaration {
     /// Returns the probe envelope.
     pub const fn probe(&self) -> ProbeDeclaration {
         self.probe
+    }
+
+    /// Returns the validation envelope.
+    pub const fn validation(&self) -> ValidationDeclaration {
+        self.validation
     }
 
     /// Borrows provider-owned views.
@@ -399,6 +445,10 @@ pub struct FileMediaProviderValidationRequest {
     pub maximum_source_bytes: u64,
     /// Maximum exact ranges the processor broker may serve.
     pub maximum_ranges: u32,
+    /// Effective maximum image width or height for decoded-image work.
+    pub maximum_image_axis: u32,
+    /// Effective maximum decoded image pixels.
+    pub maximum_decoded_image_pixels: u64,
 }
 
 /// Provider request to interpret one validated file through one view.
@@ -416,6 +466,10 @@ pub struct FileMediaProviderReadRequest {
     pub view: ReadViewName,
     /// Closed initial-options or continuation input.
     pub input: crate::FileReadInput,
+    /// Effective maximum image width or height for decoded-image work.
+    pub maximum_image_axis: u32,
+    /// Effective maximum decoded image pixels.
+    pub maximum_decoded_image_pixels: u64,
     /// Maximum entries the registry may admit in any structured container.
     pub maximum_container_entries: u64,
 }
