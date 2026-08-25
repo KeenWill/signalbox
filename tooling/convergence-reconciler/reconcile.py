@@ -73,7 +73,7 @@ query($ids: [ID!]!) {
           isResolved
           comments(first: 100) {
             totalCount
-            nodes { author { login } authorAssociation body createdAt pullRequestReview { id } }
+            nodes { author { login } authorAssociation body createdAt lastEditedAt pullRequestReview { id } }
             pageInfo { hasNextPage endCursor }
           }
         }
@@ -413,7 +413,7 @@ query($id: ID!, $after: String!) {
   node(id: $id) {
     ... on PullRequestReviewThread {
       comments(first: 100, after: $after) {
-        nodes { author { login } authorAssociation body createdAt pullRequestReview { id } }
+        nodes { author { login } authorAssociation body createdAt lastEditedAt pullRequestReview { id } }
         pageInfo { hasNextPage endCursor }
       }
     }
@@ -1486,7 +1486,7 @@ def pagination_query(tasks: Sequence[PaginationTask]) -> tuple[str, dict[str, An
             connection = (
                 f"reviewThreads(first: 100, after: $after{index}) {{ "
                 "nodes { id isResolved comments(first: 100) { totalCount "
-                "nodes { author { login } authorAssociation body createdAt pullRequestReview { id } } "
+                "nodes { author { login } authorAssociation body createdAt lastEditedAt pullRequestReview { id } } "
                 "pageInfo { hasNextPage endCursor } } } "
                 "pageInfo { hasNextPage endCursor } }"
             )

@@ -14,6 +14,8 @@ from reconcile import (
     Config,
     GitHubGraphQL,
     GitHubNotFoundError,
+    PaginationTask,
+    PULL_REQUEST_DETAILS_QUERY,
     choose_decision,
     comment_only_patch,
     configured_path,
@@ -24,6 +26,7 @@ from reconcile import (
     normalize_pull_request,
     normalize_review_threads,
     nonnegative_number,
+    pagination_query,
     positive_number,
     prior_threads_dispositioned_before,
     process_pull_request,
@@ -1473,6 +1476,57 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(normalized[0]["dispositionKind"], "declined")
         self.assertEqual(
             normalized[0]["dispositionAt"], "2026-01-09T00:00:00Z"
+        )
+
+    def test_details_query_fetches_thread_comment_edit_time(self) -> None:
+        self.assertIn(
+            "authorAssociation body createdAt lastEditedAt pullRequestReview",
+            PULL_REQUEST_DETAILS_QUERY,
+        )
+
+    def test_thread_list_pagination_fetches_comment_edit_time(self) -> None:
+        query, _ = pagination_query(
+            [PaginationTask("threads", {"node_id": "PR_thread_page"}, "cursor-100")]
+        )
+
+        self.assertIn(
+            "authorAssociation body createdAt lastEditedAt pullRequestReview",
+            query,
+        )
+
+    def test_thread_comment_pagination_fetches_comment_edit_time(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "author_login": "owner",
+            "review_threads": [],
+            "_review_thread_nodes": [
+                {
+                    "id": "thread-node",
+                    "isResolved": True,
+                    "comments": {
+                        "nodes": [],
+                        "pageInfo": {
+                            "hasNextPage": True,
+                            "endCursor": "cursor-100",
+                        },
+                    },
+                }
+            ],
+        }
+        response = {
+            "node": {
+                "comments": {
+                    "nodes": [],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            }
+        }
+        with mock.patch.object(client, "execute", return_value=response) as execute:
+            client._finish_thread_comments([pull_request])
+
+        self.assertIn(
+            "authorAssociation body createdAt lastEditedAt pullRequestReview",
+            execute.call_args.args[0],
         )
 
     def test_escalation_marker_is_a_terminal_open_disposition(self) -> None:
