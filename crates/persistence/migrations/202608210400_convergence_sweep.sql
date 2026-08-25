@@ -1,5 +1,5 @@
 -- Durable state and typed audit for daemon-native pull-request convergence
--- reconciliation. The live reliability stack reserves 2026082106xx.
+-- reconciliation. The 2026082104xx block is reserved to this stack.
 
 CREATE FUNCTION convergence_sweep_retry_budget()
 RETURNS smallint
