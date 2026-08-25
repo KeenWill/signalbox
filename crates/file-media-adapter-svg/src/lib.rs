@@ -17,7 +17,8 @@ use signalbox_file_media_runtime::{
     FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration, ProbeStrength,
     ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
     ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
-    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidationDeclaration, ValidationEvidence,
+    VerifiedBlobSource,
 };
 
 const MEDIA_TYPE: &str = "image/svg+xml";
@@ -240,6 +241,10 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(MEDIA_TYPE)?],
         probe: ProbeDeclaration::prefix_only(PROBE_BYTES),
+        // Validation reads at most one range: either the bounded prefix used
+        // for oversized-source classification or the single whole-source read,
+        // never both.
+        validation: ValidationDeclaration::new(SOURCE_BYTES, 1),
         views: vec![text_view, metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
