@@ -23,6 +23,7 @@ pub mod hub_fence;
 pub mod mapping;
 pub mod model_call_reconciliation;
 pub mod model_execution;
+pub mod operator_status;
 pub mod outbox;
 pub mod plan;
 pub mod process_read;
@@ -52,6 +53,7 @@ pub mod test_support;
 pub mod tool_loop;
 pub mod turn_liveness;
 pub mod usage;
+pub mod workspace_instructions;
 
 pub use session_credentials::{
     ModelCredentialFamilyCatalog, ModelCredentialFamilyCatalogError, SessionCredentialPin,

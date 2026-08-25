@@ -34,6 +34,7 @@ mod tool_loop_ports;
 mod turn_liveness;
 mod update_session_placement;
 mod usage;
+mod workspace_instructions;
 
 pub use approval_judge::{
     ApprovalJudgeAuthorization, ApprovalJudgeBranchAuthority, ApprovalJudgeBranchAuthorityInput,
@@ -109,9 +110,10 @@ pub use repo_watch::{
     RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
     RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
     RepoWatchReviewObservation, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchSingletonKey, RepoWatchTemplateResolver, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    RepoWatchSingletonKey, RepoWatchStaleReviewClearanceCandidate,
+    RepoWatchStaleReviewClearanceCandidateError, RepoWatchTemplateResolver,
+    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
     repo_watch_events_have_equal_identified_content,
 };
 pub use repo_watch_webhook::{
@@ -233,4 +235,8 @@ pub use usage::{
     UsageTokenAxes, UsageTokenAxis, UsageTokenCoverage, UsageTokenPresence,
     max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_call_page_items,
     max_usage_credential_profile_utf8_bytes,
+};
+pub use workspace_instructions::{
+    InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
+    InstructionDiscoveryRoot, InstructionDiscoverySnapshot, discover_workspace_instructions,
 };
