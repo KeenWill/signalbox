@@ -497,12 +497,24 @@ pub enum ProcessProviderModelCallFailureCause {
     Unrecognized,
 }
 
+/// Persistence-owned closed classification of an unsent attachment-preparation failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessAttachmentPreparationFailureCause {
+    /// Distinct rendered attachment bytes exceeded the deployment ceiling.
+    TooLarge,
+    /// No recorded replica contained the required attachment.
+    Missing,
+    /// Recorded replicas failed length or digest verification.
+    Corrupt,
+}
+
 /// Optional terminal model-call evidence for a failed turn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessFailedTerminalModelCall {
     call: ModelCallId,
     disposition: ProcessFailedModelCallDisposition,
     provider_failure_cause: Option<ProcessProviderModelCallFailureCause>,
+    attachment_preparation_failure_cause: Option<ProcessAttachmentPreparationFailureCause>,
 }
 
 impl ProcessFailedTerminalModelCall {
@@ -519,6 +531,13 @@ impl ProcessFailedTerminalModelCall {
     /// Returns the closed provider classification when this call retained one.
     pub const fn provider_failure_cause(&self) -> Option<ProcessProviderModelCallFailureCause> {
         self.provider_failure_cause
+    }
+
+    /// Returns the closed local attachment-preparation cause when retained.
+    pub const fn attachment_preparation_failure_cause(
+        &self,
+    ) -> Option<ProcessAttachmentPreparationFailureCause> {
+        self.attachment_preparation_failure_cause
     }
 }
 
@@ -2805,6 +2824,8 @@ async fn load_next_transcript_turn(
                 AS terminal_model_call_disposition_kind,
             terminal_call.terminal_provider_failure_cause
                 AS terminal_model_call_provider_failure_cause,
+            terminal_call.terminal_attachment_preparation_failure_cause
+                AS terminal_model_call_attachment_preparation_failure_cause,
             accepted.accepted_input_id,
             accepted.acceptance_position AS accepted_position,
             accepted.origin_turn_id,
@@ -2981,6 +3002,21 @@ fn decode_provider_failure_cause(
         "unrecognized" => Ok(ProcessProviderModelCallFailureCause::Unrecognized),
         value => Err(ProcessReadCorruption::Unsupported {
             field: "model-call provider failure cause",
+            value: value.to_owned(),
+        }
+        .into()),
+    }
+}
+
+fn decode_attachment_preparation_failure_cause(
+    value: &str,
+) -> Result<ProcessAttachmentPreparationFailureCause, ProcessReadError> {
+    match value {
+        "too_large" => Ok(ProcessAttachmentPreparationFailureCause::TooLarge),
+        "missing" => Ok(ProcessAttachmentPreparationFailureCause::Missing),
+        "corrupt" => Ok(ProcessAttachmentPreparationFailureCause::Corrupt),
+        value => Err(ProcessReadCorruption::Unsupported {
+            field: "model-call attachment-preparation failure cause",
             value: value.to_owned(),
         }
         .into()),
@@ -3368,6 +3404,8 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         row.try_get("terminal_model_call_disposition_kind")?;
     let terminal_call_provider_failure_cause: Option<String> =
         row.try_get("terminal_model_call_provider_failure_cause")?;
+    let terminal_call_attachment_preparation_failure_cause: Option<String> =
+        row.try_get("terminal_model_call_attachment_preparation_failure_cause")?;
     if active_phase.as_deref() != Some("awaiting_runner_recovery")
         && (runner_recovery_runner.is_some()
             || runner_recovery_revision.is_some()
@@ -3382,6 +3420,15 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
     {
         return Err(ProcessReadCorruption::Inconsistent(
             "provider failure cause without known-failed model call",
+        )
+        .into());
+    }
+    if terminal_call_attachment_preparation_failure_cause.is_some()
+        && (terminal_call_disposition.as_deref() != Some("known_failed")
+            || terminal_call_provider_failure_cause.is_some())
+    {
+        return Err(ProcessReadCorruption::Inconsistent(
+            "attachment-preparation failure cause without local known-failed model call",
         )
         .into());
     }
@@ -3937,6 +3984,11 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                         .as_deref()
                         .map(decode_provider_failure_cause)
                         .transpose()?,
+                    attachment_preparation_failure_cause:
+                        terminal_call_attachment_preparation_failure_cause
+                            .as_deref()
+                            .map(decode_attachment_preparation_failure_cause)
+                            .transpose()?,
                 }),
             },
             Some(ContextFrontierId::from_uuid(frontier)),

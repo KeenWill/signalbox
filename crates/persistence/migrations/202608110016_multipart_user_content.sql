@@ -1243,3 +1243,46 @@ ALTER TABLE submit_input_command
 ALTER TABLE accepted_input
     DROP COLUMN content_kind,
     DROP COLUMN content_text;
+
+-- Retain the closed local cause of a guarded unsent attachment-preparation
+-- failure separately from definitive provider-error evidence.
+ALTER TABLE model_call
+    ADD COLUMN terminal_attachment_preparation_failure_cause text,
+    ADD COLUMN terminal_attachment_preparation_failure_maximum_bytes numeric(20, 0),
+    ADD CONSTRAINT model_call_attachment_preparation_failure_cause_closed
+        CHECK (
+            terminal_attachment_preparation_failure_cause IS NULL
+            OR terminal_attachment_preparation_failure_cause IN (
+                'too_large', 'missing', 'corrupt'
+            )
+        ),
+    ADD CONSTRAINT model_call_attachment_preparation_failure_maximum_bytes_u64
+        CHECK (
+            terminal_attachment_preparation_failure_maximum_bytes IS NULL
+            OR (
+                terminal_attachment_preparation_failure_maximum_bytes >= 1
+                AND terminal_attachment_preparation_failure_maximum_bytes <= 18446744073709551615
+            )
+        ),
+    ADD CONSTRAINT model_call_attachment_preparation_failure_cause_shape
+        CHECK (
+            (
+                terminal_attachment_preparation_failure_cause IS NULL
+                AND terminal_attachment_preparation_failure_maximum_bytes IS NULL
+            )
+            OR (
+                state_kind = 'terminal'
+                AND terminal_disposition_kind = 'known_failed'
+                AND terminal_provider_failure_cause IS NULL
+                AND (
+                    (
+                        terminal_attachment_preparation_failure_cause = 'too_large'
+                        AND terminal_attachment_preparation_failure_maximum_bytes IS NOT NULL
+                    )
+                    OR (
+                        terminal_attachment_preparation_failure_cause IN ('missing', 'corrupt')
+                        AND terminal_attachment_preparation_failure_maximum_bytes IS NULL
+                    )
+                )
+            )
+        );

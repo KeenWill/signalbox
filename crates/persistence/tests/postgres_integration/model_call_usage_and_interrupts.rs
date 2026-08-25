@@ -366,7 +366,7 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
 
     assert_eq!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_capability_failure(fixture.session, fixture.call, None)
             .await?,
         RetainedCapabilityFailureStatus::Pending
     );
@@ -374,6 +374,7 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
         .fail_prepared_call(
             fixture.session,
             fixture.call,
+            None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 14)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(seed + 15)),
@@ -387,7 +388,7 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
     );
     assert_eq!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_capability_failure(fixture.session, fixture.call, None)
             .await?,
         RetainedCapabilityFailureStatus::AlreadyCommitted
     );
@@ -439,7 +440,7 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
         .await?;
     assert!(matches!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_capability_failure(fixture.session, fixture.call, None)
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
             "retained capability failure durable closure is incomplete"
@@ -465,7 +466,7 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
         .await?;
     assert!(matches!(
         issued_repository
-            .reread_capability_failure(issued.session, issued.call)
+            .reread_capability_failure(issued.session, issued.call, None)
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
             "retained capability failure durable closure is incomplete"
@@ -563,7 +564,7 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
         .await?;
     assert_eq!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_capability_failure(fixture.session, fixture.call, None)
             .await?,
         RetainedCapabilityFailureStatus::Cancelled
     );
@@ -586,7 +587,7 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
         .await?;
     assert!(matches!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_capability_failure(fixture.session, fixture.call, None)
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
             "retained capability failure cancellation closure is incomplete"

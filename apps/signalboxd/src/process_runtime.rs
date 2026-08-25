@@ -31,7 +31,7 @@ use signalbox_application::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
     UuidV7CommissionedDispatchIdGenerator, UuidV7CreateSessionFromImportedFrontierIdGenerator,
     UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
-    UuidV7ToolLoopIdGenerator,
+    UuidV7ToolLoopIdGenerator, render_model_user_content,
 };
 use signalbox_blob_store::ExpectedBlob;
 use signalbox_conversation_import_claude_code::{
@@ -7206,6 +7206,9 @@ pub(crate) async fn compact_automatically(
             .map_err(AutomaticContextCompactionError::Repository)?;
             return Err(AutomaticContextCompactionError::Read(error));
         }
+        Err(ContextCompactionRangeLoadError::CatalogUnavailable) => {
+            return Err(AutomaticContextCompactionError::Model);
+        }
         Err(ContextCompactionRangeLoadError::Integrity) => {
             fail_context_compaction_until_resolved(
                 &repository,
@@ -7273,10 +7276,11 @@ async fn load_context_compaction_range(
     {
         return Err(ContextCompactionRangeLoadError::Integrity);
     }
-    let values = entries
-        .iter()
-        .map(context_compaction_entry_value)
-        .collect::<Vec<_>>();
+    let catalog = BlobCatalogRepository::new(pool.clone());
+    let mut values = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        values.push(context_compaction_entry_value(entry, &catalog).await?);
+    }
     serde_json::to_string(&values).map_err(|_| ContextCompactionRangeLoadError::Integrity)
 }
 
@@ -7290,6 +7294,9 @@ where
     loop {
         match load().await {
             Err(ContextCompactionRangeLoadError::Read(ProcessReadError::Database(_))) => {
+                sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await;
+            }
+            Err(ContextCompactionRangeLoadError::CatalogUnavailable) => {
                 sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await;
             }
             result => return result,
@@ -7385,7 +7392,10 @@ fn transcript_entry_reference(
     signalbox_domain::SemanticTranscriptEntryRef::from_source(source_session, entry)
 }
 
-fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json::Value {
+async fn context_compaction_entry_value(
+    entry: &ProcessTranscriptEntry,
+    catalog: &BlobCatalogRepository,
+) -> Result<serde_json::Value, ContextCompactionRangeLoadError> {
     let reference = transcript_entry_reference(entry);
     let source_session_id = reference
         .source_session()
@@ -7393,7 +7403,7 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
         .hyphenated()
         .to_string();
     let entry_id = reference.entry().into_uuid().hyphenated().to_string();
-    match entry {
+    let value = match entry {
         ProcessTranscriptEntry::DelegatedTask {
             entry_index,
             spawning_request,
@@ -7504,15 +7514,42 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
             turn,
             content,
             ..
-        } => serde_json::json!({
-            "position": entry_index + 1,
-            "source_session_id": source_session_id,
-            "entry_id": entry_id,
-            "type": "user",
-            "accepted_input_id": accepted_input.into_uuid().hyphenated().to_string(),
-            "turn_id": turn.into_uuid().hyphenated().to_string(),
-            "content": wire_user_content(content),
-        }),
+        } => {
+            let mut lengths = std::collections::BTreeMap::new();
+            for part in content.parts() {
+                let signalbox_domain::UserContentPart::Attachment { digest, .. } = part else {
+                    continue;
+                };
+                if lengths.contains_key(digest) {
+                    continue;
+                }
+                let catalog_entry = catalog
+                    .find(*digest)
+                    .await
+                    .map_err(map_context_compaction_catalog_error)?
+                    .ok_or(ContextCompactionRangeLoadError::Integrity)?;
+                let length = NonZeroU64::new(catalog_entry.expected().byte_length())
+                    .ok_or(ContextCompactionRangeLoadError::Integrity)?;
+                lengths.insert(*digest, length);
+            }
+            let rendered =
+                render_model_user_content(content.clone(), |digest| lengths.get(&digest).copied())
+                    .map_err(|_| ContextCompactionRangeLoadError::Integrity)?;
+            let rendered_parts = rendered
+                .parts()
+                .iter()
+                .map(|part| part.as_str())
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "position": entry_index + 1,
+                "source_session_id": source_session_id,
+                "entry_id": entry_id,
+                "type": "user",
+                "accepted_input_id": accepted_input.into_uuid().hyphenated().to_string(),
+                "turn_id": turn.into_uuid().hyphenated().to_string(),
+                "content": rendered_parts,
+            })
+        }
         ProcessTranscriptEntry::Assistant {
             entry_index,
             turn,
@@ -7650,6 +7687,21 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
             "source_speaker": imported_source_speaker_label(*source_speaker),
             "content_kind": imported_content_kind_label(*content_kind),
         }),
+    };
+    Ok(value)
+}
+
+fn map_context_compaction_catalog_error(
+    error: signalbox_persistence::blob::BlobCatalogRepositoryError,
+) -> ContextCompactionRangeLoadError {
+    match error {
+        signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_)
+        | signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_) => {
+            ContextCompactionRangeLoadError::CatalogUnavailable
+        }
+        signalbox_persistence::blob::BlobCatalogRepositoryError::Corruption(_) => {
+            ContextCompactionRangeLoadError::Integrity
+        }
     }
 }
 
@@ -7797,6 +7849,15 @@ where
     Writer: AsyncWrite + Unpin,
 {
     match error {
+        ContextCompactionRangeLoadError::CatalogUnavailable => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await
+        }
         ContextCompactionRangeLoadError::Read(error) => {
             if let Err(repository_error) = fail_context_compaction_until_resolved(
                 repository,
@@ -7951,6 +8012,7 @@ where
 #[derive(Debug)]
 enum ContextCompactionRangeLoadError {
     Read(ProcessReadError),
+    CatalogUnavailable,
     Integrity,
 }
 
@@ -13367,12 +13429,24 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                 let model_call_id = wire_uuid(call.call().into_uuid());
                 match call.disposition() {
                     ProcessFailedModelCallDisposition::KnownFailed => {
-                        match call.provider_failure_cause() {
-                            Some(cause) => FailedTerminalModelCall::known_failed_with_cause(
+                        let provider_cause = call.provider_failure_cause();
+                        let attachment_cause = call.attachment_preparation_failure_cause();
+                        debug_assert!(
+                            provider_cause.is_none() || attachment_cause.is_none(),
+                            "process-read validation rejects overlapping failure causes"
+                        );
+                        match (provider_cause, attachment_cause) {
+                            (Some(cause), _) => FailedTerminalModelCall::known_failed_with_cause(
                                 model_call_id,
                                 wire_provider_failure_cause(cause),
                             ),
-                            None => FailedTerminalModelCall::new(
+                            (None, Some(cause)) => {
+                                FailedTerminalModelCall::known_failed_with_cause(
+                                    model_call_id,
+                                    wire_attachment_preparation_failure_cause(cause),
+                                )
+                            }
+                            (None, None) => FailedTerminalModelCall::new(
                                 model_call_id,
                                 FailedModelCallDisposition::KnownFailed,
                             ),
@@ -13383,6 +13457,7 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                             call.provider_failure_cause().is_none(),
                             "process-read validation rejects causes on cancelled model calls"
                         );
+                        debug_assert!(call.attachment_preparation_failure_cause().is_none());
                         FailedTerminalModelCall::new(
                             model_call_id,
                             FailedModelCallDisposition::Cancelled,
@@ -13973,6 +14048,24 @@ fn wire_provider_failure_cause(
             FailedModelCallCause::ProviderInternal
         }
         ProcessProviderModelCallFailureCause::Unrecognized => FailedModelCallCause::Unrecognized,
+    }
+}
+
+fn wire_attachment_preparation_failure_cause(
+    cause: signalbox_persistence::process_read::ProcessAttachmentPreparationFailureCause,
+) -> FailedModelCallCause {
+    use signalbox_persistence::process_read::ProcessAttachmentPreparationFailureCause;
+
+    match cause {
+        ProcessAttachmentPreparationFailureCause::TooLarge => {
+            FailedModelCallCause::AttachmentTooLarge
+        }
+        ProcessAttachmentPreparationFailureCause::Missing => {
+            FailedModelCallCause::AttachmentMissing
+        }
+        ProcessAttachmentPreparationFailureCause::Corrupt => {
+            FailedModelCallCause::AttachmentCorrupt
+        }
     }
 }
 

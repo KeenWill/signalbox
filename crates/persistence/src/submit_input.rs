@@ -18,18 +18,18 @@ use signalbox_domain::{
     ConsumedSteeringReconstitutionInput, ContextCompactionId,
     ContextCompactionModelCallReconstitutionInput, ContextCompactionModelCallState,
     ContextCompactionRange, ContextCompactionReconstitutionInput, ContextCompactionTokenUsage,
-    ContextFrontierId, ContinuationRoundReconstitutionInput, DelegatedTurnSchedulingFact,
-    DelegatedTurnSchedulingState, DelegationContent, DelegationMessageId, DelegationOutcome,
-    DelegationOutcomeKind, DelegationOutcomeReason, DelegationProvenanceReconstitutionInput,
-    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition,
-    FrozenModelSelection, GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput,
-    GoalTurnSource, IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId,
-    ModelCallInterruptOutcome, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalOutcome, ModelCapabilityCatalog, ModelSelectionOverride,
-    ModelSelectionRequest, NonAcceptedTurnPredecessorReconstitutionInput,
-    NonEmptyUnicodeTextFailure, OriginConfiguration, OriginConfigurationReconstitutionInput,
-    OriginModelSettingsError, PerInputConfigurationChoices,
+    ContextFrontierId, ContextFrontierProjection, ContinuationRoundReconstitutionInput,
+    DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegationContent,
+    DelegationMessageId, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
+    DelegationProvenanceReconstitutionInput, DelegationWaitMode, DeliveryRequest,
+    DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedTurnExecutionReconstitutionInput, FrozenAliasDefinition, FrozenModelSelection,
+    GoalEventOrdinal, GoalGeneration, GoalTurnOriginConstructionInput, GoalTurnSource,
+    IssuedOperationRef, ModelAlias, ModelCallDisposition, ModelCallId, ModelCallInterruptOutcome,
+    ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCallTerminalOutcome,
+    ModelCapabilityCatalog, ModelSelectionOverride, ModelSelectionRequest,
+    NonAcceptedTurnPredecessorReconstitutionInput, NonEmptyUnicodeTextFailure, OriginConfiguration,
+    OriginConfigurationReconstitutionInput, OriginModelSettingsError, PerInputConfigurationChoices,
     PinnedProviderTargetReconstitutionInput, PreparedSubmitInput, ProviderModelIdentity,
     ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput, ResolvedProviderTarget,
     RunnerGeneration, RunnerId, SemanticTranscriptEntryId,
@@ -1726,47 +1726,67 @@ async fn prospective_attachment_frontier_exceeds_bound(
         }
     };
     let scheduling = load_scheduling_projection(connection, current).await?;
-    let (base_origins, check_base) =
-        match require_live_execution_for_restart(connection, session).await {
-            Ok(execution) => {
-                let mut distinct = BTreeSet::new();
-                let mut origins = execution
-                    .frontier_entries()
-                    .filter_map(|entry| match entry.payload() {
-                        InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
-                            accepted_input,
-                        }
-                        | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
-                            accepted_input,
-                            ..
-                        } => distinct.insert(*accepted_input).then_some(*accepted_input),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>();
-                origins.extend(
-                    execution
-                        .active_turn()
-                        .pending_steering()
-                        .iter()
-                        .map(|pending| pending.accepted_input())
-                        .filter(|accepted_input| distinct.insert(*accepted_input)),
-                );
-                (
-                    origins,
-                    matches!(
-                        result,
-                        SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
-                    ),
-                )
+    let (base_origins, check_base) = match require_live_execution_for_restart(connection, session)
+        .await
+    {
+        Ok(execution) => {
+            let mut distinct = BTreeSet::new();
+            let complete_entries = execution.frontier_entries().cloned().collect::<Vec<_>>();
+            let projection = ContextFrontierProjection::from_complete_entries(&complete_entries)
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("prospective attachment context projection")
+                })?;
+            let entries_by_reference = complete_entries
+                .iter()
+                .map(|entry| (entry.reference(), entry))
+                .collect::<BTreeMap<_, _>>();
+            let mut projected_entries = Vec::new();
+            for reference in projection.ordered_entries() {
+                let Some(entry) = entries_by_reference.get(&reference) else {
+                    return Err(SubmitInputCorruption::Inconsistent(
+                        "prospective attachment projected entry",
+                    )
+                    .into());
+                };
+                projected_entries.push(*entry);
             }
-            Err(ModelCallRepositoryError::NoLiveExecution) => (
-                scheduling
-                    .earliest_queued_rendered_base_origins()
-                    .unwrap_or_default(),
-                false,
-            ),
-            Err(error) => return Err(error.into()),
-        };
+            let mut origins = projected_entries
+                .into_iter()
+                .filter_map(|entry| match entry.payload() {
+                    InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                        accepted_input,
+                    }
+                    | InitialSemanticTranscriptEntryPayload::SteeringAcceptedInput {
+                        accepted_input,
+                        ..
+                    } => distinct.insert(*accepted_input).then_some(*accepted_input),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            origins.extend(
+                execution
+                    .active_turn()
+                    .pending_steering()
+                    .iter()
+                    .map(|pending| pending.accepted_input())
+                    .filter(|accepted_input| distinct.insert(*accepted_input)),
+            );
+            (
+                origins,
+                matches!(
+                    result,
+                    SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+                ),
+            )
+        }
+        Err(ModelCallRepositoryError::NoLiveExecution) => (
+            scheduling
+                .earliest_queued_rendered_base_origins()
+                .unwrap_or_default(),
+            false,
+        ),
+        Err(error) => return Err(error.into()),
+    };
     let queued_inputs = scheduling
         .turns()
         .filter(|turn| turn.status() == AcceptedInputTurnSchedulingStatus::Queued)

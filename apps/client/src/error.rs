@@ -307,6 +307,11 @@ impl Error for ClientError {
 const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
     match cause {
         FailedModelCallCause::CredentialRejected => "the provider rejected the credential",
+        FailedModelCallCause::AttachmentTooLarge => {
+            "the attachment verification budget was exceeded"
+        }
+        FailedModelCallCause::AttachmentMissing => "a required attachment is missing",
+        FailedModelCallCause::AttachmentCorrupt => "a required attachment is corrupt",
         FailedModelCallCause::PermissionDenied => "the credential lacks permission",
         FailedModelCallCause::InvalidRequest => "the provider rejected the request as invalid",
         FailedModelCallCause::TargetNotFound => "the requested model or resource was not found",

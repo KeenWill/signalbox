@@ -16,13 +16,13 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, AvailabilitySuccessorOutcome,
-    ClassifyOperatorFailure, CommitModelCallObservationTransaction, CredentialPoolExhaustedOutcome,
-    FailPreparedModelCallTransaction, ModelCallAuthorizationReread, ModelCallCredentialReference,
-    ModelCallObservationCommitOutcome, ModelCallTerminalIdentityCandidates, OperatorFailureClass,
-    PrepareModelCallOutcome, PrepareModelCallTransaction, PrepareToolContinuationOutcome,
-    ResolvedToolConversationEntry, RetainedCapabilityFailureStatus,
-    RetainedModelCallObservationStatus,
+    AttachmentPreparationFailure, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
+    AvailabilitySuccessorOutcome, ClassifyOperatorFailure, CommitModelCallObservationTransaction,
+    CredentialPoolExhaustedOutcome, FailPreparedModelCallTransaction, ModelCallAuthorizationReread,
+    ModelCallCredentialReference, ModelCallObservationCommitOutcome,
+    ModelCallTerminalIdentityCandidates, OperatorFailureClass, PrepareModelCallOutcome,
+    PrepareModelCallTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
+    RetainedCapabilityFailureStatus, RetainedModelCallObservationStatus,
 };
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase,
@@ -1363,6 +1363,7 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         mut next_reclassified_turn: NextTurn,
     ) -> Result<FailedModelCallTurn, ModelCallRepositoryError>
@@ -1394,6 +1395,10 @@ impl PostgresModelCallRepository {
                 None,
             )
             .await?;
+            if let Some(failure) = attachment_failure {
+                persist_attachment_preparation_failure(&mut transaction, session, call, failure)
+                    .await?;
+            }
             Ok(failed)
         }
         .await;
@@ -1405,13 +1410,28 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
     ) -> Result<RetainedCapabilityFailureStatus, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
-            let stored = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Option<String>)>(
+            let stored = sqlx::query_as::<
+                _,
+                (
+                    Uuid,
+                    Uuid,
+                    Uuid,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<Decimal>,
+                ),
+            >(
                 "SELECT turn_id, turn_attempt_id, context_frontier_id, state_kind,
-                        terminal_disposition_kind
+                        terminal_disposition_kind, terminal_provider_failure_cause,
+                        terminal_attachment_preparation_failure_cause,
+                        terminal_attachment_preparation_failure_maximum_bytes
                    FROM model_call
                   WHERE session_id = $1
                     AND model_call_id = $2",
@@ -1423,7 +1443,16 @@ impl PostgresModelCallRepository {
             .ok_or(ModelCallCorruption::Missing(
                 "retained capability-failure model call",
             ))?;
-            let (turn, attempt, source_frontier, state, disposition) = stored;
+            let (
+                turn,
+                attempt,
+                source_frontier,
+                state,
+                disposition,
+                provider_failure_cause,
+                stored_attachment_failure,
+                stored_attachment_maximum,
+            ) = stored;
             match (state.as_str(), disposition.as_deref()) {
                 ("prepared", None) => {
                     let execution = require_exact_call(
@@ -1438,6 +1467,29 @@ impl PostgresModelCallRepository {
                     Ok(RetainedCapabilityFailureStatus::Pending)
                 }
                 ("terminal", Some("known_failed")) => {
+                    let (expected_attachment_failure, expected_attachment_maximum) =
+                        match attachment_failure {
+                            Some(AttachmentPreparationFailure::TooLarge { maximum_bytes }) => (
+                                Some("too_large"),
+                                Some(Decimal::from(maximum_bytes)),
+                            ),
+                            Some(AttachmentPreparationFailure::Missing) => (Some("missing"), None),
+                            Some(AttachmentPreparationFailure::Corrupt) => (Some("corrupt"), None),
+                            Some(AttachmentPreparationFailure::Unavailable) => {
+                                return Err(ModelCallRepositoryError::InvalidTransition(
+                                    "retryable attachment unavailability cannot have a terminal closure",
+                                ));
+                            }
+                            None => (None, None),
+                        };
+                    if provider_failure_cause.is_some()
+                        || stored_attachment_failure.as_deref() != expected_attachment_failure
+                        || stored_attachment_maximum != expected_attachment_maximum
+                    {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained capability failure durable cause changed",
+                        ));
+                    }
                     let transition_history_matches = sqlx::query_scalar::<_, bool>(
                         "SELECT
                             EXISTS (
@@ -2522,6 +2574,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> Result<FailedModelCallTurn, Self::Error>
@@ -2532,6 +2585,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
             self,
             session,
             call,
+            attachment_failure,
             identities,
             next_reclassified_turn,
         )
@@ -2542,8 +2596,10 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
     ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
-        self.reread_capability_failure(session, call).await
+        self.reread_capability_failure(session, call, attachment_failure)
+            .await
     }
 }
 
@@ -6288,6 +6344,46 @@ async fn persist_failed_with_delegated_child_result(
     lock_delegated_child_result_frontier(connection, failed.session(), failed.turn()).await?;
     persist_failed(connection, failed, usage, provider_failure_cause).await?;
     persist_delegated_child_result(connection, &DelegationOutcome::from_failed_child(failed)).await
+}
+
+async fn persist_attachment_preparation_failure(
+    connection: &mut PgConnection,
+    session: SessionId,
+    call: ModelCallId,
+    failure: AttachmentPreparationFailure,
+) -> Result<(), ModelCallRepositoryError> {
+    let (cause, maximum_bytes) = match failure {
+        AttachmentPreparationFailure::TooLarge { maximum_bytes } => {
+            ("too_large", Some(Decimal::from(maximum_bytes)))
+        }
+        AttachmentPreparationFailure::Missing => ("missing", None),
+        AttachmentPreparationFailure::Corrupt => ("corrupt", None),
+        AttachmentPreparationFailure::Unavailable => {
+            return Err(ModelCallRepositoryError::InvalidTransition(
+                "retryable attachment unavailability cannot terminalize a prepared call",
+            ));
+        }
+    };
+    let rows = sqlx::query(
+        "UPDATE model_call
+            SET terminal_attachment_preparation_failure_cause = $1,
+                terminal_attachment_preparation_failure_maximum_bytes = $2
+          WHERE model_call_id = $3
+            AND session_id = $4
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'known_failed'
+            AND terminal_provider_failure_cause IS NULL
+            AND terminal_attachment_preparation_failure_cause IS NULL
+            AND terminal_attachment_preparation_failure_maximum_bytes IS NULL",
+    )
+    .bind(cause)
+    .bind(maximum_bytes)
+    .bind(call.into_uuid())
+    .bind(session_id_to_uuid(session))
+    .execute(&mut *connection)
+    .await?
+    .rows_affected();
+    require_single(rows, "terminal attachment-preparation failure cause")
 }
 
 async fn lock_delegated_child_result_frontier(

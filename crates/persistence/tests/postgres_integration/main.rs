@@ -4765,6 +4765,7 @@ async fn delegated_capability_failure_fixture(
         .fail_prepared_call(
             child,
             call,
+            None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 27)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(seed + 28)),
@@ -4799,7 +4800,7 @@ async fn assert_delegated_capability_reread_rejects_damage(
     assert_eq!(
         fixture
             .repository
-            .reread_capability_failure(fixture.child, fixture.call)
+            .reread_capability_failure(fixture.child, fixture.call, None)
             .await?,
         RetainedCapabilityFailureStatus::AlreadyCommitted
     );
@@ -4902,7 +4903,7 @@ async fn assert_delegated_capability_reread_rejects_damage(
     }
     let error = fixture
         .repository
-        .reread_capability_failure(fixture.child, fixture.call)
+        .reread_capability_failure(fixture.child, fixture.call, None)
         .await
         .expect_err("damaged delegated delivery cannot authenticate a capability failure");
     assert!(matches!(

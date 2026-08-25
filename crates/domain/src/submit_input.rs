@@ -2977,14 +2977,7 @@ impl SubmitInputReconstitutionInput {
                         SubmitInputReconstitutionFailure::ResultSessionMismatch,
                     ));
                 }
-                if result_maximum_bytes == 0
-                    || !self
-                        .command
-                        .content
-                        .parts()
-                        .iter()
-                        .any(|part| matches!(part, crate::UserContentPart::Attachment { .. }))
-                {
+                if result_maximum_bytes == 0 {
                     return Err(fail(
                         SubmitInputReconstitutionFailure::AttachmentBudgetMismatch,
                     ));
@@ -6068,6 +6061,23 @@ mod tests {
         .expect("matching byte-budget evidence reconstructs");
         assert!(matches!(
             budget.result(),
+            SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: 4096
+            })
+        ));
+
+        let text_budget = SubmitInputReconstitutionInput::rejected_attachment_byte_budget_exceeded(
+            SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput {
+                command: start_command(0x52, "text-only frontier input", 1),
+                stored_actor: Actor::User,
+                result_session: session_id(1),
+                result_maximum_bytes: 4096,
+            },
+        )
+        .reconstitute()
+        .expect("frontier-driven byte-budget evidence reconstructs for text input");
+        assert!(matches!(
+            text_budget.result(),
             SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
                 maximum_bytes: 4096
             })

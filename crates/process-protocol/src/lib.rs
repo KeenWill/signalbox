@@ -4928,10 +4928,16 @@ pub enum FailedModelCallDisposition {
     Cancelled,
 }
 
-/// Closed provider-error classifications exposed to clients.
+/// Closed terminal model-call failure classifications exposed to clients.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailedModelCallCause {
+    /// Distinct rendered attachments exceeded the deployment verification bound.
+    AttachmentTooLarge,
+    /// No recorded replica contained a required rendered attachment.
+    AttachmentMissing,
+    /// Recorded replicas failed attachment identity verification.
+    AttachmentCorrupt,
     /// The provider rejected the request credential.
     CredentialRejected,
     /// The credential lacked permission.
@@ -4977,8 +4983,7 @@ impl FailedTerminalModelCall {
         }
     }
 
-    /// Constructs one known-failed call with its closed provider-error
-    /// classification.
+    /// Constructs one known-failed call with its closed failure classification.
     pub const fn known_failed_with_cause(
         model_call_id: CanonicalUuid,
         cause: FailedModelCallCause,
@@ -5000,7 +5005,7 @@ impl FailedTerminalModelCall {
         self.disposition
     }
 
-    /// Returns the closed provider-error classification when retained.
+    /// Returns the closed failure classification when retained.
     pub const fn cause(&self) -> Option<FailedModelCallCause> {
         self.cause
     }
@@ -5037,7 +5042,7 @@ impl<'de> Deserialize<'de> for FailedTerminalModelCall {
         let raw = RawFailedTerminalModelCall::deserialize(deserializer)?;
         if raw.cause.is_some() && raw.disposition != FailedModelCallDisposition::KnownFailed {
             return Err(serde::de::Error::custom(
-                "provider failure cause requires a known-failed disposition",
+                "failure cause requires a known-failed disposition",
             ));
         }
         Ok(Self {
@@ -10431,6 +10436,71 @@ mod tests {
             r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"quota_exhausted"}}}"#,
         )?;
         Ok(())
+    }
+
+    fn assert_attachment_failure_cause_round_trip(
+        cause: FailedModelCallCause,
+        spelling: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let encoded = encode_server_line(&ServerFrame {
+            version: ProtocolVersion::One,
+            request_id: request(92)?,
+            message: ServerMessage::TranscriptTurn {
+                turn_id: uuid(1),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::Failed {
+                    terminal_frontier_id: uuid(2),
+                    terminal_attempt_id: Some(uuid(3)),
+                    terminal_model_call: Some(FailedTerminalModelCall::known_failed_with_cause(
+                        uuid(4),
+                        cause,
+                    )),
+                },
+            },
+        })?;
+        assert!(std::str::from_utf8(&encoded)?.contains(&format!("\"cause\":\"{spelling}\"")));
+        let decoded = decode_server_line(&encoded)?;
+        let ServerMessage::TranscriptTurn {
+            state:
+                TurnState::Failed {
+                    terminal_model_call: Some(call),
+                    ..
+                },
+            ..
+        } = decoded.message
+        else {
+            panic!("attachment failure fixture keeps its terminal call");
+        };
+        assert_eq!(call.cause(), Some(cause));
+        Ok(())
+    }
+
+    #[test]
+    fn attachment_too_large_round_trips_as_a_closed_wire_classification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_attachment_failure_cause_round_trip(
+            FailedModelCallCause::AttachmentTooLarge,
+            "attachment_too_large",
+        )
+    }
+
+    #[test]
+    fn attachment_missing_round_trips_as_a_closed_wire_classification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_attachment_failure_cause_round_trip(
+            FailedModelCallCause::AttachmentMissing,
+            "attachment_missing",
+        )
+    }
+
+    #[test]
+    fn attachment_corrupt_round_trips_as_a_closed_wire_classification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_attachment_failure_cause_round_trip(
+            FailedModelCallCause::AttachmentCorrupt,
+            "attachment_corrupt",
+        )
     }
 
     #[test]

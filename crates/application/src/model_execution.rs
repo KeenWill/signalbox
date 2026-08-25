@@ -300,9 +300,11 @@ struct SerializedAttachmentStub<'a> {
     digest: String,
 }
 
-fn render_user_content(
+/// Renders ordered user content into canonical provider-visible text and
+/// bounded attachment stubs.
+pub fn render_model_user_content(
     content: UserContent,
-    attachment_byte_length: &mut impl FnMut(BlobDigest) -> Option<NonZeroU64>,
+    mut attachment_byte_length: impl FnMut(BlobDigest) -> Option<NonZeroU64>,
 ) -> Result<ModelUserContent, ModelFrontierRenderingError> {
     let parts = content
         .into_parts()
@@ -421,7 +423,7 @@ fn render_frontier_messages<'a>(
                         accepted_input: *accepted_input,
                     },
                 )?;
-                let content = render_user_content(content, &mut attachment_byte_length)?;
+                let content = render_model_user_content(content, &mut attachment_byte_length)?;
                 messages.push(ModelConversationMessage::User {
                     source,
                     accepted_input: *accepted_input,
@@ -721,6 +723,21 @@ impl PreparedModelOperation {
     pub fn tools(&self) -> &[ToolDefinition] {
         &self.tools
     }
+
+    /// Iterates over attachment digests represented by the rendered request.
+    pub fn attachment_digests(&self) -> impl Iterator<Item = BlobDigest> + '_ {
+        self.messages
+            .iter()
+            .filter_map(|message| match message {
+                ModelConversationMessage::User { content, .. } => Some(content.parts()),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|part| match part {
+                ModelUserContentPart::AttachmentStub(stub) => Some(stub.digest),
+                ModelUserContentPart::Text(_) => None,
+            })
+    }
 }
 
 /// A checked frontier could not be projected into the current text-only input.
@@ -885,6 +902,7 @@ pub trait FailPreparedModelCallTransaction {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> impl Future<Output = Result<FailedModelCallTurn, Self::Error>> + Send
@@ -896,6 +914,7 @@ pub trait FailPreparedModelCallTransaction {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
     ) -> impl Future<Output = Result<RetainedCapabilityFailureStatus, Self::Error>> + Send;
 }
 
@@ -1075,6 +1094,8 @@ enum RetainedModelCallExecutionStateKind {
         session: SessionId,
         /// Prepared call whose guarded known-failure closure remains pending.
         call: ModelCallId,
+        /// Distinct attachment-preparation cause, absent for ordinary capability failure.
+        attachment_failure: Option<AttachmentPreparationFailure>,
     },
     /// Ambiguous authorization still has same-incarnation proof of no send.
     AuthorizationNonConsumption {
@@ -1094,6 +1115,22 @@ enum RetainedModelCallExecutionStateKind {
     },
 }
 
+/// Closed result of preparing rendered attachment authority before provider work.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttachmentPreparationFailure {
+    /// Distinct rendered attachments exceed the deployment verification bound.
+    TooLarge {
+        /// Deployment maximum applied before store I/O.
+        maximum_bytes: u64,
+    },
+    /// No recorded replica contains the required attachment.
+    Missing,
+    /// Recorded replicas were readable but failed identity verification.
+    Corrupt,
+    /// No replica verified and at least one candidate was temporarily unavailable.
+    Unavailable,
+}
+
 /// Adapter-local result of credential lookup and capability preparation.
 pub enum ModelCallCapabilityPreparation<Capability> {
     /// A call-bound one-shot capability is ready to move into provider work.
@@ -1102,6 +1139,8 @@ pub enum ModelCallCapabilityPreparation<Capability> {
     Cancelled,
     /// A trustworthy ordinary local failure occurred before send authorization.
     KnownFailure,
+    /// Attachment preparation could not establish authority for the request.
+    AttachmentFailure(AttachmentPreparationFailure),
 }
 
 /// Outcome of one exact provider-native prospective input count.
@@ -1263,6 +1302,8 @@ pub enum ModelCallExecutionOutcome {
     TargetUnavailable(Box<FailedModelCallTurn>),
     /// A trustworthy local capability failure closed the prepared call.
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
+    /// Attachment verification was unavailable; the call remains `Prepared`.
+    AttachmentUnavailable,
     /// A retained capability failure's earlier commit was proven to have landed.
     CapabilityFailureAlreadyCommitted(ModelCallId),
     /// The provider observation committed its authoritative result.
@@ -1599,10 +1640,20 @@ where
     > {
         if let Some(retained) = self.retained_state.take() {
             match retained.state {
-                RetainedModelCallExecutionStateKind::CapabilityKnownFailure { session, call } => {
-                    match self.failure.reread_failure(session, call).await {
+                RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
+                    session,
+                    call,
+                    attachment_failure,
+                } => {
+                    match self
+                        .failure
+                        .reread_failure(session, call, attachment_failure)
+                        .await
+                    {
                         Ok(RetainedCapabilityFailureStatus::Pending) => {
-                            return self.commit_capability_known_failure(session, call).await;
+                            return self
+                                .commit_capability_known_failure(session, call, attachment_failure)
+                                .await;
                         }
                         Ok(RetainedCapabilityFailureStatus::AlreadyCommitted) => {
                             return Ok(
@@ -1618,6 +1669,7 @@ where
                                     RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
                                         session,
                                         call,
+                                        attachment_failure,
                                     },
                             });
                             return Err(ModelCallExecutionError::CapabilityFailureReread(error));
@@ -1810,7 +1862,9 @@ where
         )
         .map_err(ModelCallExecutionError::Render)?;
         if automatic_tool_round_limit_reached(turn, operation.messages()) {
-            return self.commit_capability_known_failure(session, call).await;
+            return self
+                .commit_capability_known_failure(session, call, None)
+                .await;
         }
         let preparation_cancellation = self.authorization.cancellation_signal(session, call);
         let capability = match self
@@ -1823,7 +1877,23 @@ where
                 return Ok(ModelCallExecutionOutcome::NoWork);
             }
             Ok(ModelCallCapabilityPreparation::KnownFailure) => {
-                return self.commit_capability_known_failure(session, call).await;
+                return self
+                    .commit_capability_known_failure(session, call, None)
+                    .await;
+            }
+            Ok(ModelCallCapabilityPreparation::AttachmentFailure(
+                AttachmentPreparationFailure::Unavailable,
+            )) => {
+                return Ok(ModelCallExecutionOutcome::AttachmentUnavailable);
+            }
+            Ok(ModelCallCapabilityPreparation::AttachmentFailure(
+                failure @ (AttachmentPreparationFailure::TooLarge { .. }
+                | AttachmentPreparationFailure::Missing
+                | AttachmentPreparationFailure::Corrupt),
+            )) => {
+                return self
+                    .commit_capability_known_failure(session, call, Some(failure))
+                    .await;
             }
             Err(error) => {
                 return Err(ModelCallExecutionError::CapabilityPreparation(error));
@@ -1926,6 +1996,7 @@ where
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
     ) -> Result<
         ModelCallExecutionOutcome,
         ModelCallExecutionError<
@@ -1942,7 +2013,7 @@ where
             let next_turn = move |_| ids.next_turn_id();
             match self
                 .failure
-                .fail_prepared(session, call, identities, next_turn)
+                .fail_prepared(session, call, attachment_failure, identities, next_turn)
                 .await
             {
                 Ok(failed) => {
@@ -1966,6 +2037,7 @@ where
                         state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
                             session,
                             call,
+                            attachment_failure,
                         },
                     });
                     return Err(ModelCallExecutionError::CapabilityFailureCommit(error));
@@ -2623,7 +2695,7 @@ mod tests {
     }
 
     fn rendered_text(content: UserContent) -> ModelUserContent {
-        render_user_content(content, &mut |_| None)
+        render_model_user_content(content, |_| None)
             .expect("text-only fixture needs no attachment catalog facts")
     }
 
@@ -2653,7 +2725,7 @@ mod tests {
             r#"{{"signalbox_attachment":{{"kind":"image","media_type":"image/png","display_filename":"scan\".png","byte_length":"17","digest":"{digest}"}}}}"#
         );
 
-        let rendered = render_user_content(content, &mut |candidate| {
+        let rendered = render_model_user_content(content, |candidate| {
             (candidate == digest)
                 .then_some(NonZeroU64::new(17).expect("the fixture attachment length is positive"))
         })
@@ -2680,7 +2752,7 @@ mod tests {
         }])
         .expect("the maximum metadata fixture is valid");
 
-        let rendered = render_user_content(content, &mut |_| Some(NonZeroU64::MAX))
+        let rendered = render_model_user_content(content, |_| Some(NonZeroU64::MAX))
             .expect("the derived bound covers maximum checked metadata");
         let stub = rendered.parts()[0].as_str();
 
@@ -3619,6 +3691,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
+            _attachment_failure: Option<AttachmentPreparationFailure>,
             _identities: FailedModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
         ) -> Result<FailedModelCallTurn, Self::Error>
@@ -3632,6 +3705,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
+            _attachment_failure: Option<AttachmentPreparationFailure>,
         ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
             panic!("unused capability-failure reread")
         }
@@ -3652,6 +3726,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
+            _attachment_failure: Option<AttachmentPreparationFailure>,
             _identities: FailedModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
         ) -> Result<FailedModelCallTurn, Self::Error>
@@ -3669,6 +3744,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
+            _attachment_failure: Option<AttachmentPreparationFailure>,
         ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
             self.reread_calls += 1;
             self.rereads
@@ -3704,6 +3780,7 @@ mod tests {
             &mut self,
             session: SessionId,
             call: ModelCallId,
+            _attachment_failure: Option<AttachmentPreparationFailure>,
             identities: FailedModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
         ) -> Result<FailedModelCallTurn, Self::Error>
@@ -3725,6 +3802,7 @@ mod tests {
             &mut self,
             _session: SessionId,
             _call: ModelCallId,
+            _attachment_failure: Option<AttachmentPreparationFailure>,
         ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
             panic!("a committed capability failure is never reread")
         }
@@ -5171,6 +5249,7 @@ mod tests {
                 state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
                     session: retained_session,
                     call: retained_call,
+                    ..
                 },
             }) if *retained_session == session && *retained_call == call
         ));
@@ -5209,6 +5288,7 @@ mod tests {
                 state: RetainedModelCallExecutionStateKind::CapabilityKnownFailure {
                     session: retained_session,
                     call: retained_call,
+                    ..
                 },
             }) if retained_session == session && retained_call == call
         ));

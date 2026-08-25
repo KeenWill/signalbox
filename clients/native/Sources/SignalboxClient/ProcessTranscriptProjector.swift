@@ -352,9 +352,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           )
           if let projected {
             store(projected, in: &projectedByID, order: &projectedOrder)
-            if case .user(let acceptedInputID, _) = assembly.message.entry {
-              materializedAcceptedInputIDs.insert(acceptedInputID)
-            }
           }
           textAssembly = nil
         } else {
@@ -465,7 +462,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           textModelCall = (modelCallID.rawValue, message.entryIndex, turnID)
         case .contextSummary(let modelCallID, _, _, _, _):
           textModelCall = (modelCallID.rawValue, message.entryIndex, nil)
-        case .user, .imported, .unknown:
+        case .imported, .unknown:
           textModelCall = nil
         }
       case .content(let content):
@@ -552,7 +549,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
           continue
         }
         switch message.entry {
-        case .user(_, let turnID), .assistant(let turnID, _):
+        case .assistant(let turnID, _):
           anchor = (turnID, message.entryIndex)
         case .contextSummary, .imported, .unknown:
           anchor = nil
@@ -705,8 +702,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     }
     let event: SignalboxConversationEvent
     switch message.entry {
-    case .user:
-      event = .processMessage(SignalboxProcessMessageEvent(role: .user, text: content))
     case .assistant:
       event = .processMessage(SignalboxProcessMessageEvent(role: .assistant, text: content))
     case .contextSummary:
@@ -1255,8 +1250,6 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
         return false
       }
       switch message.entry {
-      case .user:
-        return false
       case .assistant(let turnID, let modelCallID):
         let producingCall: (turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID)?
         switch trigger {
@@ -1976,6 +1969,12 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     switch cause {
     case .credentialRejected:
       return "provider rejected credential"
+    case .attachmentTooLarge:
+      return "attachment verification budget exceeded"
+    case .attachmentMissing:
+      return "required attachment is missing"
+    case .attachmentCorrupt:
+      return "required attachment is corrupt"
     case .permissionDenied:
       return "credential lacks permission"
     case .invalidRequest:

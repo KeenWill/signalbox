@@ -1595,7 +1595,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       guard
         modelCallsEnded,
         pendingModelIdentityTurnID == nil || entry.sourceSessionID == boundary.sessionID,
-        !entry.entry.hasMalformedStoredProjection && consumesModelIdentityTurnOrigin(entry.entry),
+        !entry.entry.hasMalformedStoredProjection && pendingModelIdentityTurnID == nil,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(
@@ -1847,14 +1847,6 @@ extension SignalboxSnapshotAccumulator {
     return true
   }
 
-  fileprivate mutating func consumesModelIdentityTurnOrigin(
-    _ entry: SignalboxTranscriptTextEntry
-  ) -> Bool {
-    entry.consumesTurnOrigin(
-      &pendingModelIdentityTurnID,
-      seenTurnIDs: &modelIdentityTurns.origins
-    )
-  }
 }
 
 extension SignalboxCurrentModelCallState {
@@ -1966,24 +1958,6 @@ extension SignalboxTranscriptTextEntry {
     return (kind, decodingDiagnostic)
   }
 
-  fileprivate func consumesTurnOrigin(
-    _ pendingTurnID: inout SignalboxCanonicalUUID?,
-    seenTurnIDs: inout Set<SignalboxCanonicalUUID>
-  ) -> Bool {
-    guard case .user(_, let turnID) = self else {
-      return pendingTurnID == nil
-    }
-    guard let expectedTurnID = pendingTurnID else {
-      seenTurnIDs.insert(turnID)
-      return true
-    }
-    guard turnID == expectedTurnID, seenTurnIDs.insert(turnID).inserted else {
-      return false
-    }
-    pendingTurnID = nil
-    return true
-  }
-
   fileprivate var hasMalformedStoredProjection: Bool {
     if case .unknown(_, _, let decodingDiagnostic) = self {
       return decodingDiagnostic != nil
@@ -1999,7 +1973,7 @@ extension SignalboxTranscriptTextEntry {
       return UInt(kind.utf8.count)
         .saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .user, .assistant, .contextSummary:
+    case .assistant, .contextSummary:
       return 0
     }
   }

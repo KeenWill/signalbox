@@ -2975,6 +2975,9 @@ const fn failed_model_call_disposition(disposition: FailedModelCallDisposition) 
 const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
     match cause {
         FailedModelCallCause::CredentialRejected => "credential_rejected",
+        FailedModelCallCause::AttachmentTooLarge => "attachment_too_large",
+        FailedModelCallCause::AttachmentMissing => "attachment_missing",
+        FailedModelCallCause::AttachmentCorrupt => "attachment_corrupt",
         FailedModelCallCause::PermissionDenied => "permission_denied",
         FailedModelCallCause::InvalidRequest => "invalid_request",
         FailedModelCallCause::TargetNotFound => "target_not_found",
