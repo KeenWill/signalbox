@@ -629,6 +629,7 @@ enum RuntimeTaskExit {
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
+    RepositoryWatchLeaseExpiry(Result<(), RepoWatchDispatchRepositoryError>),
     ConvergenceSweep,
     WebHttp(Result<(), WebHttpRuntimeError>),
     TurnLiveness,
@@ -672,6 +673,7 @@ enum RuntimeTaskDefect {
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
     RepositoryWatchCompletedBeforeShutdown,
+    RepositoryWatchLeaseExpiryCompletedBeforeShutdown,
     ConvergenceSweepCompletedBeforeShutdown,
     WebHttpCompletedBeforeShutdown,
     TurnLivenessCompletedBeforeShutdown,
@@ -689,6 +691,9 @@ impl RuntimeTaskDefect {
             Self::RunnerCompletedBeforeShutdown => "runner_runtime_completed_before_shutdown",
             Self::RepositoryWatchCompletedBeforeShutdown => {
                 "repository_watch_completed_before_shutdown"
+            }
+            Self::RepositoryWatchLeaseExpiryCompletedBeforeShutdown => {
+                "repository_watch_lease_expiry_completed_before_shutdown"
             }
             Self::ConvergenceSweepCompletedBeforeShutdown => {
                 "convergence_sweep_completed_before_shutdown"
@@ -952,6 +957,38 @@ fn report_repository_watch_runtime_defect(error: &RepositoryWatchRuntimeError) {
     );
 }
 
+/// Classifies a lease-expiry failure without flattening commit ambiguity.
+///
+/// An ambiguous commit may already have applied the goal stop and the
+/// expiration receipt, so operator telemetry must not present the
+/// expiration transaction as safe to retry; corruption stays fail-closed.
+fn repository_watch_lease_expiry_failure_class(
+    error: &RepoWatchDispatchRepositoryError,
+) -> OperatorFailureClass {
+    match error {
+        RepoWatchDispatchRepositoryError::CommitAmbiguous(_) => {
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            }
+        }
+        RepoWatchDispatchRepositoryError::Corruption(_) => {
+            OperatorFailureClass::FailClosedCorruption
+        }
+        _ => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        },
+    }
+}
+
+fn report_repository_watch_lease_expiry_failure(error: &RepoWatchDispatchRepositoryError) {
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        failure_class = ?repository_watch_lease_expiry_failure_class(error),
+        cause = %error,
+        "global repository-watch lease expiry reconciliation failed"
+    );
+}
+
 fn report_web_http_runtime_failure(error: &WebHttpRuntimeError) {
     tracing::error!(
         phase = ?RuntimePhase::Runtime,
@@ -990,6 +1027,7 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
+        | Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Ok(())))
         | Ok(RuntimeTaskExit::ConvergenceSweep)
         | Ok(RuntimeTaskExit::WebHttp(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness) => RuntimeTaskCompletion::Clean,
@@ -1004,6 +1042,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         Ok(RuntimeTaskExit::RepositoryWatch(Err(error))) => {
             report_repository_watch_runtime_defect(&error);
             RuntimeTaskCompletion::Defect
+        }
+        Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Err(error))) => {
+            report_repository_watch_lease_expiry_failure(&error);
+            RuntimeTaskCompletion::Failed
         }
         Ok(RuntimeTaskExit::WebHttp(Err(error))) => {
             report_web_http_runtime_failure(&error);
@@ -1703,6 +1745,11 @@ async fn run_hub(
     );
     let repository_watch_reconciliation = async {
         repository_watch_store
+            .process_pending_expired_start_leases(|| {
+                DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+            })
+            .await?;
+        repository_watch_store
             .process_pending_lifecycle_cutoffs(|| DurableCommandId::from_uuid(uuid::Uuid::now_v7()))
             .await?;
         repository_watch_store
@@ -1945,6 +1992,10 @@ async fn run_hub(
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
+    let (
+        repository_watch_lease_expiry_shutdown,
+        mut repository_watch_lease_expiry_shutdown_receiver,
+    ) = watch::channel(false);
     let (convergence_sweep_shutdown, convergence_sweep_shutdown_receiver) = watch::channel(false);
     let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
@@ -1976,6 +2027,33 @@ async fn run_hub(
             )
         });
     }
+    let repository_watch_lease_expiry_store = repository_watch_store.clone();
+    runtime_tasks.spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let outcome = loop {
+            select! {
+                changed = repository_watch_lease_expiry_shutdown_receiver.changed() => {
+                    if changed.is_err()
+                        || *repository_watch_lease_expiry_shutdown_receiver.borrow_and_update()
+                    {
+                        break Ok(());
+                    }
+                }
+                _ = ticker.tick() => {
+                    if let Err(error) = repository_watch_lease_expiry_store
+                        .process_pending_expired_start_leases(|| {
+                            DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+                        })
+                        .await
+                    {
+                        break Err(error);
+                    }
+                }
+            }
+        };
+        RuntimeTaskExit::RepositoryWatchLeaseExpiry(outcome)
+    });
     if let Some(convergence_sweep_runtime) = convergence_sweep_runtime {
         runtime_tasks.spawn(async move {
             convergence_sweep_runtime
@@ -2037,6 +2115,16 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Err(error)))) => {
+                        report_repository_watch_lease_expiry_failure(&error);
+                        RuntimeStopCause::RuntimeFailed
+                    }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Ok(())))) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::RepositoryWatchLeaseExpiryCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::ConvergenceSweep)) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::ConvergenceSweepCompletedBeforeShutdown,
@@ -2086,6 +2174,7 @@ async fn run_hub(
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
             let _ = repository_watch_shutdown.send(true);
+            let _ = repository_watch_lease_expiry_shutdown.send(true);
             let _ = convergence_sweep_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
             let _ = turn_liveness_shutdown.send(true);

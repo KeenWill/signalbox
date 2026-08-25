@@ -22,13 +22,13 @@ use signalbox_file_media_linux_sandbox::{
 use signalbox_file_media_runtime::{
     CancellationSignal, FileMediaProcessCeilings, FileMediaProcessor, FileMediaProcessorFuture,
     FileMediaProviderDeclaration, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    FileReadInput, MAX_PROBE_CUMULATIVE_BYTES, MAX_PROBE_PREFIX_BYTES, MAX_PROBE_RANGES,
-    MAX_PROBE_SUFFIX_BYTES, MAX_READ_RANGES, MAX_READ_SOURCE_BYTES, MAX_READERS_PER_PROVIDER,
-    MAX_REGISTRY_READERS, MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS,
-    ProbeDeclaration, ProcessorBoundaryFailure, ProcessorFailure, ProcessorIsolation,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
-    ReadViewDeclaration, ReaderDeclaration, ReaderIdentity, VerifiedBlobSource,
-    provider_declaration_inventory_fits, read_options_fit,
+    FileReadInput, MAX_DECODED_IMAGE_PIXELS, MAX_IMAGE_AXIS, MAX_PROBE_CUMULATIVE_BYTES,
+    MAX_PROBE_PREFIX_BYTES, MAX_PROBE_RANGES, MAX_PROBE_SUFFIX_BYTES, MAX_READ_RANGES,
+    MAX_READ_SOURCE_BYTES, MAX_READERS_PER_PROVIDER, MAX_REGISTRY_READERS, MAX_VALIDATION_RANGES,
+    MAX_VALIDATION_SOURCE_BYTES, MAX_WORKER_TASKS, ProbeDeclaration, ProcessorBoundaryFailure,
+    ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadViewDeclaration, ReaderDeclaration,
+    ReaderIdentity, VerifiedBlobSource, provider_declaration_inventory_fits, read_options_fit,
 };
 use tokio::{
     io::AsyncReadExt as _,
@@ -480,24 +480,31 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
     fn validate<'a>(
         &'a self,
         reader: &'a ReaderIdentity,
-        request: FileMediaProviderValidationRequest,
+        mut request: FileMediaProviderValidationRequest,
         source: &'a dyn VerifiedBlobSource,
         cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
         Box::pin(async move {
-            self.reader(reader)?;
+            let declaration = self.reader(reader)?;
             require_file_use_source(&request.source, source)?;
             if request.maximum_source_bytes == 0
                 || request.maximum_source_bytes > MAX_VALIDATION_SOURCE_BYTES
                 || request.maximum_ranges == 0
                 || request.maximum_ranges > MAX_VALIDATION_RANGES
+                || request.maximum_image_axis == 0
+                || request.maximum_image_axis > MAX_IMAGE_AXIS
+                || request.maximum_decoded_image_pixels == 0
+                || request.maximum_decoded_image_pixels > MAX_DECODED_IMAGE_PIXELS
             {
                 return Err(ProcessorFailure::Protocol.into());
             }
-            let envelope = WireReadEnvelope::RandomAccess {
-                ranges: request.maximum_ranges,
-                cumulative_bytes: request.maximum_source_bytes,
-            };
+            let (maximum_source_bytes, maximum_ranges, envelope) = clamped_validation_envelope(
+                request.maximum_source_bytes,
+                request.maximum_ranges,
+                declaration.validation(),
+            );
+            request.maximum_source_bytes = maximum_source_bytes;
+            request.maximum_ranges = maximum_ranges;
             let invocation = Invocation::Validate {
                 reader: reader.into(),
                 source: WireSource::from_source(source),
@@ -527,6 +534,13 @@ impl FileMediaProcessor for SandboxedFileMediaProcessor {
             let declaration = self.reader(reader)?;
             require_file_use_source(&request.source, source)?;
             if !direct_read_input_fits(&request.input) {
+                return Err(ProcessorFailure::Protocol.into());
+            }
+            if request.maximum_image_axis == 0
+                || request.maximum_image_axis > MAX_IMAGE_AXIS
+                || request.maximum_decoded_image_pixels == 0
+                || request.maximum_decoded_image_pixels > MAX_DECODED_IMAGE_PIXELS
+            {
                 return Err(ProcessorFailure::Protocol.into());
             }
             let view = declaration
@@ -564,8 +578,30 @@ fn require_file_use_source(
     }
 }
 
+fn clamped_validation_envelope(
+    maximum_source_bytes: u64,
+    maximum_ranges: u32,
+    validation: signalbox_file_media_runtime::ValidationDeclaration,
+) -> (u64, u32, WireReadEnvelope) {
+    let maximum_source_bytes = maximum_source_bytes.min(validation.source_bytes());
+    let maximum_ranges = maximum_ranges.min(validation.range_count());
+    (
+        maximum_source_bytes,
+        maximum_ranges,
+        WireReadEnvelope::RandomAccess {
+            ranges: maximum_ranges,
+            cumulative_bytes: maximum_source_bytes,
+        },
+    )
+}
+
 fn direct_reader_envelopes_fit(reader: &ReaderDeclaration) -> bool {
-    probe_envelope_fits(reader.probe()) && reader.views().iter().all(read_envelope_fits)
+    probe_envelope_fits(reader.probe())
+        && reader.validation().source_bytes() > 0
+        && reader.validation().source_bytes() <= MAX_VALIDATION_SOURCE_BYTES
+        && reader.validation().range_count() > 0
+        && reader.validation().range_count() <= MAX_VALIDATION_RANGES
+        && reader.views().iter().all(read_envelope_fits)
 }
 
 fn probe_envelope_fits(probe: ProbeDeclaration) -> bool {
@@ -1483,6 +1519,7 @@ mod tests {
         CancellationSignal, CanonicalJsonObjectSchema, FileReadInput, MAX_READ_OPTIONS_BYTES,
         ProbeDeclaration, ProbeDeclarationInput, ProcessorBoundaryFailure, ProcessorFailure,
         ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName,
+        ValidationDeclaration,
     };
 
     use super::{
@@ -1491,9 +1528,9 @@ mod tests {
         MAX_READ_RANGES, MAX_READ_SOURCE_BYTES, MAX_READERS_PER_PROVIDER, MAX_REGISTRY_READERS,
         MAX_WORKER_BINDINGS, admit_completed, admit_executable_snapshot_bytes,
         admit_reader_inventory, admit_worker_binding_count, cgroup_is_populated,
-        create_unique_cgroup_directory, direct_read_input_fits, open_executable_snapshot,
-        open_worker_executable, probe_envelope_fits, read_envelope_fits, sandbox_arguments,
-        seccomp_instructions, startup_pipe, worker_memory_budget,
+        clamped_validation_envelope, create_unique_cgroup_directory, direct_read_input_fits,
+        open_executable_snapshot, open_worker_executable, probe_envelope_fits, read_envelope_fits,
+        sandbox_arguments, seccomp_instructions, startup_pipe, worker_memory_budget,
     };
 
     struct Cancelled;
@@ -1575,6 +1612,22 @@ mod tests {
                 cumulative_bytes: MAX_PROBE_CUMULATIVE_BYTES,
             }
         )));
+    }
+
+    #[test]
+    fn validation_envelope_is_clamped_to_reader_declaration() {
+        let (maximum_source_bytes, maximum_ranges, envelope) =
+            clamped_validation_envelope(1_024, 8, ValidationDeclaration::new(64, 2));
+
+        assert_eq!(maximum_source_bytes, 64);
+        assert_eq!(maximum_ranges, 2);
+        assert!(matches!(
+            envelope,
+            super::WireReadEnvelope::RandomAccess {
+                ranges: 2,
+                cumulative_bytes: 64
+            }
+        ));
     }
 
     #[test]
