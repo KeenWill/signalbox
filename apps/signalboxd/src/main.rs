@@ -1611,21 +1611,24 @@ async fn run_hub(
             return Err(failure);
         }
     };
-    let web_http_runtime = match WebHttpRuntime::bind(web_configuration, pool.clone()).await {
-        Ok(runtime) => runtime,
-        Err(_) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::SocketBinding,
-                SanitizedStartupCause::Static("web_http_listener_bind_failed"),
-            );
-            let _ = listener.cleanup();
-            let _ = runner_listener.cleanup();
-            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
-        }
-    };
+    let web_http_runtime =
+        match WebHttpRuntime::bind(web_configuration, pool.clone(), model_configuration.clone())
+            .await
+        {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::SocketBinding,
+                    SanitizedStartupCause::Static("web_http_listener_bind_failed"),
+                );
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        };
     tracing::info!(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
