@@ -602,10 +602,18 @@ async fn projection_rejects_call_kind_contradicting_global_identity() -> Result<
 async fn projection_rejects_ownership_contradicting_the_source_call() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let (owning, _owning_repository, _owning_authorized) =
-        authorize_checkpointed_model_call(&pool, 0x9d_000).await?;
-    let (foreign, _foreign_repository, _foreign_authorized) =
-        authorize_checkpointed_model_call(&pool, 0x9e_000).await?;
+    let owning = terminal_reported_usage_call(
+        &pool,
+        0x9d_000,
+        ProviderReportedTokenUsage::unreported().with_output_tokens(Some(SELECTED_OUTPUT_TOKENS)),
+    )
+    .await?;
+    let foreign = terminal_reported_usage_call(
+        &pool,
+        0x9e_000,
+        ProviderReportedTokenUsage::unreported().with_output_tokens(Some(SELECTED_OUTPUT_TOKENS)),
+    )
+    .await?;
     let error = sqlx::query(
         "INSERT INTO web_usage_call_projection (
              model_call_id, call_kind, session_id, turn_id,
@@ -623,6 +631,72 @@ async fn projection_rejects_ownership_contradicting_the_source_call() -> Result<
     .expect_err("contradicted source ownership must be rejected");
 
     assert!(error.to_string().contains("contradicts source session"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_rejects_rows_for_nonterminal_source_calls() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _repository, _authorized) =
+        authorize_checkpointed_model_call(&pool, 0xa1_000).await?;
+    let error = sqlx::query(
+        "INSERT INTO web_usage_call_projection (
+             model_call_id, call_kind, session_id, turn_id,
+             resolved_provider_model_identity_id, credential_profile_label,
+             usage_provenance_kind, usage_input_includes_cache_tokens
+         )
+         VALUES ($1, 'model_call', $2, $3, $4, 'exact:guard-test', 'reported', false)",
+    )
+    .bind(fixture.call.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(Uuid::from_u128(0xa1_0f0))
+    .execute(&pool)
+    .await
+    .expect_err("a projection for a nonterminal source call must be rejected");
+
+    assert!(error.to_string().contains("has no terminal source record"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_rejects_evidence_contradicting_the_source_call() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = terminal_reported_usage_call(
+        &pool,
+        0xa2_000,
+        ProviderReportedTokenUsage::unreported().with_output_tokens(Some(SELECTED_OUTPUT_TOKENS)),
+    )
+    .await?;
+    let error = sqlx::query(
+        "INSERT INTO web_usage_call_projection (
+             model_call_id, call_kind, session_id, turn_id,
+             resolved_provider_model_identity_id, credential_profile_label,
+             usage_provenance_kind, usage_input_includes_cache_tokens
+         )
+         VALUES ($1, 'model_call', $2, $3, $4, 'exact:fabricated', 'reported', false)",
+    )
+    .bind(fixture.call.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(Uuid::from_u128(0xa2_0f0))
+    .execute(&pool)
+    .await
+    .expect_err("fabricated projection evidence must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("contradicts its terminal source record")
+    );
 
     pool.close().await;
     drop(container);

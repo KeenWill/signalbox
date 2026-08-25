@@ -547,6 +547,13 @@ pub enum UsageCallPageError {
     /// The page claimed more matching calls behind it while returning none, so
     /// no last call exists to anchor the continuation cursor.
     DanglingContinuation,
+    /// The page's calls are not in strictly newest-first
+    /// `(recorded_at, call)` order, so a derived cursor would skip or repeat
+    /// evidence.
+    Misordered {
+        /// Position of the first call not strictly older than its predecessor.
+        position: usize,
+    },
 }
 
 impl fmt::Display for UsageCallPageError {
@@ -565,6 +572,11 @@ impl fmt::Display for UsageCallPageError {
                 "usage detail page claims more matching calls but returns none to anchor the \
                  continuation cursor"
             ),
+            Self::Misordered { position } => write!(
+                formatter,
+                "usage detail page call at position {position} is not strictly older than its \
+                 predecessor"
+            ),
         }
     }
 }
@@ -581,8 +593,8 @@ pub struct UsageCallPage {
 }
 
 impl UsageCallPage {
-    /// Accepts only a page within the requested limit, deriving the
-    /// continuation cursor from the last returned call.
+    /// Accepts only a strictly newest-first page within the requested limit,
+    /// deriving the continuation cursor from the last returned call.
     pub fn new(
         calls: Vec<UsageCallEvidence>,
         continuation: UsageCallPageContinuation,
@@ -592,6 +604,15 @@ impl UsageCallPage {
             return Err(UsageCallPageError::Overflow {
                 returned_calls: calls.len(),
                 limit_items: limit.get(),
+            });
+        }
+        let misordered = calls.windows(2).position(|pair| {
+            (pair[1].recorded_at, pair[1].call.into_uuid())
+                >= (pair[0].recorded_at, pair[0].call.into_uuid())
+        });
+        if let Some(offset) = misordered {
+            return Err(UsageCallPageError::Misordered {
+                position: offset + 1,
             });
         }
         let next = match continuation {
@@ -750,15 +771,23 @@ const fn normalization_claim_consistent(
         | (UsageInputTokenSemantics::CacheInclusive, UsageCacheNormalization::Unsafe) => true,
         (UsageInputTokenSemantics::Unknown, UsageCacheNormalization::Safe)
         | (UsageInputTokenSemantics::CacheExclusive, UsageCacheNormalization::Unsafe) => false,
-        (UsageInputTokenSemantics::CacheInclusive, UsageCacheNormalization::Safe) => matches!(
-            (
+        (UsageInputTokenSemantics::CacheInclusive, UsageCacheNormalization::Safe) => {
+            match (
                 tokens.input,
                 tokens.cache_creation_input,
                 tokens.cache_read_input,
-            ),
-            (Some(input), Some(cache_creation), Some(cache_read))
-                if input >= cache_creation + cache_read
-        ),
+            ) {
+                (Some(input), Some(cache_creation), Some(cache_read)) => {
+                    // An unrepresentable cache-axis total can never certify
+                    // safety; checked addition rejects it instead of wrapping.
+                    match cache_creation.checked_add(cache_read) {
+                        Some(cache_total) => input >= cache_total,
+                        None => false,
+                    }
+                }
+                (None, _, _) | (_, None, _) | (_, _, None) => false,
+            }
+        }
     }
 }
 
@@ -1208,6 +1237,55 @@ mod tests {
                 recorded_at: evidence.recorded_at,
                 call: evidence.call,
             })
+        );
+    }
+
+    #[test]
+    fn aggregate_group_rejects_a_safety_claim_with_an_unrepresentable_cache_total() {
+        let mut key = aggregate_key_fixture();
+        key.input_semantics = UsageInputTokenSemantics::CacheInclusive;
+        key.coverage = UsageTokenCoverage {
+            input: UsageTokenPresence::Present,
+            output: UsageTokenPresence::Absent,
+            cache_creation_input: UsageTokenPresence::Present,
+            cache_read_input: UsageTokenPresence::Present,
+        };
+
+        assert_eq!(
+            UsageAggregateGroup::new(
+                key,
+                1,
+                UsageAggregateTokenAxes {
+                    input: Some(0),
+                    output: None,
+                    cache_creation_input: Some(u128::MAX),
+                    cache_read_input: Some(1),
+                },
+                UsageCacheNormalization::Safe,
+            ),
+            Err(UsageAggregateGroupError::NormalizationClaim {
+                claimed: UsageCacheNormalization::Safe,
+                input_semantics: UsageInputTokenSemantics::CacheInclusive,
+            })
+        );
+    }
+
+    #[test]
+    fn call_page_rejects_calls_out_of_newest_first_order() {
+        let older = call_evidence_fixture();
+        let mut newer = call_evidence_fixture();
+        newer.call = ModelCallId::from_uuid(uuid::Uuid::from_u128(0xD7));
+        newer.recorded_at =
+            UsageTimestampMicros::new(older.recorded_at.get() + 1).expect("fixture timestamp fits");
+        let limit = UsageCallPageLimit::new(2).expect("fixture page limit fits");
+
+        assert_eq!(
+            UsageCallPage::new(
+                vec![older, newer],
+                UsageCallPageContinuation::Exhausted,
+                limit,
+            ),
+            Err(UsageCallPageError::Misordered { position: 1 })
         );
     }
 

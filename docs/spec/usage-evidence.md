@@ -24,12 +24,14 @@ reference. The exact reference is retained once in that mapping and is not
 copied into each projected call; reads and aggregates use only its bounded,
 collision-free profile label. Each physical token axis is either absent or an
 exact integer in the `u64` domain. Aggregate token sums use `u128`, so every sum
-admitted by the bounded source-call ceiling remains exact. A projected row must
-correlate with its canonical source records: an insertion guard rejects any row
-— including one from maintenance SQL — whose kind contradicts the call's
-immutable global identity or whose session or turn contradicts the canonical
-call record, because the append-only projection would otherwise misclassify or
-misattribute the physical call permanently. The stored label column likewise
+admitted by the bounded source-call ceiling remains exact. Every projected
+column must correlate with the canonical terminal call record: an insertion
+guard rejects any row — including one from maintenance SQL — whose kind
+contradicts the call's immutable global identity, whose source call is not
+terminal, or whose ownership or evidence payload contradicts that terminal
+record, because the append-only projection would otherwise misclassify,
+misattribute, or fabricate canonical evidence permanently — or occupy the
+primary key a later terminalization needs. The stored label column likewise
 admits only the discriminated `exact:`/`mapped:` forms, so an unreadable label
 cannot become a permanent append-only row that fails matching reads closed.
 
@@ -57,12 +59,13 @@ type, a group's optional sums must agree with its key's declared presence
 coverage, a group's cache-normalization state must be consistent with its
 input-token semantics and sums (unknown semantics are never safe,
 cache-exclusive input is always safe, and a cache-inclusive safety claim
-requires every cache axis present with input at least their sum), a report
-cannot carry more than the group ceiling, a detail page cannot exceed its
-requested limit, and a page's continuation cursor is derived from its own last
-returned call rather than accepted from the reader. A reader result that would
-violate any of these is unconstructable, and the PostgreSQL adapter fails closed
-on a projection row that would require one.
+requires every cache axis present with a representable total and input at least
+that total), a report cannot carry more than the group ceiling, a detail page
+cannot exceed its requested limit or leave strictly newest-first order, and a
+page's continuation cursor is derived from its own last returned call rather
+than accepted from the reader. A reader result that would violate any of these
+is unconstructable, and the PostgreSQL adapter fails closed on a projection row
+that would require one.
 
 ## Selection and time
 

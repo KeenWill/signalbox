@@ -6766,6 +6766,7 @@ pub enum UsageCallPageContinuation { Exhausted, HasMore }
 pub enum UsageCallPageError {
     Overflow { returned_calls: usize, limit_items: u16 },
     DanglingContinuation,
+    Misordered { position: usize },
 }
 
 pub struct UsageCallPage { /* private */ }

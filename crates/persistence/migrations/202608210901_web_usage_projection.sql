@@ -233,12 +233,12 @@ CREATE TABLE web_usage_call_projection (
         DEFERRABLE INITIALLY DEFERRED
 );
 
--- The projected call kind, session, and turn must correlate with the
--- canonical call records: the identity foreign key alone accepts any existing
--- model_call_id regardless of its kind or its owning session, and the
--- projection is append-only, so a direct insert storing an ordinary call
--- under another kind or session would misclassify or misattribute the
--- physical call permanently.
+-- Every projected column must correlate with the canonical terminal call
+-- record: the identity foreign key alone accepts any existing model_call_id
+-- regardless of its kind, its owning session, its state, or its recorded
+-- evidence, and the projection is append-only, so a direct insert could
+-- otherwise misclassify, misattribute, or fabricate canonical evidence
+-- permanently -- or occupy the primary key a later terminalization needs.
 -- The identity vocabulary spells the ordinary kind 'ordinary' where the
 -- projection spells it 'model_call'.
 CREATE FUNCTION require_web_usage_source_correlation()
@@ -248,8 +248,7 @@ AS $$
 DECLARE
     identity_kind text;
     projected_identity_kind text;
-    source_session_id uuid;
-    source_turn_id uuid;
+    source record;
 BEGIN
     SELECT call_kind INTO identity_kind
       FROM model_call_identity
@@ -265,39 +264,85 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
     IF identity_kind = 'ordinary' THEN
-        SELECT session_id, turn_id INTO source_session_id, source_turn_id
+        SELECT session_id, turn_id, resolved_provider_model_identity_id,
+               bounded_web_usage_profile(credential_reference)
+                   AS credential_profile_label,
+               usage_provenance_kind, usage_input_includes_cache_tokens,
+               usage_input_tokens AS input_tokens,
+               usage_output_tokens AS output_tokens,
+               usage_cache_creation_input_tokens
+                   AS cache_creation_input_tokens,
+               usage_cache_read_input_tokens AS cache_read_input_tokens
+          INTO source
           FROM model_call
-         WHERE model_call_id = NEW.model_call_id;
+         WHERE model_call_id = NEW.model_call_id
+           AND state_kind = 'terminal';
     ELSIF identity_kind = 'approval_judge' THEN
-        SELECT session_id, turn_id INTO source_session_id, source_turn_id
+        SELECT session_id, turn_id, resolved_provider_model_identity_id,
+               bounded_web_usage_profile(credential_reference)
+                   AS credential_profile_label,
+               usage_provenance_kind, usage_input_includes_cache_tokens,
+               input_tokens, output_tokens,
+               cache_creation_input_tokens, cache_read_input_tokens
+          INTO source
           FROM tool_approval_judge_model_call
-         WHERE model_call_id = NEW.model_call_id;
+         WHERE model_call_id = NEW.model_call_id
+           AND state_kind = 'terminal';
     ELSE
-        SELECT session_id, NULL INTO source_session_id, source_turn_id
+        SELECT session_id, NULL::uuid AS turn_id,
+               resolved_provider_model_identity_id,
+               bounded_web_usage_profile(credential_reference)
+                   AS credential_profile_label,
+               'reported' AS usage_provenance_kind,
+               usage_input_includes_cache_tokens,
+               input_tokens, output_tokens,
+               cache_creation_input_tokens, cache_read_input_tokens
+          INTO source
           FROM context_compaction_model_call
-         WHERE model_call_id = NEW.model_call_id;
+         WHERE model_call_id = NEW.model_call_id
+           AND state_kind = 'terminal';
     END IF;
-    IF NEW.session_id IS DISTINCT FROM source_session_id THEN
+    IF NOT FOUND THEN
         RAISE EXCEPTION
-            'usage projection session % contradicts source session %',
-            NEW.session_id, source_session_id
+            'usage projection call % has no terminal source record',
+            NEW.model_call_id
             USING ERRCODE = '23514';
     END IF;
-    IF NEW.turn_id IS DISTINCT FROM source_turn_id THEN
+    IF NEW.session_id IS DISTINCT FROM source.session_id THEN
+        RAISE EXCEPTION
+            'usage projection session % contradicts source session %',
+            NEW.session_id, source.session_id
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.turn_id IS DISTINCT FROM source.turn_id THEN
         RAISE EXCEPTION
             'usage projection turn % contradicts source turn %',
-            NEW.turn_id, source_turn_id
+            NEW.turn_id, source.turn_id
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.resolved_provider_model_identity_id
+           IS DISTINCT FROM source.resolved_provider_model_identity_id
+       OR NEW.credential_profile_label
+           IS DISTINCT FROM source.credential_profile_label
+       OR NEW.usage_provenance_kind
+           IS DISTINCT FROM source.usage_provenance_kind
+       OR NEW.usage_input_includes_cache_tokens
+           IS DISTINCT FROM source.usage_input_includes_cache_tokens
+       OR NEW.input_tokens IS DISTINCT FROM source.input_tokens
+       OR NEW.output_tokens IS DISTINCT FROM source.output_tokens
+       OR NEW.cache_creation_input_tokens
+           IS DISTINCT FROM source.cache_creation_input_tokens
+       OR NEW.cache_read_input_tokens
+           IS DISTINCT FROM source.cache_read_input_tokens
+    THEN
+        RAISE EXCEPTION
+            'usage projection evidence for call % contradicts its terminal source record',
+            NEW.model_call_id
             USING ERRCODE = '23514';
     END IF;
     RETURN NEW;
 END;
 $$;
-
-CREATE TRIGGER web_usage_projection_matches_its_source
-BEFORE INSERT ON web_usage_call_projection
-FOR EACH ROW
-EXECUTE FUNCTION require_web_usage_source_correlation();
-
 CREATE INDEX web_usage_by_recorded_call
     ON web_usage_call_projection (recorded_at DESC, model_call_id DESC);
 CREATE INDEX web_usage_by_session_recorded_call
