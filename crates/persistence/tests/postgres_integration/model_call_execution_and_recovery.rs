@@ -2798,7 +2798,7 @@ async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pend
     };
     assert_eq!(pending.accepted_input(), steering_input);
     assert_eq!(pending.binding().source_turn(), source_turn);
-    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (eligible, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();

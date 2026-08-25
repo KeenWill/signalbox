@@ -583,9 +583,13 @@ impl ImportedTranscriptEntry {
 }
 
 pub struct ImportedTranscriptFrontier { /* private */ }
-// sealed: ImportedConversation frontier methods
 // Copy; equality is the exact imported-conversation boundary.
 impl ImportedTranscriptFrontier {
+    pub const fn from_parts(
+        conversation: ImportedConversationId,
+        through_entry: ImportedTranscriptEntryId,
+        through_position: ImportedTranscriptPosition,
+    ) -> Self;
     // accessors: conversation(), through_entry(), through_position()
 }
 
@@ -9077,6 +9081,7 @@ impl<
 
 ```rust
 pub const fn scheduler_pass_admission_cap() -> usize;
+pub const fn scheduler_ordinary_pass_limit() -> usize;
 
 pub struct ReconciliationSweepInterval(/* private */);
 impl ReconciliationSweepInterval {
@@ -9092,12 +9097,14 @@ pub struct InvalidReconciliationSweepInterval;
 
 pub enum EligibilityNudgeOutcome {
     Enqueued,
+    Coalesced,
     DroppedAtCapacity,
     WorkSourceClosed,
 }
 
 pub trait EligibilityNudge {
     fn nudge(&self, session: SessionId) -> EligibilityNudgeOutcome;
+    fn nudge_dispatch_start(&self, session: SessionId) -> EligibilityNudgeOutcome;
 }
 
 pub trait EligibilitySweep {
@@ -9111,13 +9118,23 @@ pub trait EligibilitySweep {
 pub struct EligibilitySweepBatch { /* private */ }
 impl EligibilitySweepBatch {
     pub fn new(sessions: Vec<SessionId>, continuation: bool) -> Self;
-    pub fn into_parts(self) -> (Vec<SessionId>, bool);
+    pub fn with_dispatch_starts(
+        sessions: Vec<SessionId>,
+        dispatch_starts: HashSet<SessionId>,
+        continuation: bool,
+    ) -> Self;
+    pub fn into_parts(self) -> (Vec<SessionId>, HashSet<SessionId>, bool);
 }
 
 pub trait EligibilityWorkSource {
     type Error;
 
     fn next(&mut self) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
+    fn take_returned_dispatch_start(&mut self, _session: SessionId) -> bool;
+    fn take_pending_dispatch_start(&mut self) -> Option<SessionId>;
+    fn next_pending_dispatch_start(
+        &mut self,
+    ) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
 }
 
 pub trait EligibilityPass {
@@ -9127,6 +9144,10 @@ pub trait EligibilityPass {
     fn failure_turn(_error: &Self::Error) -> Option<TurnId>;
     fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>>;
     fn run(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+    fn run_dispatch_start(
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
@@ -11869,7 +11890,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
 | application: session_metadata                      | 12 (incl. 4 traits)              |
-| application: scheduler                             | 20 (+1 free fn) (incl. 7 traits) |
+| application: scheduler                             | 20 (+2 free fn) (incl. 7 traits) |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)               |
 | application: startup_scan                          | 7 (incl. 2 traits)               |
 | application: submit_input                          | 7 (incl. 2 traits)               |
@@ -11878,4 +11899,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 13                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **346 (+11 free fn)**            |
+| **signalbox-application total**                    | **346 (+12 free fn)**            |

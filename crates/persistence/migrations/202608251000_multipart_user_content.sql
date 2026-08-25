@@ -45,53 +45,59 @@ ALTER TABLE submit_input_command
                 'interrupt_unavailable_while_awaiting_approval'
             )
         ),
+    -- `IS TRUE` for the same reason as the model-call pairing below: a null
+    -- `rejection_kind` makes both named-rejection comparisons null, so a row
+    -- carrying attachment evidence without the rejection that authorizes it
+    -- would leave the predicate null and be admitted.
     ADD CONSTRAINT submit_input_command_attachment_result_evidence_shape
         CHECK (
             (
-                rejection_kind = 'attachment_blob_not_found'
-                AND result_kind = 'rejected'
-                AND result_accepted_input_id IS NULL
-                AND result_turn_id IS NULL
-                AND result_actual_active_turn_id IS NULL
-                AND result_expected_active_turn_id IS NULL
-                AND result_expected_defaults_version IS NULL
-                AND result_current_defaults_version IS NULL
-                AND result_unknown_alias_id IS NULL
-                AND result_selected_defaults_version IS NULL
-                AND result_last_position IS NULL
-                AND result_existing_interrupt_command_id IS NULL
-                AND result_attachment_digest IS NOT NULL
-                AND result_attachment_maximum_bytes IS NULL
-            )
-            OR
-            (
-                rejection_kind = 'attachment_byte_budget_exceeded'
-                AND result_kind = 'rejected'
-                AND result_accepted_input_id IS NULL
-                AND result_turn_id IS NULL
-                AND result_actual_active_turn_id IS NULL
-                AND result_expected_active_turn_id IS NULL
-                AND result_expected_defaults_version IS NULL
-                AND result_current_defaults_version IS NULL
-                AND result_unknown_alias_id IS NULL
-                AND result_selected_defaults_version IS NULL
-                AND result_last_position IS NULL
-                AND result_existing_interrupt_command_id IS NULL
-                AND result_attachment_digest IS NULL
-                AND result_attachment_maximum_bytes IS NOT NULL
-            )
-            OR
-            (
                 (
-                    rejection_kind IS NULL
-                    OR rejection_kind NOT IN (
-                        'attachment_blob_not_found',
-                        'attachment_byte_budget_exceeded'
-                    )
+                    rejection_kind = 'attachment_blob_not_found'
+                    AND result_kind = 'rejected'
+                    AND result_accepted_input_id IS NULL
+                    AND result_turn_id IS NULL
+                    AND result_actual_active_turn_id IS NULL
+                    AND result_expected_active_turn_id IS NULL
+                    AND result_expected_defaults_version IS NULL
+                    AND result_current_defaults_version IS NULL
+                    AND result_unknown_alias_id IS NULL
+                    AND result_selected_defaults_version IS NULL
+                    AND result_last_position IS NULL
+                    AND result_existing_interrupt_command_id IS NULL
+                    AND result_attachment_digest IS NOT NULL
+                    AND result_attachment_maximum_bytes IS NULL
                 )
-                AND result_attachment_digest IS NULL
-                AND result_attachment_maximum_bytes IS NULL
-            )
+                OR
+                (
+                    rejection_kind = 'attachment_byte_budget_exceeded'
+                    AND result_kind = 'rejected'
+                    AND result_accepted_input_id IS NULL
+                    AND result_turn_id IS NULL
+                    AND result_actual_active_turn_id IS NULL
+                    AND result_expected_active_turn_id IS NULL
+                    AND result_expected_defaults_version IS NULL
+                    AND result_current_defaults_version IS NULL
+                    AND result_unknown_alias_id IS NULL
+                    AND result_selected_defaults_version IS NULL
+                    AND result_last_position IS NULL
+                    AND result_existing_interrupt_command_id IS NULL
+                    AND result_attachment_digest IS NULL
+                    AND result_attachment_maximum_bytes IS NOT NULL
+                )
+                OR
+                (
+                    (
+                        rejection_kind IS NULL
+                        OR rejection_kind NOT IN (
+                            'attachment_blob_not_found',
+                            'attachment_byte_budget_exceeded'
+                        )
+                    )
+                    AND result_attachment_digest IS NULL
+                    AND result_attachment_maximum_bytes IS NULL
+                )
+            ) IS TRUE
         );
 
 -- Preserve every inherited terminal-result correlation while admitting only
@@ -1302,25 +1308,33 @@ ALTER TABLE model_call
                 AND terminal_attachment_preparation_failure_maximum_bytes <= 18446744073709551615
             )
         ),
+    -- `IS TRUE` makes the pairing two-valued. Without it a row whose cause is
+    -- null while its maximum is not falsifies only the no-evidence arm: both
+    -- cause comparisons in the evidence arm are null, so the whole predicate
+    -- is null and PostgreSQL admits the row. Such a row decodes to no
+    -- `AttachmentPreparationFailure` at all, and a retained-failure reread
+    -- rejects its own durable evidence.
     ADD CONSTRAINT model_call_attachment_preparation_failure_cause_shape
         CHECK (
             (
-                terminal_attachment_preparation_failure_cause IS NULL
-                AND terminal_attachment_preparation_failure_maximum_bytes IS NULL
-            )
-            OR (
-                state_kind = 'terminal'
-                AND terminal_disposition_kind = 'known_failed'
-                AND terminal_provider_failure_cause IS NULL
-                AND (
-                    (
-                        terminal_attachment_preparation_failure_cause = 'too_large'
-                        AND terminal_attachment_preparation_failure_maximum_bytes IS NOT NULL
-                    )
-                    OR (
-                        terminal_attachment_preparation_failure_cause IN ('missing', 'corrupt')
-                        AND terminal_attachment_preparation_failure_maximum_bytes IS NULL
+                (
+                    terminal_attachment_preparation_failure_cause IS NULL
+                    AND terminal_attachment_preparation_failure_maximum_bytes IS NULL
+                )
+                OR (
+                    state_kind = 'terminal'
+                    AND terminal_disposition_kind = 'known_failed'
+                    AND terminal_provider_failure_cause IS NULL
+                    AND (
+                        (
+                            terminal_attachment_preparation_failure_cause = 'too_large'
+                            AND terminal_attachment_preparation_failure_maximum_bytes IS NOT NULL
+                        )
+                        OR (
+                            terminal_attachment_preparation_failure_cause IN ('missing', 'corrupt')
+                            AND terminal_attachment_preparation_failure_maximum_bytes IS NULL
+                        )
                     )
                 )
-            )
+            ) IS TRUE
         );

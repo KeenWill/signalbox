@@ -3802,6 +3802,32 @@ async fn inv061_queued_input_checks_the_complete_prospective_attachment_frontier
     .await?;
     assert_eq!(effects, (1, 1));
 
+    // Attachment evidence is retained only for the rejection that authorizes
+    // it. Dropping the rejection kind while the maximum stands leaves both
+    // named-rejection comparisons null, so the shape is asserted with `IS TRUE`
+    // and rejects the row rather than admitting an unreadable one. The
+    // append-only guard is suspended inside a transaction this test rolls back.
+    let mut orphaned_maximum = pool.begin().await?;
+    sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER USER")
+        .execute(&mut *orphaned_maximum)
+        .await?;
+    let orphaned_maximum_error = sqlx::query(
+        "UPDATE submit_input_command
+            SET rejection_kind = NULL
+          WHERE command_id = $1",
+    )
+    .bind(Uuid::from_u128(0xb337))
+    .execute(&mut *orphaned_maximum)
+    .await
+    .expect_err("a retained attachment maximum cannot outlive its rejection");
+    assert_eq!(
+        orphaned_maximum_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("submit_input_command_attachment_result_evidence_shape")
+    );
+    orphaned_maximum.rollback().await?;
+
     pool.close().await;
     drop(container);
     Ok(())

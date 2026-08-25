@@ -395,7 +395,7 @@ async fn inv048_inv053_terminal_goal_disposition_survives_scheduler_restart()
     );
     terminalize_goal_turn_as_failed(&pool, 0xe61).await?;
 
-    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (sessions, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -1346,7 +1346,7 @@ async fn inv048_terminal_current_goal_turn_is_a_reconciliation_hint() -> Result<
     );
     assert_eq!(activate_goal_turn(&pool, 0xd40).await?, attached.turn());
     mark_goal_turn_completed(&pool, attached.turn()).await?;
-    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (sessions, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -1401,10 +1401,11 @@ async fn inv012_inv048_stop_scope_replays_and_retires_queued_work() -> Result<()
             .await?,
         StartEligibleTurnOutcome::NoEligibleTurn
     );
-    let (stopped_sessions, stopped_continuation) = PostgresEligibilitySweep::new(pool.clone())
-        .find_sessions()
-        .await?
-        .into_parts();
+    let (stopped_sessions, _dispatch_starts, stopped_continuation) =
+        PostgresEligibilitySweep::new(pool.clone())
+            .find_sessions()
+            .await?
+            .into_parts();
 
     assert!(stopped_sessions.is_empty());
     assert!(!stopped_continuation);
@@ -1467,7 +1468,7 @@ async fn inv048_stopped_queued_goal_is_absent_from_reconciliation_hints()
             )
             .await?,
     );
-    let (sessions, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (sessions, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
@@ -4146,6 +4147,14 @@ async fn s18_inv005_inv032_delegated_turn_reclassifies_its_pending_steering()
         panic!("the delegated child's first model call must checkpoint");
     };
     assert_eq!(checkpointed, call);
+
+    let (eligible, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+    assert!(eligible.contains(&session(child)));
+    assert!(!continuation);
+
     let AuthorizeModelCallOutcome::Authorized(authorized) =
         model_calls.authorize_send(session(child), call).await?
     else {
