@@ -3870,6 +3870,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-model-reference-catalog"
+version = "0.0.0"
+dependencies = [
+ "rust_decimal",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "signalbox-model-runtime"
 version = "0.0.0"
 dependencies = [
