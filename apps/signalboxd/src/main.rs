@@ -65,8 +65,10 @@ use signalboxd::{
     ProcessRuntimeError, PrometheusServer, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
     SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
     SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime, WorkspaceInstructionRuntime,
+    TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime, WebBlobRuntime,
+    WorkspaceInstructionRuntime,
     model_adapter::ConfiguredModelRuntime,
+    run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
         WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError,
@@ -1336,6 +1338,9 @@ async fn run_hub(
             erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
         })?;
     let pool = database.pool().clone();
+    let image_derivative_supervisor = daemon_tool_configuration
+        .as_ref()
+        .map(|configuration| configuration.exec_supervisor_executable().to_path_buf());
     let tools = match daemon_tool_configuration {
         Some(tool_configuration) => DaemonTools::try_new_production(
             SystemCurrentTimeClock,
@@ -1627,9 +1632,53 @@ async fn run_hub(
                 return Err(failure);
             }
         };
+    let web_blob_runtime = match blob_store_registry.as_ref() {
+        Some(registry) => {
+            let worker_program = match std::env::current_exe() {
+                Ok(path) => path,
+                Err(_) => {
+                    let failure = erase_startup_cause(
+                        RuntimePhase::Configuration,
+                        SanitizedStartupCause::Static("web_blob_worker_path_failed"),
+                    );
+                    let _ = listener.cleanup();
+                    let _ = runner_listener.cleanup();
+                    disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
+                        .await;
+                    drop(blob_store_registry);
+                    let _ = database.close().await;
+                    return Err(failure);
+                }
+            };
+            match WebBlobRuntime::new(
+                pool.clone(),
+                registry.clone(),
+                image_derivative_supervisor,
+                worker_program,
+            ) {
+                Ok(runtime) => Some(runtime),
+                Err(_) => {
+                    let failure = erase_startup_cause(
+                        RuntimePhase::Configuration,
+                        SanitizedStartupCause::Static("web_blob_runtime_construction_failed"),
+                    );
+                    let _ = listener.cleanup();
+                    let _ = runner_listener.cleanup();
+                    disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
+                        .await;
+                    drop(blob_store_registry);
+                    let _ = database.close().await;
+                    return Err(failure);
+                }
+            }
+        }
+        None => None,
+    };
     let web_http_runtime = match WebHttpRuntime::bind_with_snapshot_reader_budget(
         web_configuration,
         pool.clone(),
+        web_blob_runtime,
+        model_configuration.clone(),
         Arc::clone(&snapshot_reader_budget),
     )
     .await
@@ -2220,6 +2269,9 @@ fn install_tracing_subscriber(
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if let Some(exit_code) = run_web_image_derivative_worker_if_requested() {
+        return exit_code;
+    }
     let telemetry_configuration = match TelemetryConfiguration::from_environment() {
         Ok(configuration) => configuration,
         Err(error) => {
