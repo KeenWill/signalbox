@@ -35,6 +35,8 @@ type WebContractLimits = {
 
 type WebProviderModelCallFailureCause = "credential_rejected" | "permission_denied" | "invalid_request" | "target_not_found" | "request_too_large" | "rate_limited" | "quota_exhausted" | "overloaded" | "provider_internal" | "unrecognized";
 
+type WebRunnerWorkingDirectory = string;
+
 type WebSessionId = string;
 
 type WebSessionTimelineDetail = {
@@ -114,7 +116,7 @@ type WebSessionTimelineDetailBody = {
   readonly sandbox_posture: WebTimelineRunnerSandboxPosture;
   readonly state: WebTimelineRunnerState;
   readonly type: "runner";
-  readonly working_directory?: string | null;
+  readonly working_directory?: WebRunnerWorkingDirectory | null;
 } | {
   readonly detail: WebTimelineDelegationDetail;
   readonly type: "delegation";
@@ -180,18 +182,18 @@ type WebTimelineBoundChildAction = "keep_running" | "stop" | "cancel";
 type WebTimelineCodexCliServiceTier = "default" | "priority" | "flex";
 
 type WebTimelineDelegationDetail = {
-  readonly child_session_id: string;
+  readonly child_session_id: WebSessionId;
   readonly policy: WebTimelineDelegationPolicy;
   readonly relationship_id: string;
   readonly type: "child_spawned";
 } | {
   readonly awaiting_request_id: string;
-  readonly child_session_id: string;
+  readonly child_session_id: WebSessionId;
   readonly mode: WebTimelineDelegationWaitMode;
   readonly relationship_id: string;
   readonly type: "child_waiting";
 } | {
-  readonly child_session_id: string;
+  readonly child_session_id: WebSessionId;
   readonly event_ordinal: WebU64;
   readonly outcome: WebTimelineDelegationOutcome;
   readonly provenance: WebTimelineDelegationProvenance;
@@ -199,7 +201,7 @@ type WebTimelineDelegationDetail = {
   readonly relationship_id: string;
   readonly type: "child_lifecycle_disposition";
 } | {
-  readonly child_session_id: string;
+  readonly child_session_id: WebSessionId;
   readonly content?: WebTimelineTextExcerpt | null;
   readonly outcome: WebTimelineDelegationOutcome;
   readonly provenance: WebTimelineDelegationProvenance;
@@ -211,9 +213,9 @@ type WebTimelineDelegationDetail = {
   readonly delivery_sequence: WebU64;
   readonly message_id: string;
   readonly message_ordinal: WebU64;
-  readonly recipient_session_id: string;
+  readonly recipient_session_id: WebSessionId;
   readonly relationship_id: string;
-  readonly sender_session_id: string;
+  readonly sender_session_id: WebSessionId;
   readonly type: "session_message";
 } | {
   readonly awaiting_request_id?: string | null;
@@ -236,18 +238,18 @@ type WebTimelineDelegationPolicy = {
 };
 
 type WebTimelineDelegationProvenance = {
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
   readonly turn_id: string;
   readonly type: "child_turn";
 } | {
   readonly command_id: string;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
   readonly turn_id: string;
   readonly type: "parent_turn_command";
 } | {
   readonly command_id: string;
   readonly goal_generation: WebU64;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
   readonly type: "parent_goal_command";
 };
 

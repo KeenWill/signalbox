@@ -51,14 +51,14 @@ use signalbox_persistence::session_timeline::{
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
     WebBlobId, WebContractBootstrap, WebContractExample, WebProviderModelCallFailureCause,
-    WebSessionId, WebSessionTimelineDescriptor, WebSessionTimelineDetail,
-    WebSessionTimelineDetailBody, WebSessionTimelineDetailPage, WebSessionTimelineEventKind,
-    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
-    WebSessionWorkFacts, WebTimelineAddress, WebTimelineApprovalActor, WebTimelineApprovalDecision,
-    WebTimelineBlobReference, WebTimelineBodyContinuation, WebTimelineBodyField,
-    WebTimelineBoundChildAction, WebTimelineDelegationDetail, WebTimelineDelegationOutcome,
-    WebTimelineDelegationPolicy, WebTimelineDelegationProvenance, WebTimelineDelegationReason,
-    WebTimelineDelegationWaitMode, WebTimelineDetailContinuation,
+    WebRunnerWorkingDirectory, WebSessionId, WebSessionTimelineDescriptor,
+    WebSessionTimelineDetail, WebSessionTimelineDetailBody, WebSessionTimelineDetailPage,
+    WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
+    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineApprovalActor,
+    WebTimelineApprovalDecision, WebTimelineBlobReference, WebTimelineBodyContinuation,
+    WebTimelineBodyField, WebTimelineBoundChildAction, WebTimelineDelegationDetail,
+    WebTimelineDelegationOutcome, WebTimelineDelegationPolicy, WebTimelineDelegationProvenance,
+    WebTimelineDelegationReason, WebTimelineDelegationWaitMode, WebTimelineDetailContinuation,
     WebTimelineEffectiveModelSettings, WebTimelineEventSequence, WebTimelineFastMode,
     WebTimelineFastModeOverlay, WebTimelineGoalBlockedReason, WebTimelineGoalEvent,
     WebTimelineImportedEvidence, WebTimelineImportedRelationship, WebTimelineModelCallDisposition,
@@ -1118,7 +1118,7 @@ fn detail_body_dto(
                     WebTimelineRunnerSandboxPosture::Sandboxed
                 }
             },
-            working_directory,
+            working_directory: working_directory.map(WebRunnerWorkingDirectory::from_checked),
             state: match state {
                 TimelineRunnerState::Pinned => WebTimelineRunnerState::Pinned,
                 TimelineRunnerState::Suspect => WebTimelineRunnerState::Suspect,
@@ -1463,7 +1463,7 @@ fn delegation_detail_dto(detail: TimelineDelegationDetail) -> WebTimelineDelegat
             policy,
         } => WebTimelineDelegationDetail::ChildSpawned {
             relationship_id: relationship_id.into_uuid().to_string(),
-            child_session_id: child.into_uuid().to_string(),
+            child_session_id: WebSessionId::from_uuid_bytes(*child.into_uuid().as_bytes()),
             policy: delegation_policy_dto(policy),
         },
         TimelineDelegationDetail::ChildWaiting {
@@ -1473,7 +1473,7 @@ fn delegation_detail_dto(detail: TimelineDelegationDetail) -> WebTimelineDelegat
             mode,
         } => WebTimelineDelegationDetail::ChildWaiting {
             relationship_id: relationship_id.into_uuid().to_string(),
-            child_session_id: child.into_uuid().to_string(),
+            child_session_id: WebSessionId::from_uuid_bytes(*child.into_uuid().as_bytes()),
             awaiting_request_id: awaiting_request.into_uuid().to_string(),
             mode: match mode {
                 TimelineDelegationWaitMode::Foreground => WebTimelineDelegationWaitMode::Foreground,
@@ -1489,7 +1489,7 @@ fn delegation_detail_dto(detail: TimelineDelegationDetail) -> WebTimelineDelegat
             provenance,
         } => WebTimelineDelegationDetail::ChildLifecycleDisposition {
             relationship_id: relationship_id.into_uuid().to_string(),
-            child_session_id: child.into_uuid().to_string(),
+            child_session_id: WebSessionId::from_uuid_bytes(*child.into_uuid().as_bytes()),
             event_ordinal: WebU64::from_u64(event_ordinal),
             outcome: delegation_outcome_dto(outcome),
             reason: delegation_reason_dto(reason),
@@ -1504,7 +1504,7 @@ fn delegation_detail_dto(detail: TimelineDelegationDetail) -> WebTimelineDelegat
             content,
         } => WebTimelineDelegationDetail::ChildResult {
             relationship_id: relationship_id.into_uuid().to_string(),
-            child_session_id: child.into_uuid().to_string(),
+            child_session_id: WebSessionId::from_uuid_bytes(*child.into_uuid().as_bytes()),
             outcome: delegation_outcome_dto(outcome),
             reason: delegation_reason_dto(reason),
             provenance: delegation_provenance_dto(provenance),
@@ -1521,8 +1521,8 @@ fn delegation_detail_dto(detail: TimelineDelegationDetail) -> WebTimelineDelegat
         } => WebTimelineDelegationDetail::SessionMessage {
             relationship_id: relationship_id.into_uuid().to_string(),
             message_id: message.into_uuid().to_string(),
-            sender_session_id: sender.into_uuid().to_string(),
-            recipient_session_id: recipient.into_uuid().to_string(),
+            sender_session_id: WebSessionId::from_uuid_bytes(*sender.into_uuid().as_bytes()),
+            recipient_session_id: WebSessionId::from_uuid_bytes(*recipient.into_uuid().as_bytes()),
             message_ordinal: WebU64::from_u64(message_ordinal),
             delivery_sequence: WebU64::from_u64(delivery_sequence),
             content: text_excerpt_dto(content),
@@ -1582,7 +1582,7 @@ fn delegation_provenance_dto(
     match provenance {
         TimelineDelegationProvenance::ChildTurn { session, turn } => {
             WebTimelineDelegationProvenance::ChildTurn {
-                session_id: session.into_uuid().to_string(),
+                session_id: WebSessionId::from_uuid_bytes(*session.into_uuid().as_bytes()),
                 turn_id: turn.into_uuid().to_string(),
             }
         }
@@ -1591,7 +1591,7 @@ fn delegation_provenance_dto(
             turn,
             command,
         } => WebTimelineDelegationProvenance::ParentTurnCommand {
-            session_id: session.into_uuid().to_string(),
+            session_id: WebSessionId::from_uuid_bytes(*session.into_uuid().as_bytes()),
             turn_id: turn.into_uuid().to_string(),
             command_id: command.into_uuid().to_string(),
         },
@@ -1600,7 +1600,7 @@ fn delegation_provenance_dto(
             goal_generation,
             command,
         } => WebTimelineDelegationProvenance::ParentGoalCommand {
-            session_id: session.into_uuid().to_string(),
+            session_id: WebSessionId::from_uuid_bytes(*session.into_uuid().as_bytes()),
             goal_generation: WebU64::from_u64(goal_generation),
             command_id: command.into_uuid().to_string(),
         },

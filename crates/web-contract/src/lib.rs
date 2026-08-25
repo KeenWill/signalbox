@@ -295,6 +295,38 @@ impl<'de> Deserialize<'de> for WebToolName {
     }
 }
 
+/// Checked browser-visible runner working directory using the domain's
+/// exact admission rules: nonempty, NUL-free, at most 4,096 UTF-8 bytes.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebRunnerWorkingDirectory(
+    #[schemars(length(min = 1, max = 4096), regex(pattern = "^[^\\u0000]+$"))] String,
+);
+
+impl WebRunnerWorkingDirectory {
+    /// Converts an already checked application-boundary working directory.
+    #[must_use]
+    pub fn from_checked(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebRunnerWorkingDirectory {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let valid =
+            !value.is_empty() && value.len() <= 4096 && !value.bytes().any(|byte| byte == 0);
+        valid.then_some(Self(value)).ok_or_else(|| {
+            de::Error::custom(
+                "runner working directory must be nonempty, NUL-free, and at most 4096 UTF-8 bytes",
+            )
+        })
+    }
+}
+
 /// Stable browser-visible location of one durable session event.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -761,16 +793,16 @@ pub enum WebTimelineDelegationReason {
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebTimelineDelegationProvenance {
     ChildTurn {
-        session_id: String,
+        session_id: WebSessionId,
         turn_id: String,
     },
     ParentTurnCommand {
-        session_id: String,
+        session_id: WebSessionId,
         turn_id: String,
         command_id: String,
     },
     ParentGoalCommand {
-        session_id: String,
+        session_id: WebSessionId,
         goal_generation: WebU64,
         command_id: String,
     },
@@ -781,18 +813,18 @@ pub enum WebTimelineDelegationProvenance {
 pub enum WebTimelineDelegationDetail {
     ChildSpawned {
         relationship_id: String,
-        child_session_id: String,
+        child_session_id: WebSessionId,
         policy: WebTimelineDelegationPolicy,
     },
     ChildWaiting {
         relationship_id: String,
-        child_session_id: String,
+        child_session_id: WebSessionId,
         awaiting_request_id: String,
         mode: WebTimelineDelegationWaitMode,
     },
     ChildLifecycleDisposition {
         relationship_id: String,
-        child_session_id: String,
+        child_session_id: WebSessionId,
         event_ordinal: WebU64,
         outcome: WebTimelineDelegationOutcome,
         reason: WebTimelineDelegationReason,
@@ -800,7 +832,7 @@ pub enum WebTimelineDelegationDetail {
     },
     ChildResult {
         relationship_id: String,
-        child_session_id: String,
+        child_session_id: WebSessionId,
         outcome: WebTimelineDelegationOutcome,
         reason: WebTimelineDelegationReason,
         provenance: WebTimelineDelegationProvenance,
@@ -809,8 +841,8 @@ pub enum WebTimelineDelegationDetail {
     SessionMessage {
         relationship_id: String,
         message_id: String,
-        sender_session_id: String,
-        recipient_session_id: String,
+        sender_session_id: WebSessionId,
+        recipient_session_id: WebSessionId,
         message_ordinal: WebU64,
         delivery_sequence: WebU64,
         content: WebTimelineTextExcerpt,
@@ -1104,7 +1136,7 @@ pub enum WebSessionTimelineDetailBody {
         runner_id: String,
         placement_revision: WebU64,
         sandbox_posture: WebTimelineRunnerSandboxPosture,
-        working_directory: Option<String>,
+        working_directory: Option<WebRunnerWorkingDirectory>,
         state: WebTimelineRunnerState,
     },
     Delegation {
@@ -1545,7 +1577,7 @@ function assertTimelineExcerpt(excerpt, address, field, path) {{
   return continuation;
 }}
 
-function pageToolContinuation(value, address, field, memberIndex) {{
+function pageToolContinuation(value, address, field, memberIndex, tool) {{
   if (
     value.continuation === undefined ||
     value.continuation === null ||
@@ -1560,11 +1592,23 @@ function pageToolContinuation(value, address, field, memberIndex) {{
   ) {{
     return null;
   }}
+  const physical =
+    tool !== undefined && tool !== null && tool.evidence.type === "physical_attempt"
+      ? tool.evidence
+      : null;
+  const sameMemberField =
+    physical === null
+      ? null
+      : physical.state === "completed"
+        ? "tool_result"
+        : physical.state === "known_failed"
+          ? "tool_failure"
+          : null;
   const sameMember = continuation.member_index === memberIndex;
   const nextMember = continuation.member_index === memberIndex + 1;
   const valid = field === "tool_arguments"
     ? (
-        ((continuation.field === "tool_result" || continuation.field === "tool_failure") && sameMember) ||
+        (sameMemberField !== null && continuation.field === sameMemberField && sameMember) ||
         (continuation.field === "tool_arguments" && nextMember) ||
         (continuation.field === "goal_text" && continuation.member_index === 0)
       )
@@ -1813,6 +1857,7 @@ function assertTimelineDetailPage(value) {{
                 item.address,
                 field,
                 item.body.projected_member_index,
+                tool,
               );
             }}
             textBytes = new TextEncoder().encode(excerpt.text).byteLength;
@@ -1834,6 +1879,7 @@ function assertTimelineDetailPage(value) {{
               item.address,
               "goal_text",
               item.body.projected_member_index,
+              null,
             );
           }}
           textBytes = new TextEncoder().encode(goal.text.text).byteLength;
@@ -1843,6 +1889,12 @@ function assertTimelineDetailPage(value) {{
       case "tool_approval_decision":
         if (item.kind !== "tool_approval_decided") {{
           fail(`${{path}}.kind`, "tool_approval_decided for a tool_approval_decision body");
+        }}
+        if (item.body.approval_judge_escalated && item.body.actor.type !== "user") {{
+          fail(
+            `${{path}}.body.actor`,
+            "a user actor when the approval judge escalated",
+          );
         }}
         if (item.body.rationale !== undefined && item.body.rationale !== null) {{
           continuation = assertTimelineExcerpt(
@@ -1910,6 +1962,40 @@ function assertTimelineDetailPage(value) {{
         if (!wake && item.kind !== "delegation_update") {{
           fail(`${{path}}.kind`, "delegation_update for a delegation update body");
         }}
+        if (
+          item.body.detail.type === "child_result" ||
+          item.body.detail.type === "child_lifecycle_disposition"
+        ) {{
+          const detail = item.body.detail;
+          const childTurnValid =
+            detail.provenance.type === "child_turn" &&
+            ((detail.outcome === "result_returned" && detail.reason === "child_completed") ||
+              (detail.outcome === "child_failed" &&
+                (detail.reason === "child_execution_failed" ||
+                  detail.reason === "child_result_unavailable")) ||
+              (detail.outcome === "child_cancelled" && detail.reason === "child_cancelled"));
+          const parentCommandValid =
+            (detail.provenance.type === "parent_turn_command" ||
+              detail.provenance.type === "parent_goal_command") &&
+            (detail.reason === "parent_stopped_with_descendants" ||
+              detail.reason === "parent_cancelled_with_descendants") &&
+            (detail.outcome === "already_terminal" ||
+              detail.outcome === "continue_running" ||
+              detail.outcome === "child_stopped" ||
+              detail.outcome === "child_cancelled");
+          if (!childTurnValid && !parentCommandValid) {{
+            fail(`${{path}}.body.detail`, "a durable delegation outcome shape");
+          }}
+          if (detail.type === "child_result") {{
+            const contentPresent = detail.content !== undefined && detail.content !== null;
+            if (contentPresent !== (detail.outcome === "result_returned")) {{
+              fail(
+                `${{path}}.body.detail.content`,
+                "present exactly for a returned child result",
+              );
+            }}
+          }}
+        }}
         const content =
           item.body.detail.type === "child_result"
             ? item.body.detail.content
@@ -1965,6 +2051,41 @@ function assertTimelineDetailPage(value) {{
             item.body.detail.settings,
             `${{path}}.body.detail.settings`,
           );
+          const resolved = item.body.detail;
+          if (
+            resolved.requested_model.kind === "direct" &&
+            resolved.requested_model.selection_id !== resolved.selected_direct_id
+          ) {{
+            fail(
+              `${{path}}.body.detail.selected_direct_id`,
+              "the requested direct selection identity",
+            );
+          }}
+          const validatedFor = resolved.settings.validated_for_selection_id;
+          if (
+            validatedFor !== undefined &&
+            validatedFor !== null &&
+            validatedFor !== resolved.selected_direct_id
+          ) {{
+            fail(
+              `${{path}}.body.detail.settings.validated_for_selection_id`,
+              "the selected direct identity",
+            );
+          }}
+          const adjustedFrom = resolved.adjusted_from_selection_id;
+          const adjustedPresent = adjustedFrom !== undefined && adjustedFrom !== null;
+          if (adjustedPresent !== (resolved.adjustments.length > 0)) {{
+            fail(
+              `${{path}}.body.detail.adjusted_from_selection_id`,
+              "present exactly with recorded adjustments",
+            );
+          }}
+          if (adjustedPresent && adjustedFrom === resolved.selected_direct_id) {{
+            fail(
+              `${{path}}.body.detail.adjusted_from_selection_id`,
+              "a prior direct selection different from the selected identity",
+            );
+          }}
         }}
         break;
       case "turn_lifecycle":
