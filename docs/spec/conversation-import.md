@@ -20,10 +20,11 @@ backfill through PR #304 (`agent/unified-conversation-listing`); and the
 imported-conversation inspection read through PR #303
 (`agent/imported-conversation-inspection`); and the chunked transport, total
 bound, and typed rejection evidence against PR #401
-(`agent/import-chunks-protocol`) and PR #402 (`agent/import-chunks`). Later
-session creation from one imported frontier is owned by
-[sessions-and-transcript](sessions-and-transcript.md); native turn activation
-and model-call rendering are owned by
+(`agent/import-chunks-protocol`) and PR #402 (`agent/import-chunks`). Bounded
+browser discovery, inspection, and continuation are verified against this PR
+(`agent/web-discovery-reads`). Session creation from one imported frontier is
+owned by [sessions-and-transcript](sessions-and-transcript.md); native turn
+activation and model-call rendering are owned by
 [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) and
 [model-call-execution](model-call-execution.md).
 
@@ -425,6 +426,62 @@ is stable and an exact replay names the same boundary. An out-of-range position
 on an existing imported conversation is a rejection naming the selectable range,
 not an absent-identity `not_found`; both classifications are owned by the
 [process protocol](process-protocol.md#server-messages).
+
+### Bounded browser discovery and continuation
+
+The browser HTTP contract exposes the same immutable imports as a selective read
+model rather than adapting the complete inspection spool. `GET /api/imports/`
+returns at most 100 summaries in ascending `ImportedConversationId` order. An
+optional `after` identity is an exclusive keyset cursor; the response includes a
+next cursor only when a bounded lookahead finds another row. Exact
+format/converter filters compose with that cursor. Exact attested source-session
+filters use the bounded raw `text/plain` body of `POST /api/imports/searches`.
+The body is the exact UTF-8 identifier, preserving empty text and edge
+whitespace, while avoiding URL expansion. A client-selected correlation UUID and
+SHA-256 of the complete exact value are echoed so truncated evidence remains
+unambiguous. Catalog and descriptor responses project at most 512 UTF-8 bytes of
+source-session evidence with explicit complete/truncated classification. The
+response deliberately has no total count and never reconstructs a complete
+imported aggregate.
+
+`GET /api/imports/{imported-conversation-id}` returns the immutable identity,
+evidence-derived display title, raw-record and normalized-entry counts, exact
+source format and converter version, source digest, optional consistent source
+session evidence, and first and latest continuation frontiers. Its three size
+facts are sums of raw source-record occurrence bytes, normalized source-record
+encoding bytes, and normalized entry plus source-metadata encoding bytes. They
+are descriptors only: this route returns no raw blob, normalized record, host
+path, or source repository location.
+
+`GET /api/imports/{imported-conversation-id}/entries` selects a window around
+`first`, `latest`, or one exact positive `position`. The requested neighbors
+plus the anchor may total at most 101 entries. PostgreSQL reads and checked
+decoding cover only that contiguous immutable range; neither this route nor its
+browser scenario calls the complete aggregate loader. Every returned entry names
+its imported entry identity, global position, raw-record and within-record
+positions, source-speaker attestation, normalized content kind, and continuation
+frontier. Attested text includes at most 512 UTF-8 bytes at a scalar boundary
+plus an explicit complete/truncated classification; other normalized content
+remains a typed descriptor for the blob and rendering surfaces owned elsewhere.
+First/latest bounds and every entry in a selected window are the available
+continuation positions. A supplied position outside an existing immutable
+timeline is a typed bad request rather than storage corruption.
+
+The browser labels all these rows as imported source evidence. A source role,
+tool-shaped record, result, or other normalized kind does not become native
+Signalbox acceptance, turn, call, tool, or result evidence through projection.
+
+`POST /api/imports/{imported-conversation-id}/continuations` creates a native
+session from one selected frontier, whose durable semantics are owned by
+[sessions-and-transcript](sessions-and-transcript.md), with `resume` or `fork`,
+one exact direct model-selection or model-alias identity, and provider defaults.
+The client mints and retains the durable command identity before I/O. Exact
+replay returns the recorded session, conflicting reuse is rejected, and an
+ambiguous commit instructs the client to retry the same command and payload. The
+server verifies that the immutable entry identity and position still agree
+before applying the existing imported-frontier session-creation command. The
+response returns the new session identity and selected frontier; session
+timeline navigation is the separate browser timeline address contract.
 
 ## Claude Code session JSONL versions 1 and 2
 

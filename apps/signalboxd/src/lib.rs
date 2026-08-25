@@ -72,6 +72,7 @@ mod turn_liveness_runtime;
 pub mod usage_limits;
 mod web_blob_runtime;
 pub mod web_http;
+mod web_imports;
 mod workspace_instruction_runtime;
 
 pub use blob_storage_configuration::{

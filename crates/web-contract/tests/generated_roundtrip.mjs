@@ -7,6 +7,7 @@ import {
   decodeWebBlobDescriptor,
   decodeWebContractBootstrap,
   decodeWebContractExample,
+  decodeWebImportListPage,
   decodeWebSessionTimelineDescriptor,
   decodeWebSessionTimelineWindow,
 } from "../../../clients/web/src/generated/web-contract.mjs";
@@ -81,7 +82,34 @@ test("generated bootstrap decoder rejects another contract version", () => {
   assert.throws(
     () =>
       decodeWebContractBootstrap({
-        contract: { name: "signalbox.web-http", version: "1" },
+        contract: { name: "signalbox.web-http", version: "999" },
+        capabilities: {
+          bounded_json: true,
+          same_origin_json_mutations: true,
+          ndjson_streaming: true,
+          immutable_blob_content: true,
+          blob_derivations: true,
+          image_derivatives: true,
+          import_discovery: true,
+          imported_continuations: true,
+          bounded_session_timeline: true,
+        },
+        limits: {
+          max_json_body_bytes: 65536,
+          max_ndjson_item_bytes: 65536,
+          max_timeline_window_items: 256,
+          max_timeline_window_bytes: 65536,
+        },
+      }),
+    /incompatible web contract/,
+  );
+});
+
+test("generated bootstrap decoder rejects a disabled required capability", () => {
+  assert.throws(
+    () =>
+      decodeWebContractBootstrap({
+        contract: { name: "signalbox.web-http", version: "2" },
         capabilities: {
           bounded_json: true,
           bounded_session_timeline: true,
@@ -90,6 +118,8 @@ test("generated bootstrap decoder rejects another contract version", () => {
           immutable_blob_content: true,
           blob_derivations: true,
           image_derivatives: true,
+          import_discovery: false,
+          imported_continuations: true,
         },
         limits: {
           max_json_body_bytes: 65536,
@@ -1097,6 +1127,33 @@ test("generated blob decoder rejects a contradictory deterministic cache key", (
   );
 });
 
+test("generated bootstrap decoder rejects incompatible limits", () => {
+  assert.throws(
+    () =>
+      decodeWebContractBootstrap({
+        contract: { name: "signalbox.web-http", version: "2" },
+        capabilities: {
+          bounded_json: true,
+          same_origin_json_mutations: true,
+          ndjson_streaming: true,
+          immutable_blob_content: true,
+          blob_derivations: true,
+          image_derivatives: true,
+          import_discovery: true,
+          imported_continuations: true,
+          bounded_session_timeline: true,
+        },
+        limits: {
+          max_json_body_bytes: 1,
+          max_ndjson_item_bytes: 65536,
+          max_timeline_window_items: 256,
+          max_timeline_window_bytes: 65536,
+        },
+      }),
+    /incompatible web contract/,
+  );
+});
+
 test("generated error decoder preserves the transport application boundary", () => {
   const transport = decodeWebApiErrorResponse({
     error: {
@@ -1117,6 +1174,34 @@ test("generated error decoder preserves the transport application boundary", () 
         },
       }),
     /one recognized variant/,
+  );
+});
+
+test("generated imports decoder validates explicit null evidence and cursor", () => {
+  const page = {
+    items: [
+      {
+        imported_conversation_id: "00000000-0000-7000-8000-000000000001",
+        display_title: null,
+        format: "codex_rollout_jsonl_v1",
+        source_session_id: null,
+        entry_count: 1,
+      },
+    ],
+    next_cursor: null,
+  };
+
+  const decoded = decodeWebImportListPage(page);
+
+  assert.equal(decoded.items[0].source_session_id, null);
+  assert.equal(decoded.next_cursor, null);
+  assert.throws(
+    () =>
+      decodeWebImportListPage({
+        ...page,
+        items: [{ ...page.items[0], entry_count: "1" }],
+      }),
+    /entry_count must be a safe integer/,
   );
 });
 
