@@ -185,6 +185,40 @@ pub enum UsageCallKind {
     ContextCompaction,
 }
 
+/// Turn correlation fused with the physical call class, so a session-level
+/// context-compaction call cannot carry a turn and a turn-owned call cannot
+/// lack one.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UsageCallScope {
+    /// An ordinary transcript-producing model call within its owning turn.
+    ModelCall(TurnId),
+    /// A delegated tool-approval judge call within its owning turn.
+    ApprovalJudge(TurnId),
+    /// A session-level context-summary production call with no turn identity.
+    ContextCompaction,
+}
+
+impl UsageCallScope {
+    /// Physical call class of this scope.
+    #[must_use]
+    pub const fn call_kind(self) -> UsageCallKind {
+        match self {
+            Self::ModelCall(_) => UsageCallKind::ModelCall,
+            Self::ApprovalJudge(_) => UsageCallKind::ApprovalJudge,
+            Self::ContextCompaction => UsageCallKind::ContextCompaction,
+        }
+    }
+
+    /// Owning turn, absent exactly for session-level context compaction.
+    #[must_use]
+    pub const fn turn(self) -> Option<TurnId> {
+        match self {
+            Self::ModelCall(turn) | Self::ApprovalJudge(turn) => Some(turn),
+            Self::ContextCompaction => None,
+        }
+    }
+}
+
 /// Closed provenance of token evidence.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum UsageProvenance {
@@ -389,14 +423,13 @@ pub struct UsageCallQuery {
 /// One canonical terminal model-call usage record.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageCallEvidence {
-    /// Ordinary, approval-judge, or context-compaction call.
-    pub call_kind: UsageCallKind,
+    /// Turn-correlated call scope: a turn-owned ordinary or approval-judge
+    /// call, or session-level context compaction without a turn.
+    pub scope: UsageCallScope,
     /// Exact physical call identity.
     pub call: ModelCallId,
     /// Owning session.
     pub session: SessionId,
-    /// Owning turn, absent for session-level context compaction.
-    pub turn: Option<TurnId>,
     /// Resolved provider/model target.
     pub model: ResolvedProviderTarget,
     /// Bounded non-secret projection label for the credential profile, not the

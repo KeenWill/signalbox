@@ -966,6 +966,10 @@ async fn terminal_approval_judge_usage_enters_dedicated_call_evidence() -> Resul
 
     assert_eq!(page.calls.len(), 1);
     assert_eq!(page.calls[0].call, judge_call);
+    assert_eq!(
+        page.calls[0].scope,
+        signalbox_application::UsageCallScope::ApprovalJudge(fixture.turn)
+    );
     assert_eq!(page.calls[0].tokens.input, Some(JUDGE_INPUT_TOKENS));
     assert_eq!(page.calls[0].tokens.output, Some(JUDGE_OUTPUT_TOKENS));
     assert_eq!(page.calls[0].tokens.cache_creation_input, None);
@@ -1026,7 +1030,10 @@ async fn terminal_context_compaction_usage_enters_session_level_call_evidence()
 
     assert_eq!(page.calls.len(), 1);
     assert_eq!(page.calls[0].call.into_uuid(), compaction_call);
-    assert_eq!(page.calls[0].turn, None);
+    assert_eq!(
+        page.calls[0].scope,
+        signalbox_application::UsageCallScope::ContextCompaction
+    );
     assert_eq!(page.calls[0].tokens.input, Some(17));
     assert_eq!(page.calls[0].tokens.output, Some(5));
     assert_eq!(

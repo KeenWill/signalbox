@@ -7,10 +7,10 @@ This contract is verified against PR #1137 (`agent/web-usage-cost`).
 Usage reads project terminal physical model calls without materializing the
 transcript. Ordinary and approval-judge calls belong to a turn;
 context-compaction calls belong directly to a session and therefore have no turn
-identity. Each projected row retains the resolved provider/model target,
-non-secret credential-profile reference, evidence provenance, input-token
-semantics, independently optional token axes, and projection time. The
-projection is append-only.
+identity. Each projected row retains the resolved provider/model target, bounded
+non-secret credential-profile label, evidence provenance, input-token semantics,
+independently optional token axes, and projection time. The projection is
+append-only.
 
 Canonical credential references remain exact and do not gain a terminalization
 bound from this read projection. The exposed profile label is nonempty and at
@@ -75,10 +75,14 @@ turn belongs to exactly one session, so when a selection supplies both, only the
 turn predicate reaches the projection: the session filter is decided by one
 bounded probe of the unique turn-ownership record, a matched pair reads exactly
 the turn scope through a turn-led index, and a mismatched pair is proven empty
-without scanning either dimension's history. Why: pairwise prefixes are not
-enough — each pair can be common while a deeper intersection is rare or empty,
-which would force a large range to be scanned and filtered before the bounded
-detail or aggregate limit applies.
+without scanning either dimension's history. Each read statement is assembled
+with only the selected dimensions' predicates, so every selection shape carries
+its own prepared statement and even a cached generic plan sees exactly the
+conjunction its ordered index serves. Why: pairwise prefixes are not enough —
+each pair can be common while a deeper intersection is rare or empty, which
+would force a large range to be scanned and filtered before the bounded detail
+or aggregate limit applies — and an optional-predicate statement shared across
+shapes would let a generic plan discard those ordered paths entirely.
 
 ## Open edges
 

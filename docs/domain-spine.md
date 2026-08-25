@@ -6657,6 +6657,17 @@ impl UsageTimeRange {
 }
 
 pub enum UsageCallKind { ModelCall, ApprovalJudge, ContextCompaction }
+
+pub enum UsageCallScope {
+    ModelCall(TurnId),
+    ApprovalJudge(TurnId),
+    ContextCompaction,
+}
+impl UsageCallScope {
+    pub const fn call_kind(self) -> UsageCallKind;
+    pub const fn turn(self) -> Option<TurnId>;
+}
+
 pub enum UsageProvenance { Reported, Estimated }
 pub enum UsageInputTokenSemantics { Unknown, CacheExclusive, CacheInclusive }
 pub enum UsageTokenPresence { Absent, Present }
@@ -6726,10 +6737,9 @@ pub struct UsageCallQuery {
 }
 
 pub struct UsageCallEvidence {
-    pub call_kind: UsageCallKind,
+    pub scope: UsageCallScope,
     pub call: ModelCallId,
     pub session: SessionId,
-    pub turn: Option<TurnId>,
     pub model: ResolvedProviderTarget,
     pub credential_profile: String,
     pub provenance: UsageProvenance,
@@ -11836,7 +11846,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
 | application: search                                | 21 (+4 free fn) (incl. 2 traits) |
-| application: usage                                 | 29 (+4 free fn) (incl. 1 trait)  |
+| application: usage                                 | 30 (+4 free fn) (incl. 1 trait)  |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 36 (incl. 8 traits)              |
 | application: tool_loop                             | 27 (incl. 5 traits)              |
@@ -11857,4 +11867,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 13                               |
-| **signalbox-application total**                    | **384 (+18 free fn)**            |
+| **signalbox-application total**                    | **385 (+18 free fn)**            |
