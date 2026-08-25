@@ -1,14 +1,5 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
-} as const
+import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 
 const approvalSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c61'
 const blockedSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c62'
