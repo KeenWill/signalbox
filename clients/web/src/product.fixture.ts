@@ -8,6 +8,12 @@ export const webContractBootstrapFixture = {
     immutable_blob_content: true,
     blob_derivations: true,
     image_derivatives: true,
+    bounded_session_timeline: true,
   },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
+  limits: {
+    max_json_body_bytes: 65_536,
+    max_ndjson_item_bytes: 65_536,
+    max_timeline_window_items: 256,
+    max_timeline_window_bytes: 65_536,
+  },
 } as const
