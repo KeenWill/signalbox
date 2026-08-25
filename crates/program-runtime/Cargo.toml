@@ -9,7 +9,10 @@ publish.workspace = true
 
 [features]
 default = []
-postgres-integration = ["dep:testcontainers-modules"]
+postgres-integration = [
+    "dep:testcontainers-modules",
+    "signalbox-persistence/postgres-integration",
+]
 
 [dependencies]
 deno_core = "=0.410.0"

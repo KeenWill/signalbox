@@ -4597,9 +4597,7 @@ mod tests {
                     content: ModelUserContent {
                         parts: [
                             Text(
-                                NonEmptyUnicodeText(
-                                    "inherited user request",
-                                ),
+                                NonEmptyUnicodeText(<redacted>),
                             ),
                         ],
                     },
@@ -4617,9 +4615,7 @@ mod tests {
                         00000000-0000-0000-0000-00000000005d,
                     ),
                     content: AssistantText(
-                        NonEmptyUnicodeText(
-                            "inherited assistant reply",
-                        ),
+                        NonEmptyUnicodeText(<redacted>),
                     ),
                 },
                 User {
@@ -4637,9 +4633,7 @@ mod tests {
                     content: ModelUserContent {
                         parts: [
                             Text(
-                                NonEmptyUnicodeText(
-                                    "failed user request",
-                                ),
+                                NonEmptyUnicodeText(<redacted>),
                             ),
                         ],
                     },
@@ -4659,9 +4653,7 @@ mod tests {
                     content: ModelUserContent {
                         parts: [
                             Text(
-                                NonEmptyUnicodeText(
-                                    "current user request",
-                                ),
+                                NonEmptyUnicodeText(<redacted>),
                             ),
                         ],
                     },

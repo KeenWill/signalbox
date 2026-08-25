@@ -16,6 +16,13 @@
 # requires, up to but never above the model's cap.
 version = 1
 
+# Omit this table for the fixed baseline of 16 concurrent per-session scheduler
+# passes. A smaller deployment override keeps provider and tool work bounded
+# when many durable sessions become eligible together. Zero keeps ingestion
+# and process services live while pausing authoritative session execution.
+# [scheduler]
+# max_in_flight_passes = 4
+
 # Blob bytes live outside PostgreSQL. Each deployment generates and then keeps
 # one namespace UUID per physical store. Both directories must already exist,
 # be owned by the daemon user, and have exact mode 0700.
@@ -302,18 +309,26 @@ allowed_origins = [
   "https://github.com",
 ]
 
-# Optional repository-watch polling. Each repository has its own least-scope
-# credential file; it is reread for each request and is never shared with the
-# general GitHub tool credential. The first poll after startup is unconditional;
-# later polls use process-local ETags for unchanged resources.
+# Optional repository-watch polling and shadow-mode webhook intake. Each
+# repository has its own least-scope polling credential; it is reread for each
+# request and is never shared with the general GitHub tool credential. Omitting
+# the webhook table and per-repository hook fields disables webhook intake. The
+# reference deployment exposes public /github/webhooks with Tailscale Funnel
+# --set-path, which strips that prefix and forwards local path / to this listener.
 # [repository_watch]
 # version = 1
 # signal_reviewers = ["signal-reviewer", "review-bot[bot]"]
+#
+# [repository_watch.webhook]
+# bind_address = "127.0.0.1:3333"
+# path = "/"
 #
 # [[repository_watch.repositories]]
 # repository = "namespace/project"
 # poll_interval_seconds = 60
 # credential_file = "/run/credentials/repository-watch-namespace-project"
+# webhook_hook_id = 123456789
+# webhook_secret_file = "/etc/signalbox/github-webhook-secret"
 #
 # [[repository_watch.rules]]
 # id = "merge-forward-on-base-advance"

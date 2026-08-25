@@ -12,22 +12,24 @@ use std::{
 
 use sha2::{Digest, Sha256};
 use signalbox_application::{
-    ClassifyOperatorFailure, ConversationListCursor, ConversationListItem, ConversationListQuery,
-    ConversationOriginFilter, ConversationPageReader, CreateSessionError,
-    CreateSessionFromImportedFrontierOutcome, CreateSessionFromImportedFrontierRequest,
-    CreateSessionFromImportedFrontierService, CreateSessionOutcome, CreateSessionRequest,
-    CreateSessionService, DecideToolRequestService, EligibilityNudge, ImportConversationError,
-    ImportConversationOutcome, ImportConversationService, ImportedConversationConverter,
-    InProcessEligibilityNudge, InProcessToolDispatchGate, ListConversationsService,
-    ListSessionMetadataService, LoadSessionMetadataService, OperatorFailureClass,
-    PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
-    ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
-    ReplaceSessionMetadataService, ReviewPassCompletionStatus, ReviewWorkflowCommand,
-    ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
-    ReviewWorkflowOperation, ReviewWorkflowOperationKind, SessionMetadataListItem,
-    SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
-    SubmitInputTransaction, UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest,
-    UpdateSessionPlacementService, UuidV7CreateSessionFromImportedFrontierIdGenerator,
+    ClassifyOperatorFailure, CommissionDispatchRequest,
+    CommissionedDispatchFence as ApplicationCommissionedDispatchFence, ConversationListCursor,
+    ConversationListItem, ConversationListQuery, ConversationOriginFilter, ConversationPageReader,
+    CreateSessionError, CreateSessionFromImportedFrontierOutcome,
+    CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
+    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, DecideToolRequestService,
+    EligibilityNudge, ImportConversationError, ImportConversationOutcome,
+    ImportConversationService, ImportedConversationConverter, InProcessEligibilityNudge,
+    InProcessToolDispatchGate, ListConversationsService, ListSessionMetadataService,
+    LoadSessionMetadataService, OperatorFailureClass, PromptMemberStatement,
+    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
+    ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
+    ReviewPassCompletionStatus, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,
+    ReviewWorkflowCommandResult, ReviewWorkflowCommandService, ReviewWorkflowOperation,
+    ReviewWorkflowOperationKind, SessionMetadataListItem, SessionMetadataListQuery,
+    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, SubmitInputTransaction,
+    UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
+    UuidV7CommissionedDispatchIdGenerator, UuidV7CreateSessionFromImportedFrontierIdGenerator,
     UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
     UuidV7ToolLoopIdGenerator,
 };
@@ -40,9 +42,9 @@ use signalbox_conversation_import_codex::{
     CodexRolloutJsonlConverter,
 };
 use signalbox_domain::{
-    AcceptedInputId, Actor, CancelledModelCallTurnIdentities, ContextCompactionId,
-    ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval, DecideToolRequest,
-    DecideToolRequestRejectedResult, DecideToolRequestResult,
+    AcceptedInputId, Actor, BranchName, CancelledModelCallTurnIdentities, CommitSha,
+    ContextCompactionId, ContextCompactionTokenUsage, ContextFrontierId, DangerousToolAutoApproval,
+    DecideToolRequest, DecideToolRequestRejectedResult, DecideToolRequestResult,
     DelegationMessageDirection as DomainDelegationMessageDirection,
     DelegationOutcomeKind as DomainDelegationOutcomeKind,
     DelegationOutcomeReason as DomainDelegationOutcomeReason,
@@ -60,14 +62,14 @@ use signalbox_domain::{
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,
     ModelSettingsPrecedence as DomainModelSettingsPrecedence, ParentTerminationCommandSource,
-    PerInputConfigurationChoices, ReasoningLevel as DomainReasoningLevel,
+    PerInputConfigurationChoices, PullRequestNumber, ReasoningLevel as DomainReasoningLevel,
     ReplaceSessionDefaults as DomainReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
-    ReplaceSessionMetadataResult, ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal,
-    ReviewExternalLink, ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
-    ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
-    ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
-    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ReplaceSessionMetadataResult, RepositorySlug, ReviewChangeRequestNumber, ReviewConfidence,
+    ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
+    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
+    ReviewExternalObjectKind, ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent,
+    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
     ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation,
     ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
     ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
@@ -94,6 +96,10 @@ use signalbox_model_provider_runtime::{
 };
 use signalbox_persistence::{
     blob::BlobCatalogRepository,
+    commissioned_dispatch::{
+        CommissionDispatchOutcome, CommissionedDispatchRepositoryError,
+        PostgresCommissionedDispatchStore,
+    },
     context_compaction::{
         AppliedContextCompaction, ContextCompactionCommandLookup, ContextCompactionRepository,
         ContextCompactionRepositoryError, FailedContextCompactionDisposition,
@@ -144,6 +150,7 @@ use signalbox_persistence::{
 use signalbox_process_protocol::{
     BillingRateVersion, BlobChunk, BoundChildAction as WireBoundChildAction, BulkIngestKind,
     CanonicalBlobDigest, CanonicalDollarAmount, CanonicalU64, CanonicalUuid, ClientRequest,
+    CommissionedSessionFence as WireCommissionedSessionFence,
     ConversationCursor as WireConversationCursor, ConversationImportFormat,
     ConversationImportRejectionClass, ConversationOrigin as WireConversationOrigin,
     ConversationOriginFilter as WireConversationOriginFilter,
@@ -1024,6 +1031,7 @@ fn conversation_import_request_requires_permit(
         } => (1..=max_blob_bytes).contains(&expected_length_bytes.value()),
         ClientRequest::CreateSession { .. }
         | ClientRequest::CreateSessionFromTemplate { .. }
+        | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
         | ClientRequest::ListSessions {}
         | ClientRequest::UpdateSessionPlacement { .. }
@@ -1229,6 +1237,7 @@ impl SnapshotReaderAdmission {
             | ClientRequest::ReadReviewOrchestration { .. } => Self::OneConnection,
             ClientRequest::CreateSession { .. }
             | ClientRequest::CreateSessionFromTemplate { .. }
+            | ClientRequest::CommissionSession { .. }
             | ClientRequest::ListTemplates {}
             | ClientRequest::UpdateSessionPlacement { .. }
             | ClientRequest::AttachGoal { .. }
@@ -1487,6 +1496,28 @@ where
                 command_id.into_uuid(),
                 template_name,
                 placement,
+                services,
+            )
+            .await
+        }
+        ClientRequest::CommissionSession {
+            command_id,
+            template_name,
+            fence,
+            statement,
+            content,
+        } => {
+            handle_commission_session(
+                writer,
+                version,
+                request_id,
+                WireCommissionSessionRequest {
+                    command_uuid: command_id.into_uuid(),
+                    template_name,
+                    fence,
+                    statement,
+                    content,
+                },
                 services,
             )
             .await
@@ -8469,6 +8500,250 @@ where
     .await
 }
 
+struct WireCommissionSessionRequest {
+    command_uuid: uuid::Uuid,
+    template_name: String,
+    fence: WireCommissionedSessionFence,
+    statement: String,
+    content: InputContent,
+}
+
+/// Admits one wire fence into its exact domain values.
+fn domain_commissioned_fence(
+    fence: WireCommissionedSessionFence,
+) -> Result<ApplicationCommissionedDispatchFence, ()> {
+    match fence {
+        WireCommissionedSessionFence::PullRequest {
+            repository,
+            pull_request,
+            head_sha,
+            head_repository,
+            head_branch,
+            base_branch,
+        } => Ok(ApplicationCommissionedDispatchFence::PullRequest {
+            repository: RepositorySlug::try_new(repository).map_err(|_| ())?,
+            pull_request: NonZeroU64::new(pull_request.value())
+                .map(PullRequestNumber::new)
+                .ok_or(())?,
+            head_sha: CommitSha::try_new(head_sha).map_err(|_| ())?,
+            head_repository: RepositorySlug::try_new(head_repository).map_err(|_| ())?,
+            head_branch: BranchName::try_new(head_branch).map_err(|_| ())?,
+            base_branch: BranchName::try_new(base_branch).map_err(|_| ())?,
+        }),
+        WireCommissionedSessionFence::Branch { repository, branch } => {
+            Ok(ApplicationCommissionedDispatchFence::Branch {
+                repository: RepositorySlug::try_new(repository).map_err(|_| ())?,
+                branch: BranchName::try_new(branch).map_err(|_| ())?,
+            })
+        }
+    }
+}
+
+async fn handle_commission_session<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    request: WireCommissionSessionRequest,
+    services: &ConnectionServices,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let WireCommissionSessionRequest {
+        command_uuid,
+        template_name,
+        fence,
+        statement,
+        content,
+    } = request;
+    let admitted = (|| {
+        let template_name = SessionTemplateName::try_new(template_name).map_err(|_| ())?;
+        let statement = GoalStatement::try_new(statement).map_err(|_| ())?;
+        let content = UserContent::try_text(content.into_string()).map_err(|_| ())?;
+        let fence = domain_commissioned_fence(fence)?;
+        CommissionDispatchRequest::try_new(
+            DurableCommandId::from_uuid(command_uuid),
+            template_name,
+            fence,
+            statement,
+            content,
+        )
+        .map_err(|_| ())
+    })();
+    let Ok(request) = admitted else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let store = PostgresCommissionedDispatchStore::new(
+        services.pool.clone(),
+        services.model_configuration.session_credential_pin(),
+    );
+    // Replay is resolved from the durable record before the live template
+    // catalog is consulted: a committed commission whose response was lost
+    // must stay discoverable through a retry of the exact command even after
+    // configuration removed or renamed the template it was commissioned from.
+    match store.load(request.command_id()).await {
+        Ok(Some(recorded)) => {
+            return if recorded.matches(&request) {
+                // A replay re-arms the queued turn's runnable hint too, so a
+                // retry recovers a hint the first response lost.
+                let _ = services.eligibility_nudge.nudge(recorded.session());
+                write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::SessionCommissioned {
+                        session_id: wire_uuid(recorded.session().into_uuid()),
+                        dispatch_id: wire_uuid(recorded.dispatch().into_uuid()),
+                    },
+                )
+                .await
+            } else {
+                write_error(
+                    writer,
+                    version,
+                    request_id,
+                    ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+                )
+                .await
+            };
+        }
+        Ok(None) => {}
+        Err(error) => {
+            // The lookup is a pre-mutation read: infrastructure failure is the
+            // contractually retryable unavailable, and only a durable shape
+            // that cannot reconstruct its domain value is corruption.
+            let error = match commission_failure_ambiguity(&error) {
+                Some(commit_ambiguous) => ProtocolError::mutation_unavailable(commit_ambiguous),
+                None => internal_protocol_error(
+                    None,
+                    InternalDiagnostic::CommissionedDispatchCorruption,
+                ),
+            };
+            return write_error(writer, version, request_id, error).await;
+        }
+    }
+    let Some(template) = services.template_configuration.resolve(request.template()) else {
+        // The identity outranks the template. `load` above found no committed
+        // commission, so a registry claim on this identity names a conflicting
+        // reuse — another command kind, or an ordinary session creation — and
+        // `invalid_request` stays reserved for identities that claim nothing.
+        let refusal = match store.identity_claimed(request.command_id()).await {
+            Ok(true) => ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            Ok(false) => ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            Err(error) => match commission_failure_ambiguity(&error) {
+                Some(commit_ambiguous) => ProtocolError::mutation_unavailable(commit_ambiguous),
+                None => internal_protocol_error(
+                    None,
+                    InternalDiagnostic::CommissionedDispatchCorruption,
+                ),
+            },
+        };
+        return write_error(writer, version, request_id, refusal).await;
+    };
+    let mut ids = UuidV7CommissionedDispatchIdGenerator;
+    let Ok(prepared) = request.prepare(
+        &mut ids,
+        template.provenance().clone(),
+        template.defaults().clone(),
+    ) else {
+        // The template was resolved by the requested name, so a mismatch or a
+        // refused creation command is a daemon defect rather than caller error.
+        return write_error(
+            writer,
+            version,
+            request_id,
+            internal_protocol_error(None, InternalDiagnostic::CommissionedDispatchCorruption),
+        )
+        .await;
+    };
+    let outcome = store
+        .commission(prepared, |alias| {
+            services.model_configuration.resolve_alias(alias)
+        })
+        .await;
+    match outcome {
+        Ok(
+            CommissionDispatchOutcome::Dispatched { dispatch, session }
+            | CommissionDispatchOutcome::Replayed { dispatch, session },
+        ) => {
+            // The composite committed a queued turn; hint it runnable now
+            // rather than waiting for the periodic reconciliation sweep, as
+            // submit-input and repository-watch dispatch do post-commit.
+            let _ = services.eligibility_nudge.nudge(session);
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::SessionCommissioned {
+                    session_id: wire_uuid(session.into_uuid()),
+                    dispatch_id: wire_uuid(dispatch.into_uuid()),
+                },
+            )
+            .await
+        }
+        Ok(CommissionDispatchOutcome::ConflictingReuse)
+        | Err(CommissionedDispatchRepositoryError::SessionCreation(
+            CreateSessionRepositoryError::DifferentCommandKind { .. },
+        )) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Err(error) => {
+            let protocol_error = match commission_failure_ambiguity(&error) {
+                Some(commit_ambiguous) => ProtocolError::mutation_unavailable(commit_ambiguous),
+                None => internal_protocol_error(
+                    None,
+                    InternalDiagnostic::CommissionedDispatchCorruption,
+                ),
+            };
+            write_error(writer, version, request_id, protocol_error).await
+        }
+    }
+}
+
+/// Classifies one commission failure as a database outage, or none for the
+/// fail-closed remainder.
+fn commission_failure_ambiguity(error: &CommissionedDispatchRepositoryError) -> Option<bool> {
+    match error {
+        CommissionedDispatchRepositoryError::Database {
+            commit_ambiguous, ..
+        } => Some(*commit_ambiguous),
+        CommissionedDispatchRepositoryError::SessionCreation(error) => match error {
+            CreateSessionRepositoryError::Database(_) => Some(false),
+            CreateSessionRepositoryError::CommitAmbiguous(_) => Some(true),
+            CreateSessionRepositoryError::DifferentCommandKind { .. }
+            | CreateSessionRepositoryError::Corruption(_) => None,
+        },
+        CommissionedDispatchRepositoryError::InitialInput(error) => match error {
+            SubmitInputRepositoryError::Database(_) => Some(false),
+            SubmitInputRepositoryError::CommitAmbiguous(_) => Some(true),
+            SubmitInputRepositoryError::DifferentCommandKind { .. }
+            | SubmitInputRepositoryError::AcceptedInputIdentityCollision { .. }
+            | SubmitInputRepositoryError::UnsupportedModelSetting(_)
+            | SubmitInputRepositoryError::Corruption(_)
+            | SubmitInputRepositoryError::ModelExecution(_) => None,
+        },
+        CommissionedDispatchRepositoryError::GoalCommission(error) => match error {
+            GoalRepositoryError::Database(_) => Some(false),
+            GoalRepositoryError::CommitAmbiguous(_) => Some(true),
+            GoalRepositoryError::DifferentCommandKind { .. }
+            | GoalRepositoryError::Corruption(_) => None,
+        },
+        CommissionedDispatchRepositoryError::Corruption(_) => None,
+    }
+}
+
 struct WireSessionPlacementUpdateRequest {
     command_id: signalbox_process_protocol::CommandId,
     session_id: CanonicalUuid,
@@ -12342,6 +12617,7 @@ fn map_rejection(
         SubmitInputRejectedResult::AttachmentBytesTooLarge {
             session: _,
             maximum_bytes,
+            observed_bytes: _,
         } => RejectionDetail::AttachmentByteBudgetExceeded {
             maximum_bytes: CanonicalU64::new(maximum_bytes.get()),
         },
@@ -13224,6 +13500,7 @@ enum InternalDiagnostic {
     ContextCompactionReadCorruption,
     ImportedFrontierRangeCorruption,
     TemplateSessionCreationCorruption,
+    CommissionedDispatchCorruption,
     SessionCreationPreparation,
     SessionCreationDatabase,
     SessionCreationCommitAmbiguous,
@@ -13312,6 +13589,7 @@ impl InternalDiagnostic {
             | Self::ContextCompactionReadCorruption
             | Self::ImportedFrontierRangeCorruption
             | Self::TemplateSessionCreationCorruption
+            | Self::CommissionedDispatchCorruption
             | Self::SessionCreationCorruption
             | Self::ConversationListingCorruption
             | Self::SessionMetadataCorruption
@@ -13362,6 +13640,7 @@ impl InternalDiagnostic {
             Self::ContextCompactionReadCorruption => "context_compaction_read_corruption",
             Self::ImportedFrontierRangeCorruption => "imported_frontier_range_corruption",
             Self::TemplateSessionCreationCorruption => "template_session_creation_corruption",
+            Self::CommissionedDispatchCorruption => "commissioned_dispatch_corruption",
             Self::SessionCreationPreparation => "session_creation_preparation",
             Self::SessionCreationDatabase => "session_creation_database",
             Self::SessionCreationCommitAmbiguous => "session_creation_commit_ambiguous",
@@ -13772,6 +14051,18 @@ where
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        // A client goal command names no expected lineage head, so it applies
+        // to whatever state the session lock reveals. Reaching this answer
+        // means the repository decided a question this request never asked.
+        Ok(GoalCommandHandlingOutcome::LineageMoved) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Internal),
             )
             .await
         }
