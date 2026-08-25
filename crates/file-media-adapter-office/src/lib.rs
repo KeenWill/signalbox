@@ -16,10 +16,10 @@ use signalbox_file_media_runtime::{
     FileMediaProviderDeclaration, FileMediaProviderFailure, FileMediaProviderFuture,
     FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileReadInput,
     FileReaderName, FileReaderProviderName, FileReaderRevision, MAX_OBSERVED_CONTAINER_ENTRIES,
-    MAX_TEXT_BODY_BYTES, ProbeDeclaration, ProbeStrength, ProcessorFailure, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds,
-    ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity,
-    ReasonCode, StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    MAX_TEXT_BODY_BYTES, ProbeDeclaration, ProbeDeclarationInput, ProbeStrength, ProcessorFailure,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
+    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
+    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
 };
 use zip::{CompressionMethod, ZipArchive};
 
@@ -303,12 +303,12 @@ fn reader_declaration(
         reader: FileReaderName::try_new(kind.reader())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(kind.media_type())?],
-        probe: ProbeDeclaration::new(
-            ZIP_PREFIX_BYTES,
-            ZIP_SUFFIX_BYTES,
-            16,
-            VALIDATION_SOURCE_BYTES,
-        ),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: ZIP_PREFIX_BYTES,
+            suffix_bytes: ZIP_SUFFIX_BYTES,
+            range_count: 16,
+            cumulative_bytes: VALIDATION_SOURCE_BYTES,
+        }),
         views: vec![text_view, metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
