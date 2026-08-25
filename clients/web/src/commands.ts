@@ -31,7 +31,6 @@ interface CommandDefinitionShape {
 const always = () => true
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
 const scenarioNavigation = (context: CommandContext) => context.navigateScenario !== undefined
-const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
 export const commandRegistry = [
   {
     id: 'navigate.attention',
@@ -138,13 +137,13 @@ export const commandRegistry = [
     description: 'Review modal navigation and command bindings.',
     category: 'Surface',
     bindings: [{ label: '?', registration: { kind: 'hotkey', hotkey: { key: '/', shift: true } } }],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.overlaySet('help')),
   },
   {
     id: 'navigation.open',
-    title: 'Open navigation',
-    description: 'Open navigation for the current application surface.',
+    title: 'Open scenario navigation',
+    description: 'Choose a deterministic development scenario.',
     category: 'Surface',
     bindings: [],
     available: always,
@@ -233,6 +232,24 @@ export const commandRegistry = [
     },
   },
   {
+    id: 'layout.workbench',
+    title: 'Use workbench layout',
+    description: 'Show navigation, the primary surface, and the contextual inspector.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.layoutSet('workbench')),
+  },
+  {
+    id: 'layout.focus',
+    title: 'Use focus layout',
+    description: 'Show the primary surface without secondary panes.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.layoutSet('focus')),
+  },
+  {
     id: 'density.toggle',
     title: 'Toggle visual density',
     description: 'Switch compact and comfortable spacing independently of detail.',
@@ -243,6 +260,24 @@ export const commandRegistry = [
       const current = context.getState().app.density
       context.dispatch(actions.densitySet(current === 'compact' ? 'comfortable' : 'compact'))
     },
+  },
+  {
+    id: 'density.compact',
+    title: 'Use compact density',
+    description: 'Use dense rows for high-volume operator work.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.densitySet('compact')),
+  },
+  {
+    id: 'density.comfortable',
+    title: 'Use comfortable density',
+    description: 'Use more separation without changing information detail.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.densitySet('comfortable')),
   },
   {
     id: 'theme.toggle',
@@ -257,12 +292,30 @@ export const commandRegistry = [
     },
   },
   {
+    id: 'theme.dark',
+    title: 'Use dark theme',
+    description: 'Use the dark workstation color theme.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.themeSet('dark')),
+  },
+  {
+    id: 'theme.light',
+    title: 'Use light theme',
+    description: 'Use the light workstation color theme.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.themeSet('light')),
+  },
+  {
     id: 'detail.full',
     title: 'Show full transcript detail',
     description: 'Show every supported timeline record.',
     category: 'View',
     bindings: [],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.detailSet('full')),
   },
   {
@@ -271,7 +324,7 @@ export const commandRegistry = [
     description: 'Keep origins, tools, progress, warnings, and results compact.',
     category: 'View',
     bindings: [],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.detailSet('condensed')),
   },
   {
@@ -280,7 +333,7 @@ export const commandRegistry = [
     description: 'Emphasize origins and durable results.',
     category: 'View',
     bindings: [],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.detailSet('results')),
   },
 ] as const satisfies readonly CommandDefinitionShape[]

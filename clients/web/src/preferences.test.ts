@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BROWSER_PREFERENCES_KEY,
+  createDefaultBrowserPreferences,
   decodeBrowserPreferences,
   defaultBrowserPreferences,
   loadBrowserPreferences,
@@ -203,5 +204,25 @@ describe('browser preferences', () => {
         keyOverrides: JSON.parse('{"__proto__":"Shift+K"}'),
       }),
     ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
+  })
+})
+
+describe('createDefaultBrowserPreferences', () => {
+  it('hands out an independent copy of every mutable default', () => {
+    const first = createDefaultBrowserPreferences()
+    const second = createDefaultBrowserPreferences()
+
+    expect(first).toEqual(defaultBrowserPreferences)
+    expect(first.paneSizes).not.toBe(defaultBrowserPreferences.paneSizes)
+    expect(first.lastLogicalPositions).not.toBe(defaultBrowserPreferences.lastLogicalPositions)
+    expect(first.keyOverrides).not.toBe(defaultBrowserPreferences.keyOverrides)
+
+    first.paneSizes.navigation += 1
+    first.lastLogicalPositions.session = '1'
+    first.keyOverrides.command = 'k'
+
+    expect(second).toEqual(defaultBrowserPreferences)
+    expect(defaultBrowserPreferences.lastLogicalPositions).toEqual({})
+    expect(defaultBrowserPreferences.keyOverrides).toEqual({})
   })
 })

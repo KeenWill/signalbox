@@ -2,104 +2,82 @@ import * as Dialog from '@radix-ui/react-dialog'
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
+import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
 import {
-  AlertTriangle,
-  Command,
-  Menu,
-  Moon,
-  PanelLeftClose,
-  Rows3,
-  Search,
-  Sun,
-  X,
-} from 'lucide-react'
-import { type RefObject, useEffect, useMemo, useRef } from 'react'
-import {
-  type CommandContext,
-  type CommandId,
-  commandRegistry,
-  globalHotkeyBindings,
-  globalHotkeySequenceBindings,
-  invokeCommand,
-} from './commands'
+  type CSSProperties,
+  type MouseEvent,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import {
   BootstrapContractError,
   type ProductRouteId,
   productRoutes,
+  productSurfaceStates,
   productTransport,
 } from './product'
+import {
+  invokeProductCommand,
+  type ProductCommandContext,
+  type ProductCommandId,
+  productCommandRegistry,
+  productHotkeyBindings,
+  productHotkeySequenceBindings,
+} from './productCommands'
+import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
+import { SettingsSurface } from './SettingsSurface'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
-const surfaceCopy: Record<
-  ProductRouteId,
-  { eyebrow: string; title: string; question: string; track: string }
-> = {
+const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
   attention: {
     eyebrow: 'Operator overview',
     title: 'Attention',
     question: 'What needs intervention now?',
-    track: '#992 attention projections',
   },
   sessions: {
     eyebrow: 'Conversation index',
     title: 'Sessions',
     question: 'Where is work active, blocked, or recently settled?',
-    track: '#991 session projections',
   },
   search: {
     eyebrow: 'Corpus navigation',
     title: 'Search',
     question: 'Where does this fact occur?',
-    track: '#994 search reads',
   },
   activity: {
     eyebrow: 'Repository operations',
     title: 'Activity',
     question: 'What entered the system and how was it handled?',
-    track: '#995 discovery reads',
   },
   runners: {
     eyebrow: 'Execution fleet',
     title: 'Runners',
     question: 'Which runners are available, occupied, or lost?',
-    track: '#995 runner discovery',
   },
   reviews: {
     eyebrow: 'Convergence',
     title: 'Reviews',
     question: 'Which pull requests still need work?',
-    track: '#995 review discovery',
   },
   imports: {
     eyebrow: 'Conversation intake',
     title: 'Imports',
     question: 'Which imports completed, failed, or need inspection?',
-    track: '#995 import discovery',
   },
   usage: {
     eyebrow: 'Accounting',
     title: 'Usage',
     question: 'Where are tokens and cost accumulating?',
-    track: '#994 usage reads',
   },
   settings: {
     eyebrow: 'Local preferences',
     title: 'Settings',
     question: 'How should this workstation present information?',
-    track: 'Web track H slice 2',
   },
-}
-
-const productNavigationCommandIds: Record<ProductRouteId, CommandId> = {
-  attention: 'navigate.attention',
-  sessions: 'navigate.sessions',
-  search: 'navigate.search',
-  activity: 'navigate.activity',
-  runners: 'navigate.runners',
-  reviews: 'navigate.reviews',
-  imports: 'navigate.imports',
-  usage: 'navigate.usage',
-  settings: 'navigate.settings',
 }
 
 function ProductNavigation({
@@ -108,9 +86,23 @@ function ProductNavigation({
   onNavigate,
 }: {
   active: ProductRouteId
-  context: CommandContext
+  context: ProductCommandContext
   onNavigate?: () => void
 }) {
+  const invokeNavigation = (event: MouseEvent<HTMLAnchorElement>, route: ProductRouteId) => {
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) {
+      return
+    }
+    event.preventDefault()
+    invokeProductCommand(`navigate.${route}` as ProductCommandId, context)
+  }
   return (
     <div className="product-navigation">
       <div className="brand">
@@ -126,19 +118,7 @@ function ProductNavigation({
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
-            onClick={(event) => {
-              if (
-                event.button === 0 &&
-                !event.altKey &&
-                !event.ctrlKey &&
-                !event.metaKey &&
-                !event.shiftKey
-              ) {
-                event.preventDefault()
-                onNavigate?.()
-                invokeCommand(productNavigationCommandIds[route.id], context)
-              }
-            }}
+            onClick={(event) => invokeNavigation(event, route.id)}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -149,19 +129,7 @@ function ProductNavigation({
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
-        onClick={(event) => {
-          if (
-            event.button === 0 &&
-            !event.altKey &&
-            !event.ctrlKey &&
-            !event.metaKey &&
-            !event.shiftKey
-          ) {
-            event.preventDefault()
-            onNavigate?.()
-            invokeCommand('navigate.scenario', context)
-          }
-        }}
+        onClick={onNavigate}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -171,17 +139,23 @@ function ProductNavigation({
 
 function CommandPalette({
   context,
-  onOpenNavigation,
+  openerRef,
+  helpOpenerRef,
+  navigationOpenerRef,
+  fallbackRef,
 }: {
-  context: CommandContext
-  onOpenNavigation: () => void
+  context: ProductCommandContext
+  openerRef: RefObject<HTMLElement | null>
+  helpOpenerRef: RefObject<HTMLElement | null>
+  navigationOpenerRef: RefObject<HTMLElement | null>
+  fallbackRef: RefObject<HTMLElement | null>
 }) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   return (
     <Dialog.Root
       open={open}
       onOpenChange={(next) => {
-        if (!next) invokeCommand('surface.escape', context)
+        if (!next) invokeProductCommand('surface.escape', context)
       }}
     >
       <Dialog.Portal>
@@ -189,6 +163,13 @@ function CommandPalette({
         <Dialog.Content
           className="dialog-content product-palette"
           aria-describedby="product-palette-description"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            const opener = openerRef.current
+            if (opener?.isConnected && opener.getClientRects().length > 0) opener.focus()
+            else fallbackRef.current?.focus()
+            openerRef.current = null
+          }}
         >
           <div className="dialog-heading">
             <div>
@@ -204,16 +185,25 @@ function CommandPalette({
             </Dialog.Close>
           </div>
           <div className="command-list">
-            {commandRegistry
-              .filter((command) => command.id !== 'surface.escape' && command.available(context))
+            {productCommandRegistry
+              .filter(
+                (command) =>
+                  command.id !== 'surface.escape' &&
+                  (!('available' in command) || command.available(context)),
+              )
               .map((command) => (
                 <button
                   key={command.id}
                   type="button"
                   onClick={() => {
-                    invokeCommand('surface.escape', context)
-                    if (command.id === 'navigation.open') onOpenNavigation()
-                    invokeCommand(command.id, context)
+                    const paletteOpener = openerRef.current
+                    invokeProductCommand('surface.escape', context)
+                    invokeProductCommand(command.id, context)
+                    // The palette row that launched this command is about to unmount, so the
+                    // overlay it opened inherits the palette's own opener instead.
+                    if (command.id === 'help.open') helpOpenerRef.current = paletteOpener
+                    if (command.id === 'navigation.open')
+                      navigationOpenerRef.current = paletteOpener
                   }}
                 >
                   <span>
@@ -230,19 +220,95 @@ function CommandPalette({
   )
 }
 
-function SurfaceUnavailable({ surface }: { surface: ProductRouteId }) {
-  const copy = surfaceCopy[surface]
+function KeyboardHelp({
+  context,
+  openerRef,
+  fallbackRef,
+}: {
+  context: ProductCommandContext
+  openerRef: RefObject<HTMLElement | null>
+  fallbackRef: RefObject<HTMLElement | null>
+}) {
+  const open = useAppSelector((state) => state.app.overlay === 'help')
   return (
-    <section className="surface-empty" aria-labelledby="surface-unavailable-heading">
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) invokeProductCommand('surface.escape', context)
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content
+          className="dialog-content"
+          aria-describedby="keyboard-help-description"
+          onCloseAutoFocus={(event) => {
+            event.preventDefault()
+            const opener = openerRef.current
+            if (opener?.isConnected && opener.getClientRects().length > 0) opener.focus()
+            else fallbackRef.current?.focus()
+            openerRef.current = null
+          }}
+        >
+          <div className="dialog-heading">
+            <div>
+              <Dialog.Title>Keyboard help</Dialog.Title>
+              <Dialog.Description id="keyboard-help-description">
+                Available workstation commands and their default bindings.
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button className="icon-button" type="button" aria-label="Close keyboard help">
+                <X />
+              </button>
+            </Dialog.Close>
+          </div>
+          <dl className="shortcut-list">
+            {productCommandRegistry
+              .filter(
+                (command) =>
+                  command.bindings.some((binding) => 'registration' in binding) &&
+                  (!('available' in command) || command.available(context)),
+              )
+              .map((command) => (
+                <div key={command.id}>
+                  <dt>{command.title}</dt>
+                  <dd>
+                    {command.bindings
+                      .filter((binding) => 'registration' in binding)
+                      .map((binding) => (
+                        <kbd key={binding.label}>{binding.label}</kbd>
+                      ))}
+                  </dd>
+                </div>
+              ))}
+          </dl>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
+function SurfaceUnavailable({ surface }: { surface: ProductRouteId }) {
+  const state = productSurfaceStates[surface]
+  if (state.kind !== 'committed-unimplemented') return null
+  return (
+    <section className="surface-empty" aria-labelledby={`${surface}-unavailable-heading`}>
       <AlertTriangle aria-hidden="true" />
       <div>
-        <h2 id="surface-unavailable-heading">
+        <span className="availability-tag">Committed · unavailable</span>
+        <h2 id={`${surface}-unavailable-heading`}>
           Operational data is not exposed by this daemon contract
         </h2>
         <p>
-          The product route is ready, but {copy.track} has not supplied a production read on this
-          branch. Signalbox will not infer or fabricate these facts.
+          {state.owningTrack} is committed, but no present production surface provides the required
+          facts on this branch. Signalbox will not infer or fabricate them.
         </p>
+        <ul>
+          {state.facts.map((fact) => (
+            <li key={fact}>{fact}</li>
+          ))}
+        </ul>
       </div>
     </section>
   )
@@ -264,33 +330,6 @@ function AttentionSurface() {
   )
 }
 
-function SessionsSurface() {
-  return (
-    <div className="surface-body sessions-surface">
-      <div className="sessions-toolbar" role="toolbar" aria-label="Session controls">
-        <label>
-          <Search aria-hidden="true" />
-          <input
-            aria-label="Filter loaded sessions"
-            placeholder="Filter loaded sessions"
-            disabled
-          />
-        </label>
-        <button type="button" disabled>
-          New session
-        </button>
-      </div>
-      <div className="session-columns" aria-hidden="true">
-        <span>Session</span>
-        <span>State</span>
-        <span>Activity</span>
-        <span>Updated</span>
-      </div>
-      <SurfaceUnavailable surface="sessions" />
-    </div>
-  )
-}
-
 function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   return (
     <div className="surface-body">
@@ -299,48 +338,15 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
-function SettingsSurface() {
-  return (
-    <div className="surface-body">
-      <section
-        className="surface-empty surface-empty-no-icon"
-        aria-labelledby="settings-local-heading"
-      >
-        <div>
-          <h2 id="settings-local-heading">Local settings are not exposed in this slice</h2>
-          <p>
-            Presentation preferences remain browser-local. Their dedicated controls arrive in Web
-            track H slice 2 and do not depend on a daemon read contract.
-          </p>
-        </div>
-      </section>
-    </div>
-  )
-}
-
-function ProductToolbar({
-  context,
-  navigationTriggerRef,
-  paletteTriggerRef,
-  onOpenNavigation,
-}: {
-  context: CommandContext
-  navigationTriggerRef: RefObject<HTMLButtonElement | null>
-  paletteTriggerRef: RefObject<HTMLButtonElement | null>
-  onOpenNavigation: () => void
-}) {
+function ProductToolbar({ context }: { context: ProductCommandContext }) {
   const app = useAppSelector(selectApp)
   return (
     <div className="toolbar" role="toolbar" aria-label="Application controls">
       <button
-        ref={navigationTriggerRef}
         className="icon-button mobile-only"
         type="button"
         aria-label="Open navigation"
-        onClick={() => {
-          onOpenNavigation()
-          invokeCommand('navigation.open', context)
-        }}
+        onClick={() => invokeProductCommand('navigation.open', context)}
       >
         <Menu />
       </button>
@@ -348,7 +354,7 @@ function ProductToolbar({
         className="icon-button"
         type="button"
         aria-label={`Use ${app.density === 'compact' ? 'comfortable' : 'compact'} density`}
-        onClick={() => invokeCommand('density.toggle', context)}
+        onClick={() => invokeProductCommand('density.toggle', context)}
       >
         <Rows3 />
       </button>
@@ -356,7 +362,7 @@ function ProductToolbar({
         className="icon-button"
         type="button"
         aria-label={`Switch to ${app.layout === 'focus' ? 'workbench' : 'focus'} layout`}
-        onClick={() => invokeCommand('layout.toggle', context)}
+        onClick={() => invokeProductCommand('layout.toggle', context)}
       >
         <PanelLeftClose />
       </button>
@@ -364,16 +370,15 @@ function ProductToolbar({
         className="icon-button"
         type="button"
         aria-label={`Use ${app.theme === 'dark' ? 'light' : 'dark'} theme`}
-        onClick={() => invokeCommand('theme.toggle', context)}
+        onClick={() => invokeProductCommand('theme.toggle', context)}
       >
         {app.theme === 'dark' ? <Sun /> : <Moon />}
       </button>
       <button
-        ref={paletteTriggerRef}
         className="icon-button"
         type="button"
         aria-label="Open command palette"
-        onClick={() => invokeCommand('palette.open', context)}
+        onClick={() => invokeProductCommand('palette.open', context)}
       >
         <Command />
       </button>
@@ -386,46 +391,100 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
   const primaryRef = useRef<HTMLElement>(null)
-  const navigationTriggerRef = useRef<HTMLButtonElement>(null)
-  const paletteTriggerRef = useRef<HTMLButtonElement>(null)
-  const navigationReturnFocusRef = useRef<HTMLButtonElement | null>(null)
+  const navigationOpenerRef = useRef<HTMLElement | null>(null)
+  const paletteOpenerRef = useRef<HTMLElement | null>(null)
+  const helpOpenerRef = useRef<HTMLElement | null>(null)
+  const timelineWindowNavigationRef = useRef<(anchor: 'first' | 'latest') => void>(() => {})
+  const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
+  const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
+  const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
+  const focusPrimarySurface = useCallback(() => primaryRef.current?.focus(), [])
+  const updateTimelineWindowNavigation = useCallback(
+    (navigateTimelineWindow: (anchor: 'first' | 'latest') => void) => {
+      timelineWindowNavigationRef.current = navigateTimelineWindow
+    },
+    [],
+  )
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
     staleTime: Number.POSITIVE_INFINITY,
   })
-  const context = useMemo<CommandContext>(
+  const context = useMemo<ProductCommandContext>(
     () => ({
       dispatch,
       getState: store.getState,
-      timelineIds: [],
-      focusTimeline: () => primaryRef.current?.focus(),
-      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      timelineIds,
+      focusTimeline: () => {
+        const selected = store.getState().app.selectedTimeline ?? timelineIds[0]
+        const control = selected
+          ? document.querySelector<HTMLElement>(`[data-timeline-id="${selected}"]`)
+          : null
+        ;(control ?? primaryRef.current)?.focus()
+      },
+      navigate: (path) => {
+        void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() =>
+          primaryRef.current?.focus(),
+        )
+      },
       navigateScenario: () =>
         void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } }),
+      navigateTimelineWindow: (anchor) => timelineWindowNavigationRef.current(anchor),
+      openNavigation: () => {
+        const active = document.activeElement
+        navigationOpenerRef.current =
+          active instanceof HTMLElement && active !== document.body ? active : null
+        dispatch(actions.overlaySet('navigation'))
+      },
+      openPalette: () => {
+        const active = document.activeElement
+        paletteOpenerRef.current =
+          active instanceof HTMLElement && active !== document.body ? active : null
+        dispatch(actions.overlaySet('palette'))
+      },
+      prepareFocusLayout: () => {
+        const active = document.activeElement
+        if (
+          active instanceof HTMLElement &&
+          (active.closest('.product-navigation-pane') || active.closest('.product-inspector'))
+        ) {
+          primaryRef.current?.focus()
+        }
+      },
+      timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
     }),
-    [dispatch, navigate],
+    [dispatch, navigate, surface, timelineIds, timelineWindowAvailable],
   )
   useHotkeys(
-    globalHotkeyBindings.map((binding) => ({
+    productHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
       callback: () => {
-        if (store.getState().app.overlay === null) invokeCommand(binding.commandId, context)
+        if (binding.commandId === 'surface.escape' || store.getState().app.overlay === null) {
+          if (binding.commandId === 'help.open') {
+            const active = document.activeElement
+            helpOpenerRef.current =
+              active instanceof HTMLElement && active !== document.body ? active : null
+          }
+          invokeProductCommand(binding.commandId, context)
+        }
       },
     })),
   )
   useHotkeySequences(
-    globalHotkeySequenceBindings.map((binding) => ({
-      sequence: binding.sequence,
+    productHotkeySequenceBindings.map((binding) => ({
+      sequence: [...binding.sequence],
       callback: () => {
-        if (store.getState().app.overlay === null) invokeCommand(binding.commandId, context)
+        if (store.getState().app.overlay === null) {
+          invokeProductCommand(binding.commandId, context)
+        }
       },
     })),
   )
 
   useEffect(() => {
-    if (store.getState().app.overlay === 'help') dispatch(actions.overlaySet(null))
-  }, [dispatch])
+    if (app.selectedTimeline === null) return
+    document.querySelector<HTMLElement>(`[data-timeline-id="${app.selectedTimeline}"]`)?.focus()
+  }, [app.selectedTimeline])
 
   useEffect(() => {
     document.documentElement.dataset.theme = app.theme
@@ -440,19 +499,34 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [surface])
 
   const copy = surfaceCopy[surface]
+  const surfaceUnavailable =
+    productSurfaceStates[surface].kind === 'committed-unimplemented' ||
+    (surface === 'sessions' && bootstrap.data?.capabilities.bounded_session_timeline !== true)
   const content =
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
-      <SessionsSurface />
+      <SessionWorkspaceSurface
+        bootstrap={bootstrap.data}
+        onTimelineIds={updateTimelineIds}
+        onTimelineWindowNavigation={updateTimelineWindowNavigation}
+        onTimelineWindowAvailability={setTimelineWindowAvailable}
+        onTimelineWindowCommand={(command) => invokeProductCommand(command, context)}
+        onEmptyTimelineFocus={focusPrimarySurface}
+      />
     ) : surface === 'settings' ? (
-      <SettingsSurface />
+      <SettingsSurface context={context} />
     ) : (
       <DeferredSurface surface={surface} />
     )
 
+  const shellStyle = {
+    '--product-navigation-width': `${app.paneSizes.navigation}px`,
+    '--product-inspector-width': `${app.paneSizes.inspector}px`,
+  } as CSSProperties
+
   return (
-    <div className={`product-shell layout-${app.layout}`}>
+    <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
         <ProductNavigation active={surface} context={context} />
       </aside>
@@ -462,14 +536,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <span className="eyebrow">{copy.eyebrow}</span>
             <h1>{copy.title}</h1>
           </div>
-          <ProductToolbar
-            context={context}
-            navigationTriggerRef={navigationTriggerRef}
-            paletteTriggerRef={paletteTriggerRef}
-            onOpenNavigation={() => {
-              navigationReturnFocusRef.current = navigationTriggerRef.current
-            }}
-          />
+          <ProductToolbar context={context} />
         </header>
         <div className="surface-question">
           <p>{copy.question}</p>
@@ -494,6 +561,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                     : 'Transport unavailable'
                   : 'Checking contract…'}
           </span>
+          {bootstrap.isError && (
+            <button type="button" onClick={() => void bootstrap.refetch()}>
+              Retry bootstrap
+            </button>
+          )}
         </div>
         {content}
       </main>
@@ -513,25 +585,35 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </div>
             <div>
               <dt>Authority</dt>
-              <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
+              <dd>
+                {surface === 'settings' ? 'Browser' : surfaceUnavailable ? 'Unavailable' : 'Daemon'}
+              </dd>
             </div>
             <div>
               <dt>Cache</dt>
-              <dd>{surface === 'settings' ? 'Local preferences' : 'Bounded query'}</dd>
+              <dd>
+                {surface === 'settings'
+                  ? 'Local settings'
+                  : surfaceUnavailable
+                    ? 'No operational query'
+                    : 'Bounded query'}
+              </dd>
             </div>
           </dl>
         </aside>
       )}
       <CommandPalette
         context={context}
-        onOpenNavigation={() => {
-          navigationReturnFocusRef.current = paletteTriggerRef.current
-        }}
+        openerRef={paletteOpenerRef}
+        helpOpenerRef={helpOpenerRef}
+        navigationOpenerRef={navigationOpenerRef}
+        fallbackRef={primaryRef}
       />
+      <KeyboardHelp context={context} openerRef={helpOpenerRef} fallbackRef={primaryRef} />
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {
-          if (!open) invokeCommand('surface.escape', context)
+          if (!open) dispatch(actions.overlaySet(null))
         }}
       >
         <Dialog.Portal>
@@ -540,11 +622,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             className="mobile-navigation"
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
-              const trigger = navigationReturnFocusRef.current
-              if (trigger?.getClientRects().length) {
-                event.preventDefault()
-                trigger.focus()
-              }
+              event.preventDefault()
+              const opener = navigationOpenerRef.current
+              if (opener?.isConnected && opener.getClientRects().length > 0) opener.focus()
+              else primaryRef.current?.focus()
+              navigationOpenerRef.current = null
             }}
           >
             <Dialog.Title className="sr-only">Product navigation</Dialog.Title>
@@ -554,7 +636,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <ProductNavigation
               active={surface}
               context={context}
-              onNavigate={() => invokeCommand('surface.escape', context)}
+              onNavigate={() => dispatch(actions.overlaySet(null))}
             />
           </Dialog.Content>
         </Dialog.Portal>
