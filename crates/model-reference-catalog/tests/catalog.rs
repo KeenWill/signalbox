@@ -10,11 +10,16 @@ use signalbox_model_reference_catalog::{
 
 const REFERENCE_PACKAGE: &str = "signalbox-model-reference-catalog";
 
-fn exact_api_snapshot_rate_set_ids(
-    catalog: &Catalog,
-    model_hint: &str,
-    date: &str,
-) -> Option<Vec<String>> {
+fn resolved_family_id(resolution: &ReferenceResolution) -> Option<&str> {
+    match resolution {
+        ReferenceResolution::FamilyOnly { family_id, .. } => Some(family_id),
+        ReferenceResolution::Resolved { .. }
+        | ReferenceResolution::Ambiguous { .. }
+        | ReferenceResolution::Unknown => None,
+    }
+}
+
+fn api_model_rate_set_ids(catalog: &Catalog, model_hint: &str, date: &str) -> Option<Vec<String>> {
     let resolution = catalog
         .resolve(Provider::Openai, model_hint, date, CommercialChannel::Api)
         .ok()?;
@@ -26,6 +31,15 @@ fn exact_api_snapshot_rate_set_ids(
             .map(|rate_set| rate_set.id.clone())
             .collect(),
     )
+}
+
+fn consumer_mapping_mut<'a>(catalog: &'a mut Value, id: &str) -> &'a mut Value {
+    catalog["consumer_mappings"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|mapping| mapping["id"] == id)
+        .unwrap()
 }
 
 #[test]
@@ -137,20 +151,60 @@ fn exact_api_snapshots_keep_their_recorded_rate_sets() {
     let catalog = bundled_catalog().unwrap();
 
     assert_eq!(
-        exact_api_snapshot_rate_set_ids(&catalog, "gpt-4-0314", "2023-03-14"),
+        api_model_rate_set_ids(&catalog, "gpt-4-0314", "2023-03-14"),
         Some(vec![String::from("oai-gpt4-launch")])
     );
     assert_eq!(
-        exact_api_snapshot_rate_set_ids(&catalog, "gpt-4-32k-0314", "2023-03-14"),
+        api_model_rate_set_ids(&catalog, "gpt-4-32k-0314", "2023-03-14"),
         Some(vec![String::from("oai-gpt4-32k-launch")])
     );
     assert_eq!(
-        exact_api_snapshot_rate_set_ids(&catalog, "gpt-4-1106-preview", "2023-11-06"),
+        api_model_rate_set_ids(&catalog, "gpt-4-1106-preview", "2023-11-06"),
         Some(vec![String::from("oai-gpt4-turbo-launch")])
     );
     assert_eq!(
-        exact_api_snapshot_rate_set_ids(&catalog, "gpt-4o-2024-08-06", "2024-10-01"),
+        api_model_rate_set_ids(&catalog, "gpt-4o-2024-08-06", "2024-10-01"),
         Some(vec![String::from("oai-gpt4o-0806-caching")])
+    );
+}
+
+#[test]
+fn rolling_gpt4_alias_shares_its_launch_rate() {
+    let catalog = bundled_catalog().unwrap();
+
+    let resolution = catalog
+        .resolve(
+            Provider::Openai,
+            "gpt-4",
+            "2023-03-14",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+
+    assert_eq!(resolution.resolved_model_id(), Some("openai:gpt-4"));
+    assert_eq!(
+        resolution.price().unwrap().resolved_rate_sets().unwrap()[0].id,
+        "oai-gpt4-launch"
+    );
+}
+
+#[test]
+fn rolling_gpt4_32k_alias_shares_its_launch_rate() {
+    let catalog = bundled_catalog().unwrap();
+
+    let resolution = catalog
+        .resolve(
+            Provider::Openai,
+            "gpt-4-32k",
+            "2023-03-14",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+
+    assert_eq!(resolution.resolved_model_id(), Some("openai:gpt-4-32k"));
+    assert_eq!(
+        resolution.price().unwrap().resolved_rate_sets().unwrap()[0].id,
+        "oai-gpt4-32k-launch"
     );
 }
 
@@ -446,6 +500,99 @@ fn exact_and_family_consumer_mappings_do_not_conflate() {
 }
 
 #[test]
+fn claude_code_sonnet_alias_moves_to_claude5_family_at_launch() {
+    let catalog = bundled_catalog().unwrap();
+
+    let before = catalog
+        .resolve(
+            Provider::Anthropic,
+            "sonnet",
+            "2026-06-29",
+            CommercialChannel::ClaudeCodeSubscription,
+        )
+        .unwrap();
+    let after = catalog
+        .resolve(
+            Provider::Anthropic,
+            "sonnet",
+            "2026-06-30",
+            CommercialChannel::ClaudeCodeSubscription,
+        )
+        .unwrap();
+
+    assert_eq!(
+        resolved_family_id(&before),
+        Some("anthropic:claude-4-family")
+    );
+    assert_eq!(
+        resolved_family_id(&after),
+        Some("anthropic:claude-5-family")
+    );
+}
+
+#[test]
+fn claude_code_opus_alias_moves_to_claude5_family_at_launch() {
+    let catalog = bundled_catalog().unwrap();
+
+    let before = catalog
+        .resolve(
+            Provider::Anthropic,
+            "opus",
+            "2026-07-23",
+            CommercialChannel::ClaudeCodeSubscription,
+        )
+        .unwrap();
+    let after = catalog
+        .resolve(
+            Provider::Anthropic,
+            "opus",
+            "2026-07-24",
+            CommercialChannel::ClaudeCodeSubscription,
+        )
+        .unwrap();
+
+    assert_eq!(
+        resolved_family_id(&before),
+        Some("anthropic:claude-4-family")
+    );
+    assert_eq!(
+        resolved_family_id(&after),
+        Some("anthropic:claude-5-family")
+    );
+}
+
+#[test]
+fn claude_consumer_sonnet_label_moves_to_claude5_family_at_launch() {
+    let catalog = bundled_catalog().unwrap();
+
+    let before = catalog
+        .resolve(
+            Provider::Anthropic,
+            "Sonnet",
+            "2026-06-29",
+            CommercialChannel::ClaudeSubscription,
+        )
+        .unwrap();
+    let after = catalog
+        .resolve(
+            Provider::Anthropic,
+            "Sonnet",
+            "2026-06-30",
+            CommercialChannel::ClaudeSubscription,
+        )
+        .unwrap();
+
+    assert_eq!(
+        resolved_family_id(&before),
+        Some("anthropic:claude-4-family")
+    );
+    assert_eq!(
+        resolved_family_id(&after),
+        Some("anthropic:claude-5-family")
+    );
+}
+
+#[test]
 fn competing_consumer_mappings_return_ambiguity() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
     let mut competing = raw["consumer_mappings"][0].clone();
@@ -603,11 +750,7 @@ fn exact_day_observation_boundary_must_be_ordered() {
 #[test]
 fn consumer_mapping_observation_boundary_must_be_ordered() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
-    assert_eq!(
-        raw["consumer_mappings"][30]["id"],
-        "anth-code-default-sonnet5"
-    );
-    raw["consumer_mappings"][30]["window"]["last_observed_old_rate"] =
+    consumer_mapping_mut(&mut raw, "anth-code-default-sonnet5")["window"]["last_observed_old_rate"] =
         Value::String(String::from("2026-06-30"));
 
     let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
