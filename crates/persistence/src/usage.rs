@@ -22,14 +22,29 @@ use crate::mapping::{
     usage_provenance_to_str,
 };
 
+// A turn belongs to exactly one session, so when a selection supplies both, the
+// projection predicate stays turn-led and the session filter collapses to one
+// bounded `turn_lifecycle` unique probe (an uncorrelated one-time filter): a
+// matched pair reads exactly the turn scope and a mismatched pair is proven
+// empty without scanning either dimension's history.
 const AGGREGATE_SQL: &str = "
 WITH candidate_calls AS MATERIALIZED (
     SELECT *
       FROM web_usage_call_projection
      WHERE ($1::timestamptz IS NULL OR recorded_at >= $1)
        AND ($2::timestamptz IS NULL OR recorded_at < $2)
-       AND ($3::uuid IS NULL OR session_id = $3)
+       AND ($3::uuid IS NULL OR $4::uuid IS NOT NULL OR session_id = $3)
        AND ($4::uuid IS NULL OR turn_id = $4)
+       AND (
+           $3::uuid IS NULL
+           OR $4::uuid IS NULL
+           OR EXISTS (
+               SELECT 1
+                 FROM turn_lifecycle
+                WHERE turn_id = $4
+                  AND session_id = $3
+           )
+       )
        AND ($5::uuid IS NULL OR resolved_provider_model_identity_id = $5)
        AND ($6::text IS NULL OR usage_provenance_kind = $6)
        AND ($7::text IS NULL OR call_kind = $7)
@@ -81,6 +96,7 @@ SELECT call_kind, resolved_provider_model_identity_id,
           cache_read_input_tokens IS NOT NULL
  LIMIT $10";
 
+// Session/turn combination handling matches `AGGREGATE_SQL` above.
 const CALLS_NEWEST_SQL: &str = "
 SELECT model_call_id, call_kind, session_id, turn_id,
        resolved_provider_model_identity_id,
@@ -91,8 +107,18 @@ SELECT model_call_id, call_kind, session_id, turn_id,
   FROM web_usage_call_projection
  WHERE ($1::timestamptz IS NULL OR recorded_at >= $1)
    AND ($2::timestamptz IS NULL OR recorded_at < $2)
-   AND ($3::uuid IS NULL OR session_id = $3)
+   AND ($3::uuid IS NULL OR $4::uuid IS NOT NULL OR session_id = $3)
    AND ($4::uuid IS NULL OR turn_id = $4)
+   AND (
+       $3::uuid IS NULL
+       OR $4::uuid IS NULL
+       OR EXISTS (
+           SELECT 1
+             FROM turn_lifecycle
+            WHERE turn_id = $4
+              AND session_id = $3
+       )
+   )
    AND ($5::uuid IS NULL OR resolved_provider_model_identity_id = $5)
    AND ($6::text IS NULL OR usage_provenance_kind = $6)
    AND ($7::text IS NULL OR call_kind = $7)

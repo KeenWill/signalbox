@@ -281,6 +281,76 @@ async fn usage_exact_selection_filters_call_evidence() -> Result<(), Box<dyn Err
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn mismatched_session_and_turn_selection_reads_empty_bounded_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let owning = terminal_reported_usage_call(
+        &pool,
+        0x99_000,
+        ProviderReportedTokenUsage::unreported().with_output_tokens(Some(SELECTED_OUTPUT_TOKENS)),
+    )
+    .await?;
+    let foreign = terminal_reported_usage_call(
+        &pool,
+        0x9a_000,
+        ProviderReportedTokenUsage::unreported().with_output_tokens(Some(SELECTED_OUTPUT_TOKENS)),
+    )
+    .await?;
+    let repository = UsageRepository::new(pool.clone());
+    let mismatched_scope = UsageQuery {
+        time: UsageTimeRange::all(),
+        selection: UsageSelection {
+            session: Some(foreign.session),
+            turn: Some(owning.turn),
+            model: None,
+            provenance: None,
+            call_kind: None,
+        },
+    };
+    let mismatched_page = repository
+        .calls(UsageCallQuery {
+            scope: mismatched_scope,
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(1).expect("fixture page limit fits"),
+            after: None,
+        })
+        .await?;
+    let mismatched_report = repository.aggregate(mismatched_scope).await?;
+    let matched_page = repository
+        .calls(UsageCallQuery {
+            scope: UsageQuery {
+                time: UsageTimeRange::all(),
+                selection: UsageSelection {
+                    session: Some(owning.session),
+                    turn: Some(owning.turn),
+                    model: None,
+                    provenance: None,
+                    call_kind: None,
+                },
+            },
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(1).expect("fixture page limit fits"),
+            after: None,
+        })
+        .await?;
+
+    assert_eq!(mismatched_page.calls, Vec::new());
+    assert_eq!(mismatched_page.next, None);
+    assert_eq!(mismatched_report.groups, Vec::new());
+    assert_eq!(
+        mismatched_report.completeness,
+        UsageAggregateCompleteness::Complete
+    );
+    assert_eq!(matched_page.calls[0].call, owning.call);
+    assert_eq!(matched_page.calls[0].session, owning.session);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = terminal_reported_usage_call(

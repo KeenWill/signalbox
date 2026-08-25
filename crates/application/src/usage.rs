@@ -279,7 +279,9 @@ pub struct UsageAggregateTokenAxes {
 pub struct UsageSelection {
     /// Exact session, or every session.
     pub session: Option<SessionId>,
-    /// Exact turn, or every turn in the selected session scope.
+    /// Exact turn, or every turn in the selected session scope. A turn belongs
+    /// to exactly one session, so combining a turn with a session it does not
+    /// belong to selects nothing, proven by one bounded ownership probe.
     pub turn: Option<TurnId>,
     /// Exact resolved provider/model target.
     pub model: Option<ResolvedProviderTarget>,
