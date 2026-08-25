@@ -1396,6 +1396,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd417de3d1d015fc3bfd2b1ea46dfc7bab72ef86f1cc7cc9c78e728b34a6d1fd"
 
 [[package]]
+name = "futures-timer"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af43fadb8a98512d547e37b4e92e0ced13e205c061b87b4623eff01d918d6968"
+
+[[package]]
 name = "futures-util"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3855,6 +3861,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-file-media-linux-sandbox"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "signalbox-file-media-processor-runtime"
+version = "0.0.0"
+dependencies = [
+ "base64 0.22.1",
+ "libc",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "signalbox-file-media-linux-sandbox",
+ "signalbox-file-media-runtime",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "signalbox-file-media-provider-runtime"
 version = "0.0.0"
 dependencies = [
@@ -3867,8 +3896,11 @@ dependencies = [
 name = "signalbox-file-media-runtime"
 version = "0.0.0"
 dependencies = [
+ "futures-timer",
+ "futures-util",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
