@@ -197,6 +197,36 @@ impl<'de> Deserialize<'de> for WebSessionId {
     }
 }
 
+/// Checked canonical UUID used for browser-visible turn identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebTurnId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebTurnId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(WebSessionId::from_uuid_bytes(bytes).0)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebTurnId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        canonical_session_id(&value)
+            .then_some(Self(value))
+            .ok_or_else(|| de::Error::custom("turn ID must be a canonical lowercase UUID"))
+    }
+}
+
 impl WebTimelineEventSequence {
     /// Encodes one already-validated positive durable-event sequence.
     #[must_use]
@@ -221,40 +251,6 @@ impl<'de> Deserialize<'de> for WebTimelineEventSequence {
         if positive.is_none() {
             return Err(de::Error::custom(
                 "timeline event sequence must be a canonical positive u64",
-            ));
-        }
-        Ok(Self(value))
-    }
-}
-
-/// Checked unsigned 64-bit value encoded losslessly for JavaScript.
-#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(transparent)]
-pub struct WebU64(#[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))] String);
-
-impl WebU64 {
-    /// Encodes one unsigned 64-bit value in canonical decimal form.
-    #[must_use]
-    pub fn from_u64(value: u64) -> Self {
-        Self(value.to_string())
-    }
-
-    /// Returns the canonical unsigned decimal wire spelling.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl<'de> Deserialize<'de> for WebU64 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        if canonical_u64(&value).is_none() {
-            return Err(de::Error::custom(
-                "wire value must be a canonical unsigned 64-bit integer",
             ));
         }
         Ok(Self(value))
@@ -290,6 +286,40 @@ impl<'de> Deserialize<'de> for WebPositiveU64 {
         if positive.is_none() {
             return Err(de::Error::custom(
                 "wire value must be a canonical positive u64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked unsigned 64-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebU64(#[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))] String);
+
+impl WebU64 {
+    /// Encodes one unsigned 64-bit value in canonical decimal form.
+    #[must_use]
+    pub fn from_u64(value: u64) -> Self {
+        Self(value.to_string())
+    }
+
+    /// Returns the canonical unsigned decimal wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if canonical_u64(&value).is_none() {
+            return Err(de::Error::custom(
+                "wire value must be a canonical unsigned 64-bit integer",
             ));
         }
         Ok(Self(value))
@@ -1222,6 +1252,33 @@ where
     Option::<T>::deserialize(deserializer)
 }
 
+/// Title summaries carry at most this many Unicode scalar values; production
+/// truncates longer stored titles to exactly this bound and marks
+/// `title_truncated`.
+const MAX_ATTENTION_TITLE_SCALARS: u32 = 128;
+
+/// Present-nullable bounded title text. `#[schemars(required)]` alone renders
+/// an `Option` field as its inner type, dropping the `null` arm, so this keeps
+/// `null` a legal value while absence stays rejected.
+fn nullable_title_summary_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": ["string", "null"],
+        "maxLength": MAX_ATTENTION_TITLE_SCALARS,
+    })
+}
+
+/// Present-nullable operator action. A state owing no action carries `null`,
+/// and the runtime validator compares the property against exactly that
+/// spelling, so absence must stay rejected while `null` stays legal. As with
+/// `nullable_title_summary_schema`, `#[schemars(required)]` alone would render
+/// the `Option` as its inner enum and drop the `null` arm.
+fn nullable_attention_action_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let action = generator.subschema_for::<WebAttentionAction>();
+    schemars::json_schema!({
+        "anyOf": [action, {"type": "null"}],
+    })
+}
+
 /// Layer that owns one browser API failure.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1258,6 +1315,148 @@ impl Error for WebApiError {}
 pub struct WebApiErrorResponse {
     /// Typed failure detail.
     pub error: WebApiError,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionState {
+    Active,
+    Queued,
+    Blocked,
+    AwaitingApproval,
+    Ambiguous,
+    AwaitingReconciliation,
+    RunnerLost,
+    Idle,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionAction {
+    ProvideGoalNeed,
+    DecideApproval,
+    ReconcileTurn,
+    RestoreRunner,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionActivityKind {
+    Session,
+    Turn,
+    Goal,
+    ApprovalJudge,
+    Runner,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionGoalBlock {
+    /// Goal generations are strictly positive in the domain and its storage
+    /// constraint, so zero is not a valid wire spelling.
+    pub generation: WebPositiveU64,
+    pub reason: WebAttentionBlockedReason,
+    /// At least 1 and at most 128 Unicode scalar values; exact text is in
+    /// session detail. The stored goal need is never empty, so an empty
+    /// summary is contract-invalid.
+    #[schemars(length(min = 1, max = 128))]
+    pub need_summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionJudgeFacts {
+    pub actionable: WebU64,
+    pub completed: WebU64,
+    pub escalated: WebU64,
+    pub failed: WebU64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionActivity {
+    pub unix_microseconds: WebU64,
+    pub kind: WebAttentionActivityKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionSummary {
+    pub session_id: WebSessionId,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_title_summary_schema")]
+    pub title_summary: Option<String>,
+    pub title_truncated: bool,
+    pub archived: bool,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub current_turn_id: Option<WebTurnId>,
+    pub active_turn_count: WebU64,
+    pub queued_turn_count: WebU64,
+    pub state: WebAttentionState,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_attention_action_schema")]
+    pub action: Option<WebAttentionAction>,
+    pub goal_block: Option<WebAttentionGoalBlock>,
+    pub judge: WebAttentionJudgeFacts,
+    pub last_activity: WebAttentionActivity,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionSort {
+    LastActivityDescending,
+    SessionIdentityAscending,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebAttentionContinuation {
+    LastActivity {
+        unix_microseconds: WebU64,
+        session_id: WebSessionId,
+    },
+    SessionIdentity {
+        session_id: WebSessionId,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionSnapshot {
+    pub cursor: WebU64,
+    pub total: WebU64,
+    pub sort: WebAttentionSort,
+    #[schemars(length(max = 16))]
+    pub summaries: Vec<WebAttentionSummary>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub continuation: Option<WebAttentionContinuation>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebAttentionStreamEvent {
+    Snapshot {
+        snapshot: WebAttentionSnapshot,
+    },
+    Update {
+        cursor: WebU64,
+        #[schemars(length(min = 1, max = 16))]
+        summaries: Vec<WebAttentionSummary>,
+    },
+    ResyncRequired {
+        cursor: WebU64,
+    },
 }
 
 /// One generated file and its repository-relative destination.
@@ -1314,6 +1513,23 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         "/$defs/WebTimelineTextExcerpt/properties/text",
         max_timeline_detail_bytes(),
     )?;
+    let mut attention_snapshot_schema =
+        canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
+    make_property_nullable(&mut attention_snapshot_schema, "continuation")?;
+    make_pointer_nullable(
+        &mut attention_snapshot_schema,
+        "/$defs/WebAttentionSummary/properties/current_turn_id",
+    )?;
+    let mut attention_event_schema =
+        canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value());
+    make_pointer_nullable(
+        &mut attention_event_schema,
+        "/$defs/WebAttentionSnapshot/properties/continuation",
+    )?;
+    make_pointer_nullable(
+        &mut attention_event_schema,
+        "/$defs/WebAttentionSummary/properties/current_turn_id",
+    )?;
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -1332,6 +1548,8 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &descriptor_schema,
                 &window_schema,
                 &detail_schema,
+                &attention_snapshot_schema,
+                &attention_event_schema,
             )?,
         },
         GeneratedArtifact {
@@ -1343,6 +1561,8 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
                 &descriptor_schema,
                 &window_schema,
                 &detail_schema,
+                &attention_snapshot_schema,
+                &attention_event_schema,
             )?,
         },
         GeneratedArtifact {
@@ -1364,8 +1584,15 @@ fn make_property_nullable(
     schema: &mut Value,
     property_name: &str,
 ) -> Result<(), GenerateWebContractError> {
+    make_pointer_nullable(schema, &format!("/properties/{property_name}"))
+}
+
+fn make_pointer_nullable(
+    schema: &mut Value,
+    pointer: &str,
+) -> Result<(), GenerateWebContractError> {
     let property = schema
-        .pointer_mut(&format!("/properties/{property_name}"))
+        .pointer_mut(pointer)
         .ok_or(GenerateWebContractError::UnsupportedSchema)?;
     let concrete = property.take();
     *property = json!({ "anyOf": [concrete, { "type": "null" }] });
@@ -1393,6 +1620,8 @@ fn runtime_module(
     descriptor_schema: &Value,
     window_schema: &Value,
     detail_schema: &Value,
+    attention_snapshot_schema: &Value,
+    attention_event_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut schemas = json!({
         "WebContractBootstrap": bootstrap_schema,
@@ -1401,6 +1630,8 @@ fn runtime_module(
         "WebSessionTimelineDescriptor": descriptor_schema,
         "WebSessionTimelineWindow": window_schema,
         "WebSessionTimelineDetailPage": detail_schema,
+        "WebAttentionSnapshot": attention_snapshot_schema,
+        "WebAttentionStreamEvent": attention_event_schema,
     });
     schemas.sort_all_objects();
     let max_detail_bytes = max_timeline_detail_bytes();
@@ -1415,6 +1646,55 @@ const schemas = {schemas};
 
 function fail(path, expected) {{
   throw new TypeError(`${{path}} must be ${{expected}}`);
+}}
+
+function isWellFormedUnicode(value) {{
+  for (let index = 0; index < value.length; index += 1) {{
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {{
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {{
+        return false;
+      }}
+      index += 1;
+    }} else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {{
+      return false;
+    }}
+  }}
+  return true;
+}}
+
+function exceedsScalarLength(value, maxLength) {{
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {{
+    count += 1;
+    if (count > maxLength) {{
+      return true;
+    }}
+  }}
+  return false;
+}}
+
+function scalarLengthAtLeast(value, minLength) {{
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {{
+    count += 1;
+    if (count >= minLength) {{
+      return true;
+    }}
+  }}
+  return count >= minLength;
+}}
+
+function scalarLength(value) {{
+  let count = 0;
+  const scalars = value[Symbol.iterator]();
+  while (!scalars.next().done) {{
+    count += 1;
+  }}
+  return count;
 }}
 
 function resolveReference(root, reference) {{
@@ -1479,17 +1759,11 @@ function assertSchema(root, schema, value, path) {{
       return;
     }}
     const concrete = schema.type.filter((candidate) => candidate !== "null");
-    const accepted = concrete.some((candidate) => {{
-      try {{
-        assertSchema(root, {{ ...schema, type: candidate }}, value, path);
-        return true;
-      }} catch {{
-        return false;
-      }}
-    }});
-    if (!accepted) {{
+    const actual = Array.isArray(value) ? "array" : typeof value;
+    if (!concrete.includes(actual)) {{
       fail(path, concrete.join(" or "));
     }}
+    assertSchema(root, {{ ...schema, type: actual }}, value, path);
     return;
   }}
   if (schema.type === "object") {{
@@ -1520,6 +1794,9 @@ function assertSchema(root, schema, value, path) {{
     if (!Array.isArray(value)) {{
       fail(path, "an array");
     }}
+    if (schema.minItems !== undefined && value.length < schema.minItems) {{
+      fail(path, `at least ${{schema.minItems}} items`);
+    }}
     if (schema.maxItems !== undefined && value.length > schema.maxItems) {{
       fail(path, `at most ${{schema.maxItems}} items`);
     }}
@@ -1549,6 +1826,23 @@ function assertSchema(root, schema, value, path) {{
   }}
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
+  }}
+  if (schema.type === "string" && !isWellFormedUnicode(value)) {{
+    fail(path, "well-formed Unicode text");
+  }}
+  if (
+    schema.type === "string" &&
+    schema.maxLength !== undefined &&
+    exceedsScalarLength(value, schema.maxLength)
+  ) {{
+    fail(path, `at most ${{schema.maxLength}} Unicode scalar values`);
+  }}
+  if (
+    schema.type === "string" &&
+    schema.minLength !== undefined &&
+    !scalarLengthAtLeast(value, schema.minLength)
+  ) {{
+    fail(path, `at least ${{schema.minLength}} Unicode scalar values`);
   }}
   if (
     schema.type === "string" &&
@@ -2496,8 +2790,149 @@ export function decodeWebSessionTimelineDetailPage(value) {{
   assertTimelineDetailPage(value);
   return value;
 }}
+
+export function decodeWebAttentionSnapshot(value) {{
+  assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  assertAttentionSnapshot(value, "attention_snapshot");
+  return value;
+}}
+
+export function decodeWebAttentionStreamEvent(value) {{
+  assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  if (value.kind === "snapshot") {{
+    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+    if (value.snapshot.sort !== "last_activity_descending") {{
+      fail("attention_event.snapshot.sort", "the fixed hot-page activity sort");
+    }}
+    assertUnarchivedSummaries(value.snapshot.summaries, "attention_event.snapshot.summaries");
+  }} else {{
+    value.summaries?.forEach((summary, index) =>
+      assertAttentionSummary(summary, `attention_event.summaries[${{index}}]`),
+    );
+    assertUnarchivedSummaries(value.summaries ?? [], "attention_event.summaries");
+    const identities = new Set();
+    for (const summary of value.summaries ?? []) {{
+      if (identities.has(summary.session_id)) {{
+        fail("attention_event.summaries", "at most one replacement per session");
+      }}
+      identities.add(summary.session_id);
+    }}
+  }}
+  return value;
+}}
+
+function assertUnarchivedSummaries(summaries, path) {{
+  summaries.forEach((summary, index) => {{
+    if (summary.archived) {{
+      fail(`${{path}}[${{index}}].archived`, "false on the hot attention stream");
+    }}
+  }});
+}}
+
+function assertAttentionSnapshot(snapshot, path) {{
+  snapshot.summaries.forEach((summary, index) =>
+    assertAttentionSummary(summary, `${{path}}.summaries[${{index}}]`),
+  );
+  for (let index = 1; index < snapshot.summaries.length; index += 1) {{
+    const previous = snapshot.summaries[index - 1];
+    const current = snapshot.summaries[index];
+    let ordered;
+    if (snapshot.sort === "session_identity_ascending") {{
+      ordered = previous.session_id < current.session_id;
+    }} else {{
+      const previousActivity = BigInt(previous.last_activity.unix_microseconds);
+      const currentActivity = BigInt(current.last_activity.unix_microseconds);
+      ordered =
+        previousActivity > currentActivity ||
+        (previousActivity === currentActivity && previous.session_id < current.session_id);
+    }}
+    if (!ordered) {{
+      fail(`${{path}}.summaries[${{index}}]`, `strictly ordered by sort ${{snapshot.sort}}`);
+    }}
+  }}
+  if (BigInt(snapshot.total) < BigInt(snapshot.summaries.length)) {{
+    fail(`${{path}}.total`, "at least the number of returned summaries");
+  }}
+  const continuationKind = snapshot.continuation?.kind ?? null;
+  const expectedContinuationKind = {{
+    last_activity_descending: "last_activity",
+    session_identity_ascending: "session_identity",
+  }}[snapshot.sort];
+  if (continuationKind !== null && continuationKind !== expectedContinuationKind) {{
+    fail(`${{path}}.continuation`, `the continuation required by sort ${{snapshot.sort}}`);
+  }}
+  if (snapshot.continuation !== null) {{
+    const boundary = snapshot.summaries[snapshot.summaries.length - 1];
+    if (boundary === undefined) {{
+      fail(`${{path}}.continuation`, "absent when no summaries are returned");
+    }}
+    if (snapshot.continuation.session_id !== boundary.session_id) {{
+      fail(`${{path}}.continuation.session_id`, "the session of the last returned summary");
+    }}
+    if (
+      snapshot.continuation.kind === "last_activity" &&
+      snapshot.continuation.unix_microseconds !== boundary.last_activity.unix_microseconds
+    ) {{
+      fail(
+        `${{path}}.continuation.unix_microseconds`,
+        "the activity timestamp of the last returned summary",
+      );
+    }}
+  }}
+}}
+
+function assertAttentionSummary(summary, path) {{
+  const expectedAction = {{
+    active: null,
+    queued: null,
+    blocked: "provide_goal_need",
+    awaiting_approval: "decide_approval",
+    ambiguous: "reconcile_turn",
+    awaiting_reconciliation: "reconcile_turn",
+    runner_lost: "restore_runner",
+    idle: null,
+  }}[summary.state];
+  if (summary.action !== expectedAction) {{
+    fail(`${{path}}.action`, `the action required by state ${{summary.state}}`);
+  }}
+  const turnBacked = [
+    "active",
+    "queued",
+    "awaiting_approval",
+    "ambiguous",
+    "awaiting_reconciliation",
+  ].includes(summary.state);
+  if (turnBacked && summary.current_turn_id === null) {{
+    fail(`${{path}}.current_turn_id`, `a turn identity for state ${{summary.state}}`);
+  }}
+  const activeBacked = ["active", "awaiting_approval", "ambiguous"].includes(summary.state);
+  if (activeBacked && BigInt(summary.active_turn_count) === 0n) {{
+    fail(`${{path}}.active_turn_count`, `at least one active turn for state ${{summary.state}}`);
+  }}
+  if (summary.state === "queued" && BigInt(summary.queued_turn_count) === 0n) {{
+    fail(`${{path}}.queued_turn_count`, "at least one queued turn for queued state");
+  }}
+  const hasGoalBlock = Object.hasOwn(summary, "goal_block") && summary.goal_block !== null;
+  if ((summary.state === "blocked") !== hasGoalBlock) {{
+    fail(`${{path}}.goal_block`, "present exactly for blocked state");
+  }}
+  if (summary.title_summary === null && summary.title_truncated) {{
+    fail(`${{path}}.title_truncated`, "false when title_summary is null");
+  }}
+  if (
+    summary.title_truncated &&
+    summary.title_summary !== null &&
+    scalarLength(summary.title_summary) !== {max_title_scalars}
+  ) {{
+    fail(
+      `${{path}}.title_summary`,
+      "exactly {max_title_scalars} Unicode scalar values when title_truncated is true",
+    );
+  }}
+}}
 "##,
         contract_name = WEB_CONTRACT_NAME,
+        max_title_scalars = MAX_ATTENTION_TITLE_SCALARS,
         contract_version = WEB_CONTRACT_VERSION,
     ))
 }
@@ -2509,6 +2944,8 @@ fn declaration_module(
     descriptor_schema: &Value,
     window_schema: &Value,
     detail_schema: &Value,
+    attention_snapshot_schema: &Value,
+    attention_event_schema: &Value,
 ) -> Result<String, GenerateWebContractError> {
     let mut definitions = BTreeMap::new();
     let bootstrap = typescript_type(bootstrap_schema, bootstrap_schema, &mut definitions)?;
@@ -2517,6 +2954,16 @@ fn declaration_module(
     let descriptor = typescript_type(descriptor_schema, descriptor_schema, &mut definitions)?;
     let window = typescript_type(window_schema, window_schema, &mut definitions)?;
     let detail = typescript_type(detail_schema, detail_schema, &mut definitions)?;
+    let attention_snapshot = typescript_type(
+        attention_snapshot_schema,
+        attention_snapshot_schema,
+        &mut definitions,
+    )?;
+    let attention_event = typescript_type(
+        attention_event_schema,
+        attention_event_schema,
+        &mut definitions,
+    )?;
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );
@@ -2537,8 +2984,14 @@ fn declaration_module(
     output.push_str(&format!(
         "export type WebSessionTimelineDetailPage = {detail};\n\n"
     ));
+    output.push_str(&format!(
+        "export type WebAttentionSnapshot = {attention_snapshot};\n\n"
+    ));
+    output.push_str(&format!(
+        "export type WebAttentionStreamEvent = {attention_event};\n\n"
+    ));
     output.push_str(
-        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebSessionTimelineDetailPage(value: unknown): WebSessionTimelineDetailPage;\n",
+        "export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;\nexport function decodeWebContractExample(value: unknown): WebContractExample;\nexport function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;\nexport function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;\nexport function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;\nexport function decodeWebSessionTimelineDetailPage(value: unknown): WebSessionTimelineDetailPage;\nexport function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;\nexport function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;\n",
     );
     Ok(output)
 }

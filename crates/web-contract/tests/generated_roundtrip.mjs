@@ -4,6 +4,8 @@ import test from "node:test";
 
 import {
   decodeWebApiErrorResponse,
+  decodeWebAttentionSnapshot,
+  decodeWebAttentionStreamEvent,
   decodeWebContractBootstrap,
   decodeWebContractExample,
   decodeWebSessionTimelineDescriptor,
@@ -88,6 +90,35 @@ function turnLifecycleDetailPage() {
     ],
     projected_body_bytes: 128,
     continuation: null,
+  };
+}
+
+function attentionSummary(overrides = {}) {
+  return {
+    session_id: "00000000-0000-0000-0000-000000000991",
+    title_summary: null,
+    title_truncated: false,
+    archived: false,
+    current_turn_id: null,
+    active_turn_count: "0",
+    queued_turn_count: "0",
+    state: "idle",
+    action: null,
+    goal_block: null,
+    judge: { actionable: "0", completed: "0", escalated: "0", failed: "0" },
+    last_activity: { unix_microseconds: "1", kind: "session" },
+    ...overrides,
+  };
+}
+
+function attentionSnapshot(overrides = {}) {
+  return {
+    cursor: "1",
+    total: "1",
+    sort: "last_activity_descending",
+    summaries: [attentionSummary()],
+    continuation: null,
+    ...overrides,
   };
 }
 
@@ -652,5 +683,228 @@ test("generated window decoder requires both continuation fields", () => {
         continuation_before: null,
       }),
     /continuation_after must be present/,
+  );
+});
+
+test("generated attention decoder validates decimals and identities", () => {
+  assert.throws(
+    () => decodeWebAttentionSnapshot(attentionSnapshot({ cursor: "garbage" })),
+    /matching/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ session_id: "not-a-uuid" })],
+        }),
+      ),
+    /matching/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ current_turn_id: "not-a-uuid" })],
+        }),
+      ),
+    /one recognized variant/,
+  );
+});
+
+test("generated attention decoder requires the nullable current turn field", () => {
+  const withoutCurrentTurn = attentionSummary();
+  delete withoutCurrentTurn.current_turn_id;
+
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({ summaries: [withoutCurrentTurn] }),
+      ),
+    /current_turn_id must be present/,
+  );
+});
+
+test("generated attention decoder requires identities for turn-backed states", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ state: "active" })],
+        }),
+      ),
+    /current_turn_id must be a turn identity for state active/,
+  );
+});
+
+test("generated attention decoder rejects totals below the returned page", () => {
+  assert.throws(
+    () => decodeWebAttentionSnapshot(attentionSnapshot({ total: "0" })),
+    /total must be at least the number of returned summaries/,
+  );
+});
+
+test("generated attention decoder rejects contradictory title truncation", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ title_truncated: true })],
+        }),
+      ),
+    /title_truncated must be false when title_summary is null/,
+  );
+});
+
+test("generated attention decoder rejects unpaired text surrogates", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ title_summary: "\ud800" })],
+        }),
+      ),
+    /well-formed Unicode text/,
+  );
+});
+
+test("generated attention decoder rejects unknown envelope fields", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionStreamEvent({
+        kind: "resync_required",
+        cursor: "1",
+        incompatible: true,
+      }),
+    /one recognized variant/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          continuation: {
+            kind: "session_identity",
+            session_id: "00000000-0000-0000-0000-000000000991",
+            incompatible: true,
+          },
+        }),
+      ),
+    /one recognized variant/,
+  );
+});
+
+test("generated attention decoder requires the continuation field", () => {
+  const { continuation: _continuation, ...withoutContinuation } = attentionSnapshot();
+
+  assert.throws(
+    () => decodeWebAttentionSnapshot(withoutContinuation),
+    /continuation must be present/,
+  );
+  assert.equal(decodeWebAttentionSnapshot(attentionSnapshot()).continuation, null);
+});
+
+test("generated attention decoder enforces collection and scalar bounds", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionStreamEvent({
+        kind: "update",
+        cursor: "1",
+        summaries: [],
+      }),
+    /one recognized variant/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: Array.from({ length: 33 }, () => attentionSummary()),
+        }),
+      ),
+    /at most 16 items/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionStreamEvent({
+        kind: "update",
+        cursor: "1",
+        summaries: Array.from({ length: 17 }, () => attentionSummary()),
+      }),
+    /one recognized variant/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ title_summary: "x".repeat(129) })],
+        }),
+      ),
+    /at most 128 Unicode scalar values/,
+  );
+});
+
+test("generated attention decoder rejects inconsistent operator actions", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ state: "awaiting_approval", action: null })],
+        }),
+      ),
+    /action required by state awaiting_approval/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [
+            attentionSummary({
+              state: "blocked",
+              action: "provide_goal_need",
+              goal_block: null,
+            }),
+          ],
+        }),
+      ),
+    /present exactly for blocked state/,
+  );
+  const blockedWithoutGoalBlock = attentionSummary({
+    state: "blocked",
+    action: "provide_goal_need",
+  });
+  delete blockedWithoutGoalBlock.goal_block;
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({ summaries: [blockedWithoutGoalBlock] }),
+      ),
+    /present exactly for blocked state/,
+  );
+});
+
+test("generated attention decoder rejects continuation and sort mismatches", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          sort: "session_identity_ascending",
+          continuation: {
+            kind: "last_activity",
+            unix_microseconds: "1",
+            session_id: "00000000-0000-0000-0000-000000000991",
+          },
+        }),
+      ),
+    /continuation required by sort session_identity_ascending/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          continuation: {
+            kind: "session_identity",
+            session_id: "00000000-0000-0000-0000-000000000991",
+          },
+        }),
+      ),
+    /continuation required by sort last_activity_descending/,
   );
 });

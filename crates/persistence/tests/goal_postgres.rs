@@ -9,7 +9,7 @@ mod support;
 
 use std::error::Error;
 
-use support::blocked_backends_reached;
+use support::{blocked_backends_reached, record_empty_instruction_manifest};
 
 use expect_test::expect;
 use signalbox_expect_table::table;
@@ -3342,6 +3342,7 @@ async fn s18_inv010_inv012_inv032_goal_stop_materializes_complete_delegation_cas
     let StartEligibleTurnOutcome::Activated(_) = activation else {
         panic!("the bound child must activate before its parent stops");
     };
+    record_empty_instruction_manifest(&pool, session(bound_child)).await?;
     let call = ModelCallId::from_uuid(Uuid::from_u128(0xf139));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         DirectModelSelection::from_uuid(Uuid::from_u128(0xf202)),
@@ -4108,6 +4109,7 @@ async fn s18_inv005_inv032_delegated_turn_reclassifies_its_pending_steering()
     else {
         panic!("the delegated child must activate before it is steered");
     };
+    record_empty_instruction_manifest(&pool, session(child)).await?;
     let call = ModelCallId::from_uuid(Uuid::from_u128(0xfb50));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
         DirectModelSelection::from_uuid(Uuid::from_u128(0xfb22)),

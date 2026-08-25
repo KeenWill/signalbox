@@ -4,21 +4,25 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+mod support;
+
 use std::{error::Error, num::NonZeroU64, time::Duration};
+
+use support::record_empty_instruction_manifest;
 
 use signalbox_application::{
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
     ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority, AuthorizeModelCallOutcome,
     CommissionDispatchRequest, CommissionedDispatchFence, ModelCallCredentialReference,
     RepoWatchBranchHead, RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
-    RepoWatchDispatchService, RepoWatchDispatchTransaction, RepoWatchEventContentIdentityV1,
-    RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
-    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
-    RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome, StartEligibleTurnService,
-    UuidV7CommissionedDispatchIdGenerator, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator,
+    RepoWatchConvergenceVerdict, RepoWatchDispatchService, RepoWatchDispatchTransaction,
+    RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
+    RepoWatchReviewDecision, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
+    RepoWatchTemplateResolver, RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome,
+    StartEligibleTurnService, UuidV7CommissionedDispatchIdGenerator,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName,
@@ -64,6 +68,13 @@ use signalbox_persistence::{
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
+    operator_status::{
+        ProcessOperatorStatusCounts, ProcessOperatorStatusHeldSlot,
+        ProcessOperatorStatusHeldSlotBlocker, ProcessOperatorStatusHeldSlotOrigin,
+        ProcessOperatorStatusItem, ProcessOperatorStatusPullRequestConvergence,
+        ProcessOperatorStatusQueuedObligation, ProcessOperatorStatusReader,
+        ProcessOperatorStatusRepository,
+    },
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
         RepoWatchCursorCandidate, RepoWatchCursorGeneration,
@@ -74,6 +85,7 @@ use signalbox_persistence::{
     },
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
+    test_support::{OperatorStatusConvergenceFixture, OperatorStatusFixtureRepository},
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -150,6 +162,9 @@ const BRANCH_WORKFLOW_ID: u64 = 9_002;
 const BRANCH_ACTIVATION_EVENT_ID: u128 = 0x58_000;
 const BRANCH_WORKFLOW_EVENT_ID: u128 = 0x58_100;
 const BRANCH_ACHIEVEMENT_REQUEST_ID: u128 = 0x58_200;
+const BRANCH_STATUS_ACTIVATION_EVENT_ID: u128 = 0x59_000;
+const BRANCH_STATUS_WORKFLOW_EVENT_ID: u128 = 0x59_001;
+const STATUS_READINESS_STOP_COMMAND_ID: u128 = 0x59_100;
 const SUPERSEDING_HEAD_EVENT_ID: u128 = 0x50_700;
 const SUPERSEDED_ACHIEVEMENT_REQUEST_ID: u128 = 0x50_701;
 const SUCCESSOR_ACHIEVEMENT_REQUEST_ID: u128 = 0x50_702;
@@ -1438,6 +1453,10 @@ async fn checkpoint_delegated_approval_at(
     };
     let turn = activated.turn();
     drop(activated);
+    // The daemon records a turn-start instruction manifest for every activated
+    // turn before any model work, so this fixture stands in for that write the
+    // way the other PostgreSQL fixtures do.
+    record_empty_instruction_manifest(pool, session).await?;
 
     let repository = PostgresModelCallRepository::new(
         pool.clone(),
@@ -6732,6 +6751,302 @@ async fn occupied_matches_collapse_into_one_visible_dispatch_obligation()
     assert_eq!(visible.4, session_uuids(&fixture));
     assert!(!visible.5);
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_status_reader_projects_dispatch_visibility() -> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let occupied = evaluate_conflict(&fixture, 102, SECOND_HEAD).await?;
+    let mut reader = ProcessOperatorStatusRepository::new(fixture.pool.clone())
+        .open()
+        .await?;
+    let held = held_status_item(
+        reader
+            .next_item()
+            .await?
+            .expect("the active fixture dispatch holds one slot"),
+    );
+    let queued = queued_status_item(
+        reader
+            .next_item()
+            .await?
+            .expect("the occupied match creates one queued obligation"),
+    );
+
+    assert_eq!(held.dispatch_id(), *fixture.dispatch_id.as_uuid());
+    assert_eq!(held.session_ids(), session_uuids(&fixture));
+    assert_eq!(
+        held.blockers(),
+        [
+            ProcessOperatorStatusHeldSlotBlocker::DeliveryTurnRuntimeRelevant,
+            ProcessOperatorStatusHeldSlotBlocker::LiveRuntimeTurn,
+            ProcessOperatorStatusHeldSlotBlocker::PursuingGoal,
+        ]
+    );
+    assert_eq!(queued.latest_event_id(), *occupied.event_id.as_uuid());
+    assert_eq!(occupied.outcome, RepoWatchRuleEvaluationOutcome::Occupied);
+    assert_eq!(
+        queued.occupying_dispatch_id(),
+        Some(*fixture.dispatch_id.as_uuid())
+    );
+    assert_eq!(queued.occupying_session_ids(), session_uuids(&fixture));
+    assert!(!queued.ready());
+    Ok(())
+}
+
+#[track_caller]
+fn held_status_item(item: ProcessOperatorStatusItem) -> ProcessOperatorStatusHeldSlot {
+    match item {
+        ProcessOperatorStatusItem::HeldSlot(item) => item,
+        item => panic!("fixture expected held status first, got {item:?}"),
+    }
+}
+
+#[track_caller]
+fn queued_status_item(item: ProcessOperatorStatusItem) -> ProcessOperatorStatusQueuedObligation {
+    match item {
+        ProcessOperatorStatusItem::QueuedObligation(item) => item,
+        item => panic!("fixture expected queued status second, got {item:?}"),
+    }
+}
+
+/// A rule matching branch workflow-run completion takes its singleton slot from
+/// a branch fact, whose event names no pull request. The whole status read must
+/// name the branch that stands in its place rather than fail to decode a
+/// missing number and leave the snapshot unavailable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_status_reader_names_a_branch_triggered_held_slot() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let rule = branch_workflow_rule()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let first_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(observation(context(INITIAL_HEAD)?)?),
+                    vec![identified_event(opened_event(
+                        BRANCH_STATUS_ACTIVATION_EVENT_ID,
+                        INITIAL_HEAD,
+                    )?)],
+                ),
+            )
+            .await?,
+    );
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let branch = branch_observation()?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(branch.clone()),
+                vec![identified_event(branch_workflow_event(
+                    BRANCH_STATUS_WORKFLOW_EVENT_ID,
+                )?)],
+            ),
+        )
+        .await?;
+    let loaded = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the branch rule sees its workflow event");
+    let (dispatch_id, _sessions) = dispatched(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
+            .evaluate(
+                loaded,
+                &rule,
+                &branch,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+    );
+
+    let mut reader = ProcessOperatorStatusRepository::new(pool.clone())
+        .open()
+        .await?;
+    let held = held_status_item(
+        reader
+            .next_item()
+            .await?
+            .expect("the branch dispatch holds one slot"),
+    );
+    let counts = drained_status_counts(&mut reader).await?;
+
+    assert_eq!(held.dispatch_id(), *dispatch_id.as_uuid());
+    assert_eq!(
+        held.origin(),
+        &ProcessOperatorStatusHeldSlotOrigin::Branch {
+            branch: String::from(WORKFLOW_BRANCH),
+        }
+    );
+    assert_eq!(counts.map(ProcessOperatorStatusCounts::held_slots), Some(1));
+    Ok(())
+}
+
+/// Reads the rest of an opened snapshot and returns the counts its exhaustion
+/// commits, so a test body reaches them without draining in place. It carries
+/// no `#[track_caller]` because the attribute is a no-op on an async function
+/// and this helper reports through `?` rather than panicking.
+async fn drained_status_counts(
+    reader: &mut ProcessOperatorStatusReader,
+) -> Result<Option<ProcessOperatorStatusCounts>, Box<dyn Error>> {
+    while reader.next_item().await?.is_some() {}
+    Ok(reader.counts())
+}
+
+/// Two pull requests based on the same branch are one branch head in the
+/// observed repository state. The current-convergence projection joins each
+/// assessment against every cursor entry naming its base branch, so a second
+/// entry for the shared branch would return both assessments twice and inflate
+/// the operator's convergence count.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_status_reader_reports_same_base_branch_pull_requests_once()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let bottom = base_branch_convergence(BOTTOM_PULL_REQUEST_NUMBER)?;
+    let top = base_branch_convergence(TOP_PULL_REQUEST_NUMBER)?;
+    OperatorStatusFixtureRepository::new(pool.clone())
+        .seed_pull_request_convergences(&repository()?, &[bottom.clone(), top.clone()])
+        .await?;
+
+    let mut reader = ProcessOperatorStatusRepository::new(pool.clone())
+        .open()
+        .await?;
+    let first = convergence_status_item(
+        reader
+            .next_item()
+            .await?
+            .expect("the lower-numbered seeded assessment is current"),
+    );
+    let second = convergence_status_item(
+        reader
+            .next_item()
+            .await?
+            .expect("the higher-numbered seeded assessment is current"),
+    );
+    let after_both = reader.next_item().await?;
+
+    assert_eq!(first.pull_request_number(), bottom.number.get());
+    assert_eq!(first.head_sha(), bottom.head_sha.as_str());
+    assert_eq!(first.base_branch(), bottom.base_branch.as_str());
+    assert_eq!(second.pull_request_number(), top.number.get());
+    assert_eq!(second.head_sha(), top.head_sha.as_str());
+    assert_eq!(second.base_branch(), top.base_branch.as_str());
+    assert!(after_both.is_none());
+    assert_eq!(
+        reader
+            .counts()
+            .map(ProcessOperatorStatusCounts::pull_request_convergences),
+        Some(2)
+    );
+    Ok(())
+}
+
+/// One merge-ready assessment on the fixture's canonical base branch and
+/// revision, so two of them share a base. The pull-request number is the only
+/// knob; its head is derived from it and decorrelated from the number's own
+/// value, so a projection reading one where it should read the other cannot
+/// pass. The single green gating check is the evidence the durable
+/// merge-ready verdict requires.
+fn base_branch_convergence(
+    number: u64,
+) -> Result<OperatorStatusConvergenceFixture, Box<dyn Error>> {
+    Ok(OperatorStatusConvergenceFixture {
+        number: PullRequestNumber::new(number.try_into()?),
+        head_sha: CommitSha::try_new(format!("{:040x}", u128::from(u64::MAX - number)))?,
+        base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+        base_revision: CommitSha::try_new(BASE_REVISION.to_owned())?,
+        mergeable_state: MergeableState::Mergeable,
+        settled: true,
+        review_decision: RepoWatchReviewDecision::Approved,
+        unresolved_threads: Vec::new(),
+        gating_check_count: 1,
+        non_green_gating_checks: Vec::new(),
+        verdict: RepoWatchConvergenceVerdict::MergeReady,
+        stale_review_clearance: None,
+    })
+}
+
+#[track_caller]
+fn convergence_status_item(
+    item: ProcessOperatorStatusItem,
+) -> ProcessOperatorStatusPullRequestConvergence {
+    match item {
+        ProcessOperatorStatusItem::PullRequestConvergence(item) => item,
+        item => panic!("fixture expected a pull-request convergence status, got {item:?}"),
+    }
+}
+
+/// The view withholds readiness from an obligation that is parked or has spent
+/// its attempt budget, and the dispatch loader skips exactly those. Reporting a
+/// subset of that predicate would show an operator work as ready that nothing
+/// will pick up.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_status_reader_withholds_readiness_the_view_withholds()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        STATUS_READINESS_STOP_COMMAND_ID,
+    )
+    .await?;
+
+    let unspent = read_queued_status(&fixture.pool).await?;
+    let obligation = spend_dispatch_attempt_budget(&fixture.pool).await?;
+    let exhausted = read_queued_status(&fixture.pool).await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation)
+        .execute(&fixture.pool)
+        .await?;
+    let parked = read_queued_status(&fixture.pool).await?;
+
+    assert!(unspent.ready());
+    assert!(!exhausted.ready());
+    assert!(!parked.ready());
+    assert!(load_next_obligation(&fixture).await?.is_none());
+    Ok(())
+}
+
+/// Drains one whole status snapshot and returns its single queued obligation.
+async fn read_queued_status(
+    pool: &PgPool,
+) -> Result<ProcessOperatorStatusQueuedObligation, Box<dyn Error>> {
+    let mut reader = ProcessOperatorStatusRepository::new(pool.clone())
+        .open()
+        .await?;
+    let mut queued = None;
+    while let Some(item) = reader.next_item().await? {
+        if let ProcessOperatorStatusItem::QueuedObligation(item) = item {
+            queued = Some(item);
+        }
+    }
+    Ok(queued.expect("the withdrawn dispatch leaves one outstanding obligation"))
+}
+
+/// Spends the whole attempt budget on the outstanding obligation without
+/// parking it, so exhaustion and parking are observable apart.
+async fn spend_dispatch_attempt_budget(pool: &PgPool) -> Result<Uuid, Box<dyn Error>> {
+    Ok(sqlx::query_scalar(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget(),
+                last_failed_attempt_at = clock_timestamp()
+          WHERE settled_kind IS NULL
+        RETURNING obligation_id",
+    )
+    .fetch_one(pool)
+    .await?)
 }
 
 #[tokio::test(flavor = "multi_thread")]
