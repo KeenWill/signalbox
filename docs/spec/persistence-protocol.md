@@ -1,5 +1,9 @@
 # Persistence protocol
 
+The workspace-instruction discovery, registration, empty turn-start manifest,
+and model-call correlation were verified against PR #810
+(`agent/agent-docs-skills-model-call-followup`).
+
 The durable automatic model-call reconciliation state, attempt history, and
 final-state authority were verified against this PR
 (`agent/turn-lifecycle-hardening`).
@@ -300,6 +304,17 @@ Implemented table families (across the forward-only migrations):
 - `blob_derivation` and its ordered input and output satellites, whose complete
   immutable provenance and deterministic-key convergence are owned by
   [blob storage](blob-storage.md#browser-delivery-views-and-derivations);
+- `instruction_discovery`, including its limit version, consumed counts, and
+  completeness bit, plus its ordered roots, candidates, and findings;
+  `registered_instruction_bundle`; and `turn_instruction_manifest`, whose
+  append-only discovery, registration, and exact turn-start provenance are owned
+  by [workspace-instructions](workspace-instructions.md) (INV-061). Migration
+  `202608140001` backfills the empty manifest for each existing turn that
+  already has a model call and makes every `model_call` name the manifest for
+  its own session and turn. Queued turns and callless active turns remain
+  unbound for ordinary discovery before their first call. The synthetic
+  discovery has no roots, candidates, or findings and is complete evidence for
+  the empty instruction projection those historical calls used;
 - `model_call` (execution state owned by
   [model-call-execution](model-call-execution.md), its turn-level
   provider-target pin on `turn_lifecycle`, and its pinned
@@ -878,6 +893,23 @@ Locks per transaction, in acquisition order:
   validating the predecessor. Pursuing user transitions then read current
   defaults and insert their queued goal turn; rejected commands commit without
   firing the trigger, and exact user-command replay takes no row lock.
+
+- **Empty turn-instruction manifest recording**: the `session_scheduler` row
+  `FOR UPDATE` is the only explicit lock. An ordinary activation records after
+  activation and before model work, rechecking the exact active `turn_lifecycle`
+  row under that lock. A counted activation retains its complete scan in memory
+  after the fitting exact count. Its activation-and-first-call transaction then
+  takes the scheduler lock, revalidates the exact queued row, activates it,
+  records discovery, registrations, and the manifest, and checkpoints the exact
+  Prepared call atomically; a stale preview commits none of them. In either
+  path, discovery, registrations, and the empty manifest commit atomically for a
+  complete scan. An incomplete discovery may commit as diagnostic evidence but
+  binds no manifest, leaving the turn eligible for a new scan on retry. These
+  temporary boundaries are sound only while eligibility is the one immutable
+  empty value. The committed nonempty eligibility surface moves every manifest
+  into activation under this same scheduler lock, as
+  [the activation transaction](turn-lifecycle-and-scheduling.md#the-activation-transaction)
+  requires.
 
 - **StartEligibleTurn** and nonterminal **model-call execution transactions**
   (prepare and authorize): first model-call insertion first takes the

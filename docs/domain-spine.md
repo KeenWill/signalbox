@@ -6039,8 +6039,8 @@ pub struct InstructionBundleRegistrationInput {
 pub struct InstructionBundleRegistration { /* private */ }
 impl InstructionBundleRegistration {
     pub fn new(input: InstructionBundleRegistrationInput) -> Option<Self>;
-    // accessors: kind(), root_kind(), root_path(), source_path(), source_bytes(),
-    // source_hash(), skill()
+    // accessors: kind(), root_kind(), root_path(), source_path(),
+    // relative_source_path(), agent_document_scope(), source_bytes(), source_hash(), skill()
 }
 
 pub struct EmptyTurnInstructionManifestEvidence {

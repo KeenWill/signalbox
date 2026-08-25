@@ -4,7 +4,11 @@
     reason = "this standalone integration-test crate uses assertion panics and explicit fixture expectations; the workspace gate remains active for production targets"
 )]
 
+mod support;
+
 use std::{collections::VecDeque, error::Error};
+
+use support::record_empty_instruction_manifest;
 
 use signalbox_application::{
     CreateSessionFromImportedFrontierIdGenerator, CreateSessionFromImportedFrontierOutcome,
@@ -280,11 +284,19 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
         ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x201)),
         ImportedTranscriptEntryId::from_uuid(Uuid::from_u128(0x202)),
     ];
-    let source = concat!(
-        "{\"type\":\"user\",\"message\":{\"content\":\"imported user\"}}\n",
-        "{\"type\":\"assistant\",\"message\":{\"content\":\"imported assistant\"}}\n",
-        "{\"type\":\"user\",\"message\":{\"content\":\"excluded later user\"}}"
-    );
+    let imported_user_content = "imported user";
+    let imported_assistant_content = "imported assistant";
+    let excluded_user_content = "excluded later user";
+    let source = [
+        "{\"type\":\"user\",\"message\":{\"content\":\"",
+        imported_user_content,
+        "\"}}\n{\"type\":\"assistant\",\"message\":{\"content\":\"",
+        imported_assistant_content,
+        "\"}}\n{\"type\":\"user\",\"message\":{\"content\":\"",
+        excluded_user_content,
+        "\"}}",
+    ]
+    .concat();
     let mut import_service = ImportConversationService::new(
         FixedImportIds {
             conversations: [conversation].into(),
@@ -348,35 +360,41 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
         .await?
         .expect("the imported session has an immediate seed snapshot");
     assert!(seed_snapshot.turns().is_empty());
-    assert!(matches!(
-        seed_snapshot.entries(),
-        [
-            ProcessTranscriptEntry::ImportedText {
-                imported_conversation: projected_conversation,
-                imported_entry: projected_entry,
-                source_speaker: ProcessImportedSourceSpeaker::User,
-                content,
-                ..
-            },
-            ProcessTranscriptEntry::ImportedText {
-                imported_conversation: second_conversation,
-                imported_entry: second_entry,
-                source_speaker: ProcessImportedSourceSpeaker::Assistant,
-                content: second_content,
-                ..
-            },
-        ] if *projected_conversation == conversation
-            && *projected_entry == imported_entries[0]
-            && content == "imported user"
-            && *second_conversation == conversation
-            && *second_entry == imported_entries[1]
-            && second_content == "imported assistant"
-    ));
+    let [seed_user, seed_assistant] = seed_snapshot.entries() else {
+        panic!("the seed contains exactly the selected imported prefix");
+    };
+    let ProcessTranscriptEntry::ImportedText {
+        imported_conversation: projected_conversation,
+        imported_entry: projected_entry,
+        source_speaker: ProcessImportedSourceSpeaker::User,
+        content,
+        ..
+    } = seed_user
+    else {
+        panic!("the first seed entry retains its imported-user attestation");
+    };
+    assert_eq!(*projected_conversation, conversation);
+    assert_eq!(*projected_entry, imported_entries[0]);
+    assert_eq!(content, imported_user_content);
+    let ProcessTranscriptEntry::ImportedText {
+        imported_conversation: second_conversation,
+        imported_entry: second_entry,
+        source_speaker: ProcessImportedSourceSpeaker::Assistant,
+        content: second_content,
+        ..
+    } = seed_assistant
+    else {
+        panic!("the second seed entry retains its imported-assistant attestation");
+    };
+    assert_eq!(*second_conversation, conversation);
+    assert_eq!(*second_entry, imported_entries[1]);
+    assert_eq!(second_content, imported_assistant_content);
 
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x600));
     let turn = TurnId::from_uuid(Uuid::from_u128(0x601));
+    let native_content_text = "native continuation";
     let native_content =
-        UserContent::try_text("native continuation".to_owned()).expect("valid user content");
+        UserContent::try_text(native_content_text.to_owned()).expect("valid user content");
     let mut submit_service = SubmitInputService::new(
         FixedSubmitIds {
             accepted_inputs: [accepted_input].into(),
@@ -411,12 +429,12 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
         .expect("the queued native turn keeps the imported fallback visible");
     assert_eq!(queued_snapshot.turns().len(), 1);
     assert_eq!(queued_snapshot.entries().len(), 2);
-    assert!(
-        queued_snapshot
-            .entries()
-            .iter()
-            .all(|entry| matches!(entry, ProcessTranscriptEntry::ImportedText { .. }))
-    );
+    let ProcessTranscriptEntry::ImportedText { .. } = &queued_snapshot.entries()[0] else {
+        panic!("the queued frontier preserves the first imported entry");
+    };
+    let ProcessTranscriptEntry::ImportedText { .. } = &queued_snapshot.entries()[1] else {
+        panic!("the queued frontier preserves the second imported entry");
+    };
 
     let origin_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x700));
     let starting_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(0x701));
@@ -436,6 +454,7 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
     };
     assert_eq!(activated.turn(), turn);
     assert_eq!(activated.start().frontier().snapshot(), starting_frontier);
+    record_empty_instruction_manifest(&pool, session).await?;
     let frontier_admission: (bool, bool) = sqlx::query_as(
         "SELECT
             first_native_starting_frontier_matches_seed($1, $2),
@@ -460,8 +479,9 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
         ModelCallCredentialReference::new("synthetic-provider-reference"),
     );
     let call = ModelCallId::from_uuid(Uuid::from_u128(0x800));
+    let assistant_content_text = "native assistant reply";
     let assistant_text =
-        AssistantText::try_new("native assistant reply".to_owned()).expect("valid assistant text");
+        AssistantText::try_new(assistant_content_text.to_owned()).expect("valid assistant text");
     let mut model_service = ModelCallExecutionService::new(
         FixedModelExecutionIds {
             calls: [call, ModelCallId::from_uuid(Uuid::from_u128(0x801))].into(),
@@ -496,11 +516,14 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
         model_service.execute(session).await?,
         ModelCallExecutionOutcome::Checkpointed(call)
     );
-    assert!(matches!(
-        model_service.execute(session).await?,
-        ModelCallExecutionOutcome::ObservationCommitted(outcome)
-            if matches!(*outcome, signalbox_domain::ModelCallTerminalOutcome::Completed(_))
-    ));
+    let ModelCallExecutionOutcome::ObservationCommitted(outcome) =
+        model_service.execute(session).await?
+    else {
+        panic!("the scripted provider observation must commit");
+    };
+    let signalbox_domain::ModelCallTerminalOutcome::Completed(_) = *outcome else {
+        panic!("the scripted provider observation must complete the call");
+    };
 
     let (_, _, _, _, _, provider, _, _, retained) = model_service.into_parts();
     assert!(retained.is_none());
@@ -508,36 +531,48 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
         .last_prepared_messages()
         .expect("the scripted provider observed one exact rendered frontier");
     assert_eq!(messages.len(), 3);
-    assert!(matches!(
-        &messages[0],
-        ModelConversationMessage::ImportedUser {
-            source,
-            imported_entry,
-            content,
-        } if *source == SemanticTranscriptEntryRef::from_source(session, seed_semantic_entries[0])
-            && *imported_entry == imported_entries[0]
-            && content.as_str() == "imported user"
-    ));
-    assert!(matches!(
-        &messages[1],
-        ModelConversationMessage::ImportedAssistant {
-            source,
-            imported_entry,
-            content,
-        } if *source == SemanticTranscriptEntryRef::from_source(session, seed_semantic_entries[1])
-            && *imported_entry == imported_entries[1]
-            && content.as_str() == "imported assistant"
-    ));
-    assert!(matches!(
-        &messages[2],
-        ModelConversationMessage::User {
-            source,
-            accepted_input: rendered_input,
-            content,
-        } if *source == SemanticTranscriptEntryRef::from_source(session, origin_entry)
-            && *rendered_input == accepted_input
-            && content == &native_content
-    ));
+    let ModelConversationMessage::ImportedUser {
+        source,
+        imported_entry,
+        content,
+    } = &messages[0]
+    else {
+        panic!("the first provider message retains the imported-user role");
+    };
+    assert_eq!(
+        *source,
+        SemanticTranscriptEntryRef::from_source(session, seed_semantic_entries[0])
+    );
+    assert_eq!(*imported_entry, imported_entries[0]);
+    assert_eq!(content.as_str(), imported_user_content);
+    let ModelConversationMessage::ImportedAssistant {
+        source,
+        imported_entry,
+        content,
+    } = &messages[1]
+    else {
+        panic!("the second provider message retains the imported-assistant role");
+    };
+    assert_eq!(
+        *source,
+        SemanticTranscriptEntryRef::from_source(session, seed_semantic_entries[1])
+    );
+    assert_eq!(*imported_entry, imported_entries[1]);
+    assert_eq!(content.as_str(), imported_assistant_content);
+    let ModelConversationMessage::User {
+        source,
+        accepted_input: rendered_input,
+        content,
+    } = &messages[2]
+    else {
+        panic!("the third provider message is the native user input");
+    };
+    assert_eq!(
+        *source,
+        SemanticTranscriptEntryRef::from_source(session, origin_entry)
+    );
+    assert_eq!(*rendered_input, accepted_input);
+    assert_eq!(content, &native_content);
 
     let durable_terminal: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -573,45 +608,53 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
         .expect("the native terminal frontier remains process-readable");
     assert_eq!(completed_snapshot.turns().len(), 1);
     assert_eq!(completed_snapshot.entries().len(), 5);
-    assert!(matches!(
-        &completed_snapshot.entries()[0],
-        ProcessTranscriptEntry::ImportedText {
-            imported_entry: projected,
-            content,
-            ..
-        } if *projected == imported_entries[0] && content == "imported user"
-    ));
-    assert!(matches!(
-        &completed_snapshot.entries()[1],
-        ProcessTranscriptEntry::ImportedText {
-            imported_entry: projected,
-            content,
-            ..
-        } if *projected == imported_entries[1] && content == "imported assistant"
-    ));
-    assert!(matches!(
-        &completed_snapshot.entries()[2],
-        ProcessTranscriptEntry::User {
-            accepted_input: projected,
-            content,
-            ..
-        } if *projected == accepted_input && content == "native continuation"
-    ));
-    assert!(matches!(
-        &completed_snapshot.entries()[3],
-        ProcessTranscriptEntry::Assistant {
-            model_call: projected,
-            content,
-            ..
-        } if *projected == call && content == "native assistant reply"
-    ));
-    assert!(matches!(
-        &completed_snapshot.entries()[4],
-        ProcessTranscriptEntry::TurnCompleted {
-            turn: projected,
-            ..
-        } if *projected == turn
-    ));
+    let ProcessTranscriptEntry::ImportedText {
+        imported_entry: projected,
+        content,
+        ..
+    } = &completed_snapshot.entries()[0]
+    else {
+        panic!("the completed frontier begins with imported user text");
+    };
+    assert_eq!(*projected, imported_entries[0]);
+    assert_eq!(content, imported_user_content);
+    let ProcessTranscriptEntry::ImportedText {
+        imported_entry: projected,
+        content,
+        ..
+    } = &completed_snapshot.entries()[1]
+    else {
+        panic!("the completed frontier preserves imported assistant text second");
+    };
+    assert_eq!(*projected, imported_entries[1]);
+    assert_eq!(content, imported_assistant_content);
+    let ProcessTranscriptEntry::User {
+        accepted_input: projected,
+        content,
+        ..
+    } = &completed_snapshot.entries()[2]
+    else {
+        panic!("the completed frontier renders the native input third");
+    };
+    assert_eq!(*projected, accepted_input);
+    assert_eq!(content, native_content_text);
+    let ProcessTranscriptEntry::Assistant {
+        model_call: projected,
+        content,
+        ..
+    } = &completed_snapshot.entries()[3]
+    else {
+        panic!("the completed frontier renders the native assistant fourth");
+    };
+    assert_eq!(*projected, call);
+    assert_eq!(content, assistant_content_text);
+    let ProcessTranscriptEntry::TurnCompleted {
+        turn: projected, ..
+    } = &completed_snapshot.entries()[4]
+    else {
+        panic!("the completed frontier ends with the turn marker");
+    };
+    assert_eq!(*projected, turn);
 
     let mut terminal_reconstitution = StartEligibleTurnService::new(
         FixedActivationIds {
