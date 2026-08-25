@@ -176,6 +176,16 @@ CREATE TABLE web_usage_call_projection (
         CHECK (
             char_length(credential_profile_label) > 0
             AND octet_length(credential_profile_label) <= 256
+            AND (
+                (
+                    left(credential_profile_label, 6) = 'exact:'
+                    AND octet_length(credential_profile_label) > 6
+                )
+                OR (
+                    left(credential_profile_label, 7) = 'mapped:'
+                    AND octet_length(credential_profile_label) > 7
+                )
+            )
         ),
     CONSTRAINT web_usage_turn_shape
         CHECK ((call_kind = 'context_compaction') = (turn_id IS NULL)),
@@ -223,19 +233,22 @@ CREATE TABLE web_usage_call_projection (
         DEFERRABLE INITIALLY DEFERRED
 );
 
--- The projected call kind must correlate with the immutable global identity
--- record: the identity foreign key alone accepts any existing model_call_id
--- regardless of its kind, and the projection is append-only, so a direct
--- insert storing an ordinary call under another kind would misclassify the
--- physical call permanently. The identity vocabulary spells the ordinary kind
--- 'ordinary' where the projection spells it 'model_call'.
-CREATE FUNCTION require_web_usage_call_kind_correlation()
+-- The projected call kind and ownership must correlate with the canonical
+-- call records: the identity foreign key alone accepts any existing
+-- model_call_id regardless of its kind or owner, and the projection is
+-- append-only, so a direct insert storing an ordinary call under another kind
+-- or session would misclassify or misattribute the physical call permanently.
+-- The identity vocabulary spells the ordinary kind 'ordinary' where the
+-- projection spells it 'model_call'.
+CREATE FUNCTION require_web_usage_source_correlation()
 RETURNS trigger
 LANGUAGE plpgsql
 AS $$
 DECLARE
     identity_kind text;
     projected_identity_kind text;
+    source_session_id uuid;
+    source_turn_id uuid;
 BEGIN
     SELECT call_kind INTO identity_kind
       FROM model_call_identity
@@ -250,14 +263,39 @@ BEGIN
             NEW.call_kind, identity_kind
             USING ERRCODE = '23514';
     END IF;
+    IF identity_kind = 'ordinary' THEN
+        SELECT session_id, turn_id INTO source_session_id, source_turn_id
+          FROM model_call
+         WHERE model_call_id = NEW.model_call_id;
+    ELSIF identity_kind = 'approval_judge' THEN
+        SELECT session_id, turn_id INTO source_session_id, source_turn_id
+          FROM tool_approval_judge_model_call
+         WHERE model_call_id = NEW.model_call_id;
+    ELSE
+        SELECT session_id, NULL INTO source_session_id, source_turn_id
+          FROM context_compaction_model_call
+         WHERE model_call_id = NEW.model_call_id;
+    END IF;
+    IF NEW.session_id IS DISTINCT FROM source_session_id THEN
+        RAISE EXCEPTION
+            'usage projection session % contradicts source session %',
+            NEW.session_id, source_session_id
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.turn_id IS DISTINCT FROM source_turn_id THEN
+        RAISE EXCEPTION
+            'usage projection turn % contradicts source turn %',
+            NEW.turn_id, source_turn_id
+            USING ERRCODE = '23514';
+    END IF;
     RETURN NEW;
 END;
 $$;
 
-CREATE TRIGGER web_usage_call_kind_matches_identity
+CREATE TRIGGER web_usage_projection_matches_its_source
 BEFORE INSERT ON web_usage_call_projection
 FOR EACH ROW
-EXECUTE FUNCTION require_web_usage_call_kind_correlation();
+EXECUTE FUNCTION require_web_usage_source_correlation();
 
 CREATE INDEX web_usage_by_recorded_call
     ON web_usage_call_projection (recorded_at DESC, model_call_id DESC);

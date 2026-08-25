@@ -5,8 +5,8 @@ use std::{error::Error, fmt};
 use rust_decimal::Decimal;
 use signalbox_application::{
     UsageAggregateCompleteness, UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport,
-    UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallCursor, UsageCallEvidence,
-    UsageCallKind, UsageCallOrder, UsageCallPage, UsageCallPageLimit, UsageCallQuery,
+    UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallEvidence, UsageCallKind,
+    UsageCallOrder, UsageCallPage, UsageCallPageContinuation, UsageCallPageLimit, UsageCallQuery,
     UsageCallScope, UsageCredentialProfileLabel, UsageInputTokenSemantics, UsageProvenance,
     UsageQuery, UsageReader, UsageTimestampMicros, UsageTokenAxes, UsageTokenCoverage,
     UsageTokenPresence, max_usage_aggregate_calls, max_usage_aggregate_groups,
@@ -347,9 +347,11 @@ impl UsageRepository {
                 cursor.recorded_at,
             )?));
             let call_parameter = builder.bind(StatementBind::Id(cursor.call.into_uuid()));
+            // One lexicographic row-value comparison so the descending
+            // `(recorded_at, model_call_id)` index seeks directly to the
+            // exclusive cursor instead of filtering the emitted prefix.
             builder.predicate(format!(
-                "(recorded_at < ${time_parameter} \
-                 OR (recorded_at = ${time_parameter} AND model_call_id < ${call_parameter}))"
+                "(recorded_at, model_call_id) < (${time_parameter}, ${call_parameter})"
             ));
         }
         let where_clause = builder.where_clause();
@@ -418,21 +420,17 @@ fn decode_call_page(
     rows: Vec<PgRow>,
     limit: UsageCallPageLimit,
 ) -> Result<UsageCallPage, UsageRepositoryError> {
-    let has_more = rows.len() > usize::from(limit.get());
+    let continuation = if rows.len() > usize::from(limit.get()) {
+        UsageCallPageContinuation::HasMore
+    } else {
+        UsageCallPageContinuation::Exhausted
+    };
     let calls = rows
         .into_iter()
         .take(usize::from(limit.get()))
         .map(decode_call)
         .collect::<Result<Vec<_>, _>>()?;
-    let next = if has_more {
-        calls.last().map(|call| UsageCallCursor {
-            recorded_at: call.recorded_at,
-            call: call.call,
-        })
-    } else {
-        None
-    };
-    UsageCallPage::new(calls, next, limit)
+    UsageCallPage::new(calls, continuation, limit)
         .map_err(|_| UsageProjectionCorruption::Invalid("page ceiling").into())
 }
 
@@ -487,7 +485,7 @@ fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryEr
         decode_aggregate_tokens(&row)?,
         decode_cache_normalization(row.try_get("cache_normalization_safe")?),
     )
-    .map_err(|_| UsageProjectionCorruption::Invalid("aggregate token coverage").into())
+    .map_err(|_| UsageProjectionCorruption::Invalid("aggregate consistency").into())
 }
 
 fn decode_credential_profile(

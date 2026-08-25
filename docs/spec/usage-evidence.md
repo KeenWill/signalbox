@@ -24,11 +24,14 @@ reference. The exact reference is retained once in that mapping and is not
 copied into each projected call; reads and aggregates use only its bounded,
 collision-free profile label. Each physical token axis is either absent or an
 exact integer in the `u64` domain. Aggregate token sums use `u128`, so every sum
-admitted by the bounded source-call ceiling remains exact. A projected row's
-call kind must correlate with the call's immutable global identity record: an
-insertion guard rejects any row — including one from maintenance SQL — whose
-kind contradicts that identity, because the append-only projection would
-otherwise misclassify the physical call permanently.
+admitted by the bounded source-call ceiling remains exact. A projected row must
+correlate with its canonical source records: an insertion guard rejects any row
+— including one from maintenance SQL — whose kind contradicts the call's
+immutable global identity or whose session or turn contradicts the canonical
+call record, because the append-only projection would otherwise misclassify or
+misattribute the physical call permanently. The stored label column likewise
+admits only the discriminated `exact:`/`mapped:` forms, so an unreadable label
+cannot become a permanent append-only row that fails matching reads closed.
 
 ## Compatibility grouping
 
@@ -51,10 +54,15 @@ query from imposing work proportional to retained history.
 The result shapes hold their bounds by construction rather than by adapter
 discipline: the credential-profile label is a checked bounded discriminated
 type, a group's optional sums must agree with its key's declared presence
-coverage, a report cannot carry more than the group ceiling, and a detail page
-cannot exceed its requested limit. A reader result that would violate any of
-these is unconstructable, and the PostgreSQL adapter fails closed on a
-projection row that would require one.
+coverage, a group's cache-normalization state must be consistent with its
+input-token semantics and sums (unknown semantics are never safe,
+cache-exclusive input is always safe, and a cache-inclusive safety claim
+requires every cache axis present with input at least their sum), a report
+cannot carry more than the group ceiling, a detail page cannot exceed its
+requested limit, and a page's continuation cursor is derived from its own last
+returned call rather than accepted from the reader. A reader result that would
+violate any of these is unconstructable, and the PostgreSQL adapter fails closed
+on a projection row that would require one.
 
 ## Selection and time
 
@@ -72,12 +80,15 @@ Detail reads return at most 100 calls in newest-first order by
 `(recorded_at, model_call_id)`. `recorded_at` is the terminal statement time,
 not the enclosing transaction's start time, so ties arise between calls
 projected by one statement, such as one backfill statement, and the call UUID
-breaks them. A continuation cursor is an exclusive boundary at that same pair.
-The cursor provides deterministic keyset traversal of rows already visible ahead
-of it, not a cross-page snapshot. Oldest-first traversal is not exposed because
-a statement timestamp is assigned before its transaction commits, so a
-late-committing concurrent transaction can make a row with an earlier statement
-time visible behind an already emitted oldest-first cursor.
+breaks them. A continuation cursor is an exclusive boundary at that same pair,
+anchored to the page's own last returned call and applied as one lexicographic
+row-value comparison so a deep page seeks directly to the boundary instead of
+filtering the emitted prefix. The cursor provides deterministic keyset traversal
+of rows already visible ahead of it, not a cross-page snapshot. Oldest-first
+traversal is not exposed because a statement timestamp is assigned before its
+transaction commits, so a late-committing concurrent transaction can make a row
+with an earlier statement time visible behind an already emitted oldest-first
+cursor.
 
 Every allowed exact-selection conjunction has an index whose leading columns are
 exactly the selected dimensions followed by the chronological page order: each

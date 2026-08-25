@@ -599,6 +599,38 @@ async fn projection_rejects_call_kind_contradicting_global_identity() -> Result<
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_rejects_ownership_contradicting_the_source_call() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (owning, _owning_repository, _owning_authorized) =
+        authorize_checkpointed_model_call(&pool, 0x9d_000).await?;
+    let (foreign, _foreign_repository, _foreign_authorized) =
+        authorize_checkpointed_model_call(&pool, 0x9e_000).await?;
+    let error = sqlx::query(
+        "INSERT INTO web_usage_call_projection (
+             model_call_id, call_kind, session_id, turn_id,
+             resolved_provider_model_identity_id, credential_profile_label,
+             usage_provenance_kind, usage_input_includes_cache_tokens
+         )
+         VALUES ($1, 'model_call', $2, $3, $4, 'exact:guard-test', 'reported', false)",
+    )
+    .bind(owning.call.into_uuid())
+    .bind(foreign.session.into_uuid())
+    .bind(foreign.turn.into_uuid())
+    .bind(Uuid::from_u128(0x9d_0f0))
+    .execute(&pool)
+    .await
+    .expect_err("contradicted source ownership must be rejected");
+
+    assert!(error.to_string().contains("contradicts source session"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn context_compaction_usage_axes_have_the_canonical_u64_ceiling() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;

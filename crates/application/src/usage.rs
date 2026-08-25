@@ -525,28 +525,54 @@ pub struct UsageCallEvidence {
     pub recorded_at: UsageTimestampMicros,
 }
 
-/// A detail page that exceeded its requested limit.
+/// Whether more matching calls exist behind a detail page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UsageCallPageOverflowError {
-    /// Calls the reader tried to return.
-    pub returned_calls: usize,
-    /// Requested page ceiling.
-    pub limit_items: u16,
+pub enum UsageCallPageContinuation {
+    /// The page ends the matching evidence.
+    Exhausted,
+    /// More matching calls exist strictly after the page's last call.
+    HasMore,
 }
 
-impl fmt::Display for UsageCallPageOverflowError {
+/// A detail page that violated its construction bounds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UsageCallPageError {
+    /// The page carried more calls than its requested limit.
+    Overflow {
+        /// Calls the reader tried to return.
+        returned_calls: usize,
+        /// Requested page ceiling.
+        limit_items: u16,
+    },
+    /// The page claimed more matching calls behind it while returning none, so
+    /// no last call exists to anchor the continuation cursor.
+    DanglingContinuation,
+}
+
+impl fmt::Display for UsageCallPageError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "usage detail page carries {} calls, over its requested limit of {}",
-            self.returned_calls, self.limit_items
-        )
+        match self {
+            Self::Overflow {
+                returned_calls,
+                limit_items,
+            } => write!(
+                formatter,
+                "usage detail page carries {returned_calls} calls, over its requested limit of \
+                 {limit_items}"
+            ),
+            Self::DanglingContinuation => write!(
+                formatter,
+                "usage detail page claims more matching calls but returns none to anchor the \
+                 continuation cursor"
+            ),
+        }
     }
 }
 
-impl std::error::Error for UsageCallPageOverflowError {}
+impl std::error::Error for UsageCallPageError {}
 
-/// One bounded detail page, no larger than its requested limit by
+/// One bounded detail page: no larger than its requested limit, with its
+/// continuation cursor derived from its own last returned call, by
 /// construction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageCallPage {
@@ -555,18 +581,31 @@ pub struct UsageCallPage {
 }
 
 impl UsageCallPage {
-    /// Accepts only a page within the requested limit.
+    /// Accepts only a page within the requested limit, deriving the
+    /// continuation cursor from the last returned call.
     pub fn new(
         calls: Vec<UsageCallEvidence>,
-        next: Option<UsageCallCursor>,
+        continuation: UsageCallPageContinuation,
         limit: UsageCallPageLimit,
-    ) -> Result<Self, UsageCallPageOverflowError> {
+    ) -> Result<Self, UsageCallPageError> {
         if calls.len() > usize::from(limit.get()) {
-            return Err(UsageCallPageOverflowError {
+            return Err(UsageCallPageError::Overflow {
                 returned_calls: calls.len(),
                 limit_items: limit.get(),
             });
         }
+        let next = match continuation {
+            UsageCallPageContinuation::Exhausted => None,
+            UsageCallPageContinuation::HasMore => {
+                let Some(last) = calls.last() else {
+                    return Err(UsageCallPageError::DanglingContinuation);
+                };
+                Some(UsageCallCursor {
+                    recorded_at: last.recorded_at,
+                    call: last.call,
+                })
+            }
+        };
         Ok(Self { calls, next })
     }
 
@@ -576,7 +615,7 @@ impl UsageCallPage {
         &self.calls
     }
 
-    /// Strict continuation when another call exists.
+    /// Strict continuation at the last returned call when another call exists.
     #[must_use]
     pub const fn next(&self) -> Option<UsageCallCursor> {
         self.next
@@ -647,26 +686,46 @@ pub enum UsageTokenAxis {
     CacheReadInput,
 }
 
-/// An aggregate sum that contradicts its declared presence coverage.
+/// An aggregate group that violated its construction consistency rules.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UsageAggregateCoverageError {
-    /// Axis whose sum and declared presence disagree.
-    pub axis: UsageTokenAxis,
-    /// Presence the key declares for that axis.
-    pub declared: UsageTokenPresence,
+pub enum UsageAggregateGroupError {
+    /// A sum contradicts its declared presence coverage.
+    Coverage {
+        /// Axis whose sum and declared presence disagree.
+        axis: UsageTokenAxis,
+        /// Presence the key declares for that axis.
+        declared: UsageTokenPresence,
+    },
+    /// The cache-normalization state contradicts the group's input-token
+    /// semantics and sums.
+    NormalizationClaim {
+        /// Claimed normalization state.
+        claimed: UsageCacheNormalization,
+        /// Input-token semantics the key declares.
+        input_semantics: UsageInputTokenSemantics,
+    },
 }
 
-impl fmt::Display for UsageAggregateCoverageError {
+impl fmt::Display for UsageAggregateGroupError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "aggregate {:?} sum contradicts its declared {:?} coverage",
-            self.axis, self.declared
-        )
+        match self {
+            Self::Coverage { axis, declared } => write!(
+                formatter,
+                "aggregate {axis:?} sum contradicts its declared {declared:?} coverage"
+            ),
+            Self::NormalizationClaim {
+                claimed,
+                input_semantics,
+            } => write!(
+                formatter,
+                "aggregate {claimed:?} cache normalization contradicts its {input_semantics:?} \
+                 input-token semantics and sums"
+            ),
+        }
     }
 }
 
-impl std::error::Error for UsageAggregateCoverageError {}
+impl std::error::Error for UsageAggregateGroupError {}
 
 const fn coverage_agrees(sum: Option<u128>, declared: UsageTokenPresence) -> bool {
     matches!(
@@ -675,22 +734,51 @@ const fn coverage_agrees(sum: Option<u128>, declared: UsageTokenPresence) -> boo
     )
 }
 
+/// Whether the normalization claim is consistent with the declared semantics
+/// and sums: unknown semantics are never safe, cache-exclusive input is always
+/// safe, and a cache-inclusive safety claim requires every cache axis present
+/// with input at least their sum. A cache-inclusive `Unsafe` claim is always
+/// admissible because per-call underflow is not derivable from group sums.
+const fn normalization_claim_consistent(
+    input_semantics: UsageInputTokenSemantics,
+    tokens: UsageAggregateTokenAxes,
+    claimed: UsageCacheNormalization,
+) -> bool {
+    match (input_semantics, claimed) {
+        (UsageInputTokenSemantics::Unknown, UsageCacheNormalization::Unsafe)
+        | (UsageInputTokenSemantics::CacheExclusive, UsageCacheNormalization::Safe)
+        | (UsageInputTokenSemantics::CacheInclusive, UsageCacheNormalization::Unsafe) => true,
+        (UsageInputTokenSemantics::Unknown, UsageCacheNormalization::Safe)
+        | (UsageInputTokenSemantics::CacheExclusive, UsageCacheNormalization::Unsafe) => false,
+        (UsageInputTokenSemantics::CacheInclusive, UsageCacheNormalization::Safe) => matches!(
+            (
+                tokens.input,
+                tokens.cache_creation_input,
+                tokens.cache_read_input,
+            ),
+            (Some(input), Some(cache_creation), Some(cache_read))
+                if input >= cache_creation + cache_read
+        ),
+    }
+}
+
 impl UsageAggregateGroup {
-    /// Accepts only sums that agree with the key's declared presence coverage.
+    /// Accepts only sums that agree with the key's declared presence coverage
+    /// and a normalization state consistent with the semantics and sums.
     pub fn new(
         key: UsageAggregateKey,
         call_count: u64,
         tokens: UsageAggregateTokenAxes,
         cache_normalization: UsageCacheNormalization,
-    ) -> Result<Self, UsageAggregateCoverageError> {
+    ) -> Result<Self, UsageAggregateGroupError> {
         if !coverage_agrees(tokens.input, key.coverage.input) {
-            return Err(UsageAggregateCoverageError {
+            return Err(UsageAggregateGroupError::Coverage {
                 axis: UsageTokenAxis::Input,
                 declared: key.coverage.input,
             });
         }
         if !coverage_agrees(tokens.output, key.coverage.output) {
-            return Err(UsageAggregateCoverageError {
+            return Err(UsageAggregateGroupError::Coverage {
                 axis: UsageTokenAxis::Output,
                 declared: key.coverage.output,
             });
@@ -699,15 +787,21 @@ impl UsageAggregateGroup {
             tokens.cache_creation_input,
             key.coverage.cache_creation_input,
         ) {
-            return Err(UsageAggregateCoverageError {
+            return Err(UsageAggregateGroupError::Coverage {
                 axis: UsageTokenAxis::CacheCreationInput,
                 declared: key.coverage.cache_creation_input,
             });
         }
         if !coverage_agrees(tokens.cache_read_input, key.coverage.cache_read_input) {
-            return Err(UsageAggregateCoverageError {
+            return Err(UsageAggregateGroupError::Coverage {
                 axis: UsageTokenAxis::CacheReadInput,
                 declared: key.coverage.cache_read_input,
+            });
+        }
+        if !normalization_claim_consistent(key.input_semantics, tokens, cache_normalization) {
+            return Err(UsageAggregateGroupError::NormalizationClaim {
+                claimed: cache_normalization,
+                input_semantics: key.input_semantics,
             });
         }
         Ok(Self {
@@ -963,9 +1057,9 @@ mod tests {
                     cache_creation_input: None,
                     cache_read_input: None,
                 },
-                UsageCacheNormalization::Unsafe,
+                UsageCacheNormalization::Safe,
             ),
-            Err(UsageAggregateCoverageError {
+            Err(UsageAggregateGroupError::Coverage {
                 axis: UsageTokenAxis::Input,
                 declared: UsageTokenPresence::Present,
             })
@@ -983,13 +1077,13 @@ mod tests {
                 cache_creation_input: None,
                 cache_read_input: None,
             },
-            UsageCacheNormalization::Unsafe,
+            UsageCacheNormalization::Safe,
         )
         .expect("fixture sums agree with declared coverage");
 
         assert_eq!(group.call_count(), 2);
         assert_eq!(group.tokens().input, Some(28));
-        assert_eq!(group.cache_normalization(), UsageCacheNormalization::Unsafe);
+        assert_eq!(group.cache_normalization(), UsageCacheNormalization::Safe);
         assert_eq!(group.key(), &aggregate_key_fixture());
     }
 
@@ -1004,7 +1098,7 @@ mod tests {
                 cache_creation_input: None,
                 cache_read_input: None,
             },
-            UsageCacheNormalization::Unsafe,
+            UsageCacheNormalization::Safe,
         )
         .expect("fixture sums agree with declared coverage");
         let over_ceiling = usize::from(max_usage_aggregate_groups()) + 1;
@@ -1017,6 +1111,113 @@ mod tests {
             Err(UsageAggregateGroupOverflowError {
                 returned_groups: over_ceiling,
             })
+        );
+    }
+
+    #[test]
+    fn aggregate_group_rejects_an_underflowing_cache_inclusive_safety_claim() {
+        let mut key = aggregate_key_fixture();
+        key.input_semantics = UsageInputTokenSemantics::CacheInclusive;
+        key.coverage = UsageTokenCoverage {
+            input: UsageTokenPresence::Present,
+            output: UsageTokenPresence::Absent,
+            cache_creation_input: UsageTokenPresence::Present,
+            cache_read_input: UsageTokenPresence::Present,
+        };
+
+        assert_eq!(
+            UsageAggregateGroup::new(
+                key,
+                1,
+                UsageAggregateTokenAxes {
+                    input: Some(1),
+                    output: None,
+                    cache_creation_input: Some(2),
+                    cache_read_input: Some(0),
+                },
+                UsageCacheNormalization::Safe,
+            ),
+            Err(UsageAggregateGroupError::NormalizationClaim {
+                claimed: UsageCacheNormalization::Safe,
+                input_semantics: UsageInputTokenSemantics::CacheInclusive,
+            })
+        );
+    }
+
+    #[test]
+    fn aggregate_group_rejects_a_safety_claim_under_unknown_semantics() {
+        let mut key = aggregate_key_fixture();
+        key.input_semantics = UsageInputTokenSemantics::Unknown;
+
+        assert_eq!(
+            UsageAggregateGroup::new(
+                key,
+                1,
+                UsageAggregateTokenAxes {
+                    input: Some(11),
+                    output: None,
+                    cache_creation_input: None,
+                    cache_read_input: None,
+                },
+                UsageCacheNormalization::Safe,
+            ),
+            Err(UsageAggregateGroupError::NormalizationClaim {
+                claimed: UsageCacheNormalization::Safe,
+                input_semantics: UsageInputTokenSemantics::Unknown,
+            })
+        );
+    }
+
+    fn call_evidence_fixture() -> UsageCallEvidence {
+        UsageCallEvidence {
+            scope: UsageCallScope::ContextCompaction,
+            call: ModelCallId::from_uuid(uuid::Uuid::from_u128(0xD4)),
+            session: SessionId::from_uuid(uuid::Uuid::from_u128(0xD5)),
+            model: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                uuid::Uuid::from_u128(0xD6),
+            )),
+            credential_profile: UsageCredentialProfileLabel::new("exact:profile-one".to_owned())
+                .expect("fixture label is bounded and discriminated"),
+            provenance: UsageProvenance::Reported,
+            input_semantics: UsageInputTokenSemantics::CacheInclusive,
+            tokens: UsageTokenAxes {
+                input: Some(17),
+                output: Some(5),
+                cache_creation_input: Some(0),
+                cache_read_input: Some(0),
+            },
+            recorded_at: UsageTimestampMicros::new(1_777_777_777_000_000)
+                .expect("fixture timestamp fits"),
+        }
+    }
+
+    #[test]
+    fn call_page_derives_its_continuation_cursor_from_the_last_returned_call() {
+        let evidence = call_evidence_fixture();
+        let limit = UsageCallPageLimit::new(1).expect("fixture page limit fits");
+        let page = UsageCallPage::new(
+            vec![evidence.clone()],
+            UsageCallPageContinuation::HasMore,
+            limit,
+        )
+        .expect("fixture page is within its limit and anchors its cursor");
+
+        assert_eq!(
+            page.next(),
+            Some(UsageCallCursor {
+                recorded_at: evidence.recorded_at,
+                call: evidence.call,
+            })
+        );
+    }
+
+    #[test]
+    fn call_page_rejects_a_continuation_claim_without_a_last_call() {
+        let limit = UsageCallPageLimit::new(1).expect("fixture page limit fits");
+
+        assert_eq!(
+            UsageCallPage::new(Vec::new(), UsageCallPageContinuation::HasMore, limit),
+            Err(UsageCallPageError::DanglingContinuation)
         );
     }
 
@@ -1045,8 +1246,12 @@ mod tests {
         let limit = UsageCallPageLimit::new(1).expect("fixture page limit fits");
 
         assert_eq!(
-            UsageCallPage::new(vec![evidence.clone(), evidence], None, limit),
-            Err(UsageCallPageOverflowError {
+            UsageCallPage::new(
+                vec![evidence.clone(), evidence],
+                UsageCallPageContinuation::Exhausted,
+                limit,
+            ),
+            Err(UsageCallPageError::Overflow {
                 returned_calls: 2,
                 limit_items: 1,
             })

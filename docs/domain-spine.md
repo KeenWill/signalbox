@@ -6761,18 +6761,20 @@ pub struct UsageCallEvidence {
     pub recorded_at: UsageTimestampMicros,
 }
 
-pub struct UsageCallPageOverflowError {
-    pub returned_calls: usize,
-    pub limit_items: u16,
+pub enum UsageCallPageContinuation { Exhausted, HasMore }
+
+pub enum UsageCallPageError {
+    Overflow { returned_calls: usize, limit_items: u16 },
+    DanglingContinuation,
 }
 
 pub struct UsageCallPage { /* private */ }
 impl UsageCallPage {
     pub fn new(
         calls: Vec<UsageCallEvidence>,
-        next: Option<UsageCallCursor>,
+        continuation: UsageCallPageContinuation,
         limit: UsageCallPageLimit,
-    ) -> Result<Self, UsageCallPageOverflowError>;
+    ) -> Result<Self, UsageCallPageError>;
     pub fn calls(&self) -> &[UsageCallEvidence];
     pub const fn next(&self) -> Option<UsageCallCursor>;
 }
@@ -6791,9 +6793,12 @@ pub enum UsageAggregateCompleteness { Complete, Truncated }
 
 pub enum UsageTokenAxis { Input, Output, CacheCreationInput, CacheReadInput }
 
-pub struct UsageAggregateCoverageError {
-    pub axis: UsageTokenAxis,
-    pub declared: UsageTokenPresence,
+pub enum UsageAggregateGroupError {
+    Coverage { axis: UsageTokenAxis, declared: UsageTokenPresence },
+    NormalizationClaim {
+        claimed: UsageCacheNormalization,
+        input_semantics: UsageInputTokenSemantics,
+    },
 }
 
 pub struct UsageAggregateGroup { /* private */ }
@@ -6803,7 +6808,7 @@ impl UsageAggregateGroup {
         call_count: u64,
         tokens: UsageAggregateTokenAxes,
         cache_normalization: UsageCacheNormalization,
-    ) -> Result<Self, UsageAggregateCoverageError>;
+    ) -> Result<Self, UsageAggregateGroupError>;
     pub const fn key(&self) -> &UsageAggregateKey;
     pub const fn call_count(&self) -> u64;
     pub const fn tokens(&self) -> UsageAggregateTokenAxes;
@@ -11893,7 +11898,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
 | application: search                                | 21 (+4 free fn) (incl. 2 traits) |
-| application: usage                                 | 36 (+4 free fn) (incl. 1 trait)  |
+| application: usage                                 | 37 (+4 free fn) (incl. 1 trait)  |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 36 (incl. 8 traits)              |
 | application: tool_loop                             | 27 (incl. 5 traits)              |
@@ -11914,4 +11919,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 13                               |
-| **signalbox-application total**                    | **391 (+18 free fn)**            |
+| **signalbox-application total**                    | **392 (+18 free fn)**            |
