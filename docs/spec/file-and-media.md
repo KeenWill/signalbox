@@ -5,7 +5,8 @@ Its isolated processor implementation is verified against PR #900
 (`agent/file-media-worker`). Together they include the type model, declaration
 and registry checks, detection and validation algorithm, untrusted
 processor-response boundary, stable agent tool contracts, visibility-authorizing
-application bridge, and fresh daemon-supervised worker runtime.
+application bridge, and fresh daemon-supervised worker runtime. The PDF adapter
+is verified against this PR (`agent/file-media-adapter-pdf`).
 
 The text-family adapter coverage is verified against PR #903
 (`agent/file-media-text-family`). The image-family adapter coverage is verified
@@ -152,10 +153,11 @@ Each listed adapter is compiled into a dedicated worker and registered there as
 one provider declaration. Inputs remain whole-source bounded; adapter output is
 untrusted until the daemon-side registry sanitizer admits it.
 
-| Family | Canonical types                                      | Detection and validation                                                                                          | Views                                                                                | Decoder choice                                                                                    |
-| ------ | ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| Text   | `text/plain`, `application/json`, `text/csv`         | Complete NUL-free UTF-8 fallback; structural JSON parse; strict rectangular CSV parse with row and column ceilings | Exact `text`; bounded JSON `structured`; bounded CSV headers and rows as `structured` | Standard-library UTF-8, `serde_json`, and pure-Rust `csv`; all execute only in the isolated worker |
+| Family | Canonical types                              | Detection and validation                                                                                           | Views                                                                                 | Decoder choice                                                                                     |
+| ------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Text   | `text/plain`, `application/json`, `text/csv` | Complete NUL-free UTF-8 fallback; structural JSON parse; strict rectangular CSV parse with row and column ceilings | Exact `text`; bounded JSON `structured`; bounded CSV headers and rows as `structured` | Standard-library UTF-8, `serde_json`, and pure-Rust `csv`; all execute only in the isolated worker |
 | Image  | `image/png`, `image/jpeg`, `image/webp`, `image/gif` | Strong signatures followed by primary-raster decode with encoded, axis, pixel, and memory bounds                   | Bounded dimensions and channel count as `metadata`                                   | Pure-Rust `image` with only PNG, JPEG, WebP, and GIF features; isolated in the worker              |
+| PDF    | `application/pdf`                            | Exact declared-type match against the verified source digest and length; bounded object and page parse             | Exact `text`; bounded `metadata`                                                      | `lopdf` 0.44 with default features disabled, compiled only into `signalbox-file-media-pdf-worker`; 8 MiB source, 10,000-page/object, 1 MiB decompressed-page, 256 MiB aggregate decompressed-content, and 174,000-byte text bounds; no rendering, OCR, embedded-file extraction, or password channel |
 
 ## Processor and durable media boundary
 
