@@ -1318,8 +1318,10 @@ request. A queued-obligation row carries obligation, rule, singleton, first and
 latest event, collapsed match count, whole-second wait duration, occupying
 dispatch and sessions, positive remaining cooldown when any, and the view's
 ready decision. The occupying dispatch is optional independently of the sessions
-it would name: an obligation blocked by an independently commissioned live
-session lists that session and no dispatch. Readiness is the view's whole
+it would name: a watch dispatch names its identity and its whole admitted
+session inventory, while an obligation blocked by an independently commissioned
+live session lists exactly that one session and no dispatch, because the
+obligation retains a single external blocker. Readiness is the view's whole
 decision — excluding a dispatch or external session holding the target, a parked
 obligation, and a spent attempt budget — narrowed only so that a cooldown
 expiring mid-read cannot report readiness alongside a positive remaining

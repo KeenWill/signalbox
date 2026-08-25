@@ -8204,13 +8204,17 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
                 })
         }
         OperatorStatusMessage::QueuedObligation(item) => {
-            // A blocking occupant is either a watch dispatch, which names both
-            // its identity and its sessions, or an independently commissioned
-            // live session, which names sessions and no dispatch. Only the
-            // reverse pairing — a dispatch identity with no session inventory —
-            // contradicts the projection.
-            let occupancy_is_valid =
-                item.occupying_dispatch_id.is_none() || !item.occupying_session_ids.is_empty();
+            // A blocking occupant is either a watch dispatch, which names its
+            // identity and its whole admitted session inventory, or one
+            // independently commissioned live session, which names that single
+            // session and no dispatch. Both a dispatch identity owning no
+            // sessions and a dispatch-less occupant naming more than the one
+            // session the obligation retains contradict the projection.
+            let occupancy_is_valid = match item.occupying_dispatch_id {
+                Some(_) => (1..=MAX_OPERATOR_STATUS_DISPATCH_SESSIONS)
+                    .contains(&item.occupying_session_ids.len()),
+                None => item.occupying_session_ids.len() <= 1,
+            };
             let is_occupied =
                 item.occupying_dispatch_id.is_some() || !item.occupying_session_ids.is_empty();
             operator_status_text_is_valid(
@@ -8227,7 +8231,6 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
                     item.singleton_stack_root_pull_request_number,
                 )
                 && item.matched_event_count.value() > 0
-                && item.occupying_session_ids.len() <= MAX_OPERATOR_STATUS_DISPATCH_SESSIONS
                 && values_are_distinct(&item.occupying_session_ids)
                 && occupancy_is_valid
                 && !(item.cooldown_remaining_seconds.is_some() && item.cooldown_never_eligible)
@@ -9903,8 +9906,9 @@ mod tests {
     }
 
     /// An obligation blocked by an independently commissioned live session
-    /// names that session and no dispatch. Only the reverse pairing — a
-    /// dispatch identity owning no sessions — contradicts the projection.
+    /// names exactly that one session and no dispatch. Both a dispatch identity
+    /// owning no sessions and a dispatch-less occupant naming a second session
+    /// contradict the projection, which retains a single external blocker.
     #[test]
     fn operator_status_admits_an_external_blocker_without_a_dispatch_identity()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -9941,10 +9945,15 @@ mod tests {
             Err(FrameValidationError::OperatorStatusShape)
         );
         assert_eq!(
+            externally_blocked(None, vec![uuid(7), uuid(9)], false),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        assert_eq!(
             externally_blocked(Some(uuid(8)), Vec::new(), false),
             Err(FrameValidationError::OperatorStatusShape)
         );
         assert!(externally_blocked(Some(uuid(8)), vec![uuid(7)], false).is_ok());
+        assert!(externally_blocked(Some(uuid(8)), vec![uuid(7), uuid(9)], false).is_ok());
         Ok(())
     }
 
