@@ -3996,7 +3996,7 @@ dependencies = [
 name = "signalbox-file-media-processor-runtime"
 version = "0.0.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "libc",
  "rustix 1.1.4",
  "serde",
