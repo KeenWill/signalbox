@@ -40,6 +40,87 @@ pub const fn max_usage_credential_profile_utf8_bytes() -> u16 {
     256
 }
 
+/// Rejection of a credential-profile projection label.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UsageCredentialProfileLabelError {
+    /// The label was empty.
+    Empty,
+    /// The label exceeded the bounded projection size.
+    Oversized {
+        /// Rejected UTF-8 byte length.
+        rejected_utf8_bytes: usize,
+    },
+    /// The label carried neither the `exact:` nor the `mapped:` discriminator
+    /// with a nonempty tail.
+    UndiscriminatedForm,
+}
+
+impl fmt::Display for UsageCredentialProfileLabelError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(formatter, "credential-profile label is empty"),
+            Self::Oversized {
+                rejected_utf8_bytes,
+            } => write!(
+                formatter,
+                "credential-profile label carries {rejected_utf8_bytes} UTF-8 bytes, over the \
+                 {} ceiling",
+                max_usage_credential_profile_utf8_bytes()
+            ),
+            Self::UndiscriminatedForm => write!(
+                formatter,
+                "credential-profile label carries neither the `exact:` nor the `mapped:` \
+                 discriminator with a nonempty tail"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for UsageCredentialProfileLabelError {}
+
+/// Bounded non-secret projection label for a credential profile, not the
+/// canonical credential reference: references of at most 250 UTF-8 bytes
+/// appear as `exact:<reference>`, longer ones as a stable projection-owned
+/// `mapped:<id>` identity. Strip the `exact:` discriminator before any exact
+/// credential-catalog lookup; a `mapped:` label resolves only through the
+/// projection's oversized-reference mapping.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UsageCredentialProfileLabel(String);
+
+impl UsageCredentialProfileLabel {
+    /// Accepts only a nonempty, bounded, discriminated projection label.
+    pub fn new(label: String) -> Result<Self, UsageCredentialProfileLabelError> {
+        if label.is_empty() {
+            return Err(UsageCredentialProfileLabelError::Empty);
+        }
+        if label.len() > usize::from(max_usage_credential_profile_utf8_bytes()) {
+            return Err(UsageCredentialProfileLabelError::Oversized {
+                rejected_utf8_bytes: label.len(),
+            });
+        }
+        let discriminated = label
+            .strip_prefix("exact:")
+            .or_else(|| label.strip_prefix("mapped:"))
+            .is_some_and(|tail| !tail.is_empty());
+        if !discriminated {
+            return Err(UsageCredentialProfileLabelError::UndiscriminatedForm);
+        }
+        Ok(Self(label))
+    }
+
+    /// Returns the label text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Returns the owned label text.
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
 /// Invalid microsecond timestamp supplied at an application boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UsageTimestampError {
@@ -432,13 +513,8 @@ pub struct UsageCallEvidence {
     pub session: SessionId,
     /// Resolved provider/model target.
     pub model: ResolvedProviderTarget,
-    /// Bounded non-secret projection label for the credential profile, not the
-    /// canonical credential reference: references of at most 250 UTF-8 bytes
-    /// appear as `exact:<reference>`, longer ones as a stable projection-owned
-    /// `mapped:<id>` identity. Strip the `exact:` discriminator before any
-    /// exact credential-catalog lookup; a `mapped:` label resolves only through
-    /// the projection's oversized-reference mapping.
-    pub credential_profile: String,
+    /// Bounded non-secret credential-profile projection label.
+    pub credential_profile: UsageCredentialProfileLabel,
     /// Reported or estimated provenance.
     pub provenance: UsageProvenance,
     /// Meaning of the input-token axis.
@@ -449,13 +525,62 @@ pub struct UsageCallEvidence {
     pub recorded_at: UsageTimestampMicros,
 }
 
-/// One bounded detail page.
+/// A detail page that exceeded its requested limit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UsageCallPageOverflowError {
+    /// Calls the reader tried to return.
+    pub returned_calls: usize,
+    /// Requested page ceiling.
+    pub limit_items: u16,
+}
+
+impl fmt::Display for UsageCallPageOverflowError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "usage detail page carries {} calls, over its requested limit of {}",
+            self.returned_calls, self.limit_items
+        )
+    }
+}
+
+impl std::error::Error for UsageCallPageOverflowError {}
+
+/// One bounded detail page, no larger than its requested limit by
+/// construction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageCallPage {
+    calls: Vec<UsageCallEvidence>,
+    next: Option<UsageCallCursor>,
+}
+
+impl UsageCallPage {
+    /// Accepts only a page within the requested limit.
+    pub fn new(
+        calls: Vec<UsageCallEvidence>,
+        next: Option<UsageCallCursor>,
+        limit: UsageCallPageLimit,
+    ) -> Result<Self, UsageCallPageOverflowError> {
+        if calls.len() > usize::from(limit.get()) {
+            return Err(UsageCallPageOverflowError {
+                returned_calls: calls.len(),
+                limit_items: limit.get(),
+            });
+        }
+        Ok(Self { calls, next })
+    }
+
     /// Calls in the requested stable order.
-    pub calls: Vec<UsageCallEvidence>,
+    #[must_use]
+    pub fn calls(&self) -> &[UsageCallEvidence] {
+        &self.calls
+    }
+
     /// Strict continuation when another call exists.
-    pub next: Option<UsageCallCursor>,
+    #[must_use]
+    pub const fn next(&self) -> Option<UsageCallCursor> {
+        self.next
+    }
 }
 
 /// Compatibility key that prevents unsafe aggregate summation.
@@ -466,10 +591,8 @@ pub struct UsageAggregateKey {
     /// Resolved provider/model target.
     pub model: ResolvedProviderTarget,
     /// Bounded non-secret credential-profile projection label used as the cost
-    /// dimension; see [`UsageCallEvidence::credential_profile`] for the
-    /// `exact:`/`mapped:` label forms and their distinction from the canonical
-    /// credential reference.
-    pub credential_profile: String,
+    /// dimension.
+    pub credential_profile: UsageCredentialProfileLabel,
     /// Reported or estimated provenance.
     pub provenance: UsageProvenance,
     /// Meaning of the input-token axis.
@@ -505,23 +628,178 @@ pub enum UsageAggregateCompleteness {
 /// One aggregate over calls with fully compatible evidence dimensions.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageAggregateGroup {
-    /// Dimensions retained for safe cost derivation and presentation.
-    pub key: UsageAggregateKey,
-    /// Exact number of calls represented by this group.
-    pub call_count: u64,
-    /// Sums only for axes present on every call in the group.
-    pub tokens: UsageAggregateTokenAxes,
-    /// Whether cache-inclusive input can be normalized without underflow.
-    pub cache_normalization: UsageCacheNormalization,
+    key: UsageAggregateKey,
+    call_count: u64,
+    tokens: UsageAggregateTokenAxes,
+    cache_normalization: UsageCacheNormalization,
 }
 
-/// Bounded aggregate result with explicit truncation.
+/// One independently optional token axis.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UsageTokenAxis {
+    /// The input-token axis.
+    Input,
+    /// The output-token axis.
+    Output,
+    /// The cache-creation input-token axis.
+    CacheCreationInput,
+    /// The cache-read input-token axis.
+    CacheReadInput,
+}
+
+/// An aggregate sum that contradicts its declared presence coverage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UsageAggregateCoverageError {
+    /// Axis whose sum and declared presence disagree.
+    pub axis: UsageTokenAxis,
+    /// Presence the key declares for that axis.
+    pub declared: UsageTokenPresence,
+}
+
+impl fmt::Display for UsageAggregateCoverageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "aggregate {:?} sum contradicts its declared {:?} coverage",
+            self.axis, self.declared
+        )
+    }
+}
+
+impl std::error::Error for UsageAggregateCoverageError {}
+
+const fn coverage_agrees(sum: Option<u128>, declared: UsageTokenPresence) -> bool {
+    matches!(
+        (sum, declared),
+        (Some(_), UsageTokenPresence::Present) | (None, UsageTokenPresence::Absent)
+    )
+}
+
+impl UsageAggregateGroup {
+    /// Accepts only sums that agree with the key's declared presence coverage.
+    pub fn new(
+        key: UsageAggregateKey,
+        call_count: u64,
+        tokens: UsageAggregateTokenAxes,
+        cache_normalization: UsageCacheNormalization,
+    ) -> Result<Self, UsageAggregateCoverageError> {
+        if !coverage_agrees(tokens.input, key.coverage.input) {
+            return Err(UsageAggregateCoverageError {
+                axis: UsageTokenAxis::Input,
+                declared: key.coverage.input,
+            });
+        }
+        if !coverage_agrees(tokens.output, key.coverage.output) {
+            return Err(UsageAggregateCoverageError {
+                axis: UsageTokenAxis::Output,
+                declared: key.coverage.output,
+            });
+        }
+        if !coverage_agrees(
+            tokens.cache_creation_input,
+            key.coverage.cache_creation_input,
+        ) {
+            return Err(UsageAggregateCoverageError {
+                axis: UsageTokenAxis::CacheCreationInput,
+                declared: key.coverage.cache_creation_input,
+            });
+        }
+        if !coverage_agrees(tokens.cache_read_input, key.coverage.cache_read_input) {
+            return Err(UsageAggregateCoverageError {
+                axis: UsageTokenAxis::CacheReadInput,
+                declared: key.coverage.cache_read_input,
+            });
+        }
+        Ok(Self {
+            key,
+            call_count,
+            tokens,
+            cache_normalization,
+        })
+    }
+
+    /// Dimensions retained for safe cost derivation and presentation.
+    #[must_use]
+    pub const fn key(&self) -> &UsageAggregateKey {
+        &self.key
+    }
+
+    /// Exact number of calls represented by this group.
+    #[must_use]
+    pub const fn call_count(&self) -> u64 {
+        self.call_count
+    }
+
+    /// Sums only for axes present on every call in the group, agreeing with
+    /// the key's declared coverage by construction.
+    #[must_use]
+    pub const fn tokens(&self) -> UsageAggregateTokenAxes {
+        self.tokens
+    }
+
+    /// Whether cache-inclusive input can be normalized without underflow.
+    #[must_use]
+    pub const fn cache_normalization(&self) -> UsageCacheNormalization {
+        self.cache_normalization
+    }
+}
+
+/// An aggregate result that exceeded the hard group ceiling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct UsageAggregateGroupOverflowError {
+    /// Groups the reader tried to return.
+    pub returned_groups: usize,
+}
+
+impl fmt::Display for UsageAggregateGroupOverflowError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "usage aggregate carries {} groups, over the {} ceiling",
+            self.returned_groups,
+            max_usage_aggregate_groups()
+        )
+    }
+}
+
+impl std::error::Error for UsageAggregateGroupOverflowError {}
+
+/// Bounded aggregate result with explicit truncation, within the hard group
+/// ceiling by construction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageAggregateReport {
+    groups: Vec<UsageAggregateGroup>,
+    completeness: UsageAggregateCompleteness,
+}
+
+impl UsageAggregateReport {
+    /// Accepts only a result within the hard group ceiling.
+    pub fn new(
+        groups: Vec<UsageAggregateGroup>,
+        completeness: UsageAggregateCompleteness,
+    ) -> Result<Self, UsageAggregateGroupOverflowError> {
+        if groups.len() > usize::from(max_usage_aggregate_groups()) {
+            return Err(UsageAggregateGroupOverflowError {
+                returned_groups: groups.len(),
+            });
+        }
+        Ok(Self {
+            groups,
+            completeness,
+        })
+    }
+
     /// Compatibility-preserving groups.
-    pub groups: Vec<UsageAggregateGroup>,
+    #[must_use]
+    pub fn groups(&self) -> &[UsageAggregateGroup] {
+        &self.groups
+    }
+
     /// Whether either hard safety ceiling truncated the aggregate result.
-    pub completeness: UsageAggregateCompleteness,
+    #[must_use]
+    pub const fn completeness(&self) -> UsageAggregateCompleteness {
+        self.completeness
+    }
 }
 
 /// Dedicated aggregate and detail read boundary for canonical usage evidence.
@@ -574,6 +852,7 @@ impl<Reader: UsageReader> UsageService<Reader> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use signalbox_domain::ProviderModelIdentity;
 
     #[test]
     fn usage_call_page_limit_rejects_values_outside_the_hard_bounds() {
@@ -613,6 +892,163 @@ mod tests {
             Err(UsageTimeRangeError {
                 from_inclusive_micros: 8,
                 to_exclusive_micros: 8,
+            })
+        );
+    }
+
+    #[test]
+    fn credential_profile_label_rejects_empty_oversized_and_undiscriminated_text() {
+        assert_eq!(
+            UsageCredentialProfileLabel::new(String::new()),
+            Err(UsageCredentialProfileLabelError::Empty)
+        );
+        assert_eq!(
+            UsageCredentialProfileLabel::new(format!(
+                "exact:{}",
+                "a".repeat(usize::from(max_usage_credential_profile_utf8_bytes()))
+            )),
+            Err(UsageCredentialProfileLabelError::Oversized {
+                rejected_utf8_bytes: usize::from(max_usage_credential_profile_utf8_bytes()) + 6,
+            })
+        );
+        assert_eq!(
+            UsageCredentialProfileLabel::new("profile-one".to_owned()),
+            Err(UsageCredentialProfileLabelError::UndiscriminatedForm)
+        );
+        assert_eq!(
+            UsageCredentialProfileLabel::new("mapped:".to_owned()),
+            Err(UsageCredentialProfileLabelError::UndiscriminatedForm)
+        );
+    }
+
+    #[test]
+    fn credential_profile_label_accepts_both_discriminated_forms() {
+        let exact = UsageCredentialProfileLabel::new("exact:profile-one".to_owned())
+            .expect("fixture exact label is bounded and discriminated");
+        let mapped = UsageCredentialProfileLabel::new("mapped:7".to_owned())
+            .expect("fixture mapped label is bounded and discriminated");
+
+        assert_eq!(exact.as_str(), "exact:profile-one");
+        assert_eq!(mapped.into_string(), "mapped:7");
+    }
+
+    fn aggregate_key_fixture() -> UsageAggregateKey {
+        UsageAggregateKey {
+            call_kind: UsageCallKind::ModelCall,
+            model: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                uuid::Uuid::from_u128(0xC3),
+            )),
+            credential_profile: UsageCredentialProfileLabel::new("exact:profile-one".to_owned())
+                .expect("fixture label is bounded and discriminated"),
+            provenance: UsageProvenance::Reported,
+            input_semantics: UsageInputTokenSemantics::CacheExclusive,
+            coverage: UsageTokenCoverage {
+                input: UsageTokenPresence::Present,
+                output: UsageTokenPresence::Absent,
+                cache_creation_input: UsageTokenPresence::Absent,
+                cache_read_input: UsageTokenPresence::Absent,
+            },
+        }
+    }
+
+    #[test]
+    fn aggregate_group_rejects_a_sum_contradicting_declared_coverage() {
+        assert_eq!(
+            UsageAggregateGroup::new(
+                aggregate_key_fixture(),
+                1,
+                UsageAggregateTokenAxes {
+                    input: None,
+                    output: Some(9),
+                    cache_creation_input: None,
+                    cache_read_input: None,
+                },
+                UsageCacheNormalization::Unsafe,
+            ),
+            Err(UsageAggregateCoverageError {
+                axis: UsageTokenAxis::Input,
+                declared: UsageTokenPresence::Present,
+            })
+        );
+    }
+
+    #[test]
+    fn aggregate_group_accepts_sums_agreeing_with_declared_coverage() {
+        let group = UsageAggregateGroup::new(
+            aggregate_key_fixture(),
+            2,
+            UsageAggregateTokenAxes {
+                input: Some(28),
+                output: None,
+                cache_creation_input: None,
+                cache_read_input: None,
+            },
+            UsageCacheNormalization::Unsafe,
+        )
+        .expect("fixture sums agree with declared coverage");
+
+        assert_eq!(group.call_count(), 2);
+        assert_eq!(group.tokens().input, Some(28));
+        assert_eq!(group.cache_normalization(), UsageCacheNormalization::Unsafe);
+        assert_eq!(group.key(), &aggregate_key_fixture());
+    }
+
+    #[test]
+    fn aggregate_report_rejects_results_over_the_group_ceiling() {
+        let group = UsageAggregateGroup::new(
+            aggregate_key_fixture(),
+            1,
+            UsageAggregateTokenAxes {
+                input: Some(11),
+                output: None,
+                cache_creation_input: None,
+                cache_read_input: None,
+            },
+            UsageCacheNormalization::Unsafe,
+        )
+        .expect("fixture sums agree with declared coverage");
+        let over_ceiling = usize::from(max_usage_aggregate_groups()) + 1;
+
+        assert_eq!(
+            UsageAggregateReport::new(
+                vec![group; over_ceiling],
+                UsageAggregateCompleteness::Truncated,
+            ),
+            Err(UsageAggregateGroupOverflowError {
+                returned_groups: over_ceiling,
+            })
+        );
+    }
+
+    #[test]
+    fn call_page_rejects_more_calls_than_the_requested_limit() {
+        let evidence = UsageCallEvidence {
+            scope: UsageCallScope::ContextCompaction,
+            call: ModelCallId::from_uuid(uuid::Uuid::from_u128(0xD4)),
+            session: SessionId::from_uuid(uuid::Uuid::from_u128(0xD5)),
+            model: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
+                uuid::Uuid::from_u128(0xD6),
+            )),
+            credential_profile: UsageCredentialProfileLabel::new("exact:profile-one".to_owned())
+                .expect("fixture label is bounded and discriminated"),
+            provenance: UsageProvenance::Reported,
+            input_semantics: UsageInputTokenSemantics::CacheInclusive,
+            tokens: UsageTokenAxes {
+                input: Some(17),
+                output: Some(5),
+                cache_creation_input: Some(0),
+                cache_read_input: Some(0),
+            },
+            recorded_at: UsageTimestampMicros::new(1_777_777_777_000_000)
+                .expect("fixture timestamp fits"),
+        };
+        let limit = UsageCallPageLimit::new(1).expect("fixture page limit fits");
+
+        assert_eq!(
+            UsageCallPage::new(vec![evidence.clone(), evidence], None, limit),
+            Err(UsageCallPageOverflowError {
+                returned_calls: 2,
+                limit_items: 1,
             })
         );
     }

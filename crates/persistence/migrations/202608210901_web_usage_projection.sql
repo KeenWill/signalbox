@@ -223,6 +223,42 @@ CREATE TABLE web_usage_call_projection (
         DEFERRABLE INITIALLY DEFERRED
 );
 
+-- The projected call kind must correlate with the immutable global identity
+-- record: the identity foreign key alone accepts any existing model_call_id
+-- regardless of its kind, and the projection is append-only, so a direct
+-- insert storing an ordinary call under another kind would misclassify the
+-- physical call permanently. The identity vocabulary spells the ordinary kind
+-- 'ordinary' where the projection spells it 'model_call'.
+CREATE FUNCTION require_web_usage_call_kind_correlation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    identity_kind text;
+    projected_identity_kind text;
+BEGIN
+    SELECT call_kind INTO identity_kind
+      FROM model_call_identity
+     WHERE model_call_id = NEW.model_call_id;
+    projected_identity_kind := identity_kind;
+    IF projected_identity_kind = 'ordinary' THEN
+        projected_identity_kind := 'model_call';
+    END IF;
+    IF NEW.call_kind IS DISTINCT FROM projected_identity_kind THEN
+        RAISE EXCEPTION
+            'usage projection call kind % contradicts identity kind %',
+            NEW.call_kind, identity_kind
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER web_usage_call_kind_matches_identity
+BEFORE INSERT ON web_usage_call_projection
+FOR EACH ROW
+EXECUTE FUNCTION require_web_usage_call_kind_correlation();
+
 CREATE INDEX web_usage_by_recorded_call
     ON web_usage_call_projection (recorded_at DESC, model_call_id DESC);
 CREATE INDEX web_usage_by_session_recorded_call

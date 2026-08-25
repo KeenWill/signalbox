@@ -6736,27 +6736,51 @@ pub struct UsageCallQuery {
     pub after: Option<UsageCallCursor>,
 }
 
+pub enum UsageCredentialProfileLabelError {
+    Empty,
+    Oversized { rejected_utf8_bytes: usize },
+    UndiscriminatedForm,
+}
+
+pub struct UsageCredentialProfileLabel(/* private String */);
+impl UsageCredentialProfileLabel {
+    pub fn new(label: String) -> Result<Self, UsageCredentialProfileLabelError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+
 pub struct UsageCallEvidence {
     pub scope: UsageCallScope,
     pub call: ModelCallId,
     pub session: SessionId,
     pub model: ResolvedProviderTarget,
-    pub credential_profile: String,
+    pub credential_profile: UsageCredentialProfileLabel,
     pub provenance: UsageProvenance,
     pub input_semantics: UsageInputTokenSemantics,
     pub tokens: UsageTokenAxes,
     pub recorded_at: UsageTimestampMicros,
 }
 
-pub struct UsageCallPage {
-    pub calls: Vec<UsageCallEvidence>,
-    pub next: Option<UsageCallCursor>,
+pub struct UsageCallPageOverflowError {
+    pub returned_calls: usize,
+    pub limit_items: u16,
+}
+
+pub struct UsageCallPage { /* private */ }
+impl UsageCallPage {
+    pub fn new(
+        calls: Vec<UsageCallEvidence>,
+        next: Option<UsageCallCursor>,
+        limit: UsageCallPageLimit,
+    ) -> Result<Self, UsageCallPageOverflowError>;
+    pub fn calls(&self) -> &[UsageCallEvidence];
+    pub const fn next(&self) -> Option<UsageCallCursor>;
 }
 
 pub struct UsageAggregateKey {
     pub call_kind: UsageCallKind,
     pub model: ResolvedProviderTarget,
-    pub credential_profile: String,
+    pub credential_profile: UsageCredentialProfileLabel,
     pub provenance: UsageProvenance,
     pub input_semantics: UsageInputTokenSemantics,
     pub coverage: UsageTokenCoverage,
@@ -6765,16 +6789,39 @@ pub struct UsageAggregateKey {
 pub enum UsageCacheNormalization { Unsafe, Safe }
 pub enum UsageAggregateCompleteness { Complete, Truncated }
 
-pub struct UsageAggregateGroup {
-    pub key: UsageAggregateKey,
-    pub call_count: u64,
-    pub tokens: UsageAggregateTokenAxes,
-    pub cache_normalization: UsageCacheNormalization,
+pub enum UsageTokenAxis { Input, Output, CacheCreationInput, CacheReadInput }
+
+pub struct UsageAggregateCoverageError {
+    pub axis: UsageTokenAxis,
+    pub declared: UsageTokenPresence,
 }
 
-pub struct UsageAggregateReport {
-    pub groups: Vec<UsageAggregateGroup>,
-    pub completeness: UsageAggregateCompleteness,
+pub struct UsageAggregateGroup { /* private */ }
+impl UsageAggregateGroup {
+    pub fn new(
+        key: UsageAggregateKey,
+        call_count: u64,
+        tokens: UsageAggregateTokenAxes,
+        cache_normalization: UsageCacheNormalization,
+    ) -> Result<Self, UsageAggregateCoverageError>;
+    pub const fn key(&self) -> &UsageAggregateKey;
+    pub const fn call_count(&self) -> u64;
+    pub const fn tokens(&self) -> UsageAggregateTokenAxes;
+    pub const fn cache_normalization(&self) -> UsageCacheNormalization;
+}
+
+pub struct UsageAggregateGroupOverflowError {
+    pub returned_groups: usize,
+}
+
+pub struct UsageAggregateReport { /* private */ }
+impl UsageAggregateReport {
+    pub fn new(
+        groups: Vec<UsageAggregateGroup>,
+        completeness: UsageAggregateCompleteness,
+    ) -> Result<Self, UsageAggregateGroupOverflowError>;
+    pub fn groups(&self) -> &[UsageAggregateGroup];
+    pub const fn completeness(&self) -> UsageAggregateCompleteness;
 }
 
 pub trait UsageReader {
@@ -11846,7 +11893,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
 | application: search                                | 21 (+4 free fn) (incl. 2 traits) |
-| application: usage                                 | 30 (+4 free fn) (incl. 1 trait)  |
+| application: usage                                 | 36 (+4 free fn) (incl. 1 trait)  |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 36 (incl. 8 traits)              |
 | application: tool_loop                             | 27 (incl. 5 traits)              |
@@ -11867,4 +11914,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 13                               |
-| **signalbox-application total**                    | **385 (+18 free fn)**            |
+| **signalbox-application total**                    | **391 (+18 free fn)**            |

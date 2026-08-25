@@ -24,7 +24,11 @@ reference. The exact reference is retained once in that mapping and is not
 copied into each projected call; reads and aggregates use only its bounded,
 collision-free profile label. Each physical token axis is either absent or an
 exact integer in the `u64` domain. Aggregate token sums use `u128`, so every sum
-admitted by the bounded source-call ceiling remains exact.
+admitted by the bounded source-call ceiling remains exact. A projected row's
+call kind must correlate with the call's immutable global identity record: an
+insertion guard rejects any row — including one from maintenance SQL — whose
+kind contradicts that identity, because the append-only projection would
+otherwise misclassify the physical call permanently.
 
 ## Compatibility grouping
 
@@ -43,6 +47,14 @@ An aggregate consumes at most 10,000 newest matching calls and returns at most
 that records truncation when either source calls or groups exceed those hard
 safety ceilings. Why: bounding before grouping prevents an unscoped lifetime
 query from imposing work proportional to retained history.
+
+The result shapes hold their bounds by construction rather than by adapter
+discipline: the credential-profile label is a checked bounded discriminated
+type, a group's optional sums must agree with its key's declared presence
+coverage, a report cannot carry more than the group ceiling, and a detail page
+cannot exceed its requested limit. A reader result that would violate any of
+these is unconstructable, and the PostgreSQL adapter fails closed on a
+projection row that would require one.
 
 ## Selection and time
 

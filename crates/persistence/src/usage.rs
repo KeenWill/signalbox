@@ -6,10 +6,10 @@ use rust_decimal::Decimal;
 use signalbox_application::{
     UsageAggregateCompleteness, UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport,
     UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallCursor, UsageCallEvidence,
-    UsageCallKind, UsageCallOrder, UsageCallPage, UsageCallQuery, UsageCallScope,
-    UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageReader, UsageTimestampMicros,
-    UsageTokenAxes, UsageTokenCoverage, UsageTokenPresence, max_usage_aggregate_calls,
-    max_usage_aggregate_groups, max_usage_credential_profile_utf8_bytes,
+    UsageCallKind, UsageCallOrder, UsageCallPage, UsageCallPageLimit, UsageCallQuery,
+    UsageCallScope, UsageCredentialProfileLabel, UsageInputTokenSemantics, UsageProvenance,
+    UsageQuery, UsageReader, UsageTimestampMicros, UsageTokenAxes, UsageTokenCoverage,
+    UsageTokenPresence, max_usage_aggregate_calls, max_usage_aggregate_groups,
 };
 use signalbox_domain::{
     ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId,
@@ -330,10 +330,8 @@ impl UsageRepository {
             .take(limit)
             .map(decode_aggregate)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(UsageAggregateReport {
-            groups,
-            completeness,
-        })
+        UsageAggregateReport::new(groups, completeness)
+            .map_err(|_| UsageProjectionCorruption::Invalid("aggregate group ceiling").into())
     }
 
     /// Reads one strict terminal-time/UUID keyset page.
@@ -358,7 +356,7 @@ impl UsageRepository {
         let page_probe = builder.bind(StatementBind::Count(i64::from(query.limit.get()) + 1));
         let sql = calls_newest_sql(&where_clause, page_probe);
         let rows = builder.query(sql).fetch_all(&self.pool).await?;
-        decode_call_page(rows, usize::from(query.limit.get()))
+        decode_call_page(rows, query.limit)
     }
 }
 
@@ -416,11 +414,14 @@ fn timestamp_to_offset(
         .map_err(|_| UsageProjectionCorruption::Invalid("timestamp"))
 }
 
-fn decode_call_page(rows: Vec<PgRow>, limit: usize) -> Result<UsageCallPage, UsageRepositoryError> {
-    let has_more = rows.len() > limit;
-    let mut calls = rows
+fn decode_call_page(
+    rows: Vec<PgRow>,
+    limit: UsageCallPageLimit,
+) -> Result<UsageCallPage, UsageRepositoryError> {
+    let has_more = rows.len() > usize::from(limit.get());
+    let calls = rows
         .into_iter()
-        .take(limit)
+        .take(usize::from(limit.get()))
         .map(decode_call)
         .collect::<Result<Vec<_>, _>>()?;
     let next = if has_more {
@@ -431,19 +432,12 @@ fn decode_call_page(rows: Vec<PgRow>, limit: usize) -> Result<UsageCallPage, Usa
     } else {
         None
     };
-    Ok(UsageCallPage {
-        calls: std::mem::take(&mut calls),
-        next,
-    })
+    UsageCallPage::new(calls, next, limit)
+        .map_err(|_| UsageProjectionCorruption::Invalid("page ceiling").into())
 }
 
 fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
-    let credential_profile: String = row.try_get("credential_reference")?;
-    if credential_profile.is_empty()
-        || credential_profile.len() > usize::from(max_usage_credential_profile_utf8_bytes())
-    {
-        return Err(UsageProjectionCorruption::Invalid("credential profile").into());
-    }
+    let credential_profile = decode_credential_profile(&row)?;
     let call_kind = decode_call_kind(row.try_get("call_kind")?)?;
     let turn = row
         .try_get::<Option<Uuid>, _>("turn_id")?
@@ -471,34 +465,37 @@ fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
 }
 
 fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryError> {
-    let credential_profile: String = row.try_get("credential_reference")?;
-    if credential_profile.is_empty()
-        || credential_profile.len() > usize::from(max_usage_credential_profile_utf8_bytes())
-    {
-        return Err(UsageProjectionCorruption::Invalid("credential profile").into());
-    }
+    let credential_profile = decode_credential_profile(&row)?;
     let call_count = u64::try_from(row.try_get::<i64, _>("call_count")?)
         .map_err(|_| UsageProjectionCorruption::Invalid("call count"))?;
-    Ok(UsageAggregateGroup {
-        key: UsageAggregateKey {
-            call_kind: decode_call_kind(row.try_get("call_kind")?)?,
-            model: decode_model(&row)?,
-            credential_profile,
-            provenance: decode_provenance(row.try_get("usage_provenance_kind")?)?,
-            input_semantics: decode_input_semantics(
-                row.try_get("usage_input_includes_cache_tokens")?,
-            ),
-            coverage: UsageTokenCoverage {
-                input: decode_presence(row.try_get("has_input")?),
-                output: decode_presence(row.try_get("has_output")?),
-                cache_creation_input: decode_presence(row.try_get("has_cache_creation")?),
-                cache_read_input: decode_presence(row.try_get("has_cache_read")?),
-            },
+    let key = UsageAggregateKey {
+        call_kind: decode_call_kind(row.try_get("call_kind")?)?,
+        model: decode_model(&row)?,
+        credential_profile,
+        provenance: decode_provenance(row.try_get("usage_provenance_kind")?)?,
+        input_semantics: decode_input_semantics(row.try_get("usage_input_includes_cache_tokens")?),
+        coverage: UsageTokenCoverage {
+            input: decode_presence(row.try_get("has_input")?),
+            output: decode_presence(row.try_get("has_output")?),
+            cache_creation_input: decode_presence(row.try_get("has_cache_creation")?),
+            cache_read_input: decode_presence(row.try_get("has_cache_read")?),
         },
+    };
+    UsageAggregateGroup::new(
+        key,
         call_count,
-        tokens: decode_aggregate_tokens(&row)?,
-        cache_normalization: decode_cache_normalization(row.try_get("cache_normalization_safe")?),
-    })
+        decode_aggregate_tokens(&row)?,
+        decode_cache_normalization(row.try_get("cache_normalization_safe")?),
+    )
+    .map_err(|_| UsageProjectionCorruption::Invalid("aggregate token coverage").into())
+}
+
+fn decode_credential_profile(
+    row: &PgRow,
+) -> Result<UsageCredentialProfileLabel, UsageRepositoryError> {
+    let credential_profile: String = row.try_get("credential_reference")?;
+    UsageCredentialProfileLabel::new(credential_profile)
+        .map_err(|_| UsageProjectionCorruption::Invalid("credential profile").into())
 }
 
 const fn decode_cache_normalization(safe: bool) -> UsageCacheNormalization {

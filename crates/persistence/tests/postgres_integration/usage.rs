@@ -136,12 +136,12 @@ fn aggregate_signature(
     report: &UsageAggregateReport,
 ) -> BTreeMap<(ProviderModelIdentity, UsageProvenance), (u64, Option<u128>)> {
     report
-        .groups
+        .groups()
         .iter()
         .map(|group| {
             (
-                (group.key.model.identity(), group.key.provenance),
-                (group.call_count, group.tokens.input),
+                (group.key().model.identity(), group.key().provenance),
+                (group.call_count(), group.tokens().input),
             )
         })
         .collect()
@@ -152,9 +152,9 @@ fn paged_evidence_signature(
     second: &UsageCallPage,
 ) -> BTreeMap<ModelCallId, (UsageProvenance, Option<u64>)> {
     first
-        .calls
+        .calls()
         .iter()
-        .chain(&second.calls)
+        .chain(second.calls())
         .map(|call| (call.call, (call.provenance, call.tokens.input)))
         .collect()
 }
@@ -198,18 +198,18 @@ async fn mixed_provenance_aggregates_reconcile_with_exact_paged_call_evidence()
     .await?;
     let repository = UsageRepository::new(pool.clone());
     let first_page = repository.calls(call_query(2, None)).await?;
-    let second_page = repository.calls(call_query(2, first_page.next)).await?;
+    let second_page = repository.calls(call_query(2, first_page.next())).await?;
     let report = repository.aggregate(all_usage_query()).await?;
     let all_calls = [
-        first_page.calls[0].clone(),
-        first_page.calls[1].clone(),
-        second_page.calls[0].clone(),
+        first_page.calls()[0].clone(),
+        first_page.calls()[1].clone(),
+        second_page.calls()[0].clone(),
     ];
 
-    assert_eq!(first_page.calls.len(), 2);
-    assert!(first_page.next.is_some());
-    assert_eq!(second_page.calls.len(), 1);
-    assert_eq!(second_page.next, None);
+    assert_eq!(first_page.calls().len(), 2);
+    assert!(first_page.next().is_some());
+    assert_eq!(second_page.calls().len(), 1);
+    assert_eq!(second_page.next(), None);
     assert_eq!(
         paged_evidence_signature(&first_page, &second_page),
         evidence_signature(&all_calls)
@@ -235,7 +235,7 @@ async fn mixed_provenance_aggregates_reconcile_with_exact_paged_call_evidence()
             ),
         ])
     );
-    assert_eq!(report.completeness, UsageAggregateCompleteness::Complete);
+    assert_eq!(report.completeness(), UsageAggregateCompleteness::Complete);
 
     pool.close().await;
     drop(container);
@@ -270,9 +270,9 @@ async fn usage_exact_selection_filters_call_evidence() -> Result<(), Box<dyn Err
             after: None,
         })
         .await?;
-    assert_eq!(page.calls.len(), 1);
-    assert_eq!(page.calls[0].call, fixture.call);
-    assert_eq!(page.calls[0].tokens.output, Some(SELECTED_OUTPUT_TOKENS));
+    assert_eq!(page.calls().len(), 1);
+    assert_eq!(page.calls()[0].call, fixture.call);
+    assert_eq!(page.calls()[0].tokens.output, Some(SELECTED_OUTPUT_TOKENS));
 
     pool.close().await;
     drop(container);
@@ -334,15 +334,15 @@ async fn mismatched_session_and_turn_selection_reads_empty_bounded_evidence()
         })
         .await?;
 
-    assert_eq!(mismatched_page.calls, Vec::new());
-    assert_eq!(mismatched_page.next, None);
-    assert_eq!(mismatched_report.groups, Vec::new());
+    assert_eq!(mismatched_page.calls().to_vec(), Vec::new());
+    assert_eq!(mismatched_page.next(), None);
+    assert_eq!(mismatched_report.groups().to_vec(), Vec::new());
     assert_eq!(
-        mismatched_report.completeness,
+        mismatched_report.completeness(),
         UsageAggregateCompleteness::Complete
     );
-    assert_eq!(matched_page.calls[0].call, owning.call);
-    assert_eq!(matched_page.calls[0].session, owning.session);
+    assert_eq!(matched_page.calls()[0].call, owning.call);
+    assert_eq!(matched_page.calls()[0].session, owning.session);
 
     pool.close().await;
     drop(container);
@@ -369,7 +369,7 @@ async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Bo
         })
         .await?;
     let next_microsecond =
-        signalbox_application::UsageTimestampMicros::new(page.calls[0].recorded_at.get() + 1)?;
+        signalbox_application::UsageTimestampMicros::new(page.calls()[0].recorded_at.get() + 1)?;
     let excluded = repository
         .aggregate(UsageQuery {
             time: UsageTimeRange::new(Some(UsageTimeFromInclusive(next_microsecond)), None)?,
@@ -377,8 +377,8 @@ async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Bo
         })
         .await?;
 
-    assert_eq!(page.calls[0].call, fixture.call);
-    assert_eq!(excluded.groups, Vec::new());
+    assert_eq!(page.calls()[0].call, fixture.call);
+    assert_eq!(excluded.groups().to_vec(), Vec::new());
 
     pool.close().await;
     drop(container);
@@ -432,9 +432,9 @@ async fn incomplete_cache_inclusive_aggregates_are_not_normalization_safe()
         })
         .await?;
 
-    assert_eq!(report.groups.len(), 1);
+    assert_eq!(report.groups().len(), 1);
     assert_eq!(
-        report.groups[0].cache_normalization,
+        report.groups()[0].cache_normalization(),
         UsageCacheNormalization::Unsafe
     );
 
@@ -562,6 +562,35 @@ async fn usage_projection_has_combined_selection_indexes() -> Result<(), Box<dyn
         "resolved_provider_model_identity_id, usage_provenance_kind, call_kind, \
          recorded_at DESC, model_call_id DESC"
     ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_rejects_call_kind_contradicting_global_identity() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _repository, _authorized) =
+        authorize_checkpointed_model_call(&pool, 0x9c_000).await?;
+    let error = sqlx::query(
+        "INSERT INTO web_usage_call_projection (
+             model_call_id, call_kind, session_id, turn_id,
+             resolved_provider_model_identity_id, credential_profile_label,
+             usage_provenance_kind, usage_input_includes_cache_tokens
+         )
+         VALUES ($1, 'context_compaction', $2, NULL, $3, 'exact:guard-test', 'reported', true)",
+    )
+    .bind(fixture.call.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(0x9c_0f0))
+    .execute(&pool)
+    .await
+    .expect_err("contradicted call kind must be rejected");
+
+    assert!(error.to_string().contains("contradicts identity kind"));
 
     pool.close().await;
     drop(container);
@@ -964,16 +993,16 @@ async fn terminal_approval_judge_usage_enters_dedicated_call_evidence() -> Resul
         })
         .await?;
 
-    assert_eq!(page.calls.len(), 1);
-    assert_eq!(page.calls[0].call, judge_call);
+    assert_eq!(page.calls().len(), 1);
+    assert_eq!(page.calls()[0].call, judge_call);
     assert_eq!(
-        page.calls[0].scope,
+        page.calls()[0].scope,
         signalbox_application::UsageCallScope::ApprovalJudge(fixture.turn)
     );
-    assert_eq!(page.calls[0].tokens.input, Some(JUDGE_INPUT_TOKENS));
-    assert_eq!(page.calls[0].tokens.output, Some(JUDGE_OUTPUT_TOKENS));
-    assert_eq!(page.calls[0].tokens.cache_creation_input, None);
-    assert_eq!(page.calls[0].tokens.cache_read_input, None);
+    assert_eq!(page.calls()[0].tokens.input, Some(JUDGE_INPUT_TOKENS));
+    assert_eq!(page.calls()[0].tokens.output, Some(JUDGE_OUTPUT_TOKENS));
+    assert_eq!(page.calls()[0].tokens.cache_creation_input, None);
+    assert_eq!(page.calls()[0].tokens.cache_read_input, None);
 
     pool.close().await;
     drop(container);
@@ -1028,16 +1057,16 @@ async fn terminal_context_compaction_usage_enters_session_level_call_evidence()
         })
         .await?;
 
-    assert_eq!(page.calls.len(), 1);
-    assert_eq!(page.calls[0].call.into_uuid(), compaction_call);
+    assert_eq!(page.calls().len(), 1);
+    assert_eq!(page.calls()[0].call.into_uuid(), compaction_call);
     assert_eq!(
-        page.calls[0].scope,
+        page.calls()[0].scope,
         signalbox_application::UsageCallScope::ContextCompaction
     );
-    assert_eq!(page.calls[0].tokens.input, Some(17));
-    assert_eq!(page.calls[0].tokens.output, Some(5));
+    assert_eq!(page.calls()[0].tokens.input, Some(17));
+    assert_eq!(page.calls()[0].tokens.output, Some(5));
     assert_eq!(
-        page.calls[0].input_semantics,
+        page.calls()[0].input_semantics,
         signalbox_application::UsageInputTokenSemantics::CacheInclusive
     );
 
