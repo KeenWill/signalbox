@@ -128,6 +128,13 @@ concurrency:
 
 permissions: {}
 
+# Matches the Rust workflow, whose workspace-tests job writes the shared
+# cache: both the cache key and cargo's own artifact fingerprints
+# incorporate RUSTFLAGS, so restore-only jobs must build identically
+# to reuse it.
+env:
+  RUSTFLAGS: "-D warnings"
+
 jobs:
   eligibility:
     name: Tool eval eligibility
@@ -169,13 +176,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        family: [git, workspace, web, exec]
-    runs-on: ubuntu-latest
+        include:
+          - family: git
+            runner: signalbox-docker
+          - family: workspace
+            runner: signalbox-docker
+          - family: web
+            runner: signalbox-docker
+          - family: exec
+            runner: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
       - name: Install Bubblewrap for the exec family
         if: ${{ matrix.family == 'exec' }}
@@ -198,7 +214,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: daemon-tool-eval-${{ matrix.family }}
+          shared-key: rust
+          save-if: false
       - name: Build the tool-eval binary without credentials
         id: build
         run: |

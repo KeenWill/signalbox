@@ -444,6 +444,39 @@ impl StartEligibleTurnTransaction for StartEligibleTurnRepository {
     ) -> Result<StartEligibleTurnOutcome, Self::Error> {
         StartEligibleTurnRepository::handle(self, session, identities).await
     }
+
+    async fn handle_with_activation_observer(
+        &mut self,
+        session: SessionId,
+        identities: AcceptedInputTurnActivationIdentities,
+        observer: std::sync::Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> Result<StartEligibleTurnOutcome, Self::Error> {
+        let mut transaction = self.pool.begin().await?;
+        let decision = handle_in_transaction(&mut transaction, session, identities).await;
+
+        match decision {
+            Ok(TransactionDecision::Commit(outcome)) => {
+                if let StartEligibleTurnOutcome::Activated(activated) = &outcome {
+                    observer(activated.turn());
+                }
+                transaction.commit().await.map_err(|error| {
+                    let commit_ambiguous = commit_failure_is_ambiguous(&error);
+                    StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous)
+                })?;
+                Ok(outcome)
+            }
+            Ok(TransactionDecision::Rollback(outcome)) => {
+                transaction.rollback().await?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback().await {
+                    return Err(rollback_error.into());
+                }
+                Err(error)
+            }
+        }
+    }
 }
 
 async fn prepare_preview(

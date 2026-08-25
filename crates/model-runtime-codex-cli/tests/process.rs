@@ -1981,6 +1981,7 @@ async fn stderr_credential_rejection_is_classified_before_exit_status() {
     let error = provider_error(&result.evidence);
 
     assert_eq!(error.kind, ProviderErrorKind::CredentialRejected);
+    assert!(!error.non_acceptance_proven);
     assert!(
         !error
             .native
@@ -2063,6 +2064,35 @@ async fn a_turn_failed_echo_after_a_stream_error_keeps_the_typed_provider_error(
     let error = provider_error(&result.evidence);
 
     assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+    assert!(error.non_acceptance_proven);
+    assert_eq!(
+        error.native.message.as_deref(),
+        Some(fixtures::STREAM_ERROR_MESSAGE)
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+/// A stream-level `error` that the process never echoes as `turn.failed`
+/// classifies the cause but proves nothing about acceptance.
+///
+/// The substitution contract admits the Codex proof only on the exact,
+/// noncontradictory `turn.failed` closure. A truncated stream, or an exit after
+/// a lone `error` event, may still follow a request the provider accepted, so
+/// reporting the proof here would let credential-pool rotation reissue the turn
+/// under a second account and duplicate billed work.
+#[tokio::test]
+async fn a_stream_error_without_its_turn_failed_echo_proves_no_non_acceptance() {
+    let result = execute_scenario(
+        "error_without_turn_failed",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let error = provider_error(&result.evidence);
+
+    assert_eq!(error.kind, ProviderErrorKind::QuotaExhausted);
+    assert!(!error.non_acceptance_proven);
     assert_eq!(
         error.native.message.as_deref(),
         Some(fixtures::STREAM_ERROR_MESSAGE)
@@ -2893,12 +2923,22 @@ async fn cancellation_after_a_terminal_marker_preserves_completion_evidence() {
 /// A leader that already exited zero after its terminal marker keeps its
 /// completion evidence at the exchange deadline even while a surviving
 /// descendant holds the inherited stdout handle open.
-#[cfg(unix)]
-#[tokio::test]
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "cygwin",
+        target_os = "horizon",
+        target_os = "openbsd",
+        target_os = "redox",
+        target_os = "wasi"
+    ))
+))]
+#[tokio::test(start_paused = true)]
 async fn inherited_stdout_cannot_extend_process_cleanup_past_deadline() {
     let temporary = tempfile::tempdir().expect("test working directory is created");
     let executable = stdout_inheriting_completed_cli(temporary.path());
-    let runtime = runtime_with_timeout(temporary.path(), executable, Duration::from_secs(5));
+    let exchange_timeout = Duration::from_secs(5);
+    let runtime = runtime_with_timeout(temporary.path(), executable, exchange_timeout);
     let prepared = prepare(
         &runtime,
         operation(
@@ -2908,17 +2948,30 @@ async fn inherited_stdout_cannot_extend_process_cleanup_past_deadline() {
         ),
     )
     .await;
-    let mut observations = Vec::new();
+    let process_group_path = temporary.path().join("fake-codex-stdout-inherit-group");
+    let execution = tokio::spawn(async move {
+        let mut observations = Vec::new();
+        runtime
+            .execute(prepared, &mut observations, CancellationSignal::never())
+            .await
+    });
 
-    let report = runtime
-        .execute(prepared, &mut observations, CancellationSignal::never())
-        .await;
+    let readiness_path = process_group_path.clone();
+    tokio::task::spawn_blocking(move || {
+        wait_for_recorded_process_group_leader_exit(&readiness_path);
+    })
+    .await
+    .expect("the wall-clock readiness barrier completes");
+    tokio::time::advance(exchange_timeout).await;
+    let report = execution
+        .await
+        .expect("the deadline-driven execution task completes");
 
     assert_eq!(
         completed(&report.evidence).content,
         vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
     );
-    assert_recorded_process_group_exited(temporary.path().join("fake-codex-stdout-inherit-group"));
+    assert_recorded_process_group_exited(process_group_path);
 }
 
 /// A leader that exited nonzero before any terminal marker keeps its exit
@@ -3320,6 +3373,71 @@ async fn subprocess_environment_is_allowlisted() {
         vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
     );
     assert_eq!(result.spawns, 1);
+}
+
+#[tokio::test]
+async fn selected_member_home_reaches_each_spawn_and_changes_with_the_reference() {
+    // Pool rotation reaches the adapter by pinning the successor member's
+    // credential reference on the next operation. Exercise both sides of that
+    // boundary: the same runtime must deliver the pre- and post-rotation homes
+    // from those exact references.
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let first_home = temporary.path().join("synthetic-home-a");
+    let second_home = temporary.path().join("synthetic-home-b");
+    std::fs::create_dir(&first_home).expect("first synthetic home is created");
+    std::fs::create_dir(&second_home).expect("second synthetic home is created");
+    std::fs::write(first_home.join("fixture-marker"), "synthetic")
+        .expect("first synthetic home is nonempty");
+    std::fs::write(second_home.join("fixture-marker"), "synthetic")
+        .expect("second synthetic home is nonempty");
+    let first_reference = CredentialReference::new("codex-a");
+    let second_reference = CredentialReference::new("codex-b");
+    let mut config = CodexCliConfig::new(fake_cli(), temporary.path(), first_reference.clone())
+        .with_credential_homes([
+            (first_reference.clone(), first_home.clone()),
+            (second_reference.clone(), second_home.clone()),
+        ]);
+    config.exchange_timeout = OFFLINE_HARNESS_TIMEOUT;
+    config.interrupt_grace = Duration::from_millis(100);
+    let runtime = CodexCliRuntime::new(config).expect("synthetic homes are admitted");
+    let mut first_operation = operation(
+        "selected_credential_home",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    first_operation.credential_reference = first_reference;
+    let first_prepared = prepare(&runtime, first_operation).await;
+    let mut first_observations = Vec::new();
+    runtime
+        .execute(
+            first_prepared,
+            &mut first_observations,
+            CancellationSignal::never(),
+        )
+        .await;
+    let delivered_first =
+        std::fs::read_to_string(temporary.path().join("fake-codex-selected-home"))
+            .expect("first spawn records its synthetic home");
+    assert_eq!(delivered_first, first_home.to_string_lossy());
+    let mut second_operation = operation(
+        "selected_credential_home",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    second_operation.credential_reference = second_reference;
+    let second_prepared = prepare(&runtime, second_operation).await;
+    let mut second_observations = Vec::new();
+    runtime
+        .execute(
+            second_prepared,
+            &mut second_observations,
+            CancellationSignal::never(),
+        )
+        .await;
+    let delivered_second =
+        std::fs::read_to_string(temporary.path().join("fake-codex-selected-home"))
+            .expect("second spawn records its synthetic home");
+    assert_eq!(delivered_second, second_home.to_string_lossy());
 }
 
 /// INV-035: credential-shaped CLI text and tool JSON are redacted before
@@ -4360,16 +4478,7 @@ fn read_optional(path: std::path::PathBuf) -> String {
 fn assert_recorded_process_group_exited(path: std::path::PathBuf) {
     const PROCESS_EXIT_OBSERVATION_TIMEOUT: Duration = Duration::from_secs(5);
 
-    let record = std::fs::read_to_string(path)
-        .expect("the fake CLI records its process group and descendant identities");
-    let raw_process_group = record
-        .lines()
-        .find_map(|line| line.strip_prefix("process_group="))
-        .expect("the process-group record names the process group")
-        .parse::<i32>()
-        .expect("the recorded process-group identity is a process id");
-    let process_group = rustix::process::Pid::from_raw(raw_process_group)
-        .expect("the process-group identity is nonzero");
+    let process_group = recorded_process_group(&path);
     let deadline = std::time::Instant::now() + PROCESS_EXIT_OBSERVATION_TIMEOUT;
     while process_group_exists(process_group) && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
@@ -4380,6 +4489,20 @@ fn assert_recorded_process_group_exited(path: std::path::PathBuf) {
     );
 }
 
+#[cfg(unix)]
+fn recorded_process_group(path: &Path) -> rustix::process::Pid {
+    let record = std::fs::read_to_string(path)
+        .expect("the fake CLI records its process group and descendant identities");
+    let raw_process_group = record
+        .lines()
+        .find_map(|line| line.strip_prefix("process_group="))
+        .expect("the process-group record names the process group")
+        .parse::<i32>()
+        .expect("the recorded process-group identity is a process id");
+    rustix::process::Pid::from_raw(raw_process_group)
+        .expect("the process-group identity is nonzero")
+}
+
 #[cfg(not(unix))]
 fn assert_recorded_process_group_exited(_path: std::path::PathBuf) {}
 
@@ -4387,6 +4510,50 @@ fn assert_recorded_process_group_exited(_path: std::path::PathBuf) {}
 fn process_group_exists(process_group: rustix::process::Pid) -> bool {
     rustix::process::test_kill_process_group(process_group).is_ok()
         && process_group_has_live_member(process_group)
+}
+
+#[cfg(all(
+    unix,
+    not(any(
+        target_os = "cygwin",
+        target_os = "horizon",
+        target_os = "openbsd",
+        target_os = "redox",
+        target_os = "wasi"
+    ))
+))]
+fn wait_for_recorded_process_group_leader_exit(path: &Path) {
+    let deadline = std::time::Instant::now() + OFFLINE_HARNESS_TIMEOUT;
+    while std::fs::read_to_string(path)
+        .map(|content| content.lines().count())
+        .unwrap_or_default()
+        == 0
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fake CLI records its process group before the wall-clock bound"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let process_group = recorded_process_group(path);
+    loop {
+        let exited = rustix::process::waitid(
+            rustix::process::WaitId::Pid(process_group),
+            rustix::process::WaitIdOptions::EXITED
+                | rustix::process::WaitIdOptions::NOWAIT
+                | rustix::process::WaitIdOptions::NOHANG,
+        )
+        .expect("the fake CLI leader remains waitable")
+        .is_some();
+        if exited {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the fake CLI leader exits before the wall-clock bound"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// A host whose PID 1 does not promptly reap orphans can hold a fully killed

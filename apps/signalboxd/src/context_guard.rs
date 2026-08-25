@@ -296,6 +296,39 @@ where
                         Err(ModelCallRepositoryError::IdentityCollision(_)) => continue,
                         Err(source) => return Err(ContextGuardedTurnPassError::Operation { turn, source }),
                     };
+                    // An exhausted credential pool leaves no account to
+                    // authenticate the input-token count with, so this pass
+                    // activates the turn call-free and lets ordinary
+                    // preparation record the typed pool-exhaustion closure
+                    // rather than failing the count against an excluded member.
+                    let Some(prospective) = prospective else {
+                        let committed = activation
+                            .commit_preview(preview)
+                            .await
+                            .map_err(|source| ContextGuardedTurnPassError::Activation {
+                                turn: Some(turn),
+                                source,
+                            })?;
+                        match committed {
+                            CommitActivationPreviewOutcome::Stale => continue,
+                            CommitActivationPreviewOutcome::Activated(activated) => {
+                                if activated.session() != session {
+                                    execution.report_post_activation_failure();
+                                    return Err(ContextGuardedTurnPassError::ActivationSessionMismatch(turn));
+                                }
+                                report_guarded_turn_activation(activated.session(), activated.turn());
+                                return execution
+                                    .execute(activated)
+                                    .instrument(guarded_turn_span(session, turn))
+                                    .await
+                                    .map_err(|source| ContextGuardedTurnPassError::Execution {
+                                        stage: TurnPassExecutionStage::Execution,
+                                        turn: Some(turn),
+                                        source,
+                                    });
+                            }
+                        }
+                    };
                     let operation = prospective
                         .render(tools.definitions())
                         .map_err(|source| ContextGuardedTurnPassError::Render { turn, source })?;

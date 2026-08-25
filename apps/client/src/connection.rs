@@ -202,8 +202,10 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         ClientRequest::ImportConversation { .. } => true,
         ClientRequest::CreateSession { .. }
         | ClientRequest::CreateSessionFromTemplate { .. }
+        | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
         | ClientRequest::ListSessions {}
+        | ClientRequest::ReadOperatorStatus {}
         | ClientRequest::UpdateSessionPlacement { .. }
         | ClientRequest::AttachGoal { .. }
         | ClientRequest::ReadGoal { .. }
@@ -233,6 +235,8 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::AppendBlobUpload { .. }
         | ClientRequest::CommitBlobUpload {}
         | ClientRequest::AbortBlobUpload {}
+        | ClientRequest::ReadBlobMetadata { .. }
+        | ClientRequest::ReadBlobChunk { .. }
         | ClientRequest::ReadImportedConversation { .. }
         | ClientRequest::CreateSessionFromImportedFrontier { .. }
         | ClientRequest::ReconcileTurn { .. }
@@ -257,7 +261,8 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
         | ClientRequest::RecordReviewPublicationOutcomes { .. }
         | ClientRequest::ReadReviewOrchestration { .. }
         | ClientRequest::StopTurn { .. }
-        | ClientRequest::DecideToolRequest { .. } => false,
+        | ClientRequest::DecideToolRequest { .. }
+        | ClientRequest::OverrideDeniedToolRequest { .. } => false,
     }
 }
 

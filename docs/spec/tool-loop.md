@@ -8,6 +8,9 @@ verified against PR #433 (`agent/web-search-wiring`). The durable-command
 version cross-link was re-verified through this PR
 (`agent/model-settings-persistence`).
 
+The executor-failure containment contract is verified against this PR
+(`agent/executor-failure-turn-containment`).
+
 The session-delegation scheduling executor and daemon catalog composition are
 verified against PR #462 (`agent/delegation-runtime-daemon-v2`).
 
@@ -19,11 +22,24 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture �
 `Delegated` admitted, `Auto` refused — is verified through this PR
 (`agent/approval-posture-alwaysconfirm`).
 
+The immutable repository-watch authority supplied to a dispatched approval judge
+and the unattended-escalation terminal path are verified against this PR
+(`agent/headless-approval-escalation`).
+
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
+The user override of a delegate denial — its override command, the recorded
+one-shot pre-approval, and the `UserOverride` decision source — is verified
+against this PR (`agent/user-override-denials`).
+
 The change-request-scoped thread mutation contracts and their pre-dispatch
 ownership confirmation are verified through this PR (`agent/thread-ownership`).
+
+The automatic tool-round saturation, 256-round ceiling, and
+retained-frontier-content ceiling contracts are verified through this PR
+(`agent/tool-round-ceiling`) at implementation ref
+`aeaf22867c0c07060bae6dfa26434a013a3c4ceb`.
 
 The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
@@ -115,7 +131,42 @@ All requests produced by one call are one batch. Approval decisions are resolved
 in proposal order, and the turn parks on the earliest undecided request.
 Execution does not begin until the batch has no undecided approval. The next
 model round does not begin until every request has one durable logical
-resolution: executed, denied, or closed by turn end.
+resolution: executed, denied, closed by turn end, or — for a family that
+declares the pre-approval admissibility check below — closed inadmissible.
+
+**Committed unimplemented functionality — pre-approval admissibility.** A family
+may declare that a request is inadmissible on evidence available before any
+approval decision, and where a family declares one it takes precedence over the
+ordinary path for the same condition: an argument-schema failure for such a
+family resolves here, request-level and with no attempt, rather than through the
+prepared-attempt `KnownFailed` route that families without the declaration use.
+The two cannot both run, and the declared check is the earlier of them. The
+instruction family declares two: arguments that do not decode to its schema, and
+a bundle outside the effective eligibility view, both specified by
+[workspace instructions](workspace-instructions.md#enumeration-preview-and-admission).
+Such a request resolves before approval through a request-level transition that
+mints no attempt: it records a fourth durable logical resolution,
+`closed_inadmissible`, carrying the family's typed reason on the request itself,
+and creates no approval state, no judge call, no attempt row, and no executor
+work. It must be request-level, because a tool attempt names its issuing turn
+attempt and a batch parked on an undecided approval has no current turn attempt
+to name — minting one here would either orphan the attempt or force a turn
+attempt into existence under the approval-wait constraints. Storing the reason
+on the request instead is sound because nothing executed: there is no attempt
+history to explain, only a request that was never admissible. The projection
+renders it through the same provider-visible error object as any other typed
+failure, so no new result shape reaches a provider. A request resolved this way
+is not undecided, so the batch is not parked behind it and proposal order
+continues at the next request. It is resolved for the continuation boundary too:
+it projects one `ToolInadmissible` result entry in proposal order, and it
+satisfies the batch-complete condition that creates the fresh continuation turn
+attempt. A batch whose only proposal is inadmissible therefore still prepares
+its next model call rather than stalling with nothing to project. Why this
+rather than deciding approval first: a delegated decision needs evidence the
+daemon can only build for a bundle the session may see, so asking a judge about
+an inadmissible request would mean either exposing metadata the session is not
+entitled to or sending an evidence-free prompt. No present family declares such
+a check.
 
 ## Approval policy and decision sources
 
@@ -128,14 +179,18 @@ implemented decision sources are:
 - `SessionBlanket` — the frozen dangerous blanket supplied daemon-local
   automatic approval;
 - `SessionOverride` — an exact runner-placement tool override supplied automatic
-  approval; and
-- `Delegate` — an authority-checked approval-judge call decided the request.
+  approval;
+- `Delegate` — an authority-checked approval-judge call decided the request; and
+- `UserOverride` — a user-recorded one-shot override of a delegate denial
+  supplied approval when the session re-proposed the denied command.
 
 A delegated decision names the exact direct model selection and dedicated model
 call that made it, and retains the judge rationale as nonempty text of at most
-4,096 bytes. A user decision instead names its exact durable command. Automatic
-policy has no decider or rationale. Neither automated path can claim user agency
-(INV-020).
+4,096 bytes. A user decision instead names its exact durable command. A consumed
+user override names its override durable command and the exact delegate-denied
+request it overrides — user agency exercised in advance through that command.
+Automatic policy has no decider or rationale. Neither automated path can claim
+user agency (INV-020).
 
 Each daemon tool mapping may declare one approval posture: `Auto`, `Delegated`,
 or `Human`. The selected posture is frozen into every resulting request. For
@@ -215,19 +270,60 @@ in model-call history with its selection, resolved provider target, credential
 reference, state, disposition, and reported token usage. Its closed result is
 `Approve`, `Deny`, or `EscalateToHuman`, always with rationale.
 
-The judge may approve or deny only a request frozen as `Delegated`. An
-`EscalateToHuman` result stores the completed call but no approval decision and
-leaves the same request parked. A `KnownFailed`, `Refused`, `Cancelled`, or
-`Ambiguous` terminal judge call likewise retains that park while immediately
-admitting a user decision, so a terminal judge failure cannot strand the
-approval wait. A request frozen as `Human` admits only that escalation result
-from a delegate; a delegate approval or denial is rejected by both domain
-reconstruction and relational provenance constraints (INV-049). Thus delegation
-can narrow authority but never widen it. A completed approve or deny atomically
-records the decision and advances the same proposal-ordered batch transition
-used by a user decision. Each explicit user or delegate decision emits one
-ordered `ToolApprovalDecided` event carrying the decision, decider kind and
-identity, and delegate rationale when present.
+For a turn recorded in the generation a repository-watch dispatch commissioned,
+preparation also reads the immutable dispatch authority linked to that dispatch.
+Pull-request authority contains the dispatch identity, watched repository,
+pull-request number, exact head commit, head repository and branch, and base
+branch; branch authority contains the dispatch identity, repository, and branch.
+The judge receives this structured authority beside the commissioned goal,
+template, and frozen system prompt. A judged turn in any other generation of
+that session — an unrelated successor goal it later accepted — resolves no such
+authority, as does a turn no generation recorded: the dispatch described
+neither. Those turns are prepared, judged, and escalated exactly as in a session
+no dispatch created, which [repository watch](repo-watch.md) states from the
+dispatch side. Every session-derived field is separately delimited and quoted as
+untrusted evidence, and the judge prompt treats it as scope to compare with the
+proposed request rather than as instruction. The context comes from the
+append-only dispatch action and triggering event, not from mutable provider
+state or text reconstructed from the goal.
+
+The judge may approve or deny only a request frozen as `Delegated`. In a session
+without repository-watch dispatch authority, an `EscalateToHuman` result stores
+the completed call but no approval decision and leaves the same request parked.
+A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous` terminal judge call
+likewise retains that attended park while immediately admitting a user decision,
+so a terminal judge failure cannot prevent that decision. In a session judged
+under dispatch authority, no user attends the approval wait — unless steering
+accepted while the judge was outstanding still names the judged turn, which is a
+user attending it, or the session has already recorded an escalation while the
+commissioned goal's authority still stands, which means an operator resumed this
+work by hand — nothing else can, because the block an escalation writes is
+exempt from automatic resumption. Either turn keeps the attended park described
+above: its completed `EscalateToHuman` leaves the turn active and the request
+parked for that user, exactly as in a session no dispatch created, and no steer
+is reclassified or stranded by a terminalization it did not expect. Otherwise a
+completed `EscalateToHuman` closes every unresolved request in the active batch
+as `ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
+judge escalation as its typed cause, and blocks the commissioned goal for
+execution failure while that goal's authority still stands. A generation
+stopped, achieved, or superseded during the provider round-trip is failed but
+not blocked: [goal mode](goal-mode.md) fixes that the authority the block would
+record has already ended, and a released batch whose authority ended this way is
+the stale work [repository watch](repo-watch.md) terminalizes rather than parks.
+The same transaction records an append-only audit row linking the judge call and
+rationale, request, dispatch action, terminal attempt, failure entry, and
+terminal frontier. The blocked goal then participates in the ordinary
+repository-watch release and re-arm rules instead of leaving the active turn
+parked.
+
+A request frozen as `Human` admits only an escalation result from a delegate; a
+delegate approval or denial is rejected by both domain reconstruction and
+relational provenance constraints (INV-049). Thus delegation can narrow
+authority but never widen it. A completed approve or deny atomically records the
+decision and advances the same proposal-ordered batch transition used by a user
+decision. Each explicit user or delegate decision emits one ordered
+`ToolApprovalDecided` event carrying the decision, decider kind and identity,
+and delegate rationale when present.
 
 The consume-and-proceed transaction locks the owning session, validates that the
 request is the turn's earliest undecided request, records the command and
@@ -254,6 +350,74 @@ remaining tool work and the interrupt applies. On the wire this composition is
 the parked wait records the typed
 `interrupt_unavailable_while_awaiting_approval` rejection and leaves the wait
 intact.
+
+A judge denial the user disagrees with is reversed forward, never in place: the
+denial is terminal (INV-027), and the session naturally re-proposes after a
+denial because the denial reason reaches the model at the continuation boundary.
+The canonical `OverrideDeniedToolRequest` command — user-global
+`DurableCommandId`, the owning `SessionId`, and the exact denied
+`ToolRequestId`; equality excludes only the command identifier — records one
+one-shot pre-approval for that re-proposal. Recording verifies every conjunct of
+the override predicate against durable evidence, each with its own recorded
+rejection: the recorded approval is a delegate denial (a user denial or any
+approval admits no override), the denial is terminal (its denied-result entry is
+materialized, so a denial whose round is still resolving cannot be overridden),
+the request belongs to the command's session, and no override is already
+recorded for it — each denial admits at most one override ever. The session is
+part of the canonical payload, unlike `decide_tool_request`, because the
+recorded override is a session-scoped standing fact consumed by a later
+proposal. An applied command durably links the denied request, its denying judge
+call, and the override command.
+
+Recorded overrides are frozen into each prepared model call in the same
+transaction as the dangerous blanket posture, so consumption has blanket-frozen
+semantics with no mid-call races: a prepared call's override inventory is part
+of that call's immutable input, and an override recorded after the call is
+checkpointed takes effect at the next prepared call, never at that one.
+
+Only a still-effective override is frozen, and two things retire one: the
+consuming `UserOverride` approval that names it, and an approval of the
+identical command recorded by any other authority after the denial — the judge
+approving a re-proposal it once denied, a user decision after escalation, or a
+policy approval. The second is what keeps the boundary below from leaking. The
+call that first carries a denial cannot hold that denial's override, so its
+re-proposal is decided without one, and an override left standing after that
+decision would pre-approve a repeat of a command the session has already let
+through. Ordering here is structural rather than clocked, because none of these
+append-only records carries a timestamp. Across turns the order is the
+acceptance position of the input that opened each turn; inside a turn each model
+call owns one turn attempt and attempts chain through their predecessor, so a
+proposal counts as later when its turn was accepted after the denial's or its
+attempt continues the denied proposal's. Both are needed, because the
+re-proposal an override exists for is normally made in the denial's own turn.
+The scope is required rather than decorative — the same command is routinely
+approved and executed earlier in a session, long before a later proposal of it
+is denied, and an unscoped rule would retire most overrides at the instant they
+were recorded.
+
+The continuation that first carries a denial to the model is therefore out of
+reach by design, and this is the boundary of the feature rather than a gap in
+it. That continuation is checkpointed by the same transaction that projects the
+denied result, so at the instant its override inventory freezes no override for
+the denial can exist — the user has not yet been shown the denial to disagree
+with. The user overrides it, the model re-proposes on the following call, and
+that call's frozen inventory carries the override. The accepted cost is one
+extra round; the gain is that a prepared call's approval inputs are fixed at
+checkpoint and no concurrent command can race them.
+
+When the completing call proposes a command whose initial selection would park
+for the judge (`Delegated`) and an unconsumed recorded override matches the
+exact denied command — equal tool name and equal normalized arguments — the
+proposal records an immediate `UserOverride` approval at proposal time instead
+of parking. Each recorded override is consumed at most once per response in
+proposal order, and once ever durably: the consuming decision row names the
+overridden denial through a UNIQUE column, so a second identical proposal parks
+for the judge again. The override substitutes only for the judge: a `Human`,
+`AlwaysConfirm`, or automatic selection is never overridden, and the consuming
+request still freezes the `Delegated` posture. Consumption emits the same
+ordered `ToolApprovalDecided` event as other explicit decisions, carrying the
+override provenance, so the full audit chain — judge denial, override command,
+consuming approval — stays queryable end to end.
 
 ## Registry, placement, and effect metadata
 
@@ -470,15 +634,27 @@ execution and continuation. For each next approved request:
    attempt.
 
 **Committed unimplemented functionality — instruction admission effect.** For a
-successful fresh `instructions.read`, the commit-result transaction also locks
+successful fresh `instructions_read`, the commit-result transaction also locks
 the session's admitted-set head and atomically appends the
 `InstructionAdmission` specified by
 [workspace instructions](workspace-instructions.md#durable-admission-transition)
 with the receipt-only completed result. A stale head, failed read, or failed
-admission validation rolls back both effects. Replay of an already committed
-request returns the recorded receipt and admission link without appending either
-again; a conflicting receipt or link is corruption. No present tool supplies
-this effect until an implementing child advances the owning workspace contract.
+admission validation discards the admission, not the round: the transaction
+commits the terminal typed failure as this attempt's result and leaves the
+admitted-set head and every existing admission untouched. Rolling both back
+would discard a completed executor result and strand the attempt `InFlight`,
+which contradicts the monotonic terminal transition required above and would
+wedge the serialized batch behind an attempt that can never close. The
+distinction is that the executor work already happened outside any transaction;
+what this transaction decides is whether its evidence becomes an admission, and
+"no" is a result to record rather than a reason to forget the attempt. Replay of
+an already committed request returns the recorded receipt and admission link
+without appending either again; a conflicting receipt or link is corruption.
+That head lock's position in the repository-wide order and its mode belong to
+the [persistence lock protocol](persistence-protocol.md#lock-protocol), which
+carries it in the same inventory as this transaction's scheduler lock; this page
+states that the lock is taken, never where or how. No present tool supplies this
+effect until an implementing child advances the owning workspace contract.
 
 The runner durably spools a terminal evidence envelope until `result_recorded`.
 A process exit, timeout, supervisor loss, or channel loss after claim is not a
@@ -519,14 +695,21 @@ cannot strand an issued request or roll back its command.
 
 If the executor returns an operator failure without trustworthy evidence after
 authorization, the service retains the dispatch gate and applies the attempt's
-effect-class crash-loss transition before surfacing that failure. A failed
+effect-class crash-loss transition. A committed classification contains an
+infrastructure or identity-collision failure as the ordinary `CrashClassified`
+outcome, so the affected turn either fails or parks for reconciliation without
+failing unrelated session execution. A fail-closed corruption or caller-or-hub
+bug remains an error after that same classification closes the attempt, so the
+daemon's fatal execution supervisor still stops scheduling. A failed
 classification retains the exact attempt identity and permit for another
-classification pass, and the returned combined error preserves both the executor
-failure and the classification failure. Evidence carrying a different dispatch
-correlation follows the same classification-before-release path, surfacing the
-correlation mismatch only after closure or together with a failed
-classification. The durable attempt therefore cannot remain `InFlight` after the
-gate becomes available to an interrupt.
+classification pass. It also retains whether closure belongs to prior-process
+loss, an executor failure, or a correlation mismatch. An executor failure keeps
+its safe class and cause token, so a later successful classification emits the
+same nonfatal diagnostic or returns the same fatal class; a correlation mismatch
+likewise resurfaces only after closure. The initial combined error preserves
+both the executor failure or mismatch and the classification failure. The
+durable attempt therefore cannot remain `InFlight` after the gate becomes
+available to an interrupt.
 
 If trustworthy executor evidence returns but its commit fails, the service
 retains that exact correlated observation as an opaque linear same-incarnation
@@ -560,7 +743,8 @@ scope.
 An interrupt against a tool recovery wait does not reinterpret or erase the
 ambiguous attempt. It materializes exactly one reference-only result per request
 in proposal order: completed or known-failed attempts use `ToolExecutionResult`,
-denials use `ToolDenied`, and the ambiguous request plus any request without an
+denials use `ToolDenied`, requests already resolved `closed_inadmissible` keep
+`ToolInadmissible`, and the ambiguous request plus any request without an
 ordinary result use `ToolClosed`. The turn then terminalizes as
 `ReconciliationRequired` on that prefix-extending frontier, with the exact tool
 attempt as its ambiguity set and the applied-interrupt proof. Logical closure
@@ -601,11 +785,18 @@ Semantic tool-result entries contain references only:
 - `ToolClosed { request }` references a request closed because its turn ended
   before it could complete ordinary execution, whether it remained undecided or
   was approved but not yet attempted. A crash-lost attempt has durable
-  `KnownFailed` evidence and therefore uses `ToolExecutionResult`.
+  `KnownFailed` evidence and therefore uses `ToolExecutionResult`. **Committed
+  unimplemented functionality.** A fourth entry, `ToolInadmissible { request }`,
+  references a request resolved `closed_inadmissible` by the pre-approval check
+  above. It references the request because that resolution mints no attempt,
+  exactly as `ToolDenied` does, and the request row already carries the family's
+  typed reason. No present family declares such a check, so no present
+  transaction emits this entry.
 
 No result entry copies output, error detail, or denial reason. Attempt evidence
 commits as soon as execution ends, independently of semantic projection. Once
-every request in the batch is executed or denied, one continuation transaction:
+every request in the batch is executed, denied, or closed inadmissible, one
+continuation transaction:
 
 1. appends exactly one result entry per request in proposal order;
 2. consumes every pending steering input in ascending acceptance position and
@@ -614,22 +805,25 @@ every request in the batch is executed or denied, one continuation transaction:
 4. creates the next round's `Prepared` model call against that frontier.
 
 **Committed unimplemented functionality — instruction admission continuation.**
-When `instructions.read` is implemented, this transaction additionally folds the
-batch's durable successful instruction admissions in request order and creates
-exactly one successor turn-instruction manifest authenticated by the new
-`Prepared` model call. No present tool or transaction supplies this fifth
-effect; the compatibility constraint is that the four implemented effects and
-the successor manifest must eventually commit or roll back together.
+When `instructions_read` is implemented, this transaction additionally folds the
+batch's fresh durable successful instruction-admission rows in request order and
+creates exactly one successor turn-instruction manifest authenticated by the new
+`Prepared` model call. An idempotent replay receipt or an `already_admitted`
+receipt contributes no row and cannot duplicate a bundle or alter the successor
+manifest digest. No present tool or transaction supplies this fifth effect; the
+compatibility constraint is that the four implemented effects and the successor
+manifest must eventually commit or roll back together.
 
 When at least one request entered execution, the continuation turn attempt
 already entered `Running` during tool authorization. It owns the new `Prepared`
 call without moving backward; send authorization advances only the call to
-`InFlight` and leaves the attempt `Running`. A denial-only batch never
-authorized an effect, so its continuation attempt remains `Prepared` while it
-owns the new `Prepared` call. Reconstitution and the deferred database assertion
-admit `(Running, Prepared)` or `(Prepared, Prepared)` only for a
-continuation-chain attempt whose exact call frontier contains the current
-batch's complete durable result evidence.
+`InFlight` and leaves the attempt `Running`. A batch that authorized no effect
+at all — denials only, inadmissible requests only, or any mixture of the two,
+since neither kind creates an attempt — leaves its continuation attempt
+`Prepared` while it owns the new `Prepared` call. Reconstitution and the
+deferred database assertion admit `(Running, Prepared)` or
+`(Prepared, Prepared)` only for a continuation-chain attempt whose exact call
+frontier contains the current batch's complete durable result evidence.
 
 Those effects commit or roll back together (INV-036). A newly prepared call ends
 the invocation and is reloaded before provider capability preparation,
@@ -640,29 +834,64 @@ its assistant text and `TurnCompleted` marker terminalize the turn.
 At most 32 requests may appear in one completed provider tool response. A
 response with a thirty-third request closes the producing model call as
 `KnownFailed` without creating a partial batch, request record, or tool-use
-entry. At most 32 provider rounds in one turn may complete with admitted tool
+entry. At most 256 provider rounds in one turn may complete with admitted tool
 requests. The application counts distinct producing calls for the current turn,
 so every multi-request batch counts once and inherited tool history from earlier
-turns does not count. After the thirty-second batch resolves, the ordinary
-continuation transaction still projects all results and creates its fresh
-`Prepared` call; model execution closes that checkpoint as `KnownFailed` before
-provider capability preparation or send. The normal known-failure boundary then
-fails the turn honestly. These durable-content bounds avoid wall-clock policy
-and ensure one model-controlled response or chain cannot retain the progressing
-slot indefinitely.
+turns does not count. After the 256th batch resolves, the ordinary continuation
+transaction still projects all results and creates its fresh `Prepared` call;
+model execution closes that checkpoint as `KnownFailed` before provider
+capability preparation or send. At that enforcement site it emits a warning
+carrying the limit and observed round count, and the guarded pre-send closure
+carries `ToolRoundLimitReached`. The terminal event consequently uses
+`tool_round_limit_reached`, distinct from `capability_known_failure` (INV-071).
+
+The round ceiling bounds latency and provider spend; it does not bound retained
+memory, because it multiplies against the 32-request batch bound and the 1 MiB
+argument and result bounds. Retained content is therefore bounded on its own
+terms: at most 256 MiB of projected frontier content may be rendered into one
+call's provider messages. The bound counts every kind of content the render
+clones, not tool evidence alone — request arguments, result text, error detail,
+and denial reasons, plus assistant text, context summaries, delegated task and
+peer-message content, delivered delegation-outcome content, origin and steering
+user content, and attested imported text. Assistant text carries no length bound
+of its own beyond the transport cap on a single response, so a ceiling counting
+only tool evidence would leave the same round multiplication unbounded through
+the entries it clones without counting. The bound is enforced once the frontier
+projection names its entries and before any of that content is cloned into
+messages — the projection reads the durable frontier by reference for exactly
+that reason — so an over-bound frontier is refused rather than materialized.
+Exceeding it closes the checkpoint through the same pre-send contract as round
+saturation, emitting a warning carrying the ceiling and the observed byte count
+and terminalizing as `tool_round_limit_reached` (INV-071). Because one maximal
+round retains at most 64 MiB of tool evidence, the ceiling admits four maximal
+rounds and leaves the round ceiling operative for the kilobyte-scale results
+executors return in practice.
+
+These durable-content bounds avoid wall-clock policy and ensure one
+model-controlled response or chain cannot retain the progressing slot
+indefinitely or exhaust daemon memory before its guard is reached.
 
 If an applied stop terminalizes before continuation, the same materialization
-algorithm appends results for executed and denied requests, closes every request
-that did not complete ordinary execution as `ToolClosed` in proposal order, then
-appends the proof-bearing terminal marker. The consumed result projection is
-bound to the interrupted turn: reusing this turn's current frontier identity is
-not sufficient, and a projection prepared for another turn cannot terminalize
-this turn with foreign request results even when the yielded source frontier
-matches. A prepared or effect-free crash loss that fails the turn uses that same
-proposal-ordered materialization before `TurnFailed`; the crash-lost
-`KnownFailed` attempt becomes `ToolExecutionResult`, while every other request
-without an ordinary result becomes `ToolClosed`. A request can therefore never
-remain an open logical dependency behind a terminal turn (INV-006).
+algorithm appends results for executed, denied, and already-inadmissible
+requests, closes every remaining request that did not complete ordinary
+execution as `ToolClosed` in proposal order, then appends the proof-bearing
+terminal marker. The consumed result projection is bound to the interrupted
+turn: reusing this turn's current frontier identity is not sufficient, and a
+projection prepared for another turn cannot terminalize this turn with foreign
+request results even when the yielded source frontier matches. A prepared or
+effect-free crash loss that fails the turn uses that same proposal-ordered
+materialization before `TurnFailed`; the crash-lost `KnownFailed` attempt
+becomes `ToolExecutionResult`, while every other request without an ordinary
+result becomes `ToolClosed`. A request can therefore never remain an open
+logical dependency behind a terminal turn (INV-006).
+
+**Committed unimplemented functionality.** A request already resolved
+`closed_inadmissible` is never reclassified by any of these paths. It has a
+durable resolution and a typed reason before the interrupt or crash arrives, and
+because it deliberately has no attempt it would otherwise fall into the
+`ToolClosed` fallback and lose both — reporting a request that was refused on
+its own terms as one the turn ran out of time for. Its result entry is
+`ToolInadmissible` wherever these algorithms name a materialization.
 
 ## Approval waits and restart
 
@@ -816,13 +1045,22 @@ exactly `unknown_tool`, `invalid_arguments`, `execution_failed`,
 `result_too_large`, `crash_lost`, `denied`, or `closed_by_turn_end`. Execution
 failures select their stored error kind and detail, denial selects `denied` and
 its reason, and terminal closure selects `closed_by_turn_end` with null detail.
-OpenAI carries that JSON as ordinary tool-message content because its wire shape
-has no failure flag; Anthropic also receives the provider-neutral failure flag.
-Malformed proposal arguments remain exact after preparation-time credential
-scrubbing on the durable request but replay as the exact provider-neutral JSON
-object `{"signalbox_invalid_arguments":true}`, allowing the paired typed error
-result to reach either provider without pretending the placeholder is durable
-evidence.
+`K` stays closed as written; a family whose failures do not fit it maps into it
+rather than extending it, and may fix `D` to its own closed token vocabulary so
+the projection stays machine-readable. **Committed unimplemented
+functionality.** The instruction family is the one such mapping so far, fixed by
+[workspace instructions](workspace-instructions.md#enumeration-preview-and-admission):
+its four execution-stage failures select `execution_failed` with `D` set to
+exactly one closed reason token and no other text, while its two pre-approval
+reasons, which resolve before approval and create no attempt, select
+`invalid_arguments` with `D` the token `not_eligible` or JSON null for arguments
+that did not decode. OpenAI carries that JSON as ordinary tool-message content
+because its wire shape has no failure flag; Anthropic also receives the
+provider-neutral failure flag. Malformed proposal arguments remain exact after
+preparation-time credential scrubbing on the durable request but replay as the
+exact provider-neutral JSON object `{"signalbox_invalid_arguments":true}`,
+allowing the paired typed error result to reach either provider without
+pretending the placeholder is durable evidence.
 
 The first compiled tool is `current_time`:
 
@@ -1244,12 +1482,15 @@ reconstructing provider history in frontier order; it performs no per-entry
 database round trips while holding the scheduler lock.
 
 `DecideToolRequest` joins the user-global durable-command registry as its own
-typed record family. Adding the dangerous posture originally advanced each
-defaults-bearing command family to kind-scoped storage version 2; version-1
-records reconstitute with `DangerousToolAutoApproval::Disabled`. Later
-system-prompt and template provenance migrations advance the affected families
-independently. The current kind-scoped versions and their compatibility gates
-are owned by
+typed record family, and `OverrideDeniedToolRequest` likewise; the recorded
+override row, its recording and consumption triggers, and the UNIQUE consumption
+column are owned by
+[persistence protocol](persistence-protocol.md#relational-representation).
+Adding the dangerous posture originally advanced each defaults-bearing command
+family to kind-scoped storage version 2; version-1 records reconstitute with
+`DangerousToolAutoApproval::Disabled`. Later system-prompt and template
+provenance migrations advance the affected families independently. The current
+kind-scoped versions and their compatibility gates are owned by
 [identity and commands](identity-and-commands.md#durable-command-records) and
 [persistence protocol](persistence-protocol.md#relational-representation).
 Registry inspection validates the supported version set for the selected kind
@@ -1257,6 +1498,9 @@ rather than applying one global version constant.
 
 ## Open edges
 
+- Replacing direct approval-judge recommendations with graded risk and brief
+  alignment remains recorded under
+  [Graded approval judging](../open-questions.md#graded-approval-judging).
 - Dynamic execution-strategy policy beyond the two named runner profiles,
   model-declared approval expiry and additional high-risk guardrails are
   recorded in [Tool safety](../open-questions.md#tool-safety).

@@ -180,7 +180,7 @@ impl DebugPassFailureSignal {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ObservableDebugPass<Pass> {
     pass: Pass,
     failure: watch::Sender<bool>,
@@ -198,6 +198,12 @@ where
     Pass: EligibilityPass,
 {
     type Error = Pass::Error;
+
+    fn occupancy_expiry_handler(
+        &self,
+    ) -> Option<std::sync::Arc<dyn signalbox_application::SchedulerPassExpiryHandler>> {
+        self.pass.occupancy_expiry_handler()
+    }
 
     fn run(
         &mut self,
@@ -339,7 +345,7 @@ async fn drive_scheduler<WorkSource, Pass>(
 where
     WorkSource: EligibilityWorkSource + Send + 'static,
     WorkSource::Error: ClassifyOperatorFailure,
-    Pass: EligibilityPass + Send + 'static,
+    Pass: EligibilityPass + Clone + Send + 'static,
     Pass::Error: ClassifyOperatorFailure + Send + 'static,
 {
     let (shutdown_sender, shutdown_receiver) = oneshot::channel();

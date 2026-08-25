@@ -7,23 +7,29 @@
 use std::{
     collections::{BTreeSet, HashSet},
     error::Error,
-    num::NonZeroU16,
+    num::{NonZeroU16, NonZeroU64},
 };
 
 use signalbox_application::{
-    RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
-    RepoWatchCheckSuiteObservation, RepoWatchEventIdGenerator, RepoWatchObservation,
+    RepoWatchBranchHead, RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
+    RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
+    RepoWatchConvergenceAssessmentInput, RepoWatchEventContentIdentityV1,
+    RepoWatchEventIdGenerator, RepoWatchEventOccurrenceV1, RepoWatchObservation,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, derive_repo_watch_events,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewDecision,
+    RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWorkflowRunObservation, derive_repo_watch_events,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
     MergeableState, PullRequestBody, PullRequestEventContext, PullRequestEventContextInput,
     PullRequestNumber, PullRequestTitle, ReactionChange, ReactionContent, ReactionSubject,
     RepoWatchAuthorLogin, RepoWatchEvent, RepoWatchEventId, RepoWatchEventKindNameV1,
-    RepoWatchEventKindV1, RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
+    RepoWatchEventKindV1, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
+    WorkflowName,
 };
 use signalbox_persistence::{
+    MIGRATOR, disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels, local_test_connection_options, migrate,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
@@ -31,7 +37,7 @@ use signalbox_persistence::{
         RepoWatchPersistenceCorruption, RepoWatchStoreError,
     },
 };
-use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
+use sqlx::{PgPool, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
     postgres::Postgres,
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
@@ -47,6 +53,7 @@ const BASE_BRANCH: &str = "main";
 const HEAD_BRANCH: &str = "feature/repo-watch";
 const INITIAL_HEAD: &str = "1111111111111111111111111111111111111111";
 const CHANGED_HEAD: &str = "2222222222222222222222222222222222222222";
+const BASE_REVISION: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TITLE: &str = "Persist repository-watch facts";
 const BODY: &str = "A complete fixture pull request body.";
 const AUTHOR: &str = "fixture-author";
@@ -65,9 +72,11 @@ const REACTION_CONTENT: &str = "+1";
 // — or `head_sha` where it should read `review_commit` — still satisfy the
 // round trip, so a cross-wired durable column would be invisible here.
 const REVIEW_REVIEWER: &str = "fixture-reviewer";
+const REVIEW_NODE: &str = "PRR_fixture_review_node";
 const REVIEW_COMMIT: &str = "3333333333333333333333333333333333333333";
 const REACTOR: &str = "fixture-reactor";
 const PULL_REQUEST: u64 = 41;
+const CONTENT_IDENTITY_MIGRATION: i64 = 202608150001;
 const CHECK_SUITE_ID: u64 = 51;
 const CHECK_RUN_ID: u64 = 52;
 const ISSUE_COMMENT_ID: u64 = 61;
@@ -78,7 +87,8 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -93,6 +103,54 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .await?;
     migrate(&pool).await?;
     Ok((container, pool))
+}
+
+async fn postgres_before_content_identity()
+-> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < CONTENT_IDENTITY_MIGRATION)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+    Ok((container, pool))
+}
+
+async fn apply_content_identity_migration(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .filter(|migration| migration.version >= CONTENT_IDENTITY_MIGRATION)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -110,18 +168,43 @@ fn repository() -> Result<RepositorySlug, Box<dyn Error>> {
 }
 
 fn observation(head: Option<&str>) -> Result<RepoWatchObservation, Box<dyn Error>> {
+    observation_at_base(head, BASE_REVISION)
+}
+
+fn observation_at_base(
+    head: Option<&str>,
+    base_revision: &str,
+) -> Result<RepoWatchObservation, Box<dyn Error>> {
     let pull_requests = head.map(pull_request).transpose()?.into_iter().collect();
     Ok(RepoWatchObservation::new(
         Vec::new(),
         RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
             pull_requests,
             workflow_runs: Vec::new(),
-            branch_heads: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                BranchName::try_new(BASE_BRANCH.to_owned())?,
+                CommitSha::try_new(base_revision.to_owned())?,
+            )],
         })?,
     ))
 }
 
 fn pull_request(head: &str) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
+    pull_request_with_threads(head, Vec::new())
+}
+
+fn pull_request_with_threads(
+    head: &str,
+    threads: Vec<RepoWatchThreadObservation>,
+) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
+    pull_request_state(head, threads, MergeableState::Mergeable)
+}
+
+fn pull_request_state(
+    head: &str,
+    threads: Vec<RepoWatchThreadObservation>,
+    mergeable_state: MergeableState,
+) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
     Ok(RepoWatchPullRequestState::try_new(
         RepoWatchPullRequestStateInput {
             context: PullRequestEventContext::new(PullRequestEventContextInput {
@@ -137,7 +220,7 @@ fn pull_request(head: &str) -> Result<RepoWatchPullRequestState, Box<dyn Error>>
                 author: Some(RepoWatchAuthorLogin::try_new(AUTHOR.to_owned())?),
             }),
             lifecycle: RepoWatchPullRequestLifecycle::Open,
-            mergeable_state: MergeableState::Mergeable,
+            mergeable_state,
             completed_check_suites: vec![RepoWatchCheckSuiteObservation::new(
                 GitHubObjectId::new(CHECK_SUITE_ID.try_into()?),
                 RepoWatchCheckCompletionGeneration::try_new(String::from(
@@ -154,14 +237,177 @@ fn pull_request(head: &str) -> Result<RepoWatchPullRequestState, Box<dyn Error>>
                 CheckConclusion::Success,
             )],
             reviews: Vec::new(),
-            threads: Vec::new(),
+            threads,
             reactions: Vec::new(),
         },
     )?)
 }
 
+fn candidate_with_open_thread(head: &str) -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
+    Ok(RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: vec![pull_request_with_threads(
+                head,
+                vec![RepoWatchThreadObservation::new(
+                    ReviewThreadId::try_new(REVIEW_THREAD.to_owned())?,
+                    RepoWatchThreadState::Open,
+                )],
+            )?],
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                BranchName::try_new(BASE_BRANCH.to_owned())?,
+                CommitSha::try_new(BASE_REVISION.to_owned())?,
+            )],
+        })?,
+    )))
+}
+
 fn candidate(head: Option<&str>) -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
     Ok(RepoWatchCursorCandidate::new(observation(head)?))
+}
+
+fn merge_ready_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::None,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+/// The same stale-review evidence with the gating check the candidate rule
+/// requires, so the head's only remaining blocker really is the review.
+fn clearable_stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+fn stale_review_clearance_candidate(
+    assessment: &RepoWatchConvergenceAssessment,
+) -> Result<RepoWatchStaleReviewClearanceCandidate, Box<dyn Error>> {
+    Ok(RepoWatchStaleReviewClearanceCandidate::try_new(
+        assessment,
+        String::from(REVIEW_NODE),
+        RepoWatchAuthorLogin::try_new(REVIEW_REVIEWER.to_owned())?,
+        CommitSha::try_new(REVIEW_COMMIT.to_owned())?,
+    )?)
+}
+
+/// The same stale-review evidence for a head that has not finished registering
+/// and completing its exact-head checks, so its empty non-green list is the
+/// absence of evidence rather than evidence of a green head.
+fn unsettled_stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            settled: false,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+/// The same stale-review evidence recorded while GitHub had not decided the
+/// head's mergeability. `unknown` is that pending state, never affirmative
+/// evidence that the head merges.
+fn undecided_mergeability_stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Unknown,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+/// The cursor an assessment carrying `unknown` mergeability is recorded
+/// against: recorded evidence must restate the observed mergeable state.
+fn undecided_mergeability_candidate(
+    head: &str,
+) -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
+    Ok(RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: vec![pull_request_state(
+                head,
+                Vec::new(),
+                MergeableState::Unknown,
+            )?],
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                BranchName::try_new(BASE_BRANCH.to_owned())?,
+                CommitSha::try_new(BASE_REVISION.to_owned())?,
+            )],
+        })?,
+    )))
+}
+
+/// Stale-review evidence for a head that ran no gating check at all. Its empty
+/// non-green list is indistinguishable from a fully green head's.
+fn stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
 }
 
 fn committed_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGeneration {
@@ -171,12 +417,51 @@ fn committed_generation(outcome: RepoWatchCommitOutcome) -> RepoWatchCursorGener
     }
 }
 
+async fn seed_legacy_repo_watch_event(pool: &PgPool) -> Result<Uuid, Box<dyn Error>> {
+    let event = Uuid::from_u128(0x10_001);
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_cursor (
+            repository, generation, storage_version, cursor_payload
+         ) VALUES ($1, 1, 1, $2)",
+    )
+    .bind(REPOSITORY)
+    .bind(sqlx::types::Json(serde_json::json!({
+        "storage_version": 1,
+        "signal_reviewers": [],
+        "state": {
+            "pull_requests": [],
+            "workflow_runs": [],
+            "branch_heads": []
+        }
+    })))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, target_kind, event_kind, conclusion,
+            workflow_branch, workflow_name
+         ) VALUES ($1, $2, 1, 1, 1, 'branch',
+             'branch_workflow_run_completed', 'success', $3, $4)",
+    )
+    .bind(event)
+    .bind(REPOSITORY)
+    .bind(BASE_BRANCH)
+    .bind(WORKFLOW_NAME)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(event)
+}
+
 struct CommittedFixture {
     _container: ContainerAsync<Postgres>,
+    pool: PgPool,
     repository: RepositorySlug,
     store: PostgresRepoWatchStore,
     second_candidate: RepoWatchCursorCandidate,
-    events: Vec<RepoWatchEvent>,
+    events: Vec<RepoWatchEventOccurrenceV1>,
     first_generation: RepoWatchCursorGeneration,
     second_generation: RepoWatchCursorGeneration,
 }
@@ -194,13 +479,19 @@ async fn committed_fixture() -> Result<CommittedFixture, Box<dyn Error>> {
             )
             .await?,
     );
-    let second_candidate = candidate(Some(INITIAL_HEAD))?;
+    let second_observation = observation(Some(INITIAL_HEAD))?;
+    let mut identity_frontier = first_candidate.event_identity_frontier().clone();
     let events = derive_repo_watch_events(
         &repository,
         Some(first_candidate.observation()),
-        second_candidate.observation(),
+        &second_observation,
+        &mut identity_frontier,
         &mut FixedEventIds::default(),
     )?;
+    let second_candidate = RepoWatchCursorCandidate::with_event_identity_frontier(
+        second_observation,
+        identity_frontier,
+    );
     let second_generation = committed_generation(
         store
             .commit(
@@ -215,6 +506,7 @@ async fn committed_fixture() -> Result<CommittedFixture, Box<dyn Error>> {
     );
     Ok(CommittedFixture {
         _container: container,
+        pool,
         repository,
         store,
         second_candidate,
@@ -294,18 +586,89 @@ async fn cursor_round_trip_retains_check_completion_generations() -> Result<(), 
     Ok(())
 }
 
+/// The durable identity columns the content-identity migrations write.
+#[derive(sqlx::FromRow)]
+struct MigratedEventIdentityRow {
+    content_identity_version: i16,
+    content_identity: Vec<u8>,
+    producer: String,
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn content_identity_migration_carries_existing_cursor_and_event_to_version_one()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = postgres_before_content_identity().await?;
+    let event = seed_legacy_repo_watch_event(&pool).await?;
+
+    apply_content_identity_migration(&pool).await?;
+
+    let cursor_version: i16 =
+        sqlx::query_scalar("SELECT storage_version FROM repo_watch_cursor WHERE repository = $1")
+            .bind(REPOSITORY)
+            .fetch_one(&pool)
+            .await?;
+    let frontier: serde_json::Value = sqlx::query_scalar(
+        "SELECT cursor_payload -> 'event_identity_frontier'
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(REPOSITORY)
+    .fetch_one(&pool)
+    .await?;
+    let event_identity = sqlx::query_as::<_, MigratedEventIdentityRow>(
+        "SELECT content_identity_version, content_identity, producer
+           FROM repo_watch_event
+          WHERE event_id = $1",
+    )
+    .bind(event)
+    .fetch_one(&pool)
+    .await?;
+    let store = PostgresRepoWatchStore::new(pool);
+    let loaded_cursor = store
+        .load_cursor(&repository()?)
+        .await?
+        .expect("migrated cursor remains readable");
+    let loaded_event = store
+        .load_event(&repository()?, RepoWatchEventId::from_uuid(event))
+        .await?
+        .expect("migrated event remains readable");
+
+    assert_eq!(cursor_version, 2);
+    assert_eq!(frontier, serde_json::json!([]));
+    assert_eq!(event_identity.content_identity_version, 1);
+    assert_eq!(event_identity.content_identity.len(), 32);
+    assert_eq!(event_identity.producer, "poll");
+    assert_eq!(
+        loaded_cursor
+            .candidate()
+            .event_identity_frontier()
+            .entries()
+            .len(),
+        0
+    );
+    assert_eq!(loaded_event.id(), RepoWatchEventId::from_uuid(event));
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn exact_retry_finds_its_replay_after_a_later_generation_commits()
 -> Result<(), Box<dyn Error>> {
     let fixture = committed_fixture().await?;
-    let changed = candidate(Some(CHANGED_HEAD))?;
+    let changed_observation = observation(Some(CHANGED_HEAD))?;
+    let mut changed_frontier = fixture.second_candidate.event_identity_frontier().clone();
     let changed_events = derive_repo_watch_events(
         &fixture.repository,
         Some(fixture.second_candidate.observation()),
-        changed.observation(),
+        &changed_observation,
+        &mut changed_frontier,
         &mut FixedEventIds(100),
     )?;
+    let changed = RepoWatchCursorCandidate::with_event_identity_frontier(
+        changed_observation,
+        changed_frontier,
+    );
     fixture
         .store
         .commit(
@@ -370,6 +733,438 @@ async fn unchanged_candidate_without_events_does_not_advance() -> Result<(), Box
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn convergence_mismatch_rolls_back_cursor_events_and_evidence() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let first_generation = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, baseline.clone(), Vec::new()),
+            )
+            .await?,
+    );
+    let current_observation = observation(Some(INITIAL_HEAD))?;
+    let mut current_frontier = baseline.event_identity_frontier().clone();
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(baseline.observation()),
+        &current_observation,
+        &mut current_frontier,
+        &mut FixedEventIds::default(),
+    )?;
+    let current = RepoWatchCursorCandidate::with_event_identity_frontier(
+        current_observation,
+        current_frontier,
+    );
+    let mismatched_base = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+    let failure = store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(first_generation), current, events),
+            &[merge_ready_assessment(INITIAL_HEAD, mismatched_base)?],
+        )
+        .await;
+    let cursor = store
+        .load_cursor(&repository)
+        .await?
+        .expect("baseline cursor remains present");
+    let cursor_count: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_cursor")
+        .fetch_one(&pool)
+        .await?;
+    let event_count: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_event")
+        .fetch_one(&pool)
+        .await?;
+    let assessment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_assessment")
+            .fetch_one(&pool)
+            .await?;
+    let seal_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence")
+            .fetch_one(&pool)
+            .await?;
+
+    assert!(matches!(
+        failure,
+        Err(RepoWatchStoreError::ConvergenceEvidenceMismatch)
+    ));
+    assert_eq!(cursor.generation(), first_generation);
+    assert_eq!(cursor_count, 1);
+    assert_eq!(event_count, 0);
+    assert_eq!(assessment_count, 0);
+    assert_eq!(seal_count, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cursor_events_assessment_and_seal_commit_atomically() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let first_generation = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, baseline.clone(), Vec::new()),
+            )
+            .await?,
+    );
+    let current_observation = observation(Some(INITIAL_HEAD))?;
+    let mut current_frontier = baseline.event_identity_frontier().clone();
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(baseline.observation()),
+        &current_observation,
+        &mut current_frontier,
+        &mut FixedEventIds::default(),
+    )?;
+    let current = RepoWatchCursorCandidate::with_event_identity_frontier(
+        current_observation,
+        current_frontier,
+    );
+    let expected_event_count = i64::try_from(events.len())?;
+
+    let committed = store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(first_generation), current, events),
+            &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let cursor_count: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_cursor")
+        .fetch_one(&pool)
+        .await?;
+    let event_count: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_event")
+        .fetch_one(&pool)
+        .await?;
+    let assessment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_assessment")
+            .fetch_one(&pool)
+            .await?;
+    let seal_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence")
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(
+        committed_generation(committed).get(),
+        next_generation_value(first_generation)
+    );
+    assert_eq!(cursor_count, 2);
+    assert_eq!(event_count, expected_event_count);
+    assert_eq!(assessment_count, 1);
+    assert_eq!(seal_count, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn assessment_threads_must_match_the_committed_cursor() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let baseline_generation = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, baseline.clone(), Vec::new()),
+            )
+            .await?,
+    );
+    let current = candidate_with_open_thread(INITIAL_HEAD)?;
+    let mut current_frontier = baseline.event_identity_frontier().clone();
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(baseline.observation()),
+        current.observation(),
+        &mut current_frontier,
+        &mut FixedEventIds::default(),
+    )?;
+    let current = RepoWatchCursorCandidate::with_event_identity_frontier(
+        current.observation().clone(),
+        current_frontier,
+    );
+
+    let failure = store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(baseline_generation), current, events),
+            &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await;
+    let cursor = store
+        .load_cursor(&repository)
+        .await?
+        .expect("the baseline cursor remains present");
+    let assessment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_assessment")
+            .fetch_one(&pool)
+            .await?;
+
+    assert!(matches!(
+        failure,
+        Err(RepoWatchStoreError::ConvergenceEvidenceMismatch)
+    ));
+    assert_eq!(cursor.generation(), baseline_generation);
+    assert_eq!(assessment_count, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn superseded_exact_replay_does_not_record_convergence_evidence() -> Result<(), Box<dyn Error>>
+{
+    let fixture = committed_fixture().await?;
+    let changed_observation = observation(Some(CHANGED_HEAD))?;
+    let mut changed_frontier = fixture.second_candidate.event_identity_frontier().clone();
+    let changed_events = derive_repo_watch_events(
+        &fixture.repository,
+        Some(fixture.second_candidate.observation()),
+        &changed_observation,
+        &mut changed_frontier,
+        &mut FixedEventIds(100),
+    )?;
+    let changed = RepoWatchCursorCandidate::with_event_identity_frontier(
+        changed_observation,
+        changed_frontier,
+    );
+    fixture
+        .store
+        .commit(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(Some(fixture.second_generation), changed, changed_events),
+        )
+        .await?;
+
+    let replay = fixture
+        .store
+        .commit_with_convergence(
+            &fixture.repository,
+            RepoWatchCommitRequest::new(
+                Some(fixture.first_generation),
+                fixture.second_candidate.clone(),
+                fixture.events.clone(),
+            ),
+            &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let assessment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_assessment")
+            .fetch_one(&fixture.pool)
+            .await?;
+    let identity_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_identity")
+            .fetch_one(&fixture.pool)
+            .await?;
+
+    assert_eq!(replayed_generation(replay), fixture.second_generation);
+    assert_eq!(assessment_count, 0);
+    assert_eq!(identity_count, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn evidence_replay_after_a_head_round_trip_uses_the_candidate_head()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let baseline_generation = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, baseline.clone(), Vec::new()),
+            )
+            .await?,
+    );
+    let first_observation = observation(Some(INITIAL_HEAD))?;
+    let second_observation = observation(Some(CHANGED_HEAD))?;
+    let mut ids = FixedEventIds::default();
+    let mut first_frontier = baseline.event_identity_frontier().clone();
+    let first_events = derive_repo_watch_events(
+        &repository,
+        Some(baseline.observation()),
+        &first_observation,
+        &mut first_frontier,
+        &mut ids,
+    )?;
+    let first = RepoWatchCursorCandidate::with_event_identity_frontier(
+        first_observation.clone(),
+        first_frontier,
+    );
+    let first_generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(Some(baseline_generation), first.clone(), first_events),
+                &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let mut second_frontier = first.event_identity_frontier().clone();
+    let second_events = derive_repo_watch_events(
+        &repository,
+        Some(first.observation()),
+        &second_observation,
+        &mut second_frontier,
+        &mut ids,
+    )?;
+    let second =
+        RepoWatchCursorCandidate::with_event_identity_frontier(second_observation, second_frontier);
+    let second_generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(Some(first_generation), second.clone(), second_events),
+                &[merge_ready_assessment(CHANGED_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let mut replay_frontier = second.event_identity_frontier().clone();
+    let replay_events = derive_repo_watch_events(
+        &repository,
+        Some(second.observation()),
+        &first_observation,
+        &mut replay_frontier,
+        &mut ids,
+    )?;
+    let replay =
+        RepoWatchCursorCandidate::with_event_identity_frontier(first_observation, replay_frontier);
+
+    store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(second_generation), replay, replay_events),
+            &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let assessment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_assessment")
+            .fetch_one(&pool)
+            .await?;
+    let first_head_assessment_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_pull_request_convergence_assessment
+          WHERE head_sha = $1",
+    )
+    .bind(INITIAL_HEAD)
+    .fetch_one(&pool)
+    .await?;
+    let current_head: String =
+        sqlx::query_scalar("SELECT head_sha FROM repo_watch_current_pull_request_convergence")
+            .fetch_one(&pool)
+            .await?;
+    let identity_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_identity")
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(assessment_count, 3);
+    assert_eq!(first_head_assessment_count, 2);
+    assert_eq!(current_head, INITIAL_HEAD);
+    assert_eq!(identity_count, 3);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn evidence_replay_after_a_base_round_trip_uses_the_candidate_base()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let second_base = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let first_observation = observation_at_base(Some(INITIAL_HEAD), BASE_REVISION)?;
+    let second_observation = observation_at_base(Some(INITIAL_HEAD), second_base)?;
+    let first = RepoWatchCursorCandidate::new(first_observation.clone());
+    let first_generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, first.clone(), Vec::new()),
+                &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let mut ids = FixedEventIds::default();
+    let mut second_frontier = first.event_identity_frontier().clone();
+    let second_events = derive_repo_watch_events(
+        &repository,
+        Some(first.observation()),
+        &second_observation,
+        &mut second_frontier,
+        &mut ids,
+    )?;
+    let second =
+        RepoWatchCursorCandidate::with_event_identity_frontier(second_observation, second_frontier);
+    let second_generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(Some(first_generation), second.clone(), second_events),
+                &[merge_ready_assessment(INITIAL_HEAD, second_base)?],
+            )
+            .await?,
+    );
+    let mut restored_frontier = second.event_identity_frontier().clone();
+    let restored_events = derive_repo_watch_events(
+        &repository,
+        Some(second.observation()),
+        &first_observation,
+        &mut restored_frontier,
+        &mut ids,
+    )?;
+    let restored = RepoWatchCursorCandidate::with_event_identity_frontier(
+        first_observation,
+        restored_frontier,
+    );
+
+    store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(second_generation), restored, restored_events),
+            &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let assessment_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_assessment")
+            .fetch_one(&pool)
+            .await?;
+    let first_base_assessment_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_pull_request_convergence_assessment
+          WHERE base_revision = $1",
+    )
+    .bind(BASE_REVISION)
+    .fetch_one(&pool)
+    .await?;
+    let current_base: String =
+        sqlx::query_scalar("SELECT base_revision FROM repo_watch_current_pull_request_convergence")
+            .fetch_one(&pool)
+            .await?;
+    let identity_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_pull_request_convergence_identity")
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(assessment_count, 3);
+    assert_eq!(first_base_assessment_count, 2);
+    assert_eq!(current_base, BASE_REVISION);
+    assert_eq!(identity_count, 3);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn event_pages_use_the_last_position_as_the_next_keyset_cursor() -> Result<(), Box<dyn Error>>
 {
     let fixture = committed_fixture().await?;
@@ -418,14 +1213,20 @@ async fn event_identity_failure_rolls_back_cursor_and_events() -> Result<(), Box
             )
             .await?,
     );
-    let current = candidate(Some(INITIAL_HEAD))?;
+    let current_observation = observation(Some(INITIAL_HEAD))?;
+    let mut current_frontier = baseline.event_identity_frontier().clone();
     let mut ids = FixedEventIds::default();
     let events = derive_repo_watch_events(
         &repository,
         Some(baseline.observation()),
-        current.observation(),
+        &current_observation,
+        &mut current_frontier,
         &mut ids,
     )?;
+    let current = RepoWatchCursorCandidate::with_event_identity_frontier(
+        current_observation,
+        current_frontier,
+    );
     let second_generation = committed_generation(
         store
             .commit(
@@ -434,17 +1235,104 @@ async fn event_identity_failure_rolls_back_cursor_and_events() -> Result<(), Box
             )
             .await?,
     );
-    let changed = candidate(Some(CHANGED_HEAD))?;
+    let changed_observation = observation(Some(CHANGED_HEAD))?;
+    let mut changed_frontier = current.event_identity_frontier().clone();
     let collision = derive_repo_watch_events(
         &repository,
         Some(current.observation()),
-        changed.observation(),
+        &changed_observation,
+        &mut changed_frontier,
         &mut FixedEventIds::default(),
     )?;
+    let changed = RepoWatchCursorCandidate::with_event_identity_frontier(
+        changed_observation,
+        changed_frontier,
+    );
     let failure = store
         .commit(
             &repository,
             RepoWatchCommitRequest::new(Some(second_generation), changed, collision),
+        )
+        .await;
+    let cursor = store
+        .load_cursor(&repository)
+        .await?
+        .expect("fixture cursor remains present");
+    let cursor_rows: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_cursor WHERE repository = $1")
+            .bind(repository.as_str())
+            .fetch_one(&pool)
+            .await?;
+
+    assert!(is_database_failure(failure));
+    assert_eq!(cursor.generation(), second_generation);
+    assert_eq!(cursor_rows, 2);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn content_identity_failure_rolls_back_cursor_and_events() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let first_generation = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, baseline.clone(), Vec::new()),
+            )
+            .await?,
+    );
+    let current_observation = observation(Some(INITIAL_HEAD))?;
+    let mut current_frontier = baseline.event_identity_frontier().clone();
+    let current_events = derive_repo_watch_events(
+        &repository,
+        Some(baseline.observation()),
+        &current_observation,
+        &mut current_frontier,
+        &mut FixedEventIds::default(),
+    )?;
+    let duplicated_content_identity = current_events[0].content_identity();
+    let current = RepoWatchCursorCandidate::with_event_identity_frontier(
+        current_observation,
+        current_frontier,
+    );
+    let second_generation = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    Some(first_generation),
+                    current.clone(),
+                    current_events,
+                ),
+            )
+            .await?,
+    );
+    let changed_observation = observation(Some(CHANGED_HEAD))?;
+    let mut changed_frontier = current.event_identity_frontier().clone();
+    let changed_events = derive_repo_watch_events(
+        &repository,
+        Some(current.observation()),
+        &changed_observation,
+        &mut changed_frontier,
+        &mut FixedEventIds(100),
+    )?;
+    let conflicting_event = RepoWatchEventOccurrenceV1::from_parts(
+        changed_events[0].event().clone(),
+        duplicated_content_identity,
+    );
+    let changed = RepoWatchCursorCandidate::with_event_identity_frontier(
+        changed_observation,
+        changed_frontier,
+    );
+
+    let failure = store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(Some(second_generation), changed, vec![conflicting_event]),
         )
         .await;
     let cursor = store
@@ -496,6 +1384,272 @@ async fn append_only_guards_reject_update_delete_and_truncate() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn inv073_stale_review_clearance_journals_are_append_only() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+            &[stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let assessment_id: Uuid = sqlx::query_scalar(
+        "SELECT assessment_id
+           FROM repo_watch_pull_request_convergence_assessment
+          WHERE repository = $1 AND head_sha = $2",
+    )
+    .bind(repository.as_str())
+    .bind(INITIAL_HEAD)
+    .fetch_one(&pool)
+    .await?;
+    let clearance_id = Uuid::from_u128(0x70_001);
+    sqlx::query(
+        "INSERT INTO repo_watch_stale_review_clearance
+            (clearance_id, assessment_id, repository, pull_request_number,
+             current_head_sha, base_revision, review_node_id, reviewer,
+             reviewed_head_sha, dismissal_message)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    )
+    .bind(clearance_id)
+    .bind(assessment_id)
+    .bind(repository.as_str())
+    .bind(i64::try_from(PULL_REQUEST)?)
+    .bind(INITIAL_HEAD)
+    .bind(BASE_REVISION)
+    .bind("review-node-70")
+    .bind(REVIEW_REVIEWER)
+    .bind(REVIEW_COMMIT)
+    .bind("fixture stale-review dismissal")
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_stale_review_clearance_result
+            (clearance_id, outcome_kind, provider_review_state)
+         VALUES ($1, 'dismissed', 'dismissed')",
+    )
+    .bind(clearance_id)
+    .execute(&pool)
+    .await?;
+
+    let intent_update = sqlx::query(
+        "UPDATE repo_watch_stale_review_clearance SET reviewer = $1 WHERE clearance_id = $2",
+    )
+    .bind(AUTHOR)
+    .bind(clearance_id)
+    .execute(&pool)
+    .await;
+    let intent_delete =
+        sqlx::query("DELETE FROM repo_watch_stale_review_clearance WHERE clearance_id = $1")
+            .bind(clearance_id)
+            .execute(&pool)
+            .await;
+    let intent_truncate = sqlx::query("TRUNCATE repo_watch_stale_review_clearance CASCADE")
+        .execute(&pool)
+        .await;
+    let result_update = sqlx::query(
+        "UPDATE repo_watch_stale_review_clearance_result SET observed_at = clock_timestamp() WHERE clearance_id = $1",
+    )
+    .bind(clearance_id)
+    .execute(&pool)
+    .await;
+    let result_delete =
+        sqlx::query("DELETE FROM repo_watch_stale_review_clearance_result WHERE clearance_id = $1")
+            .bind(clearance_id)
+            .execute(&pool)
+            .await;
+    let result_truncate = sqlx::query("TRUNCATE repo_watch_stale_review_clearance_result CASCADE")
+        .execute(&pool)
+        .await;
+
+    assert!(intent_update.is_err());
+    assert!(intent_delete.is_err());
+    assert!(intent_truncate.is_err());
+    assert!(result_update.is_err());
+    assert!(result_delete.is_err());
+    assert!(result_truncate.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_stale_review_clearance_plans_against_its_recorded_assessment()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let assessment = clearable_stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?;
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+                std::slice::from_ref(&assessment),
+            )
+            .await?,
+    );
+
+    let planned = store
+        .plan_stale_review_clearances(
+            &repository,
+            generation,
+            &[stale_review_clearance_candidate(&assessment)?],
+        )
+        .await?;
+
+    assert_eq!(planned.len(), 1);
+    assert_eq!(planned[0].review_node_id(), REVIEW_NODE);
+    assert_eq!(planned[0].reviewer().as_str(), REVIEW_REVIEWER);
+    assert_eq!(planned[0].reviewed_head_sha().as_str(), REVIEW_COMMIT);
+    assert_eq!(planned[0].current_head_sha().as_str(), INITIAL_HEAD);
+    assert_eq!(planned[0].base_revision().as_str(), BASE_REVISION);
+    Ok(())
+}
+
+/// The durable gate reads the recorded assessment, not the candidate's own
+/// evidence, so it refuses a head whose committed convergence row counted no
+/// gating check even when the in-memory candidate was admissible. Without that
+/// term the daemon would dismiss a blocking review on a pull request whose only
+/// gate was the review itself.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_recorded_assessment_without_a_gating_check_plans_no_clearance()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+                &[stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let candidate = stale_review_clearance_candidate(&clearable_stale_review_assessment(
+        INITIAL_HEAD,
+        BASE_REVISION,
+    )?)?;
+
+    let planned = store
+        .plan_stale_review_clearances(&repository, generation, &[candidate])
+        .await;
+
+    assert!(matches!(
+        planned,
+        Err(RepoWatchStoreError::StaleReviewClearanceMismatch)
+    ));
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_stale_review_clearance")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(intents, 0);
+    Ok(())
+}
+
+/// Another watcher can append a newer assessment for the unchanged cursor while
+/// this watcher reconciles the candidate it raised, and the durable gate reads
+/// that newest row. An unsettled head has not finished registering and
+/// completing its exact-head checks, so planning against it would link a
+/// dismissal intent claiming `only_stale_review_blocks` to evidence recording a
+/// second blocker.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_unsettled_newer_assessment_plans_no_clearance() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let assessment = clearable_stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?;
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+                std::slice::from_ref(&assessment),
+            )
+            .await?,
+    );
+    store
+        .record_convergence_assessments(
+            &repository,
+            generation,
+            &[unsettled_stale_review_assessment(
+                INITIAL_HEAD,
+                BASE_REVISION,
+            )?],
+        )
+        .await?;
+
+    let planned = store
+        .plan_stale_review_clearances(
+            &repository,
+            generation,
+            &[stale_review_clearance_candidate(&assessment)?],
+        )
+        .await;
+
+    assert!(matches!(
+        planned,
+        Err(RepoWatchStoreError::StaleReviewClearanceMismatch)
+    ));
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_stale_review_clearance")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(intents, 0);
+    Ok(())
+}
+
+/// The durable gate proves mergeability against the recorded row rather than
+/// inferring it from the settlement recorded beside it, so evidence GitHub had
+/// not decided plans nothing even when its writer called the head settled.
+/// `unknown` is that pending state, and dismissing against it would claim the
+/// review was the head's only blocker while the recorded evidence names
+/// mergeability as another.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_undecided_mergeability_assessment_plans_no_clearance() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    undecided_mergeability_candidate(INITIAL_HEAD)?,
+                    Vec::new(),
+                ),
+                &[undecided_mergeability_stale_review_assessment(
+                    INITIAL_HEAD,
+                    BASE_REVISION,
+                )?],
+            )
+            .await?,
+    );
+    let candidate = stale_review_clearance_candidate(&clearable_stale_review_assessment(
+        INITIAL_HEAD,
+        BASE_REVISION,
+    )?)?;
+
+    let planned = store
+        .plan_stale_review_clearances(&repository, generation, &[candidate])
+        .await;
+
+    assert!(matches!(
+        planned,
+        Err(RepoWatchStoreError::StaleReviewClearanceMismatch)
+    ));
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_stale_review_clearance")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(intents, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn malformed_cursor_document_fails_closed_on_read() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let repository = repository()?;
@@ -511,7 +1665,7 @@ async fn malformed_cursor_document_fails_closed_on_read() -> Result<(), Box<dyn 
         .execute(&mut *corruption_connection)
         .await?;
     sqlx::query(
-        "UPDATE repo_watch_cursor SET cursor_payload = '{\"storage_version\":1}'::jsonb WHERE repository = $1",
+        "UPDATE repo_watch_cursor SET cursor_payload = '{\"storage_version\":2}'::jsonb WHERE repository = $1",
     )
     .bind(repository.as_str())
     .execute(&mut *corruption_connection)
@@ -573,11 +1727,13 @@ async fn event_insert_requires_its_cursor_commit_transaction() -> Result<(), Box
     let (_container, pool, repository) = migrated_cursor_fixture().await?;
     let error = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'pull_request_opened', $4,
             $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false
          )",
     )
@@ -708,11 +1864,13 @@ async fn pull_request_target_constraint_rejects_a_null_number() -> Result<(), Bo
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', NULL,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'pull_request_opened', NULL,
             $4, $5, $6, $7, $8, $9, ARRAY[]::text[], false
          )",
     )
@@ -741,11 +1899,13 @@ async fn pull_request_target_constraint_rejects_a_number_beyond_u64() -> Result<
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', $4::numeric,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'pull_request_opened', $4::numeric,
             $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false
          )",
     )
@@ -774,11 +1934,13 @@ async fn pull_request_target_constraint_accepts_u64_maximum() -> Result<(), Box<
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', $4::numeric,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'pull_request_opened', $4::numeric,
             $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false
          )",
     )
@@ -806,13 +1968,15 @@ async fn comment_reaction_constraint_rejects_a_null_subject_id() -> Result<(), B
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft,
             reaction_subject_kind, reaction_subject_id, reaction_reactor,
             reaction_content, reaction_change
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'reaction_changed', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'reaction_changed', $4,
             $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false,
             'issue_comment', NULL, $11, '+1', 'added'
          )",
@@ -844,13 +2008,15 @@ async fn comment_reaction_constraint_rejects_a_subject_id_beyond_u64() -> Result
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft,
             reaction_subject_kind, reaction_subject_id, reaction_reactor,
             reaction_content, reaction_change
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'reaction_changed', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'reaction_changed', $4,
             $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false,
             'issue_comment', $11::numeric, $12, '+1', 'added'
          )",
@@ -883,13 +2049,15 @@ async fn comment_reaction_constraint_accepts_a_u64_maximum_subject_id() -> Resul
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft,
             reaction_subject_kind, reaction_subject_id, reaction_reactor,
             reaction_content, reaction_change
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'reaction_changed', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'reaction_changed', $4,
             $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false,
             'issue_comment', $11::numeric, $12, '+1', 'added'
          )",
@@ -920,13 +2088,15 @@ async fn comment_reaction_constraint_rejects_an_empty_content() -> Result<(), Bo
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft,
             reaction_subject_kind, reaction_subject_id, reaction_reactor,
             reaction_content, reaction_change
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'reaction_changed', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'reaction_changed', $4,
             $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false,
             'issue_comment', $11::numeric, $12, '', 'added'
          )",
@@ -958,11 +2128,13 @@ async fn label_array_constraint_rejects_a_null_member() -> Result<(), Box<dyn Er
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft, label_name
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'labeled', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'labeled', $4,
             $5, $6, $7, $8, $9, $10, ARRAY[$11, NULL]::text[], false, $11
          )",
     )
@@ -992,11 +2164,13 @@ async fn label_array_constraint_rejects_an_overlong_member() -> Result<(), Box<d
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft, label_name
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'labeled', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'labeled', $4,
             $5, $6, $7, $8, $9, $10, ARRAY[$11, $12]::text[], false, $11
          )",
     )
@@ -1027,11 +2201,13 @@ async fn label_array_constraint_rejects_multiple_dimensions() -> Result<(), Box<
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft, label_name
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'labeled', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'labeled', $4,
             $5, $6, $7, $8, $9, $10, ARRAY[[$11], [$11]]::text[][], false, $11
          )",
     )
@@ -1061,11 +2237,13 @@ async fn label_array_constraint_rejects_a_noncanonical_lower_bound() -> Result<(
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft, label_name
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'labeled', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'labeled', $4,
             $5, $6, $7, $8, $9, $10, ('[0:0]={' || $11 || '}')::text[], false, $11
          )",
     )
@@ -1095,11 +2273,13 @@ async fn label_array_constraint_rejects_noncanonical_order() -> Result<(), Box<d
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'pull_request_opened', $4,
             $5, $6, $7, $8, $9, $10, ARRAY['z-label', 'a-label']::text[], false
          )",
     )
@@ -1128,11 +2308,13 @@ async fn label_array_constraint_rejects_duplicate_members() -> Result<(), Box<dy
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'pull_request_opened', $4,
             $5, $6, $7, $8, $9, $10, ARRAY[$11, $11]::text[], false
          )",
     )
@@ -1162,11 +2344,13 @@ async fn actor_login_constraint_rejects_domain_invalid_spelling() -> Result<(), 
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft, author
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'pull_request_opened', $4,
             $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false, 'bad login'
          )",
     )
@@ -1195,11 +2379,13 @@ async fn actor_login_constraint_rejects_non_ascii_range_members() -> Result<(), 
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft, author
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'pull_request_opened', $4,
             $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false, $11
          )",
     )
@@ -1230,11 +2416,13 @@ async fn head_repository_constraint_rejects_domain_invalid_spelling() -> Result<
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'pull_request_opened', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'pull_request_opened', $4,
             $5, 'namespace/bad repo', $6, $7, $8, $9, ARRAY[]::text[], false
          )",
     )
@@ -1263,10 +2451,12 @@ async fn workflow_branch_constraint_rejects_domain_invalid_spelling() -> Result<
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, conclusion, workflow_branch, workflow_name
          ) VALUES (
-            $1, $2, $3, 1, 1, 'branch', 'branch_workflow_run_completed',
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'branch', 'branch_workflow_run_completed',
             'failure', 'bad branch', 'required checks'
          )",
     )
@@ -1288,11 +2478,13 @@ async fn label_name_constraint_rejects_an_overlong_value() -> Result<(), Box<dyn
     let (mut transaction, generation) = begin_next_cursor_transaction(&pool, &repository).await?;
     let insert = sqlx::query(
         "INSERT INTO repo_watch_event (
-            event_id, repository, cursor_generation, event_ordinal, event_version,
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity, producer,
             target_kind, event_kind, pull_request_number, head_sha, head_repository,
             base_branch, head_branch, title, body, labels, draft, label_name
          ) VALUES (
-            $1, $2, $3, 1, 1, 'pull_request', 'unlabeled', $4,
+            $1, $2, $3, 1, 1, 1, sha256(uuid_send($1)), 'poll',
+            'pull_request', 'unlabeled', $4,
             $5, $6, $7, $8, $9, $10, ARRAY[]::text[], false, $11
          )",
     )
@@ -1399,6 +2591,10 @@ async fn committed_event_fixture(
     let (container, pool) = migrated_postgres().await?;
     let repository = repository()?;
     let store = PostgresRepoWatchStore::new(pool);
+    let events = events
+        .into_iter()
+        .map(fixture_occurrence)
+        .collect::<Vec<_>>();
     let baseline = committed_generation(
         store
             .commit(
@@ -1416,6 +2612,16 @@ async fn committed_event_fixture(
             .await?,
     );
     Ok((container, store, repository))
+}
+
+fn fixture_occurrence(event: RepoWatchEvent) -> RepoWatchEventOccurrenceV1 {
+    let mut identity = [0_u8; 32];
+    identity[..16].copy_from_slice(event.id().as_uuid().as_bytes());
+    identity[16..].copy_from_slice(event.id().as_uuid().as_bytes());
+    RepoWatchEventOccurrenceV1::from_parts(
+        event,
+        RepoWatchEventContentIdentityV1::from_bytes(identity),
+    )
 }
 
 /// Loads one committed event back through the closed event decoder.
@@ -1775,5 +2981,425 @@ async fn every_reaction_subject_survives_a_commit_and_load_round_trip() -> Resul
         Some(&review_comment),
         "a committed repository-watch event must load back unchanged"
     );
+    Ok(())
+}
+
+const REAPPEARING_WORKFLOW_RUN_ID: u64 = 71;
+const REAPPEARING_WORKFLOW_ID: u64 = 72;
+
+const RENAMED_WORKFLOW_NAME: &str = "required checks (renamed)";
+
+/// Whether the reappearing branch-workflow run is in the observation.
+enum WorkflowRunPresence {
+    /// The provider lists the completed run.
+    Listed,
+    /// The provider omits it, as it does while the branch is deleted.
+    Omitted,
+}
+
+/// An observation carrying only the reappearing branch-workflow run, or none.
+fn workflow_run_observation(
+    presence: WorkflowRunPresence,
+) -> Result<RepoWatchObservation, Box<dyn Error>> {
+    let workflow_runs = match presence {
+        WorkflowRunPresence::Listed => vec![RepoWatchWorkflowRunObservation::new(
+            GitHubObjectId::new(REAPPEARING_WORKFLOW_RUN_ID.try_into()?),
+            GitHubObjectId::new(REAPPEARING_WORKFLOW_ID.try_into()?),
+            RepoWatchWorkflowRunAttempt::new(NonZeroU64::MIN),
+            BranchName::try_new(BASE_BRANCH.to_owned())?,
+            WorkflowName::try_new(WORKFLOW_NAME.to_owned())?,
+            CheckConclusion::Success,
+        )],
+        WorkflowRunPresence::Omitted => Vec::new(),
+    };
+    Ok(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs,
+            branch_heads: Vec::new(),
+        })?,
+    ))
+}
+
+/// The same run, listed after its workflow was given a new display name.
+fn renamed_workflow_run_observation() -> Result<RepoWatchObservation, Box<dyn Error>> {
+    Ok(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: Vec::new(),
+            workflow_runs: vec![RepoWatchWorkflowRunObservation::new(
+                GitHubObjectId::new(REAPPEARING_WORKFLOW_RUN_ID.try_into()?),
+                GitHubObjectId::new(REAPPEARING_WORKFLOW_ID.try_into()?),
+                RepoWatchWorkflowRunAttempt::new(NonZeroU64::MIN),
+                BranchName::try_new(BASE_BRANCH.to_owned())?,
+                WorkflowName::try_new(RENAMED_WORKFLOW_NAME.to_owned())?,
+                CheckConclusion::Success,
+            )],
+            branch_heads: Vec::new(),
+        })?,
+    ))
+}
+
+/// A branch-workflow run that leaves the observation and returns re-derives a
+/// byte-identical content identity. Before commit coalescing that duplicate
+/// aborted the whole cursor-and-event transaction, so the cursor never left the
+/// run-absent generation and every later poll repeated the same failure.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_reappearing_workflow_run_advances_the_cursor_without_a_duplicate_event()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let mut ids = FixedEventIds::default();
+
+    let empty =
+        RepoWatchCursorCandidate::new(workflow_run_observation(WorkflowRunPresence::Omitted)?);
+    let first = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, empty.clone(), Vec::new()),
+            )
+            .await?,
+    );
+
+    // The run completes and is recorded.
+    let mut frontier = empty.event_identity_frontier().clone();
+    let present = workflow_run_observation(WorkflowRunPresence::Listed)?;
+    let recorded = derive_repo_watch_events(
+        &repository,
+        Some(empty.observation()),
+        &present,
+        &mut frontier,
+        &mut ids,
+    )?;
+    assert_eq!(recorded.len(), 1);
+    let identity = recorded[0].content_identity();
+    let recorded_event_id = recorded[0].event().id();
+    let present_candidate =
+        RepoWatchCursorCandidate::with_event_identity_frontier(present, frontier);
+    let second = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(Some(first), present_candidate.clone(), recorded),
+            )
+            .await?,
+    );
+
+    // The branch is deleted, so the run leaves the observation.
+    let mut frontier = present_candidate.event_identity_frontier().clone();
+    let absent = workflow_run_observation(WorkflowRunPresence::Omitted)?;
+    let none_derived = derive_repo_watch_events(
+        &repository,
+        Some(present_candidate.observation()),
+        &absent,
+        &mut frontier,
+        &mut ids,
+    )?;
+    assert!(none_derived.is_empty());
+    let absent_candidate = RepoWatchCursorCandidate::with_event_identity_frontier(absent, frontier);
+    let third = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(Some(second), absent_candidate.clone(), none_derived),
+            )
+            .await?,
+    );
+
+    // The branch is recreated and the historical run reappears. The differ
+    // re-derives the same occurrence, identity and all.
+    let mut frontier = absent_candidate.event_identity_frontier().clone();
+    let returned = workflow_run_observation(WorkflowRunPresence::Listed)?;
+    let reemitted = derive_repo_watch_events(
+        &repository,
+        Some(absent_candidate.observation()),
+        &returned,
+        &mut frontier,
+        &mut ids,
+    )?;
+    assert_eq!(reemitted.len(), 1);
+    assert_eq!(reemitted[0].content_identity(), identity);
+    // A fresh candidate id on an equal occurrence is exactly the case commit
+    // coalescing has to recognize.
+    assert_ne!(reemitted[0].event().id(), recorded_event_id);
+    let returned_candidate =
+        RepoWatchCursorCandidate::with_event_identity_frontier(returned, frontier);
+
+    let outcome = store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(Some(third), returned_candidate, reemitted),
+        )
+        .await?;
+
+    // The commit succeeds and the cursor advances rather than stalling.
+    let fourth = committed_generation(outcome);
+    assert_eq!(fourth.get(), third.get() + 1);
+    assert_eq!(
+        store
+            .load_cursor(&repository)
+            .await?
+            .expect("cursor remains readable")
+            .generation(),
+        fourth
+    );
+    // The occurrence is recorded exactly once, so the identity still names one row.
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_event
+          WHERE repository = $1 AND content_identity = $2",
+    )
+    .bind(REPOSITORY)
+    .bind(identity.as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(rows, 1);
+    Ok(())
+}
+
+/// The same run returning after its workflow was renamed restates its content
+/// identity, because the digest excludes the mutable display name. Storage has
+/// to recognize it through the same equivalence: comparing whole events would
+/// call the renamed payload a different fact, attempt an insert under an
+/// already-durable identity, and abort the commit on the unique constraint,
+/// leaving the cursor stuck at the run-absent generation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_renamed_workflow_run_reappearance_commits_without_aborting() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let mut ids = FixedEventIds::default();
+
+    let empty =
+        RepoWatchCursorCandidate::new(workflow_run_observation(WorkflowRunPresence::Omitted)?);
+    let first = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, empty.clone(), Vec::new()),
+            )
+            .await?,
+    );
+
+    let mut frontier = empty.event_identity_frontier().clone();
+    let present = workflow_run_observation(WorkflowRunPresence::Listed)?;
+    let recorded = derive_repo_watch_events(
+        &repository,
+        Some(empty.observation()),
+        &present,
+        &mut frontier,
+        &mut ids,
+    )?;
+    assert_eq!(recorded.len(), 1);
+    let identity = recorded[0].content_identity();
+    let present_candidate =
+        RepoWatchCursorCandidate::with_event_identity_frontier(present, frontier);
+    let second = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(Some(first), present_candidate.clone(), recorded),
+            )
+            .await?,
+    );
+
+    let mut frontier = present_candidate.event_identity_frontier().clone();
+    let absent = workflow_run_observation(WorkflowRunPresence::Omitted)?;
+    let none_derived = derive_repo_watch_events(
+        &repository,
+        Some(present_candidate.observation()),
+        &absent,
+        &mut frontier,
+        &mut ids,
+    )?;
+    let absent_candidate = RepoWatchCursorCandidate::with_event_identity_frontier(absent, frontier);
+    let third = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(Some(second), absent_candidate.clone(), none_derived),
+            )
+            .await?,
+    );
+
+    // The workflow is renamed while the run is out of the observation.
+    let mut frontier = absent_candidate.event_identity_frontier().clone();
+    let renamed = renamed_workflow_run_observation()?;
+    let reemitted = derive_repo_watch_events(
+        &repository,
+        Some(absent_candidate.observation()),
+        &renamed,
+        &mut frontier,
+        &mut ids,
+    )?;
+    assert_eq!(reemitted.len(), 1);
+    assert_eq!(reemitted[0].content_identity(), identity);
+    let renamed_candidate =
+        RepoWatchCursorCandidate::with_event_identity_frontier(renamed, frontier);
+
+    let fourth = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(Some(third), renamed_candidate, reemitted),
+            )
+            .await?,
+    );
+
+    assert_eq!(fourth.get(), third.get() + 1);
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_event
+          WHERE repository = $1 AND content_identity = $2",
+    )
+    .bind(REPOSITORY)
+    .bind(identity.as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(rows, 1);
+    Ok(())
+}
+
+/// A commit whose occurrences are all already durable stores no event, so a
+/// stale retry of it has no durable UUID to be checked against: the fact it
+/// restates is durable under the UUID of the occurrence that first recorded it.
+/// Such a retry therefore replays on cursor candidate and content identity
+/// alone, which is the narrowed meaning of exact replay for coalesced
+/// occurrences.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_fully_coalesced_retry_replays_on_candidate_and_content_identity()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let mut ids = FixedEventIds::default();
+
+    let empty =
+        RepoWatchCursorCandidate::new(workflow_run_observation(WorkflowRunPresence::Omitted)?);
+    let first = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, empty.clone(), Vec::new()),
+            )
+            .await?,
+    );
+
+    let mut frontier = empty.event_identity_frontier().clone();
+    let present = workflow_run_observation(WorkflowRunPresence::Listed)?;
+    let recorded = derive_repo_watch_events(
+        &repository,
+        Some(empty.observation()),
+        &present,
+        &mut frontier,
+        &mut ids,
+    )?;
+    let present_candidate =
+        RepoWatchCursorCandidate::with_event_identity_frontier(present, frontier);
+    let second = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(Some(first), present_candidate.clone(), recorded),
+            )
+            .await?,
+    );
+
+    let mut frontier = present_candidate.event_identity_frontier().clone();
+    let absent = workflow_run_observation(WorkflowRunPresence::Omitted)?;
+    let none_derived = derive_repo_watch_events(
+        &repository,
+        Some(present_candidate.observation()),
+        &absent,
+        &mut frontier,
+        &mut ids,
+    )?;
+    let absent_candidate = RepoWatchCursorCandidate::with_event_identity_frontier(absent, frontier);
+    let third = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(Some(second), absent_candidate.clone(), none_derived),
+            )
+            .await?,
+    );
+
+    // The run reappears: its occurrence is already durable, so this generation
+    // stores no event at all.
+    let build_return = |seed: u128| -> Result<
+        (RepoWatchCursorCandidate, Vec<RepoWatchEventOccurrenceV1>),
+        Box<dyn Error>,
+    > {
+        let mut frontier = absent_candidate.event_identity_frontier().clone();
+        let returned = workflow_run_observation(WorkflowRunPresence::Listed)?;
+        let events = derive_repo_watch_events(
+            &repository,
+            Some(absent_candidate.observation()),
+            &returned,
+            &mut frontier,
+            &mut FixedEventIds(seed),
+        )?;
+        Ok((
+            RepoWatchCursorCandidate::with_event_identity_frontier(returned, frontier),
+            events,
+        ))
+    };
+
+    let (returned_candidate, first_attempt) = build_return(500)?;
+    let fourth = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    Some(third),
+                    returned_candidate.clone(),
+                    first_attempt.clone(),
+                ),
+            )
+            .await?,
+    );
+    let stored_at_fourth: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_event WHERE repository = $1 AND cursor_generation = $2",
+    )
+    .bind(REPOSITORY)
+    .bind(i64::try_from(fourth.get())?)
+    .fetch_one(&pool)
+    .await?;
+
+    // A stale retry carrying the same candidate and content identity but a
+    // freshly minted event UUID.
+    let (retry_candidate, retry_events) = build_return(900)?;
+    let outcome = store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(Some(third), retry_candidate, retry_events.clone()),
+        )
+        .await?;
+
+    // The coalescing generation wrote no event at all.
+    assert_eq!(stored_at_fourth, 0);
+    // The retry restates the same occurrence under a freshly minted candidate.
+    assert_eq!(
+        first_attempt[0].content_identity(),
+        retry_events[0].content_identity()
+    );
+    assert_ne!(first_attempt[0].event().id(), retry_events[0].event().id());
+    assert_eq!(replayed_generation(outcome), fourth);
+    // The fact still names exactly one row, recorded under the identity of the
+    // occurrence that first carried it.
+    let rows: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM repo_watch_event
+          WHERE repository = $1 AND content_identity = $2",
+    )
+    .bind(REPOSITORY)
+    .bind(first_attempt[0].content_identity().as_bytes().as_slice())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(rows, 1);
     Ok(())
 }

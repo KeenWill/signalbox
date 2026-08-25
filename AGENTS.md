@@ -185,7 +185,8 @@ INV-tagged tests. Repository process rules live in `AGENTS.md` or the process
 document it names as their owner; scenarios and fixtures may themselves be the
 statement of record. Other documents link to an owner rather than restating it,
 and an owning scenario or fixture changes only with the owner-approved change
-that authorizes it.
+that authorizes it. Raising a hard safety ceiling requires a reviewed code
+change with a test and rationale.
 
 Ordinary implementation choices are made in the pull request and remain durable
 in its description and git history. Foundation-weight changes — changing
@@ -272,7 +273,9 @@ These suites start one PostgreSQL container per test through testcontainers,
 whose Rust client ships no Ryuk reaper: a container is removed by
 `ContainerAsync`'s `Drop` and by nothing else, and it is created with
 `AutoRemove: false`, so a test process that dies without unwinding strands every
-container it started along with that container's anonymous volume. Nothing
+container it started. A stranded container's database state is the bounded
+RAM-backed tmpfs `signalbox_persistence::disposable_postgres_state_tmpfs`
+mounts, so until removal it pins host memory rather than disk. Nothing
 in-process reclaims those — the client's optional `watchdog` feature is left off
 deliberately, because it `expect`s every stop and removal and so panics its
 background thread on the first error, which both abandons the containers it had
@@ -322,6 +325,8 @@ python3 scripts/check_docs_consistency.py
 python3 scripts/test_check_docs_consistency.py
 python3 scripts/check_migration_versions.py
 python3 scripts/test_check_migration_versions.py
+python3 scripts/check_numeric_bounds.py
+python3 scripts/test_check_numeric_bounds.py
 python3 scripts/check_panic_gate.py
 python3 scripts/test_check_panic_gate.py
 python3 scripts/test_postgres_integration_suites.py

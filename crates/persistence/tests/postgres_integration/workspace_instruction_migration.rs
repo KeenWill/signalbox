@@ -613,9 +613,10 @@ async fn inv061_workspace_instruction_manifest_requires_a_complete_discovery()
             (turn_instruction_manifest_id, session_id, turn_id,
              instruction_discovery_id, boundary_kind,
              eligibility_hash_algorithm, eligibility_hash,
+             admitted_set_hash_algorithm, admitted_set_hash,
              manifest_hash_algorithm, manifest_hash)
          VALUES ($1, $2, $3, $4, 'turn_start',
-                 'sha256_v1', $5, 'sha256_v1', $5)",
+                 'sha256_v1', $5, 'sha256_v1', $5, 'sha256_v1', $5)",
     )
     .bind(Uuid::from_u128(0x68d8))
     .bind(session.into_uuid())
@@ -663,9 +664,10 @@ async fn inv061_workspace_instruction_manifest_requires_canonical_hashes()
             (turn_instruction_manifest_id, session_id, turn_id,
              instruction_discovery_id, boundary_kind,
              eligibility_hash_algorithm, eligibility_hash,
+             admitted_set_hash_algorithm, admitted_set_hash,
              manifest_hash_algorithm, manifest_hash)
          VALUES ($1, $2, $3, $4, 'turn_start',
-                 'sha256_v1', $5, 'sha256_v1', $5)",
+                 'sha256_v1', $5, 'sha256_v1', $5, 'sha256_v1', $5)",
     )
     .bind(Uuid::from_u128(0x68f8))
     .bind(session.into_uuid())

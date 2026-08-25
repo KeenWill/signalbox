@@ -9,7 +9,9 @@ publish.workspace = true
 
 [features]
 default = []
-postgres-integration = ["dep:testcontainers-modules"]
+# The integration suites state the durable rows they need through the typed
+# seeding in `test_support`, so enabling them enables it.
+postgres-integration = ["dep:testcontainers-modules", "test-support"]
 test-support = []
 
 [dependencies]
@@ -45,6 +47,7 @@ testcontainers-modules = { version = "0.15.0", optional = true, default-features
 
 [dev-dependencies]
 expect-test = "1.5.1"
+signalbox-application = { path = "../application", features = ["test-support"] }
 toml = { version = "1.1.3", default-features = false, features = [
     "parse",
     "serde",
@@ -90,8 +93,18 @@ path = "tests/imported_conversation_e2e_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
+name = "search_path_postgres"
+path = "tests/search_path_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
 name = "outbox_decode_postgres"
 path = "tests/outbox_decode_postgres.rs"
+required-features = ["postgres-integration"]
+
+[[test]]
+name = "program_journal_postgres"
+path = "tests/program_journal_postgres.rs"
 required-features = ["postgres-integration"]
 
 [[test]]
