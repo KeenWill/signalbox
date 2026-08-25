@@ -33,13 +33,16 @@ fn api_model_rate_set_ids(catalog: &Catalog, model_hint: &str, date: &str) -> Op
     )
 }
 
-fn consumer_mapping_mut<'a>(catalog: &'a mut Value, id: &str) -> &'a mut Value {
+fn consumer_mapping_mut<'a>(
+    catalog: &'a mut Value,
+    id: &str,
+) -> Result<&'a mut Value, &'static str> {
     catalog["consumer_mappings"]
         .as_array_mut()
-        .unwrap()
+        .ok_or("consumer_mappings is not an array")?
         .iter_mut()
         .find(|mapping| mapping["id"] == id)
-        .unwrap()
+        .ok_or("consumer mapping fixture is absent")
 }
 
 #[test]
@@ -750,7 +753,7 @@ fn exact_day_observation_boundary_must_be_ordered() {
 #[test]
 fn consumer_mapping_observation_boundary_must_be_ordered() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
-    consumer_mapping_mut(&mut raw, "anth-code-default-sonnet5")["window"]["last_observed_old_rate"] =
+    consumer_mapping_mut(&mut raw, "anth-code-default-sonnet5").unwrap()["window"]["last_observed_old_rate"] =
         Value::String(String::from("2026-06-30"));
 
     let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
