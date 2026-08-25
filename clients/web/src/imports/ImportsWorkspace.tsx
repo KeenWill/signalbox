@@ -1,7 +1,7 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Menu } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   type CommandContext,
   importHotkeyBindings,
@@ -184,6 +184,28 @@ export function ImportsWorkspace({
     },
     [queryScope],
   )
+  const pendingCommandRef = useRef(pendingCommand)
+  useEffect(() => {
+    pendingCommandRef.current = pendingCommand
+  }, [pendingCommand])
+  // Retention is coordinated across tabs, not snapshotted once: another tab's write lands
+  // here through the storage event, and admission rechecks storage so a command persisted
+  // between the last snapshot and this tab's next action still locks new continuations.
+  useEffect(() => {
+    const observeRetention = (event: StorageEvent) => {
+      if (event.key !== null && !event.key.startsWith(retainedCommandStoragePrefix(queryScope))) {
+        return
+      }
+      if (pendingCommandRef.current !== null) return
+      const restored = readRetainedCommand(queryScope)
+      if (restored !== null) {
+        setPendingCommand(restored)
+        setContinuationAmbiguous(true)
+      }
+    }
+    window.addEventListener('storage', observeRetention)
+    return () => window.removeEventListener('storage', observeRetention)
+  }, [queryScope])
 
   const listRequest = useMemo(
     () => ({
@@ -412,12 +434,17 @@ export function ImportsWorkspace({
 
   const retryableContinuationFailure =
     continuation.isError && isRetryableContinuationError(continuation.error)
+  // Mutation error state belongs to the command that produced it: after slot rotation the
+  // retained command is a different one, so its retry offer follows the ambiguous posture
+  // rather than the settled command's definitive rejection.
+  const errorNamesRetainedCommand =
+    continuation.isError && continuation.variables?.command_id === pendingCommand?.command_id
   // A retained command is offered for exact retry after a retryable failure and after a
   // reload restored it from browser persistence with its durable outcome still unknown.
   const commandRetainedForRetry =
     pendingCommand !== null &&
     !continuation.isPending &&
-    (continuation.isError ? retryableContinuationFailure : continuationAmbiguous)
+    (errorNamesRetainedCommand ? retryableContinuationFailure : continuationAmbiguous)
   const ambiguousContinuationFailure = commandRetainedForRetry && continuationAmbiguous
 
   const continueAt = (relationship: WebImportedSessionRelationship) => {
@@ -427,6 +454,14 @@ export function ImportsWorkspace({
       modelSelectionId.trim().length === 0 ||
       hasRetainedCommand
     ) {
+      return
+    }
+    // Recheck storage at admission: another tab may have retained a command after this
+    // tab's last snapshot, and its outcome may still be ambiguous.
+    const concurrentlyRetained = readRetainedCommand(queryScope)
+    if (concurrentlyRetained !== null) {
+      setPendingCommand(concurrentlyRetained)
+      setContinuationAmbiguous(true)
       return
     }
     const request: WebImportContinuationRequest = {
@@ -744,7 +779,7 @@ export function ImportsWorkspace({
                         : ' Abandon it before selecting another import or frontier.'}
                     </p>
                   )}
-                  {continuation.isError && !retryableContinuationFailure && (
+                  {continuation.isError && !retryableContinuationFailure && !hasRetainedCommand && (
                     <p role="alert">
                       The continuation request was rejected and cannot be retried unchanged.
                     </p>
