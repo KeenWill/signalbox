@@ -30,6 +30,14 @@ const largeFleetFixture = {
   firstRowIndex: '2',
 } as const
 
+const sessionFoundationFixture = {
+  path: '/scenario/session-foundation',
+  logicalItems: 1_000_000,
+  loadedItems: 256,
+  mountedRowsCeiling: VIRTUALIZED_MOUNTED_ROWS_EXCLUSIVE_CEILING,
+  latestItemTestId: 'timeline-event-1000000',
+} as const
+
 const streamingFixture = {
   firstLoadedItemId: 'event-0',
   secondLoadedItemId: 'event-1',
@@ -87,6 +95,30 @@ test('keeps a six-figure timeline bounded', async ({ page }) => {
   const diagnostics = await page.evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__?.())
   expect(diagnostics?.logicalTimeline).toBe(largeTimelineFixture.logicalItems)
   expect(diagnostics?.loadedTimeline).toBe(largeTimelineFixture.loadedItems)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('browses an enormous production-shaped session from its bounded tail', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto(sessionFoundationFixture.path)
+
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await expect(timeline).toBeVisible()
+  await expect(timeline).toHaveAttribute('data-mounted-rows', /^\d+$/)
+  expect(Number(await timeline.getAttribute('data-mounted-rows'))).toBeLessThan(
+    sessionFoundationFixture.mountedRowsCeiling,
+  )
+  expect(await timeline.getAttribute('data-total-loaded')).toBe(
+    String(sessionFoundationFixture.loadedItems),
+  )
+  await timeline.press('End')
+  await expect(page.getByTestId(sessionFoundationFixture.latestItemTestId)).toHaveAttribute(
+    'aria-selected',
+    'true',
+  )
+  const diagnostics = await page.evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__?.())
+  expect(diagnostics?.logicalTimeline).toBe(sessionFoundationFixture.logicalItems)
+  expect(diagnostics?.loadedTimeline).toBe(sessionFoundationFixture.loadedItems)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -446,6 +478,7 @@ test('Mod+K opens the registered command palette', async ({ page }) => {
   await page.goto('/scenario/streaming')
   await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
 
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
@@ -469,6 +502,7 @@ test('the command palette opens keyboard help with available product navigation'
   await page.goto('/scenario/streaming')
   await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
 
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await page.getByRole('button', { name: /Open keyboard help/ }).click()
