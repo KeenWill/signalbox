@@ -53,6 +53,18 @@ const cachedScenarioFixture = {
   retainedQueryCacheSummary: '4 bounded entries',
 } as const
 
+const importsFixture = {
+  path: '/scenario/imports',
+  logicalImports: 1_000_000,
+  loadedImports: 100,
+  logicalEntries: 250_000,
+  latestWindowSummary: '249,950–250,000 · 51 loaded',
+  arbitraryWindowSummary: '124,975–125,025 · 51 loaded',
+  continuedSessionId: '00000000-0000-7000-8000-000009000000',
+  firstEntryId: 'import-entry-00000000-0000-7000-8000-000002000001',
+  secondEntryId: 'import-entry-00000000-0000-7000-8000-000002000002',
+} as const
+
 const watchBrowser = (page: Page): BrowserProblems => {
   const problems: BrowserProblems = { consoleErrors: [], pageErrors: [] }
   page.on('console', (message) => {
@@ -527,6 +539,132 @@ test('returns from the scenario studio through the command palette', async ({ pa
 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('keeps million-row imports and enormous entry histories bounded', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto(importsFixture.path)
+
+  const imports = page.getByRole('rowgroup', { name: 'Imported conversation rows' })
+  await expect(imports).toHaveAttribute('data-total-loaded', String(importsFixture.loadedImports))
+  expect(Number(await imports.getAttribute('data-mounted-rows'))).toBeLessThan(
+    VIRTUALIZED_MOUNTED_ROWS_EXCLUSIVE_CEILING,
+  )
+  await expect(page.getByText('250,000', { exact: true }).first()).toBeVisible()
+  const diagnostics = await page.evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__?.())
+  expect(diagnostics?.logicalImports).toBe(importsFixture.logicalImports)
+  expect(diagnostics?.loadedImports).toBe(importsFixture.loadedImports)
+
+  await page.getByRole('button', { name: 'Latest', exact: true }).click()
+  await expect(page.getByText(importsFixture.latestWindowSummary, { exact: true })).toBeVisible()
+  const entries = page.getByRole('listbox', { name: 'Imported source entries' })
+  await expect(entries).toHaveAttribute('data-total-loaded', '51')
+  expect(Number(await entries.getAttribute('data-mounted-rows'))).toBeLessThan(
+    VIRTUALIZED_MOUNTED_ROWS_EXCLUSIVE_CEILING,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('navigates imported frontiers by keyboard and preserves logical positions', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await page.goto(importsFixture.path)
+
+  const entries = page.getByRole('listbox', { name: 'Imported source entries' })
+  await entries.focus()
+  await entries.press('j')
+  await expect(entries).toHaveAttribute('aria-activedescendant', importsFixture.secondEntryId)
+  await expect(entries.getByRole('option', { selected: true })).toHaveAttribute(
+    'aria-posinset',
+    '2',
+  )
+  await expect(entries.getByRole('option', { selected: true })).toHaveAttribute(
+    'aria-setsize',
+    String(importsFixture.logicalEntries),
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('leaves imported modal navigation inactive while position input owns editing', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await page.goto(importsFixture.path)
+
+  const position = page.getByRole('textbox', { name: 'Imported entry position' })
+  await position.fill('125000')
+  await position.press('j')
+  await expect(position).toHaveValue('125000j')
+  await expect(page.getByRole('listbox', { name: 'Imported source entries' })).toHaveAttribute(
+    'aria-activedescendant',
+    'import-entry-00000000-0000-7000-8000-000002000001',
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('Escape returns imported position editing to its owning entry window', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto(importsFixture.path)
+
+  const position = page.getByRole('textbox', { name: 'Imported entry position' })
+  await position.focus()
+  await position.press('Escape')
+  await expect(page.getByRole('listbox', { name: 'Imported source entries' })).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('discovers imported navigation bindings through the command palette', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto(importsFixture.path)
+
+  const entries = page.locator('[aria-label="Imported source entries"]')
+  await expect(entries).toHaveAttribute('aria-activedescendant', importsFixture.firstEntryId)
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette.getByText('Select next imported frontier', { exact: true })).toBeVisible()
+  await expect(palette.getByText('j', { exact: true })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('suspends imported navigation while the command palette owns focus', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto(importsFixture.path)
+
+  const entries = page.locator('[aria-label="Imported source entries"]')
+  await expect(entries).toHaveAttribute('aria-activedescendant', importsFixture.firstEntryId)
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+  await page.keyboard.press('j')
+
+  await expect(entries).toHaveAttribute('aria-activedescendant', importsFixture.firstEntryId)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('continues an exact arbitrary imported frontier as a native session', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto(importsFixture.path)
+
+  await page.getByRole('textbox', { name: 'Imported entry position' }).fill('125000')
+  await page.getByRole('button', { name: 'Go', exact: true }).press('Enter')
+  await expect(page.getByText(importsFixture.arbitraryWindowSummary, { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Resume', exact: true }).press('Enter')
+  await expect(
+    page.getByText(`Session created: ${importsFixture.continuedSessionId}`, { exact: true }),
+  ).toBeVisible()
+  await expect(page.getByText('Imported source', { exact: true }).first()).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('captures the pinned imports workstation', async ({ page }, testInfo) => {
+  skipUnlessLinuxChromium(testInfo)
+  const problems = watchBrowser(page)
+  await page.goto(importsFixture.path)
+  await expect(page.getByRole('heading', { name: 'Imported conversations' })).toBeVisible()
+  await expect(page).toHaveScreenshot('imports-dark.png', { animations: 'disabled' })
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

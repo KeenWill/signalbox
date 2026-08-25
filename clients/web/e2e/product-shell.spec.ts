@@ -263,7 +263,7 @@ test('retries a failed product bootstrap after the daemon recovers', async ({ pa
   await page.getByRole('button', { name: 'Retry contract' }).click()
 
   await expect(page.getByText('Timeline reads available')).toBeVisible()
-  await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
   expect(attempts).toBe(2)
   expect(problems.pageErrors).toEqual([])
   expect(

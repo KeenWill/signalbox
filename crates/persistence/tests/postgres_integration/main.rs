@@ -12,6 +12,7 @@
 mod support;
 
 mod approval_decisions;
+mod attention;
 mod convergence_sweep;
 mod delegated_result_rereads;
 mod delegation_schema;
@@ -1892,6 +1893,23 @@ async fn postgres_before_approval_event_migration()
     for migration in MIGRATOR
         .iter()
         .take_while(|migration| migration.version < 202608030001)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+    Ok((container, pool, database_url))
+}
+
+async fn postgres_before_attention_migration()
+-> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let (container, pool, database_url) = unmigrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < 202608250800)
     {
         connection.apply("_sqlx_migrations", migration).await?;
     }
