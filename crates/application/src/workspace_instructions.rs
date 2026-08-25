@@ -153,12 +153,18 @@ impl InstructionDiscoverySnapshot {
     }
 }
 
+// numeric-bound: not-a-bound - names which fixed discovery-limit set was applied
 const DISCOVERY_LIMIT_SET_VERSION: u16 = 1;
+// numeric-bound: ceiling - bounds one discovery scan's directory traversal work
 const MAX_CLASSIFIED_ENTRIES: u64 = 100_000;
+// numeric-bound: ceiling - protects retained discovery-finding memory
 const MAX_FINDINGS: usize = 4_096;
+// numeric-bound: ceiling - protects daemon memory against a runaway instruction tree
 const MAX_CANDIDATE_SOURCE_BYTES: u64 = 64 * 1024 * 1024;
+// numeric-bound: ceiling - bounds one discovery scan's latency
 const MAX_ELAPSED: Duration = Duration::from_secs(30);
 #[cfg(unix)]
+// numeric-bound: ceiling - bounds the blocking filesystem threads discovery holds
 const MAX_FILESYSTEM_WORKERS: usize = 4;
 
 #[cfg(unix)]
