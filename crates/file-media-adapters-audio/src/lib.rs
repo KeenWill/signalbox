@@ -9,9 +9,10 @@ use signalbox_file_media_runtime::{
     CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider, FileMediaProviderDeclaration,
     FileMediaProviderFailure, FileMediaProviderFuture, FileMediaProviderReadRequest,
     FileMediaProviderValidationRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
-    ProbeDeclaration, ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput,
-    ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
-    ReaderDeclarationInput, ReaderIdentity, ReasonCode, StreamingTextFallback, VerifiedBlobSource,
+    ProbeDeclaration, ProbeDeclarationInput, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
+    ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
+    StreamingTextFallback, VerifiedBlobSource,
 };
 
 const PROVIDER_NAME: &str = "signalbox_audio";
@@ -468,7 +469,12 @@ fn reader(
         reader: FileReaderName::try_new(format.reader_name())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(format.media_type())?],
-        probe: ProbeDeclaration::new(64, 0, 2, AUDIO_PROBE_CUMULATIVE_BYTES),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: 64,
+            suffix_bytes: 0,
+            range_count: 2,
+            cumulative_bytes: AUDIO_PROBE_CUMULATIVE_BYTES,
+        }),
         views: vec![metadata_view()?],
         reason_codes: reasons,
         streaming_text_fallback: StreamingTextFallback::Disabled,
