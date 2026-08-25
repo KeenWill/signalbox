@@ -368,7 +368,47 @@ fn classify_svg_root(bytes: &[u8]) -> Result<bool, ParseIssue> {
     loop {
         match reader.read_event_into(&mut buffer) {
             Ok(Event::Start(start) | Event::Empty(start)) => {
-                return Ok(start.local_name().as_ref() == b"svg");
+                if start.local_name().as_ref() != b"svg" {
+                    return Ok(false);
+                }
+                let qualified_name = start.name();
+                let qualified_name = qualified_name.as_ref();
+                let prefix = qualified_name
+                    .iter()
+                    .position(|byte| *byte == b':')
+                    .map(|index| &qualified_name[..index]);
+                let prefixed_namespace =
+                    prefix.map(|prefix| [b"xmlns:".as_slice(), prefix].concat());
+                let mut default_svg_namespace = false;
+                let mut prefixed_svg_namespace = false;
+                for attribute in start.attributes() {
+                    let Ok(attribute) = attribute else {
+                        return Ok(true);
+                    };
+                    let Some(value) = std::str::from_utf8(attribute.value.as_ref())
+                        .ok()
+                        .and_then(|value| unescape(value).ok())
+                    else {
+                        return Ok(true);
+                    };
+                    if value.as_bytes() != SVG_NAMESPACE {
+                        continue;
+                    }
+                    if attribute.key.as_ref() == b"xmlns" {
+                        default_svg_namespace = true;
+                    }
+                    if prefixed_namespace
+                        .as_ref()
+                        .is_some_and(|key| attribute.key.as_ref() == key.as_slice())
+                    {
+                        prefixed_svg_namespace = true;
+                    }
+                }
+                return Ok(if prefix.is_some() {
+                    prefixed_svg_namespace || default_svg_namespace
+                } else {
+                    default_svg_namespace
+                });
             }
             Ok(Event::Eof) | Err(_) => return Ok(false),
             _ => {}
@@ -1287,13 +1327,19 @@ impl<'a> CalculationParser<'a> {
         let number = core::str::from_utf8(self.input.get(start..unit_start)?)
             .ok()
             .and_then(|number| parse_finite(number).ok());
-        let unit = (kind == CalculationKind::Dimension)
+        let raw_unit = (kind == CalculationKind::Dimension)
             .then(|| token[unit_start - start..].to_ascii_lowercase());
-        Some(CalculationValue {
-            kind,
-            value: number,
-            unit,
-        })
+        let (value, unit) = match (number, raw_unit.as_deref()) {
+            (Some(number), Some("px")) => (Some(number), Some(String::from("px"))),
+            (Some(number), Some("in")) => (Some(number * 96.0), Some(String::from("px"))),
+            (Some(number), Some("cm")) => (Some(number * 96.0 / 2.54), Some(String::from("px"))),
+            (Some(number), Some("mm")) => (Some(number * 96.0 / 25.4), Some(String::from("px"))),
+            (Some(number), Some("q")) => (Some(number * 96.0 / 101.6), Some(String::from("px"))),
+            (Some(number), Some("pt")) => (Some(number * 96.0 / 72.0), Some(String::from("px"))),
+            (Some(number), Some("pc")) => (Some(number * 16.0), Some(String::from("px"))),
+            (value, _) => (value, raw_unit),
+        };
+        Some(CalculationValue { kind, value, unit })
     }
 
     fn parse_identifier(&mut self) -> Option<&'a [u8]> {

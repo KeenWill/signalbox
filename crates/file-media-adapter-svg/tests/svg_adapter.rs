@@ -443,6 +443,19 @@ async fn plain_text_is_unknown_with_svg_declaration() -> Result<(), Box<dyn Erro
 }
 
 #[tokio::test]
+async fn invalid_utf8_after_foreign_svg_root_is_unknown() -> Result<(), Box<dyn Error>> {
+    let mut bytes = br#"<x:svg xmlns:x="urn:other"/>"#.to_vec();
+    bytes.push(0xff);
+    let source = SvgFixture::raw(&bytes).into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Unknown
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn unnamespaced_non_svg_root_is_unknown_with_svg_declaration() -> Result<(), Box<dyn Error>> {
     let source = SvgFixture::raw(br#"<foo/>"#).into_source()?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;
@@ -869,6 +882,15 @@ async fn clamp_minimum_precedes_inverted_maximum() -> Result<(), Box<dyn Error>>
         FileInspectionStatus::Validated
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn negative_mixed_absolute_unit_calculation_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(-1cm + 1mm)"/>"#,),
+        "malformed_svg",
+    )
+    .await
 }
 
 #[tokio::test]
