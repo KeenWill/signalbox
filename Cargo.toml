@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["crates/file-media-linux-sandbox"]
 members = [
     "apps/client",
     "apps/signalbox-runner",
@@ -15,12 +16,14 @@ members = [
     "crates/expect-table",
     "crates/file-media-runtime",
     "crates/file-media-provider-runtime",
+    "crates/file-media-processor-runtime",
     "crates/model-runtime",
     "crates/model-runtime-anthropic",
     "crates/model-runtime-claude-cli",
     "crates/model-runtime-codex-cli",
     "crates/model-runtime-openai",
     "crates/model-provider-runtime",
+    "crates/model-reference-catalog",
     "crates/persistence",
     "crates/process-protocol",
     "crates/program-runtime",
