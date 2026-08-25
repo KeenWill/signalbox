@@ -128,7 +128,7 @@ export function OverlaySurfaces({
         onClose={close}
       >
         <dl className="shortcut-list">
-          {commandRegistry
+          {availableCommands
             .filter((command) => command.bindings.length > 0)
             .map((command) => (
               <div key={command.id}>

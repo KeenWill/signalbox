@@ -497,12 +497,24 @@ pub enum ProcessProviderModelCallFailureCause {
     Unrecognized,
 }
 
+/// Persistence-owned closed classification of an unsent attachment-preparation failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessAttachmentPreparationFailureCause {
+    /// Distinct rendered attachment bytes exceeded the deployment ceiling.
+    TooLarge,
+    /// No recorded replica contained the required attachment.
+    Missing,
+    /// Recorded replicas failed length or digest verification.
+    Corrupt,
+}
+
 /// Optional terminal model-call evidence for a failed turn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessFailedTerminalModelCall {
     call: ModelCallId,
     disposition: ProcessFailedModelCallDisposition,
     provider_failure_cause: Option<ProcessProviderModelCallFailureCause>,
+    attachment_preparation_failure_cause: Option<ProcessAttachmentPreparationFailureCause>,
 }
 
 impl ProcessFailedTerminalModelCall {
@@ -519,6 +531,13 @@ impl ProcessFailedTerminalModelCall {
     /// Returns the closed provider classification when this call retained one.
     pub const fn provider_failure_cause(&self) -> Option<ProcessProviderModelCallFailureCause> {
         self.provider_failure_cause
+    }
+
+    /// Returns the closed local attachment-preparation cause when retained.
+    pub const fn attachment_preparation_failure_cause(
+        &self,
+    ) -> Option<ProcessAttachmentPreparationFailureCause> {
+        self.attachment_preparation_failure_cause
     }
 }
 
@@ -590,6 +609,10 @@ pub enum ProcessTurnState {
         ended_attempt: TurnAttemptId,
         /// Ambiguous call awaiting recovery.
         recovery_call: ModelCallId,
+        /// Durable automatic attempts already claimed.
+        automatic_reconciliation_attempts: u32,
+        /// True only after the automatic attempt budget is exhausted.
+        operator_action_required: bool,
     },
     /// The yielded tool batch is parked on a user decision.
     ActiveAwaitingToolApproval {
@@ -1918,7 +1941,10 @@ impl ProcessReadRepository {
                 transcript_approval.user_command_id AS transcript_user_command_id,
                 transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
                 transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
-                transcript_approval.rationale AS transcript_decision_rationale
+                transcript_approval.rationale AS transcript_decision_rationale,
+                transcript_approval.override_denied_request_id
+                    AS transcript_override_denied_request_id,
+                transcript_override.command_id AS transcript_override_command_id
                FROM UNNEST($1::numeric[], $2::uuid[], $3::uuid[])
                     WITH ORDINALITY AS selected(
                         member_position,
@@ -1947,6 +1973,9 @@ impl ProcessReadRepository {
                 )
                LEFT JOIN tool_approval_decision AS transcript_approval
                  ON transcript_approval.request_id = transcript_request.request_id
+               LEFT JOIN tool_approval_user_override AS transcript_override
+                 ON transcript_override.denied_request_id =
+                    transcript_approval.override_denied_request_id
                LEFT JOIN imported_transcript_entry AS imported
                  ON imported.imported_conversation_id =
                         entry.imported_conversation_id
@@ -2805,6 +2834,8 @@ async fn load_next_transcript_turn(
                 AS terminal_model_call_disposition_kind,
             terminal_call.terminal_provider_failure_cause
                 AS terminal_model_call_provider_failure_cause,
+            terminal_call.terminal_attachment_preparation_failure_cause
+                AS terminal_model_call_attachment_preparation_failure_cause,
             accepted.accepted_input_id,
             accepted.acceptance_position AS accepted_position,
             accepted.origin_turn_id,
@@ -2849,6 +2880,12 @@ async fn load_next_transcript_turn(
             current_call.state_kind AS current_model_call_state_kind,
             current_call.context_frontier_id AS current_model_call_frontier_id,
             recovery_call.context_frontier_id AS recovery_model_call_frontier_id,
+            automatic_reconciliation.state_kind
+                AS automatic_reconciliation_state_kind,
+            automatic_reconciliation.attempt_count
+                AS automatic_reconciliation_attempt_count,
+            automatic_reconciliation.model_call_id
+                AS automatic_reconciliation_model_call_id,
             active_tool_round.boundary_frontier_id AS active_tool_round_frontier_id,
             logical_terminal.spawning_tool_request_id
                 AS logical_terminal_spawning_request_id,
@@ -2924,6 +2961,9 @@ async fn load_next_transcript_turn(
             AND recovery_call.turn_id = turn.turn_id
             AND recovery_call.session_id = turn.session_id
             AND recovery_call.state_kind = 'terminal'
+           LEFT JOIN automatic_model_call_reconciliation AS automatic_reconciliation
+             ON automatic_reconciliation.turn_id = turn.turn_id
+            AND automatic_reconciliation.session_id = turn.session_id
            LEFT JOIN model_call AS terminal_call
              ON terminal_call.model_call_id = turn.terminal_model_call_id
             AND terminal_call.turn_attempt_id = turn.terminal_attempt_id
@@ -2981,6 +3021,21 @@ fn decode_provider_failure_cause(
         "unrecognized" => Ok(ProcessProviderModelCallFailureCause::Unrecognized),
         value => Err(ProcessReadCorruption::Unsupported {
             field: "model-call provider failure cause",
+            value: value.to_owned(),
+        }
+        .into()),
+    }
+}
+
+fn decode_attachment_preparation_failure_cause(
+    value: &str,
+) -> Result<ProcessAttachmentPreparationFailureCause, ProcessReadError> {
+    match value {
+        "too_large" => Ok(ProcessAttachmentPreparationFailureCause::TooLarge),
+        "missing" => Ok(ProcessAttachmentPreparationFailureCause::Missing),
+        "corrupt" => Ok(ProcessAttachmentPreparationFailureCause::Corrupt),
+        value => Err(ProcessReadCorruption::Unsupported {
+            field: "model-call attachment-preparation failure cause",
             value: value.to_owned(),
         }
         .into()),
@@ -3368,6 +3423,8 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         row.try_get("terminal_model_call_disposition_kind")?;
     let terminal_call_provider_failure_cause: Option<String> =
         row.try_get("terminal_model_call_provider_failure_cause")?;
+    let terminal_call_attachment_preparation_failure_cause: Option<String> =
+        row.try_get("terminal_model_call_attachment_preparation_failure_cause")?;
     if active_phase.as_deref() != Some("awaiting_runner_recovery")
         && (runner_recovery_runner.is_some()
             || runner_recovery_revision.is_some()
@@ -3385,13 +3442,39 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         )
         .into());
     }
+    if terminal_call_attachment_preparation_failure_cause.is_some()
+        && (terminal_call_disposition.as_deref() != Some("known_failed")
+            || terminal_call_provider_failure_cause.is_some())
+    {
+        return Err(ProcessReadCorruption::Inconsistent(
+            "attachment-preparation failure cause without local known-failed model call",
+        )
+        .into());
+    }
     let current_model_call: Option<Uuid> = row.try_get("current_model_call_id")?;
     let current_model_call_state: Option<String> = row.try_get("current_model_call_state_kind")?;
     let current_model_call_frontier: Option<Uuid> =
         row.try_get("current_model_call_frontier_id")?;
     let recovery_model_call_frontier: Option<Uuid> =
         row.try_get("recovery_model_call_frontier_id")?;
+    let automatic_reconciliation_state: Option<String> =
+        row.try_get("automatic_reconciliation_state_kind")?;
+    let automatic_reconciliation_attempts: Option<i32> =
+        row.try_get("automatic_reconciliation_attempt_count")?;
+    let automatic_reconciliation_call: Option<Uuid> =
+        row.try_get("automatic_reconciliation_model_call_id")?;
     let active_tool_round_frontier: Option<Uuid> = row.try_get("active_tool_round_frontier_id")?;
+    if state_kind == "active"
+        && active_phase.as_deref() != Some("awaiting_model_call_recovery")
+        && (automatic_reconciliation_state.is_some()
+            || automatic_reconciliation_attempts.is_some()
+            || automatic_reconciliation_call.is_some())
+    {
+        return Err(ProcessReadCorruption::Inconsistent(
+            "automatic model-call reconciliation active phase",
+        )
+        .into());
+    }
 
     if !matches!(state_kind.as_str(), "queued" | "active" | "terminal") {
         return Err(ProcessReadCorruption::Unsupported {
@@ -3857,10 +3940,48 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             let call_frontier = recovery_model_call_frontier.ok_or(
                 ProcessReadCorruption::Inconsistent("recovery model call frontier"),
             )?;
+            if automatic_reconciliation_call.is_some()
+                && automatic_reconciliation_call != Some(call)
+            {
+                return Err(ProcessReadCorruption::Inconsistent(
+                    "automatic model-call reconciliation call correlation",
+                )
+                .into());
+            }
+            let (automatic_reconciliation_attempts, operator_action_required) = match (
+                automatic_reconciliation_state.as_deref(),
+                automatic_reconciliation_attempts,
+            ) {
+                (None, None) => (0, false),
+                (Some("scheduled" | "attempting"), Some(attempts)) => (
+                    u32::try_from(attempts).map_err(|_| {
+                        ProcessReadCorruption::Inconsistent(
+                            "automatic model-call reconciliation attempt count",
+                        )
+                    })?,
+                    false,
+                ),
+                (Some("exhausted"), Some(attempts)) => (
+                    u32::try_from(attempts).map_err(|_| {
+                        ProcessReadCorruption::Inconsistent(
+                            "exhausted model-call reconciliation attempt count",
+                        )
+                    })?,
+                    true,
+                ),
+                _ => {
+                    return Err(ProcessReadCorruption::Inconsistent(
+                        "active automatic model-call reconciliation state",
+                    )
+                    .into());
+                }
+            };
             (
                 ProcessTurnState::ActiveAwaitingModelCallRecovery {
                     ended_attempt: TurnAttemptId::from_uuid(attempt),
                     recovery_call: ModelCallId::from_uuid(call),
+                    automatic_reconciliation_attempts,
+                    operator_action_required,
                 },
                 Some(call_frontier),
             )
@@ -3937,6 +4058,11 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                         .as_deref()
                         .map(decode_provider_failure_cause)
                         .transpose()?,
+                    attachment_preparation_failure_cause:
+                        terminal_call_attachment_preparation_failure_cause
+                            .as_deref()
+                            .map(decode_attachment_preparation_failure_cause)
+                            .transpose()?,
                 }),
             },
             Some(ContextFrontierId::from_uuid(frontier)),
@@ -4254,7 +4380,10 @@ async fn open_transcript_entry_cursor(
             transcript_approval.user_command_id AS transcript_user_command_id,
             transcript_approval.delegate_model_selection_id AS transcript_delegate_model_selection_id,
             transcript_approval.delegate_model_call_id AS transcript_delegate_model_call_id,
-            transcript_approval.rationale AS transcript_decision_rationale
+            transcript_approval.rationale AS transcript_decision_rationale,
+            transcript_approval.override_denied_request_id
+                AS transcript_override_denied_request_id,
+            transcript_override.command_id AS transcript_override_command_id
            FROM (
                 SELECT
                     resolved.*,
@@ -4282,6 +4411,9 @@ async fn open_transcript_entry_cursor(
             )
            LEFT JOIN tool_approval_decision AS transcript_approval
              ON transcript_approval.request_id = transcript_request.request_id
+           LEFT JOIN tool_approval_user_override AS transcript_override
+             ON transcript_override.denied_request_id =
+                transcript_approval.override_denied_request_id
            LEFT JOIN imported_transcript_entry AS imported
              ON imported.imported_conversation_id =
                     entry.imported_conversation_id
@@ -5136,6 +5268,8 @@ fn decode_process_tool_approval(
     let delegate_model: Option<Uuid> = row.try_get("transcript_delegate_model_selection_id")?;
     let delegate_call: Option<Uuid> = row.try_get("transcript_delegate_model_call_id")?;
     let rationale: Option<String> = row.try_get("transcript_decision_rationale")?;
+    let override_denied: Option<Uuid> = row.try_get("transcript_override_denied_request_id")?;
+    let override_command: Option<Uuid> = row.try_get("transcript_override_command_id")?;
     let Some(source) = source else {
         if decision_kind.is_some()
             || denial_reason.is_some()
@@ -5143,6 +5277,8 @@ fn decode_process_tool_approval(
             || delegate_model.is_some()
             || delegate_call.is_some()
             || rationale.is_some()
+            || override_denied.is_some()
+            || override_command.is_some()
         {
             return Err(ProcessReadCorruption::Inconsistent(
                 "tool approval projection without source",
@@ -5169,6 +5305,11 @@ fn decode_process_tool_approval(
             return Err(ProcessReadCorruption::Inconsistent("tool approval decision kind").into());
         }
     };
+    if source_kind != ToolApprovalDecisionSourceStorageKind::UserOverride
+        && (override_denied.is_some() || override_command.is_some())
+    {
+        return Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into());
+    }
     match (
         source_kind,
         user_command,
@@ -5221,11 +5362,32 @@ fn decode_process_tool_approval(
                 rationale: Some(rationale),
             }))
         }
+        (ToolApprovalDecisionSourceStorageKind::UserOverride, None, None, None, None)
+            if decision == ToolApprovalDecision::Approve =>
+        {
+            match (override_denied, override_command) {
+                (Some(denied_request), Some(command)) => Ok(Some(ProcessToolApproval {
+                    decision,
+                    decider: ToolApprovalDecider::UserOverride {
+                        command: durable_command_id_from_uuid(command).map_err(|_| {
+                            ProcessReadCorruption::Inconsistent("tool approval override command")
+                        })?,
+                        denied_request: ToolRequestId::from_uuid(denied_request),
+                    },
+                    rationale: None,
+                })),
+                (None, _) | (_, None) => Err(ProcessReadCorruption::Inconsistent(
+                    "tool approval provenance shape",
+                )
+                .into()),
+            }
+        }
         (
             ToolApprovalDecisionSourceStorageKind::PolicyAuto
             | ToolApprovalDecisionSourceStorageKind::SessionBlanket
             | ToolApprovalDecisionSourceStorageKind::UserCommand
-            | ToolApprovalDecisionSourceStorageKind::Delegate,
+            | ToolApprovalDecisionSourceStorageKind::Delegate
+            | ToolApprovalDecisionSourceStorageKind::UserOverride,
             ..,
         ) => Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into()),
     }

@@ -90,7 +90,15 @@ export const visibleTimeline = (items: TimelineItem[], detail: DetailMode): Time
   }
 }
 
-export function Transcript({ items, context }: { items: TimelineItem[]; context: CommandContext }) {
+export function Transcript({
+  items,
+  context,
+  autoFocus = false,
+}: {
+  items: TimelineItem[]
+  context: CommandContext
+  autoFocus?: boolean
+}) {
   'use no memo'
   const dispatch = useAppDispatch()
   const detail = useAppSelector((state) => state.app.detail)
@@ -118,6 +126,10 @@ export function Transcript({ items, context }: { items: TimelineItem[]; context:
     (virtualizer.range?.endIndex ?? 0) + TRANSCRIPT_OVERSCAN_ROWS,
     Math.max(visibleItems.length - 1, 0),
   )
+
+  useEffect(() => {
+    if (autoFocus) parentRef.current?.focus()
+  }, [autoFocus])
 
   useEffect(() => {
     dispatch(actions.transcriptRangeSet({ start: rangeStart, end: rangeEnd }))

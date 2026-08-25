@@ -21,6 +21,8 @@ pub(crate) const REPLACE_SESSION_METADATA_KIND: &str =
 pub(crate) const SUBMIT_INPUT_KIND: &str = durable_command_kind_to_str(CommandKind::SubmitInput);
 pub(crate) const DECIDE_TOOL_REQUEST_KIND: &str =
     durable_command_kind_to_str(CommandKind::DecideToolRequest);
+pub(crate) const OVERRIDE_DENIED_TOOL_REQUEST_KIND: &str =
+    durable_command_kind_to_str(CommandKind::OverrideDeniedToolRequest);
 pub(crate) const REVIEW_WORKFLOW_KIND: &str =
     durable_command_kind_to_str(CommandKind::ReviewWorkflow);
 pub(crate) const REVIEW_ORCHESTRATION_KIND: &str =
@@ -54,7 +56,7 @@ struct CommandKindDefinition {
     maximum_version: i16,
 }
 
-const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 14] = [
+const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 15] = [
     CommandKindDefinition {
         kind: CommandKind::CreateSession,
         spelling: CREATE_SESSION_KIND,
@@ -87,13 +89,20 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 14] = [
         kind: CommandKind::SubmitInput,
         spelling: SUBMIT_INPUT_KIND,
         typed_table: "submit_input_command",
-        minimum_version: 4,
-        maximum_version: 4,
+        minimum_version: 3,
+        maximum_version: 3,
     },
     CommandKindDefinition {
         kind: CommandKind::DecideToolRequest,
         spelling: DECIDE_TOOL_REQUEST_KIND,
         typed_table: "decide_tool_request_command",
+        minimum_version: 1,
+        maximum_version: 1,
+    },
+    CommandKindDefinition {
+        kind: CommandKind::OverrideDeniedToolRequest,
+        spelling: OVERRIDE_DENIED_TOOL_REQUEST_KIND,
+        typed_table: "override_denied_tool_request_command",
         minimum_version: 1,
         maximum_version: 1,
     },

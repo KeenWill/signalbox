@@ -1515,11 +1515,14 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 collecting_tool_results = false;
             }
             ModelConversationMessage::User { content, .. } => {
-                let text = content
-                    .single_text()
-                    .map(signalbox_domain::NonEmptyUnicodeText::as_str)
-                    .unwrap_or("Signalbox user content contains attachment stubs.");
-                rendered.push(ConversationMessage::user_text(text));
+                rendered.push(ConversationMessage {
+                    role: ConversationRole::User,
+                    parts: content
+                        .parts()
+                        .iter()
+                        .map(|part| MessagePart::Text(part.as_str().to_owned()))
+                        .collect(),
+                });
                 assistant_call = None;
                 collecting_tool_results = false;
             }

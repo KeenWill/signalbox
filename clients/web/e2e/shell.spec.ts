@@ -1,4 +1,5 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { webContractBootstrapFixture } from '../src/product.fixture'
 
 interface BrowserProblems {
   consoleErrors: string[]
@@ -27,6 +28,14 @@ const largeFleetFixture = {
   ariaRowCount: '1000001',
   firstRowTestId: 'fleet-obligation-0',
   firstRowIndex: '2',
+} as const
+
+const sessionFoundationFixture = {
+  path: '/scenario/session-foundation',
+  logicalItems: 1_000_000,
+  loadedItems: 256,
+  mountedRowsCeiling: VIRTUALIZED_MOUNTED_ROWS_EXCLUSIVE_CEILING,
+  latestItemTestId: 'timeline-event-1000000',
 } as const
 
 const streamingFixture = {
@@ -89,6 +98,30 @@ test('keeps a six-figure timeline bounded', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('browses an enormous production-shaped session from its bounded tail', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.goto(sessionFoundationFixture.path)
+
+  const timeline = page.getByRole('listbox', { name: 'Session timeline' })
+  await expect(timeline).toBeVisible()
+  await expect(timeline).toHaveAttribute('data-mounted-rows', /^\d+$/)
+  expect(Number(await timeline.getAttribute('data-mounted-rows'))).toBeLessThan(
+    sessionFoundationFixture.mountedRowsCeiling,
+  )
+  expect(await timeline.getAttribute('data-total-loaded')).toBe(
+    String(sessionFoundationFixture.loadedItems),
+  )
+  await timeline.press('End')
+  await expect(page.getByTestId(sessionFoundationFixture.latestItemTestId)).toHaveAttribute(
+    'aria-selected',
+    'true',
+  )
+  const diagnostics = await page.evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__?.())
+  expect(diagnostics?.logicalTimeline).toBe(sessionFoundationFixture.logicalItems)
+  expect(diagnostics?.loadedTimeline).toBe(sessionFoundationFixture.loadedItems)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
 test('exposes logical positions for virtualized timeline options', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto(largeTimelineFixture.path)
@@ -139,7 +172,7 @@ test('makes the fleet scroll viewport keyboard reachable', async ({ page }) => {
   await rows.focus()
   await expect(rows).toBeFocused()
   await rows.press('End')
-  expect(await rows.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
+  await expect.poll(() => rows.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
@@ -443,7 +476,9 @@ test('keeps the fleet surface reachable on a short wide viewport', async ({ page
 test('Mod+K opens the registered command palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
 
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
@@ -460,14 +495,37 @@ test('Escape closes the command palette', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
-test('the command palette opens keyboard help without closing it', async ({ page }) => {
+test('the command palette opens keyboard help with available product navigation', async ({
+  page,
+}) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
 
+  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+K`)
   await page.getByRole('button', { name: /Open keyboard help/ }).click()
-  await expect(page.getByRole('dialog', { name: 'Keyboard help' })).toBeVisible()
+  const help = page.getByRole('dialog', { name: 'Keyboard help' })
+  await expect(help).toBeVisible()
+  await expect(help.getByText('Go to Attention', { exact: true })).toBeVisible()
+  await expect(help.getByText('Go to Sessions', { exact: true })).toBeVisible()
+  await expect(help.getByText('Go to Settings', { exact: true })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('returns from the scenario studio through the command palette', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.goto('/scenario/streaming')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  await page.getByRole('button', { name: /Go to Attention/ }).click()
+
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
