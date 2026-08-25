@@ -261,8 +261,6 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       canAbandonImport: canRecoverRetainedCommand,
       abandonImport: abandonExactCommand,
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
-      navigateScenario: () =>
-        void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } }),
     }),
     [
       abandonExactCommand,
@@ -749,7 +747,7 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
               active="imports"
               context={commandContext}
               disabled={hasRetainedCommand}
-              onNavigate={() => invokeCommand('surface.escape', commandContext)}
+              onActivate={() => invokeCommand('surface.escape', commandContext)}
             />
           )
         }

@@ -7,8 +7,9 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{Deserialize, Deserializer, Serialize, de};
+use serde_json::{Value, json};
+use signalbox_application::{max_timeline_window_bytes, max_timeline_window_items};
 
 /// Exact browser HTTP contract version served by this daemon build.
 pub const WEB_CONTRACT_VERSION: &str = "2";
@@ -44,6 +45,8 @@ pub struct WebContractCapabilities {
     pub import_discovery: bool,
     /// Imported frontiers can seed a native session through an idempotent command.
     pub imported_continuations: bool,
+    /// Stable bounded session descriptors and historical windows are available.
+    pub bounded_session_timeline: bool,
 }
 
 /// Effective hard limits clients must honor for this contract version.
@@ -54,6 +57,10 @@ pub struct WebContractLimits {
     pub max_json_body_bytes: u32,
     /// Maximum encoded bytes for one NDJSON item, excluding its newline.
     pub max_ndjson_item_bytes: u32,
+    /// Maximum durable event headers returned in one timeline window.
+    pub max_timeline_window_items: u32,
+    /// Maximum projected structured item bytes in one timeline window.
+    pub max_timeline_window_bytes: u32,
 }
 
 /// Response from the contract bootstrap endpoint.
@@ -83,10 +90,13 @@ impl WebContractBootstrap {
                 ndjson_streaming: true,
                 import_discovery: true,
                 imported_continuations: true,
+                bounded_session_timeline: true,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
                 max_ndjson_item_bytes: MAX_NDJSON_ITEM_BYTES as u32,
+                max_timeline_window_items: u32::from(max_timeline_window_items()),
+                max_timeline_window_bytes: max_timeline_window_bytes(),
             },
         }
     }
@@ -430,6 +440,244 @@ pub struct WebImportContinuationResponse {
     pub relationship: WebImportedSessionRelationship,
 }
 
+/// Checked positive durable-event sequence encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebTimelineEventSequence(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
+
+fn canonical_u64(value: &str) -> Option<u64> {
+    let canonical = !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'));
+    canonical.then(|| value.parse::<u64>().ok()).flatten()
+}
+
+fn canonical_session_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
+}
+
+/// Checked canonical UUID used for browser-visible session identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebSessionId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebSessionId {
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+            bytes[6],
+            bytes[7],
+            bytes[8],
+            bytes[9],
+            bytes[10],
+            bytes[11],
+            bytes[12],
+            bytes[13],
+            bytes[14],
+            bytes[15],
+        ))
+    }
+
+    /// Constructs a session identity from its canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn from_canonical(value: String) -> Option<Self> {
+        canonical_session_id(&value).then_some(Self(value))
+    }
+
+    /// Returns the canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebSessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value)
+            .ok_or_else(|| de::Error::custom("session ID must be a canonical lowercase UUID"))
+    }
+}
+
+impl WebTimelineEventSequence {
+    /// Encodes one already-validated positive durable-event sequence.
+    #[must_use]
+    pub fn from_nonzero(sequence: std::num::NonZeroU64) -> Self {
+        Self(sequence.get().to_string())
+    }
+
+    /// Returns the canonical positive decimal wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebTimelineEventSequence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let positive = canonical_u64(&value).and_then(std::num::NonZeroU64::new);
+        if positive.is_none() {
+            return Err(de::Error::custom(
+                "timeline event sequence must be a canonical positive u64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked unsigned 64-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebU64(#[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))] String);
+
+impl WebU64 {
+    /// Encodes one unsigned 64-bit value in canonical decimal form.
+    #[must_use]
+    pub fn from_u64(value: u64) -> Self {
+        Self(value.to_string())
+    }
+
+    /// Returns the canonical unsigned decimal wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if canonical_u64(&value).is_none() {
+            return Err(de::Error::custom(
+                "wire value must be a canonical unsigned 64-bit integer",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Stable browser-visible location of one durable session event.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineAddress {
+    /// Positive global durable event sequence encoded losslessly for JavaScript.
+    pub event_sequence: WebTimelineEventSequence,
+}
+
+/// Explicit lifetime size facts used only for browser loading policy.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineSizeFacts {
+    pub item_count: WebU64,
+    pub projected_text_bytes: WebU64,
+    pub projected_structured_bytes: WebU64,
+    pub referenced_blob_count: WebU64,
+    pub referenced_blob_bytes: WebU64,
+}
+
+/// Current work facts carried by the lightweight session descriptor.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionWorkFacts {
+    pub active_turn_count: WebU64,
+    pub queued_turn_count: WebU64,
+}
+
+/// Browser descriptor for one authoritative bounded session projection.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineDescriptor {
+    pub session_id: WebSessionId,
+    pub sizes: WebSessionTimelineSizeFacts,
+    pub first_address: WebTimelineAddress,
+    pub latest_address: WebTimelineAddress,
+    pub work: WebSessionWorkFacts,
+    pub observed_through: WebU64,
+}
+
+/// Closed durable event categories in the browser timeline foundation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionTimelineEventKind {
+    SessionCreated,
+    SessionModelSettingsChanged,
+    TurnModelSettingsResolved,
+    InputAccepted,
+    GoalTurnRetired,
+    TurnActivated,
+    TurnFailed,
+    ModelCallTransition,
+    ToolBatchTransition,
+    ToolApprovalDecided,
+    ContextCompacted,
+    TurnCompleted,
+    TurnRefused,
+    TurnCancelled,
+    TurnReconciliationRequired,
+    RunnerStateTransition,
+    DelegationUpdate,
+    DelegationWake,
+}
+
+/// One typed, header-only event in a bounded browser window.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineItem {
+    pub address: WebTimelineAddress,
+    pub kind: WebSessionTimelineEventKind,
+    pub projected_structured_bytes: u32,
+}
+
+/// One bounded, logically ordered browser timeline window.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineWindow {
+    pub session_id: WebSessionId,
+    pub items: Vec<WebSessionTimelineItem>,
+    pub projected_structured_bytes: u32,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub continuation_before: Option<WebTimelineAddress>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub continuation_after: Option<WebTimelineAddress>,
+}
+
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// Layer that owns one browser API failure.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -506,7 +754,7 @@ impl Error for GenerateWebContractError {}
 /// Returns a closed build-time error when serde cannot encode a generated value
 /// or a DTO schema grows beyond the generator's focused supported shapes.
 pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContractError> {
-    let schemas = contract_schemas();
+    let schemas = contract_schemas()?;
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -537,8 +785,13 @@ struct ContractSchema {
     schema: Value,
 }
 
-fn contract_schemas() -> Vec<ContractSchema> {
-    vec![
+fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
+    let mut timeline_window_schema =
+        canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
+    make_property_nullable(&mut timeline_window_schema, "continuation_before")?;
+    make_property_nullable(&mut timeline_window_schema, "continuation_after")?;
+
+    Ok(vec![
         ContractSchema {
             name: "WebContractBootstrap",
             decoder: "decodeWebContractBootstrap",
@@ -553,6 +806,18 @@ fn contract_schemas() -> Vec<ContractSchema> {
             name: "WebApiErrorResponse",
             decoder: "decodeWebApiErrorResponse",
             schema: canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value()),
+        },
+        ContractSchema {
+            name: "WebSessionTimelineDescriptor",
+            decoder: "decodeWebSessionTimelineDescriptor",
+            schema: canonical_schema(
+                schemars::schema_for!(WebSessionTimelineDescriptor).to_value(),
+            ),
+        },
+        ContractSchema {
+            name: "WebSessionTimelineWindow",
+            decoder: "decodeWebSessionTimelineWindow",
+            schema: timeline_window_schema,
         },
         ContractSchema {
             name: "WebImportListRequest",
@@ -593,7 +858,7 @@ fn contract_schemas() -> Vec<ContractSchema> {
                 schemars::schema_for!(WebImportContinuationResponse).to_value(),
             ),
         },
-    ]
+    ])
 }
 
 fn canonical_schema(mut schema: Value) -> Value {
@@ -602,6 +867,18 @@ fn canonical_schema(mut schema: Value) -> Value {
     // must not change checked-in artifacts.
     schema.sort_all_objects();
     schema
+}
+
+fn make_property_nullable(
+    schema: &mut Value,
+    property_name: &str,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(&format!("/properties/{property_name}"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let concrete = property.take();
+    *property = json!({ "anyOf": [concrete, { "type": "null" }] });
+    Ok(())
 }
 
 fn runtime_module(schemas: &[ContractSchema]) -> Result<String, GenerateWebContractError> {
@@ -669,7 +946,11 @@ function assertSchema(root, schema, value, path) {{
     return;
   }}
   if (Array.isArray(schema.type)) {{
-    const accepted = schema.type.some((candidate) => {{
+    if (value === null && schema.type.includes("null")) {{
+      return;
+    }}
+    const concrete = schema.type.filter((candidate) => candidate !== "null");
+    const accepted = concrete.some((candidate) => {{
       try {{
         assertSchema(root, {{ ...schema, type: candidate }}, value, path);
         return true;
@@ -678,7 +959,7 @@ function assertSchema(root, schema, value, path) {{
       }}
     }});
     if (!accepted) {{
-      fail(path, "one recognized type");
+      fail(path, concrete.join(" or "));
     }}
     return;
   }}
@@ -736,6 +1017,23 @@ function assertSchema(root, schema, value, path) {{
   }}
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
+  }}
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    value.length > 20
+  ) {{
+    fail(path, "an unsigned 64-bit integer");
+  }}
+  if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {{
+    fail(path, `a string matching ${{schema.pattern}}`);
+  }}
+  if (
+    schema.type === "string" &&
+    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+    BigInt(value) > 18446744073709551615n
+  ) {{
+    fail(path, "an unsigned 64-bit integer");
   }}
 }}
 
@@ -836,13 +1134,17 @@ fn typescript_type(
             .collect::<Result<Vec<_>, _>>()?
             .join(" | "));
     }
-    if let Some(kinds) = schema.get("type").and_then(Value::as_array) {
-        return Ok(kinds
+    if let Some(types) = schema.get("type").and_then(Value::as_array) {
+        return Ok(types
             .iter()
-            .map(|kind| {
-                let mut variant = schema.clone();
-                variant["type"] = kind.clone();
-                typescript_type(root, &variant, definitions)
+            .map(|kind| match kind.as_str() {
+                Some("null") => Ok("null".to_owned()),
+                Some(kind) => {
+                    let mut concrete = schema.clone();
+                    concrete["type"] = Value::String(kind.to_owned());
+                    typescript_type(root, &concrete, definitions)
+                }
+                None => Err(GenerateWebContractError::UnsupportedSchema),
             })
             .collect::<Result<Vec<_>, _>>()?
             .join(" | "));
@@ -860,8 +1162,8 @@ fn typescript_type(
         }
         Some("integer" | "number") => Ok("number".to_owned()),
         Some("boolean") => Ok("boolean".to_owned()),
-        Some("string") => Ok("string".to_owned()),
         Some("null") => Ok("null".to_owned()),
+        Some("string") => Ok("string".to_owned()),
         _ => Err(GenerateWebContractError::UnsupportedSchema),
     }
 }
@@ -897,7 +1199,10 @@ fn typescript_object(
 mod tests {
     use std::{fs, path::Path};
 
-    use super::{WebContractBootstrap, WebContractExample, generated_artifacts};
+    use super::{
+        WebContractBootstrap, WebContractExample, WebSessionId, WebTimelineEventSequence, WebU64,
+        generated_artifacts,
+    };
 
     #[track_caller]
     fn assert_generated_artifact_current(path: &str) {
@@ -948,5 +1253,34 @@ mod tests {
             serde_json::from_str(fixture).expect("generated fixture is JSON");
 
         assert_eq!(encoded, fixture_value);
+    }
+
+    #[test]
+    fn timeline_event_sequence_rejects_invalid_wire_spellings() {
+        assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""0""#).is_err());
+        assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""+1""#).is_err());
+        assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""01""#).is_err());
+        assert!(
+            serde_json::from_str::<WebTimelineEventSequence>(r#""18446744073709551616""#).is_err()
+        );
+        assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""1""#).is_ok());
+    }
+
+    #[test]
+    fn unsigned_wire_value_rejects_invalid_spellings() {
+        assert!(serde_json::from_str::<WebU64>(r#""+1""#).is_err());
+        assert!(serde_json::from_str::<WebU64>(r#""01""#).is_err());
+        assert!(serde_json::from_str::<WebU64>(r#""18446744073709551616""#).is_err());
+        assert!(serde_json::from_str::<WebU64>(r#""0""#).is_ok());
+        assert!(serde_json::from_str::<WebU64>(r#""18446744073709551615""#).is_ok());
+    }
+
+    #[test]
+    fn session_id_rejects_noncanonical_uuid_spellings() {
+        assert!(serde_json::from_str::<WebSessionId>(r#""not-a-uuid""#).is_err());
+        assert!(
+            serde_json::from_str::<WebSessionId>(r#""00000000-0000-0000-0000-000000000991""#)
+                .is_ok()
+        );
     }
 }

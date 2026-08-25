@@ -36,6 +36,11 @@ against this PR (`agent/user-override-denials`).
 The change-request-scoped thread mutation contracts and their pre-dispatch
 ownership confirmation are verified through this PR (`agent/thread-ownership`).
 
+The automatic tool-round saturation, 256-round ceiling, and
+retained-frontier-content ceiling contracts are verified through this PR
+(`agent/tool-round-ceiling`) at implementation ref
+`aeaf22867c0c07060bae6dfa26434a013a3c4ceb`.
+
 The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
 child stack.
@@ -747,16 +752,42 @@ its assistant text and `TurnCompleted` marker terminalize the turn.
 At most 32 requests may appear in one completed provider tool response. A
 response with a thirty-third request closes the producing model call as
 `KnownFailed` without creating a partial batch, request record, or tool-use
-entry. At most 32 provider rounds in one turn may complete with admitted tool
+entry. At most 256 provider rounds in one turn may complete with admitted tool
 requests. The application counts distinct producing calls for the current turn,
 so every multi-request batch counts once and inherited tool history from earlier
-turns does not count. After the thirty-second batch resolves, the ordinary
-continuation transaction still projects all results and creates its fresh
-`Prepared` call; model execution closes that checkpoint as `KnownFailed` before
-provider capability preparation or send. The normal known-failure boundary then
-fails the turn honestly. These durable-content bounds avoid wall-clock policy
-and ensure one model-controlled response or chain cannot retain the progressing
-slot indefinitely.
+turns does not count. After the 256th batch resolves, the ordinary continuation
+transaction still projects all results and creates its fresh `Prepared` call;
+model execution closes that checkpoint as `KnownFailed` before provider
+capability preparation or send. At that enforcement site it emits a warning
+carrying the limit and observed round count, and the guarded pre-send closure
+carries `ToolRoundLimitReached`. The terminal event consequently uses
+`tool_round_limit_reached`, distinct from `capability_known_failure` (INV-071).
+
+The round ceiling bounds latency and provider spend; it does not bound retained
+memory, because it multiplies against the 32-request batch bound and the 1 MiB
+argument and result bounds. Retained content is therefore bounded on its own
+terms: at most 256 MiB of projected frontier content may be rendered into one
+call's provider messages. The bound counts every kind of content the render
+clones, not tool evidence alone — request arguments, result text, error detail,
+and denial reasons, plus assistant text, context summaries, delegated task and
+peer-message content, delivered delegation-outcome content, origin and steering
+user content, and attested imported text. Assistant text carries no length bound
+of its own beyond the transport cap on a single response, so a ceiling counting
+only tool evidence would leave the same round multiplication unbounded through
+the entries it clones without counting. The bound is enforced once the frontier
+projection names its entries and before any of that content is cloned into
+messages — the projection reads the durable frontier by reference for exactly
+that reason — so an over-bound frontier is refused rather than materialized.
+Exceeding it closes the checkpoint through the same pre-send contract as round
+saturation, emitting a warning carrying the ceiling and the observed byte count
+and terminalizing as `tool_round_limit_reached` (INV-071). Because one maximal
+round retains at most 64 MiB of tool evidence, the ceiling admits four maximal
+rounds and leaves the round ceiling operative for the kilobyte-scale results
+executors return in practice.
+
+These durable-content bounds avoid wall-clock policy and ensure one
+model-controlled response or chain cannot retain the progressing slot
+indefinitely or exhaust daemon memory before its guard is reached.
 
 If an applied stop terminalizes before continuation, the same materialization
 algorithm appends results for executed and denied requests, closes every request
