@@ -737,11 +737,11 @@ background or bound policy, including both bound parent-terminal actions. Tool
 arguments, results, failures, approval rationale, goal text, compaction
 summaries, and delegation content use their own continuation fields; repeated
 tool members advance by explicit member index. Tool-attempt state, terminal
-disposition, failure cause, and result and failure presence are snapshotted
-into the transition's immutable detail members when the transition event
-commits, so a historical transition address never changes as the live attempt
-row advances. An unknown durable event or state is corruption, never a generic
-body or guessed prose.
+disposition, failure cause, and result and failure presence are snapshotted into
+the transition's immutable detail members when the transition event commits, so
+a historical transition address never changes as the live attempt row advances.
+An unknown durable event or state is corruption, never a generic body or guessed
+prose.
 
 Browser DTOs remain distinct from the application projection, persistence rows,
 and process messages. Text already masked before durable storage remains masked:
