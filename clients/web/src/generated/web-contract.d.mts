@@ -196,7 +196,7 @@ type WebTimelineDelegationDetail = {
   readonly type: "child_waiting";
 } | {
   readonly child_session_id: WebSessionId;
-  readonly event_ordinal: WebU64;
+  readonly event_ordinal: WebPositiveU64;
   readonly outcome: WebTimelineDelegationOutcome;
   readonly provenance: WebTimelineDelegationProvenance;
   readonly reason: WebTimelineDelegationReason;
@@ -212,9 +212,9 @@ type WebTimelineDelegationDetail = {
   readonly type: "child_result";
 } | {
   readonly content: WebTimelineTextExcerpt;
-  readonly delivery_sequence: WebU64;
+  readonly delivery_sequence: WebPositiveU64;
   readonly message_id: WebSessionId;
-  readonly message_ordinal: WebU64;
+  readonly message_ordinal: WebPositiveU64;
   readonly recipient_session_id: WebSessionId;
   readonly relationship_id: WebSessionId;
   readonly sender_session_id: WebSessionId;

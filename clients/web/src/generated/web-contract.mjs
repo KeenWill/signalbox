@@ -1052,7 +1052,7 @@ const schemas = {
                 "$ref": "#/$defs/WebSessionId"
               },
               "event_ordinal": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "outcome": {
                 "$ref": "#/$defs/WebTimelineDelegationOutcome"
@@ -1132,13 +1132,13 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineTextExcerpt"
               },
               "delivery_sequence": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "message_id": {
                 "$ref": "#/$defs/WebSessionId"
               },
               "message_ordinal": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "recipient_session_id": {
                 "$ref": "#/$defs/WebSessionId"
@@ -2974,9 +2974,24 @@ function sameBodyContinuation(left, right) {
 }
 
 function assertTimelineExcerpt(excerpt, address, field, path, memberIndex) {
+  // Durable ceilings for continued source fields; fields without a durable
+  // byte constraint carry no entry.
+  const totalBytesCeiling = {
+    input_text: 1048576n,
+    tool_arguments: 1048576n,
+    tool_result: 1048576n,
+    tool_failure: 4096n,
+    approval_rationale: 4096n,
+    goal_text: 1048576n,
+    delegation_content: 1048576n,
+  };
   const expectedMemberIndex = memberIndex ?? 0;
   const offset = BigInt(excerpt.offset_bytes);
   const total = BigInt(excerpt.total_bytes);
+  const ceiling = totalBytesCeiling[field];
+  if (ceiling !== undefined && total > ceiling) {
+    fail(path, `a declared total within the ${ceiling}-byte durable bound`);
+  }
   const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
   if (offset > total || end > total) {
     fail(path, "an excerpt within its declared byte range");
@@ -3099,8 +3114,38 @@ function assertModelSettingsSnapshot(snapshot, path) {
 }
 
 function assertAdjustedEffective(settings, adjustments, path) {
+  const knobByType = {
+    reasoning_level_clamped: 1,
+    reasoning_level_cleared: 1,
+    fast_mode_disabled: 2,
+    service_tier_cleared: 3,
+  };
+  let lastKnob = 0;
   adjustments.forEach((adjustment, index) => {
     const adjustmentPath = `${path}[${index}]`;
+    const knob = knobByType[adjustment.type];
+    if (knob === undefined || knob <= lastKnob) {
+      fail(adjustmentPath, "one ordered adjustment per settings knob");
+    }
+    lastKnob = knob;
+    if (
+      knob === 1 &&
+      (settings.reasoning_source ?? null) === "per_call"
+    ) {
+      fail(adjustmentPath, "a non-per-call reasoning target");
+    }
+    if (
+      knob === 2 &&
+      (settings.fast_mode_source ?? null) === "per_call"
+    ) {
+      fail(adjustmentPath, "a non-per-call fast-mode target");
+    }
+    if (
+      knob === 3 &&
+      (settings.service_tier_source ?? null) === "per_call"
+    ) {
+      fail(adjustmentPath, "a non-per-call service-tier target");
+    }
     if (
       adjustment.type === "fast_mode_disabled" &&
       settings.effective.fast_mode !== "disabled"
@@ -3129,6 +3174,16 @@ function assertAdjustedEffective(settings, adjustments, path) {
       fail(adjustmentPath, "a cleared effective service tier");
     }
   });
+}
+
+function assertAllInheritLayer(layer, path) {
+  if (
+    layer.reasoning_level.kind !== "inherit" ||
+    layer.fast_mode.kind !== "inherit" ||
+    layer.service_tier.kind !== "inherit"
+  ) {
+    fail(path, "an all-inherit per-call layer in a defaults snapshot");
+  }
 }
 
 function assertModelSnapshotIdentity(model, snapshot, path) {
@@ -3268,6 +3323,17 @@ function assertTimelineDetailPage(value) {
             );
           }
           const physical = tool.evidence.type === "physical_attempt" ? tool.evidence : null;
+          if (
+            physical !== null &&
+            item.body.state.type === "recovery_required" &&
+            physical.attempt_id === item.body.state.tool_attempt_id &&
+            physical.state !== "ambiguous"
+          ) {
+            fail(
+              `${path}.body.tools[0].evidence.state`,
+              "ambiguous for the recovery target attempt",
+            );
+          }
           if (physical !== null) {
             const terminalFailure = physical.state === "known_failed";
             if ((physical.cause !== undefined && physical.cause !== null) !== terminalFailure) {
@@ -3370,6 +3436,16 @@ function assertTimelineDetailPage(value) {
             "the checked rationale a delegate decision always carries",
           );
         }
+        if (
+          item.body.actor.type === "policy" &&
+          (item.body.decision !== "approve" ||
+            (item.body.rationale !== undefined && item.body.rationale !== null))
+        ) {
+          fail(
+            `${path}.body.actor`,
+            "an automatic approval without a rationale for a policy actor",
+          );
+        }
         if (item.body.rationale !== undefined && item.body.rationale !== null) {
           continuation = assertTimelineExcerpt(
             item.body.rationale,
@@ -3462,7 +3538,9 @@ function assertTimelineDetailPage(value) {
           );
         }
         if (
-          item.body.detail.child_session_id !== undefined &&
+          (item.body.detail.type === "child_spawned" ||
+            item.body.detail.type === "child_waiting" ||
+            item.body.detail.type === "child_result") &&
           item.body.detail.child_session_id === value.session_id
         ) {
           fail(
@@ -3470,10 +3548,22 @@ function assertTimelineDetailPage(value) {
             "a session other than the relationship parent",
           );
         }
-        if (
-          item.body.detail.type === "child_result" ||
-          item.body.detail.type === "child_lifecycle_disposition"
-        ) {
+        if (item.body.detail.type === "child_lifecycle_disposition") {
+          const detail = item.body.detail;
+          const lifecycleValid =
+            (detail.provenance.type === "parent_turn_command" ||
+              detail.provenance.type === "parent_goal_command") &&
+            (detail.reason === "parent_stopped_with_descendants" ||
+              detail.reason === "parent_cancelled_with_descendants") &&
+            (detail.outcome === "already_terminal" ||
+              detail.outcome === "continue_running" ||
+              detail.outcome === "child_stopped" ||
+              detail.outcome === "child_cancelled");
+          if (!lifecycleValid) {
+            fail(`${path}.body.detail`, "a durable lifecycle disposition shape");
+          }
+        }
+        if (item.body.detail.type === "child_result") {
           const detail = item.body.detail;
           if (
             detail.provenance.type === "child_turn" &&
@@ -3496,21 +3586,17 @@ function assertTimelineDetailPage(value) {
               detail.provenance.type === "parent_goal_command") &&
             (detail.reason === "parent_stopped_with_descendants" ||
               detail.reason === "parent_cancelled_with_descendants") &&
-            (detail.outcome === "already_terminal" ||
-              detail.outcome === "continue_running" ||
-              detail.outcome === "child_stopped" ||
+            (detail.outcome === "child_stopped" ||
               detail.outcome === "child_cancelled");
           if (!childTurnValid && !parentCommandValid) {
             fail(`${path}.body.detail`, "a durable delegation outcome shape");
           }
-          if (detail.type === "child_result") {
-            const contentPresent = detail.content !== undefined && detail.content !== null;
-            if (contentPresent !== (detail.outcome === "result_returned")) {
-              fail(
-                `${path}.body.detail.content`,
-                "present exactly for a returned child result",
-              );
-            }
+          const contentPresent = detail.content !== undefined && detail.content !== null;
+          if (contentPresent !== (detail.outcome === "result_returned")) {
+            fail(
+              `${path}.body.detail.content`,
+              "present exactly for a returned child result",
+            );
           }
         }
         const content =
@@ -3573,6 +3659,14 @@ function assertTimelineDetailPage(value) {
             );
           }
           const defaults = item.body.detail;
+          assertAllInheritLayer(
+            defaults.prior_settings.precedence.per_call,
+            `${path}.body.detail.prior_settings.precedence.per_call`,
+          );
+          assertAllInheritLayer(
+            defaults.installed_settings.precedence.per_call,
+            `${path}.body.detail.installed_settings.precedence.per_call`,
+          );
           assertModelSnapshotIdentity(
             defaults.prior_model,
             defaults.prior_settings,

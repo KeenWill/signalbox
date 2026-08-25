@@ -1502,7 +1502,7 @@ fn delegation_detail_dto(
         } => WebTimelineDelegationDetail::ChildLifecycleDisposition {
             relationship_id: web_uuid(relationship_id.into_uuid()),
             child_session_id: WebSessionId::from_uuid_bytes(*child.into_uuid().as_bytes()),
-            event_ordinal: WebU64::from_u64(event_ordinal),
+            event_ordinal: web_positive(event_ordinal)?,
             outcome: delegation_outcome_dto(outcome),
             reason: delegation_reason_dto(reason),
             provenance: delegation_provenance_dto(provenance)?,
@@ -1535,8 +1535,8 @@ fn delegation_detail_dto(
             message_id: web_uuid(message.into_uuid()),
             sender_session_id: WebSessionId::from_uuid_bytes(*sender.into_uuid().as_bytes()),
             recipient_session_id: WebSessionId::from_uuid_bytes(*recipient.into_uuid().as_bytes()),
-            message_ordinal: WebU64::from_u64(message_ordinal),
-            delivery_sequence: WebU64::from_u64(delivery_sequence),
+            message_ordinal: web_positive(message_ordinal)?,
+            delivery_sequence: web_positive(delivery_sequence)?,
             content: text_excerpt_dto(content),
         },
         TimelineDelegationDetail::ResultWake {

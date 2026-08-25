@@ -1825,4 +1825,244 @@ describe('generated timeline detail decoder', () => {
 
     expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
   })
+
+  it('accepts a lifecycle disposition on the child session page', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '31' },
+          kind: 'delegation_update',
+          body: {
+            type: 'delegation',
+            detail: {
+              type: 'child_lifecycle_disposition',
+              relationship_id: '00000000-0000-0000-0000-000000000004',
+              child_session_id: ambiguousModelCallPage.session_id,
+              event_ordinal: '2',
+              outcome: 'child_stopped',
+              reason: 'parent_stopped_with_descendants',
+              provenance: {
+                type: 'parent_turn_command',
+                session_id: '00000000-0000-0000-0000-000000000009',
+                turn_id: '00000000-0000-0000-0000-000000000002',
+                command_id: '00000000-0000-0000-0000-000000000007',
+              },
+            },
+          },
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 128,
+    }
+
+    expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
+  })
+
+  it('rejects a lifecycle disposition with a child-result shape', () => {
+    expectTimelineBodyRejected(
+      'delegation_update',
+      {
+        type: 'delegation',
+        detail: {
+          type: 'child_lifecycle_disposition',
+          relationship_id: '00000000-0000-0000-0000-000000000004',
+          child_session_id: '00000000-0000-0000-0000-000000000005',
+          event_ordinal: '2',
+          outcome: 'child_failed',
+          reason: 'child_execution_failed',
+          provenance: {
+            type: 'child_turn',
+            session_id: '00000000-0000-0000-0000-000000000005',
+            turn_id: '00000000-0000-0000-0000-000000000006',
+          },
+        },
+      },
+      'a durable lifecycle disposition shape',
+    )
+  })
+
+  it('rejects an already-terminal child result outcome', () => {
+    expectTimelineBodyRejected(
+      'delegation_update',
+      childResultBody(
+        'already_terminal',
+        'parent_stopped_with_descendants',
+        {
+          type: 'parent_turn_command',
+          session_id: '00000000-0000-0000-0000-000000000001',
+          turn_id: '00000000-0000-0000-0000-000000000002',
+          command_id: '00000000-0000-0000-0000-000000000007',
+        },
+        null,
+      ),
+      'a durable delegation outcome shape',
+    )
+  })
+
+  it('rejects duplicate model-change adjustments', () => {
+    expectTimelineBodyRejected(
+      'session_model_settings_changed',
+      {
+        ...sessionDefaultsSettingsBody,
+        detail: {
+          ...sessionDefaultsSettingsBody.detail,
+          adjustments: [{ type: 'fast_mode_disabled' }, { type: 'fast_mode_disabled' }],
+        },
+      },
+      'one ordered adjustment per settings knob',
+    )
+  })
+
+  it('rejects a per-call layer inside a defaults snapshot', () => {
+    expectTimelineBodyRejected(
+      'session_model_settings_changed',
+      {
+        ...sessionDefaultsSettingsBody,
+        detail: {
+          ...sessionDefaultsSettingsBody.detail,
+          installed_settings: {
+            ...settingsSnapshot,
+            precedence: {
+              ...settingsSnapshot.precedence,
+              per_call: {
+                ...inheritedSettingsOverlay,
+                fast_mode: { kind: 'value', value: 'enabled' },
+              },
+            },
+            effective: { fast_mode: 'enabled' },
+            fast_mode_source: 'per_call',
+            validated_for_selection_id: '00000000-0000-0000-0000-000000000006',
+          },
+        },
+      },
+      'an all-inherit per-call layer in a defaults snapshot',
+    )
+  })
+
+  it('rejects a zero delegation event ordinal', () => {
+    expectTimelineBodyRejected('delegation_update', {
+      type: 'delegation',
+      detail: {
+        type: 'child_lifecycle_disposition',
+        relationship_id: '00000000-0000-0000-0000-000000000004',
+        child_session_id: '00000000-0000-0000-0000-000000000005',
+        event_ordinal: '0',
+        outcome: 'child_stopped',
+        reason: 'parent_stopped_with_descendants',
+        provenance: {
+          type: 'parent_turn_command',
+          session_id: '00000000-0000-0000-0000-000000000001',
+          turn_id: '00000000-0000-0000-0000-000000000002',
+          command_id: '00000000-0000-0000-0000-000000000007',
+        },
+      },
+    })
+  })
+
+  it('rejects a policy actor with a deny decision', () => {
+    expectTimelineBodyRejected(
+      'tool_approval_decided',
+      {
+        type: 'tool_approval_decision',
+        turn_id: '00000000-0000-0000-0000-000000000002',
+        request_id: '00000000-0000-0000-0000-000000000004',
+        tool_name: 'exec',
+        decision: 'deny',
+        actor: { type: 'policy' },
+        approval_judge_escalated: false,
+      },
+      'an automatic approval without a rationale for a policy actor',
+    )
+  })
+
+  it('rejects a tool-failure total beyond its durable bound', () => {
+    expectTimelineBodyRejected(
+      'tool_batch_transition',
+      {
+        type: 'tool_batch',
+        turn_id: '00000000-0000-0000-0000-000000000002',
+        producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+        projected_member_index: 0,
+        state: {
+          type: 'results_projected',
+          frontier_id: '00000000-0000-0000-0000-000000000008',
+        },
+        tools: [
+          {
+            request_id: '00000000-0000-0000-0000-000000000004',
+            tool_name: 'exec',
+            approval_posture: 'auto',
+            approval_judge_escalated: false,
+            operator_required: false,
+            evidence: {
+              type: 'physical_attempt',
+              attempt_id: '00000000-0000-0000-0000-000000000005',
+              failure: {
+                text: 'boom',
+                offset_bytes: '0',
+                total_bytes: '18446744073709551615',
+                continuation: {
+                  address: { event_sequence: '13' },
+                  field: 'tool_failure',
+                  member_index: 0,
+                  offset_bytes: '4',
+                },
+              },
+              effect_posture: 'effect_free',
+              state: 'known_failed',
+              cause: 'execution_failed',
+            },
+          },
+        ],
+        goal_events: [],
+      },
+      'a declared total within the 4096-byte durable bound',
+    )
+  })
+
+  it('rejects a non-ambiguous recovery target attempt', () => {
+    expectTimelineBodyRejected(
+      'tool_batch_transition',
+      {
+        type: 'tool_batch',
+        turn_id: '00000000-0000-0000-0000-000000000002',
+        producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+        projected_member_index: 0,
+        state: {
+          type: 'recovery_required',
+          tool_attempt_id: '00000000-0000-0000-0000-000000000005',
+        },
+        tools: [
+          {
+            request_id: '00000000-0000-0000-0000-000000000004',
+            tool_name: 'exec',
+            arguments: {
+              text: '{}',
+              offset_bytes: '0',
+              total_bytes: '2',
+              continuation: null,
+            },
+            approval_posture: 'auto',
+            approval_judge_escalated: false,
+            operator_required: false,
+            evidence: {
+              type: 'physical_attempt',
+              attempt_id: '00000000-0000-0000-0000-000000000005',
+              result: {
+                text: 'done',
+                offset_bytes: '0',
+                total_bytes: '4',
+                continuation: null,
+              },
+              effect_posture: 'external_effect',
+              state: 'completed',
+            },
+          },
+        ],
+        goal_events: [],
+      },
+      'ambiguous for the recovery target attempt',
+    )
+  })
 })
