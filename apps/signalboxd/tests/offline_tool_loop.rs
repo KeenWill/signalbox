@@ -2067,10 +2067,11 @@ async fn delegated_park_resumes_into_fresh_judge_composition() -> Result<(), Box
     first_execution
         .execute(Box::new(fixture.activated.clone()))
         .await?;
-    let (scheduled, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
-        .find_sessions()
-        .await?
-        .into_parts();
+    let (scheduled, _dispatch_starts, continuation) =
+        PostgresEligibilitySweep::new(fixture.pool.clone())
+            .find_sessions()
+            .await?
+            .into_parts();
     let resumable = PostgresToolLoopRepository::new(fixture.pool.clone())
         .find_resumable_turn(fixture.session)
         .await?;
@@ -3759,10 +3760,11 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
     fixture
         .decide(request, ToolApprovalDecision::Approve)
         .await?;
-    let (resumable, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
-        .find_sessions()
-        .await?
-        .into_parts();
+    let (resumable, _dispatch_starts, continuation) =
+        PostgresEligibilitySweep::new(fixture.pool.clone())
+            .find_sessions()
+            .await?
+            .into_parts();
     assert!(!continuation);
     assert_eq!(resumable, vec![fixture.session]);
     let (restarted_execution, restarted_runtime) = fixture.execution(

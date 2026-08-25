@@ -24,7 +24,7 @@ required-features = ["test-worker"]
 base64 = "0.23.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.140", features = ["unbounded_depth"] }
-sha2 = "0.10.9"
+sha2 = "0.11.0"
 signalbox-file-media-runtime = { path = "../file-media-runtime" }
 tokio = { version = "1.53.0", default-features = false, features = [
     "io-std",

@@ -336,7 +336,10 @@ async fn inv014_model_call_credential_reference_is_immutable() -> Result<(), Box
 /// Prepared-to-terminal statement that closes the call. A follow-up update
 /// aborts the whole failure transaction instead, leaving the call and its turn
 /// open, which is why this exercises the `Some(..)` closure end to end rather
-/// than asserting the column shape alone.
+/// than asserting the column shape alone. The pairing constraint is then probed
+/// on its own inside a rolled-back transaction that suspends that guard, because
+/// a maximum without a cause is reachable only on a row already closed as a
+/// known failure.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn definitive_attachment_failure_closes_its_call_with_a_durable_cause()
@@ -385,6 +388,33 @@ async fn definitive_attachment_failure_closes_its_call_with_a_durable_cause()
         durable_cause,
         ("terminal".to_owned(), Some("missing".to_owned()), None)
     );
+
+    // A maximum retained without the cause that names it describes no
+    // `AttachmentPreparationFailure`, so the pairing constraint rejects it
+    // rather than leaving the row for a reread to reject. Every other terminal
+    // fact is already durable and unchanged here, so this constraint is the
+    // only one the statement can violate.
+    let mut stripped_cause = pool.begin().await?;
+    sqlx::query("ALTER TABLE model_call DISABLE TRIGGER USER")
+        .execute(&mut *stripped_cause)
+        .await?;
+    let stripped_cause_error = sqlx::query(
+        "UPDATE model_call
+            SET terminal_attachment_preparation_failure_cause = NULL,
+                terminal_attachment_preparation_failure_maximum_bytes = 1
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&mut *stripped_cause)
+    .await
+    .expect_err("a retained maximum cannot outlive its cause");
+    assert_eq!(
+        stripped_cause_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("model_call_attachment_preparation_failure_cause_shape")
+    );
+    stripped_cause.rollback().await?;
 
     // The reread only reports a committed closure when the durable cause still
     // matches the failure the caller is reconciling.
