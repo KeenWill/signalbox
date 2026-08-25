@@ -897,6 +897,15 @@ async fn nonzero_mvhd_full_box_flags_are_malformed() -> Result<(), Box<dyn Error
 }
 
 #[tokio::test]
+async fn nonzero_mehd_full_box_flags_are_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::fragmented_mp4_with_nonzero_movie_extends_header_flags(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn zero_sample_entry_data_reference_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(
         VideoFixture::mp4_with_zero_sample_entry_data_reference(),

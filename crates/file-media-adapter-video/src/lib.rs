@@ -1135,6 +1135,9 @@ fn parse_mehd(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
     if state.fragment_duration.is_some() {
         return Err(VideoIssue::Malformed);
     }
+    if payload.len() < 4 || payload[1..4] != [0, 0, 0] {
+        return Err(VideoIssue::Malformed);
+    }
     let version = *payload.first().ok_or(VideoIssue::Malformed)?;
     let duration = match version {
         0 if payload.len() >= 8 => u64::from(read_u32(payload, 4)?),

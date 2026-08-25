@@ -580,6 +580,18 @@ impl VideoFixture {
         fixture
     }
 
+    pub fn fragmented_mp4_with_nonzero_movie_extends_header_flags() -> Self {
+        let mut fixture = Self::fragmented_mp4_with_movie_extends_duration();
+        if let Some(offset) = fixture
+            .bytes
+            .windows(4)
+            .position(|window| window == b"mehd")
+        {
+            fixture.bytes[offset + 5] = 1;
+        }
+        fixture
+    }
+
     pub fn mp4_with_zero_media_timescale() -> Self {
         let mut fixture = Self::ordinary_mp4();
         if let Some(media_header_type) = fixture
