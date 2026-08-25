@@ -1679,22 +1679,6 @@ function assertTimelineDetailPage(value) {{
     "turn_cancelled",
     "turn_reconciliation_required",
   ]);
-  const bodyOwnedKinds = new Set([
-    "session_created",
-    "session_model_settings_changed",
-    "turn_model_settings_resolved",
-    "input_accepted",
-    "goal_turn_retired",
-    "model_call_transition",
-    "tool_batch_transition",
-    "tool_approval_decided",
-    "context_compacted",
-    "turn_activated",
-    "runner_state_transition",
-    "delegation_update",
-    "delegation_wake",
-    ...terminalKinds,
-  ]);
   let expectedBodyContinuation = null;
   let computedProjectedBodyBytes = 0;
   let previousAddress = null;
@@ -2123,11 +2107,6 @@ function assertTimelineDetailPage(value) {{
         }};
         if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {{
           fail(`${{path}}.body.cause_code`, `the cause for ${{item.kind}}`);
-        }}
-        break;
-      case "event_fact":
-        if (item.body.kind !== item.kind || bodyOwnedKinds.has(item.kind)) {{
-          fail(`${{path}}.body.kind`, "the matching header-only event kind");
         }}
         break;
       default:

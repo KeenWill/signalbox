@@ -349,8 +349,15 @@ async fn transition_detail_freezes_attempt_state_before_later_resolution()
         )
         .await?;
 
-    // A later real recovery path updates the same attempt row in place; the
+    // A later sanctioned path (a sibling member settling, or runner-recovery
+    // crash resolution) advances the same live attempt row in place; the
     // committed recovery transition must keep projecting the evidence it saw.
+    // The guard trigger admits that narrow path only with full runner-recovery
+    // scaffolding, so this fixture applies the row change directly.
+    let mut later_resolution = pool.begin().await?;
+    sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
+        .execute(&mut *later_resolution)
+        .await?;
     sqlx::query(
         "UPDATE tool_attempt
             SET terminal_disposition_kind = 'completed',
@@ -359,8 +366,12 @@ async fn transition_detail_freezes_attempt_state_before_later_resolution()
           WHERE attempt_id = $1",
     )
     .bind(attempt.into_uuid())
-    .execute(&pool)
+    .execute(&mut *later_resolution)
     .await?;
+    sqlx::query("ALTER TABLE tool_attempt ENABLE TRIGGER ALL")
+        .execute(&mut *later_resolution)
+        .await?;
+    later_resolution.commit().await?;
 
     let sequence: i64 = sqlx::query_scalar(
         "SELECT event_sequence::bigint

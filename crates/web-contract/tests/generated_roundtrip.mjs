@@ -479,7 +479,7 @@ test("generated detail decoder requires a continued body to end the page", () =>
   page.items.push({
     address: { event_sequence: "8" },
     kind: "session_created",
-    body: { type: "event_fact", kind: "session_created" },
+    body: { type: "session_created", imported_evidence: null },
     projected_body_bytes: 128,
   });
   page.projected_body_bytes = 259;
