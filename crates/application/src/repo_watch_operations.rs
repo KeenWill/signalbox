@@ -124,7 +124,7 @@ pub enum RepoWatchChecksStatus {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RepoWatchReviewDecision {
+pub enum RepoWatchReviewStatus {
     None,
     Commented,
     Approved,
@@ -183,7 +183,7 @@ pub struct RepoWatchPullRequestOperations {
     pub mergeable: MergeableState,
     pub draft: RepoWatchDraftStatus,
     pub checks: RepoWatchChecksStatus,
-    pub review_decision: RepoWatchReviewDecision,
+    pub review_decision: RepoWatchReviewStatus,
     pub stale_review_count: u64,
     pub unresolved_thread_count: u64,
     pub open_parent: Option<PullRequestNumber>,
@@ -230,19 +230,19 @@ impl RepoWatchPullRequestOperations {
             .values()
             .any(|state| *state == Some(ReviewState::ChangesRequested))
         {
-            RepoWatchReviewDecision::ChangesRequested
+            RepoWatchReviewStatus::ChangesRequested
         } else if current_reviews
             .values()
             .any(|state| *state == Some(ReviewState::Approved))
         {
-            RepoWatchReviewDecision::Approved
+            RepoWatchReviewStatus::Approved
         } else if current_reviews
             .values()
             .any(|state| *state == Some(ReviewState::Commented))
         {
-            RepoWatchReviewDecision::Commented
+            RepoWatchReviewStatus::Commented
         } else {
-            RepoWatchReviewDecision::None
+            RepoWatchReviewStatus::None
         };
         let unresolved_thread_count = state
             .threads()
@@ -569,6 +569,6 @@ mod tests {
             },
         );
 
-        assert_eq!(projected.review_decision, RepoWatchReviewDecision::Approved);
+        assert_eq!(projected.review_decision, RepoWatchReviewStatus::Approved);
     }
 }

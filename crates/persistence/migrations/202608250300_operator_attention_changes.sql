@@ -171,20 +171,25 @@ BEGIN
     new_failed := COALESCE((NEW.state_kind = 'terminal'
         AND NEW.terminal_disposition_kind <> 'completed')::integer, 0);
 
+    -- Seed the counter row before applying the deltas, then add them with an
+    -- UPDATE. Carrying a delta through the INSERT of an upsert cannot work
+    -- here: PostgreSQL validates CHECK constraints against the proposed insert
+    -- tuple before the ON CONFLICT arbiter runs, so a transition that retires
+    -- an actionable call (delta -1) is rejected by `actionable >= 0` even when
+    -- the conflicting row makes the resulting sum non-negative. The seed tuple
+    -- is all zeros and so always satisfies the constraints, and the UPDATE
+    -- still checks the summed row -- which is the invariant worth holding.
     INSERT INTO operator_attention_judge_facts
         (session_id, actionable, completed, escalated, failed)
-    VALUES (
-        NEW.session_id,
-        new_actionable - old_actionable,
-        new_completed - old_completed,
-        new_escalated - old_escalated,
-        new_failed - old_failed
-    )
-    ON CONFLICT (session_id) DO UPDATE SET
-        actionable = operator_attention_judge_facts.actionable + EXCLUDED.actionable,
-        completed = operator_attention_judge_facts.completed + EXCLUDED.completed,
-        escalated = operator_attention_judge_facts.escalated + EXCLUDED.escalated,
-        failed = operator_attention_judge_facts.failed + EXCLUDED.failed;
+    VALUES (NEW.session_id, 0, 0, 0, 0)
+    ON CONFLICT (session_id) DO NOTHING;
+
+    UPDATE operator_attention_judge_facts
+       SET actionable = actionable + (new_actionable - old_actionable),
+           completed = completed + (new_completed - old_completed),
+           escalated = escalated + (new_escalated - old_escalated),
+           failed = failed + (new_failed - old_failed)
+     WHERE session_id = NEW.session_id;
     RETURN NULL;
 END;
 $$;

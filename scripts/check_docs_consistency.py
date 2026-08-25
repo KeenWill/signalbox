@@ -2639,7 +2639,7 @@ def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
     """
     if not (root / postgres_integration_suites.MANIFEST).is_file():
         return []
-    return [
+    runs = [
         IgnoredTestRun(
             package=suite.package,
             features=suite.features,
@@ -2651,6 +2651,37 @@ def workflow_ignored_test_runs(root: Path) -> list[IgnoredTestRun]:
         )
         for suite in postgres_integration_suites.load_suites(root)
     ]
+    workflow_path = root / postgres_integration_suites.WORKFLOW
+    workflow = (
+        workflow_path.read_text(encoding="utf-8")
+        if workflow_path.is_file()
+        else ""
+    )
+    executed_commands = [
+        tokens
+        for command, _, _ in postgres_integration_suites.workflow_shell_commands(
+            workflow
+        )
+        for tokens in postgres_integration_suites.simple_commands(command)
+    ]
+    if any(
+        arguments is not None
+        and postgres_integration_suites.runs_file_media_isolation_tests(arguments)
+        for tokens in executed_commands
+        for arguments in [postgres_integration_suites.cargo_test_arguments(tokens)]
+    ):
+        runs.append(
+            IgnoredTestRun(
+                package="signalbox-file-media-processor-runtime",
+                features=("test-worker",),
+                selection=IgnoredTestSelection(
+                    skips=(),
+                    includes=("isolation",),
+                    excludes=(),
+                ),
+            )
+        )
+    return runs
 
 
 def declared_package(package: Path) -> dict:

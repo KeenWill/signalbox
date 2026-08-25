@@ -428,6 +428,10 @@ impl fmt::Display for RejectionDisplay {
                 formatter,
                 "active_turn_present session={session_id} active_turn={active_turn_id}"
             ),
+            RejectionDetail::CommissionTargetBusy { session_id } => write!(
+                formatter,
+                "commission_target_busy live_session={session_id}"
+            ),
             RejectionDetail::ActiveTurnMismatch {
                 session_id,
                 expected_active_turn_id,
