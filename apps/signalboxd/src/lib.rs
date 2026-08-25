@@ -238,6 +238,22 @@ pub trait ActivatedTurnExecution {
         self.resume_active(session)
     }
 
+    /// Reconciles an active evidence-free turn through its first call
+    /// checkpoint while reporting its identity before resumed execution
+    /// begins.
+    ///
+    /// A dispatch-start hint that recovers an already-active turn must report
+    /// that turn for the same reason the active-resume path does: occupancy
+    /// recovery can only hand an expired pass off for repair when it knows
+    /// which turn the pass was occupying.
+    fn resume_dispatch_start_with_observer(
+        &self,
+        session: SessionId,
+        observe_turn: std::sync::Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.resume_active_with_observer(session, observe_turn)
+    }
+
     /// Reports whether a failed active-turn resume may require startup
     /// recovery rather than ordinary scheduler retry.
     ///
@@ -565,6 +581,22 @@ where
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let execution = self.execution.resume_dispatch_start(session);
+        supervise_active_resume::<Execution, _>(
+            self.fatal_signal.clone(),
+            std::sync::Arc::clone(&self.bounded_expirations),
+            session,
+            execution,
+        )
+    }
+
+    fn resume_dispatch_start_with_observer(
+        &self,
+        session: SessionId,
+        observe_turn: std::sync::Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self
+            .execution
+            .resume_dispatch_start_with_observer(session, observe_turn);
         supervise_active_resume::<Execution, _>(
             self.fatal_signal.clone(),
             std::sync::Arc::clone(&self.bounded_expirations),
@@ -1144,10 +1176,13 @@ where
             .unwrap_or_else(|| std::sync::Arc::new(|_| {}));
         let activation = self
             .activation
-            .execute_with_cloned_transaction_and_observer(session, observe_turn);
+            .execute_with_cloned_transaction_and_observer(
+                session,
+                std::sync::Arc::clone(&observe_turn),
+            );
         async move {
             execution
-                .resume_dispatch_start(session)
+                .resume_dispatch_start_with_observer(session, observe_turn)
                 .await
                 .map_err(|source| ActivatedTurnPassError::Execution {
                     stage: TurnPassExecutionStage::ActiveTurnRecovery,
@@ -2587,6 +2622,14 @@ where
         &self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.resume_dispatch_start_with_observer(session, std::sync::Arc::new(|_| {}))
+    }
+
+    fn resume_dispatch_start_with_observer(
+        &self,
+        session: SessionId,
+        observe_turn: std::sync::Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let tool_repository = self.tool_repository.clone();
         let execution = self.clone();
         async move {
@@ -2595,16 +2638,19 @@ where
                 .await
                 .map_err(PostgresProviderToolLoopExecutionError::ResumeLookup)?;
             match turn {
-                Some(turn) => execution
-                    .execute_scope(session, turn, true)
-                    .instrument(turn_work_span(session, turn))
-                    .await
-                    .map_err(
-                        |source| PostgresProviderToolLoopExecutionError::ResumeExecution {
-                            turn,
-                            source: Box::new(source),
-                        },
-                    ),
+                Some(turn) => {
+                    observe_turn(turn);
+                    execution
+                        .execute_scope(session, turn, true)
+                        .instrument(turn_work_span(session, turn))
+                        .await
+                        .map_err(
+                            |source| PostgresProviderToolLoopExecutionError::ResumeExecution {
+                                turn,
+                                source: Box::new(source),
+                            },
+                        )
+                }
                 None => Ok(()),
             }
         }
@@ -4088,6 +4134,63 @@ mod tests {
         assert_eq!(
             classify_expired_pass_observation(turn, None, None),
             ExpiredPassObservation::Absent
+        );
+    }
+
+    /// Reports one recovered turn through whichever resume path the pass took.
+    #[derive(Clone, Copy, Debug)]
+    struct RecoveredTurnExecution(TurnId);
+
+    impl ActivatedTurnExecution for RecoveredTurnExecution {
+        type Error = ExecutionFailure;
+
+        fn execute(
+            &self,
+            _activated: Box<ActivatedTurn>,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            ready(Ok(()))
+        }
+
+        fn resume_active_with_observer(
+            &self,
+            _session: SessionId,
+            observe_turn: Arc<dyn Fn(TurnId) + Send + Sync>,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            observe_turn(self.0);
+            ready(Ok(()))
+        }
+    }
+
+    /// A dispatch-start hint that recovers an already-active turn must report
+    /// that turn, exactly as the active-resume path does. Without it the
+    /// occupancy tracker holds no entry for the session, so an expired pass
+    /// finds no `expected_turn`, returns before the detached recovery handoff,
+    /// and strands the turn behind the far longer watchdog ceiling.
+    #[tokio::test]
+    async fn a_dispatch_start_resume_reports_the_turn_it_recovers() {
+        let session = SessionId::from_uuid(Uuid::now_v7());
+        let turn = TurnId::from_uuid(Uuid::now_v7());
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&observed);
+
+        RecoveredTurnExecution(turn)
+            .resume_dispatch_start_with_observer(
+                session,
+                Arc::new(move |turn| {
+                    recorder
+                        .lock()
+                        .expect("dispatch-start resume observer lock")
+                        .push(turn);
+                }),
+            )
+            .await
+            .expect("dispatch-start resume succeeds");
+
+        assert_eq!(
+            *observed
+                .lock()
+                .expect("dispatch-start resume observer lock"),
+            vec![turn]
         );
     }
 
