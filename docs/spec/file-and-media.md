@@ -9,7 +9,8 @@ application bridge, and fresh daemon-supervised worker runtime. The PDF adapter
 is verified against this PR (`agent/file-media-adapter-pdf`).
 
 The text-family adapter coverage is verified against PR #903
-(`agent/file-media-text-family`).
+(`agent/file-media-text-family`). The Office Open XML adapter is verified
+against this PR (`agent/file-media-adapter-office`).
 
 The SVG adapter is verified against this PR (`agent/file-media-adapter-svg`).
 
@@ -155,6 +156,7 @@ untrusted until the daemon-side registry sanitizer admits it.
 | ------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
 | Text   | `text/plain`, `application/json`, `text/csv` | Complete NUL-free UTF-8 fallback; structural JSON parse; strict rectangular CSV parse with row and column ceilings | Exact `text`; bounded JSON `structured`; bounded CSV headers and rows as `structured` | Standard-library UTF-8, `serde_json`, and pure-Rust `csv`; all execute only in the isolated worker |
 | PDF    | `application/pdf`                            | Exact declared-type match against the verified source digest and length; bounded object and page parse             | Exact `text`; bounded `metadata`                                                      | `lopdf` 0.44 with default features disabled, compiled only into `signalbox-file-media-pdf-worker`; 8 MiB source, 10,000-page/object, 1 MiB decompressed-page, 256 MiB aggregate decompressed-content, and 174,000-byte text bounds; no rendering, OCR, embedded-file extraction, or password channel |
+| Office Open XML | `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `application/vnd.openxmlformats-officedocument.presentationml.presentation` | Exact declared-type match; bounded ZIP container and XML part parse | Exact `text`; bounded `metadata` | `zip` 8 with only its Rust `flate2` backend and `quick-xml` 0.41, compiled only into `signalbox-file-media-office-worker`; macro-enabled and legacy OLE formats, formulas, macros, rendering, OCR, external entities, links, and embedded recursive containers are excluded |
 | SVG    | `image/svg+xml`                              | Structural `<svg>` root detection over a bounded 64 KiB prefix; bounded XML parse rejecting malformed and active content | Exact `text`; bounded `metadata`                                                     | `quick-xml` 0.41, compiled only into `signalbox-file-media-svg-worker`; 256 KiB source bound; rendering, scripts, event handlers, styles, DTDs, non-built-in entities, external or embedded resources, nested SVG containers, OCR, animation, and resource fetching are excluded |
 
 ## Processor and durable media boundary
