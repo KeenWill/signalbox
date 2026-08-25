@@ -37,6 +37,7 @@ struct PersistedCandidateExpectation<'a> {
 #[derive(sqlx::FromRow)]
 struct PersistedManifestHashes {
     eligibility_hash: Vec<u8>,
+    admitted_set_hash: Vec<u8>,
     manifest_hash: Vec<u8>,
 }
 
@@ -517,7 +518,7 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
     );
     assert_eq!(persisted_finding.finding_kind, "invalid_skill");
     let persisted_hashes = sqlx::query_as::<_, PersistedManifestHashes>(
-        "SELECT eligibility_hash, manifest_hash
+        "SELECT eligibility_hash, admitted_set_hash, manifest_hash
            FROM turn_instruction_manifest
           WHERE turn_instruction_manifest_id = $1",
     )
@@ -527,6 +528,10 @@ async fn inv061_turn_instruction_snapshot_is_exact() -> Result<(), Box<dyn Error
     assert_eq!(
         persisted_hashes.eligibility_hash,
         manifest.eligibility_hash().as_bytes().as_slice()
+    );
+    assert_eq!(
+        persisted_hashes.admitted_set_hash,
+        manifest.admitted_set_hash().as_bytes().as_slice()
     );
     assert_eq!(
         persisted_hashes.manifest_hash,
