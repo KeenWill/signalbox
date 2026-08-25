@@ -52,6 +52,12 @@ impl ConversationIntrospectionError {
         }
     }
 
+    const fn corrupt_projection() -> Self {
+        Self {
+            class: OperatorFailureClass::FailClosedCorruption,
+        }
+    }
+
     fn from_listing(error: ConversationListingRepositoryError) -> Self {
         Self {
             class: match error {
@@ -290,7 +296,12 @@ fn visible_process_entry(
             entry_index,
             content,
             ..
-        } => (entry_index, TranscriptEntryKind::User, content),
+        } => (
+            entry_index,
+            TranscriptEntryKind::User,
+            serde_json::to_string(&crate::process_runtime::wire_user_content(&content))
+                .map_err(|_| ConversationIntrospectionError::corrupt_projection())?,
+        ),
         ProcessTranscriptEntry::Assistant {
             entry_index,
             content,

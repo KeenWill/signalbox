@@ -637,7 +637,13 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
         panic!("the completed frontier renders the native input third");
     };
     assert_eq!(*projected, accepted_input);
-    assert_eq!(content, native_content_text);
+    assert_eq!(
+        content
+            .single_text()
+            .expect("the native input renders as one text part")
+            .as_str(),
+        native_content_text
+    );
     let ProcessTranscriptEntry::Assistant {
         model_call: projected,
         content,

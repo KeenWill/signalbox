@@ -32,6 +32,7 @@ use signalbox_application::{
     UpdateSessionPlacementService, UuidV7CommissionedDispatchIdGenerator,
     UuidV7CreateSessionFromImportedFrontierIdGenerator, UuidV7ImportedConversationIdGenerator,
     UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
+    render_model_user_content,
 };
 use signalbox_blob_store::ExpectedBlob;
 use signalbox_conversation_import_claude_code::{
@@ -269,7 +270,6 @@ const BULK_INGEST_SESSION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 /// Hard safety ceiling bounding store latency and retained read capacity.
 const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
-const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 
 #[derive(Debug)]
@@ -1779,6 +1779,7 @@ where
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
+                services.blob_store_registry.as_deref(),
             )
             .await
         }
@@ -1804,6 +1805,7 @@ where
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
+                services.blob_store_registry.as_deref(),
             )
             .await
         }
@@ -2449,6 +2451,7 @@ where
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
+                services.blob_store_registry.as_deref(),
             )
             .await
         }
@@ -7255,6 +7258,9 @@ pub(crate) async fn compact_automatically(
             .map_err(AutomaticContextCompactionError::Repository)?;
             return Err(AutomaticContextCompactionError::Read(error));
         }
+        Err(ContextCompactionRangeLoadError::CatalogUnavailable) => {
+            return Err(AutomaticContextCompactionError::Model);
+        }
         Err(ContextCompactionRangeLoadError::Integrity) => {
             fail_context_compaction_until_resolved(
                 &repository,
@@ -7322,10 +7328,11 @@ async fn load_context_compaction_range(
     {
         return Err(ContextCompactionRangeLoadError::Integrity);
     }
-    let values = entries
-        .iter()
-        .map(context_compaction_entry_value)
-        .collect::<Vec<_>>();
+    let catalog = BlobCatalogRepository::new(pool.clone());
+    let mut values = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        values.push(context_compaction_entry_value(entry, &catalog).await?);
+    }
     serde_json::to_string(&values).map_err(|_| ContextCompactionRangeLoadError::Integrity)
 }
 
@@ -7339,6 +7346,9 @@ where
     loop {
         match load().await {
             Err(ContextCompactionRangeLoadError::Read(ProcessReadError::Database(_))) => {
+                sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await;
+            }
+            Err(ContextCompactionRangeLoadError::CatalogUnavailable) => {
                 sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await;
             }
             result => return result,
@@ -7434,7 +7444,10 @@ fn transcript_entry_reference(
     signalbox_domain::SemanticTranscriptEntryRef::from_source(source_session, entry)
 }
 
-fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json::Value {
+async fn context_compaction_entry_value(
+    entry: &ProcessTranscriptEntry,
+    catalog: &BlobCatalogRepository,
+) -> Result<serde_json::Value, ContextCompactionRangeLoadError> {
     let reference = transcript_entry_reference(entry);
     let source_session_id = reference
         .source_session()
@@ -7442,7 +7455,7 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
         .hyphenated()
         .to_string();
     let entry_id = reference.entry().into_uuid().hyphenated().to_string();
-    match entry {
+    let value = match entry {
         ProcessTranscriptEntry::DelegatedTask {
             entry_index,
             spawning_request,
@@ -7553,15 +7566,42 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
             turn,
             content,
             ..
-        } => serde_json::json!({
-            "position": entry_index + 1,
-            "source_session_id": source_session_id,
-            "entry_id": entry_id,
-            "type": "user",
-            "accepted_input_id": accepted_input.into_uuid().hyphenated().to_string(),
-            "turn_id": turn.into_uuid().hyphenated().to_string(),
-            "content": content,
-        }),
+        } => {
+            let mut lengths = std::collections::BTreeMap::new();
+            for part in content.parts() {
+                let signalbox_domain::UserContentPart::Attachment { digest, .. } = part else {
+                    continue;
+                };
+                if lengths.contains_key(digest) {
+                    continue;
+                }
+                let catalog_entry = catalog
+                    .find(*digest)
+                    .await
+                    .map_err(map_context_compaction_catalog_error)?
+                    .ok_or(ContextCompactionRangeLoadError::Integrity)?;
+                let length = NonZeroU64::new(catalog_entry.expected().byte_length())
+                    .ok_or(ContextCompactionRangeLoadError::Integrity)?;
+                lengths.insert(*digest, length);
+            }
+            let rendered =
+                render_model_user_content(content.clone(), |digest| lengths.get(&digest).copied())
+                    .map_err(|_| ContextCompactionRangeLoadError::Integrity)?;
+            let rendered_parts = rendered
+                .parts()
+                .iter()
+                .map(|part| part.as_str())
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "position": entry_index + 1,
+                "source_session_id": source_session_id,
+                "entry_id": entry_id,
+                "type": "user",
+                "accepted_input_id": accepted_input.into_uuid().hyphenated().to_string(),
+                "turn_id": turn.into_uuid().hyphenated().to_string(),
+                "content": rendered_parts,
+            })
+        }
         ProcessTranscriptEntry::Assistant {
             entry_index,
             turn,
@@ -7699,6 +7739,21 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
             "source_speaker": imported_source_speaker_label(*source_speaker),
             "content_kind": imported_content_kind_label(*content_kind),
         }),
+    };
+    Ok(value)
+}
+
+fn map_context_compaction_catalog_error(
+    error: signalbox_persistence::blob::BlobCatalogRepositoryError,
+) -> ContextCompactionRangeLoadError {
+    match error {
+        signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_)
+        | signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_) => {
+            ContextCompactionRangeLoadError::CatalogUnavailable
+        }
+        signalbox_persistence::blob::BlobCatalogRepositoryError::Corruption(_) => {
+            ContextCompactionRangeLoadError::Integrity
+        }
     }
 }
 
@@ -7846,6 +7901,15 @@ where
     Writer: AsyncWrite + Unpin,
 {
     match error {
+        ContextCompactionRangeLoadError::CatalogUnavailable => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await
+        }
         ContextCompactionRangeLoadError::Read(error) => {
             if let Err(repository_error) = fail_context_compaction_until_resolved(
                 repository,
@@ -8000,6 +8064,7 @@ where
 #[derive(Debug)]
 enum ContextCompactionRangeLoadError {
     Read(ProcessReadError),
+    CatalogUnavailable,
     Integrity,
 }
 
@@ -11005,6 +11070,7 @@ async fn handle_submit_input<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -11024,6 +11090,10 @@ where
         pool.clone(),
         model_configuration.model_capability_catalog(),
     );
+    let repository = match blob_store_registry {
+        Some(registry) => repository.with_attachment_maximum_bytes(registry.max_blob_bytes()),
+        None => repository,
+    };
     let expected_version = expected_defaults_version
         .and_then(|version| SessionConfigurationDefaultsVersion::try_from_u64(version.value()));
     let model_settings = domain_model_settings_overlay(model_settings);
@@ -11115,6 +11185,7 @@ async fn handle_reconcile_turn<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -11126,6 +11197,10 @@ where
         pool.clone(),
         model_configuration.model_capability_catalog(),
     );
+    let repository = match blob_store_registry {
+        Some(registry) => repository.with_attachment_maximum_bytes(registry.max_blob_bytes()),
+        None => repository,
+    };
     // A command identity that already names durable intent must reach the
     // replay boundary unconditionally (INV-012): the first handling already
     // released the wait, so re-applying the current-state precondition would
@@ -11293,6 +11368,7 @@ async fn handle_stop_turn<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -11304,6 +11380,10 @@ where
         pool.clone(),
         model_configuration.model_capability_catalog(),
     );
+    let repository = match blob_store_registry {
+        Some(registry) => repository.with_attachment_maximum_bytes(registry.max_blob_bytes()),
+        None => repository,
+    };
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
@@ -11942,11 +12022,81 @@ where
 }
 
 fn admitted_user_content(content: UserInputContent) -> Result<UserContent, ()> {
-    let text = content.single_text().ok_or(())?;
-    if text.len() > MAX_SUBMITTED_INPUT_BYTES {
-        return Err(());
-    }
-    UserContent::try_text(text.to_owned()).map_err(|_| ())
+    let parts = content
+        .into_parts()
+        .into_iter()
+        .map(|part| match part {
+            signalbox_process_protocol::UserInputPart::Text { text } => {
+                signalbox_domain::UserContentPart::try_text(text).map_err(|_| ())
+            }
+            signalbox_process_protocol::UserInputPart::Attachment {
+                digest,
+                kind,
+                media_type,
+                display_filename,
+            } => Ok(signalbox_domain::UserContentPart::Attachment {
+                digest: digest.into_digest(),
+                kind: match kind {
+                    signalbox_process_protocol::UserAttachmentKind::Image => {
+                        signalbox_domain::AttachmentKind::Image
+                    }
+                    signalbox_process_protocol::UserAttachmentKind::Document => {
+                        signalbox_domain::AttachmentKind::Document
+                    }
+                    signalbox_process_protocol::UserAttachmentKind::File => {
+                        signalbox_domain::AttachmentKind::File
+                    }
+                },
+                media_type: signalbox_domain::DeclaredMediaType::try_new(media_type)
+                    .map_err(|_| ())?,
+                display_filename: display_filename
+                    .map(signalbox_domain::AttachmentDisplayFilename::try_new)
+                    .transpose()
+                    .map_err(|_| ())?,
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    UserContent::try_parts(parts).map_err(|_| ())
+}
+
+pub(crate) fn wire_user_content(content: &UserContent) -> UserInputContent {
+    UserInputContent::from_parts(
+        content
+            .parts()
+            .iter()
+            .map(|part| match part {
+                signalbox_domain::UserContentPart::Text { value } => {
+                    signalbox_process_protocol::UserInputPart::Text {
+                        text: value.as_str().to_owned(),
+                    }
+                }
+                signalbox_domain::UserContentPart::Attachment {
+                    digest,
+                    kind,
+                    media_type,
+                    display_filename,
+                } => signalbox_process_protocol::UserInputPart::Attachment {
+                    digest: signalbox_process_protocol::CanonicalBlobDigest::from_digest(*digest),
+                    kind: match kind {
+                        signalbox_domain::AttachmentKind::Image => {
+                            signalbox_process_protocol::UserAttachmentKind::Image
+                        }
+                        signalbox_domain::AttachmentKind::Document => {
+                            signalbox_process_protocol::UserAttachmentKind::Document
+                        }
+                        signalbox_domain::AttachmentKind::File => {
+                            signalbox_process_protocol::UserAttachmentKind::File
+                        }
+                    },
+                    media_type: media_type.as_str().to_owned(),
+                    display_filename: display_filename
+                        .as_ref()
+                        .map(signalbox_domain::AttachmentDisplayFilename::as_str)
+                        .map(str::to_owned),
+                },
+            })
+            .collect(),
+    )
 }
 
 async fn handle_read_transcript<Writer>(
@@ -12662,18 +12812,16 @@ where
                 writer,
                 version,
                 request_id,
-                ServerMessage::TranscriptTextEntry {
+                ServerMessage::TranscriptUserEntry {
                     entry_index: CanonicalU64::new(*entry_index),
                     source_session_id: wire_uuid(source_session.into_uuid()),
                     entry_id: wire_uuid(entry.into_uuid()),
-                    entry: TranscriptTextEntry::User {
-                        accepted_input_id: wire_uuid(accepted_input.into_uuid()),
-                        turn_id: wire_uuid(turn.into_uuid()),
-                    },
+                    accepted_input_id: wire_uuid(accepted_input.into_uuid()),
+                    turn_id: wire_uuid(turn.into_uuid()),
+                    content: wire_user_content(content),
                 },
             )
-            .await?;
-            write_content(writer, version, request_id, *entry_index, content).await
+            .await
         }
         ProcessTranscriptEntry::Assistant {
             entry_index,
@@ -13000,6 +13148,17 @@ fn map_rejection(
     rejected: SubmitInputRejectedResult,
 ) -> Result<RejectionDetail, ProcessConnectionError> {
     Ok(match rejected {
+        SubmitInputRejectedResult::AttachmentBlobNotFound { digest } => {
+            RejectionDetail::AttachmentBlobNotFound {
+                digest: signalbox_process_protocol::CanonicalBlobDigest::from_digest(digest),
+            }
+        }
+        SubmitInputRejectedResult::AttachmentByteBudgetExceeded { maximum_bytes } => {
+            RejectionDetail::AttachmentByteBudgetExceeded {
+                maximum_bytes: PositiveCanonicalU64::try_new(maximum_bytes)
+                    .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
+            }
+        }
         SubmitInputRejectedResult::SessionNotFound { session } => {
             RejectionDetail::SessionNotFound {
                 session_id: wire_uuid(session.into_uuid()),
@@ -13653,7 +13812,7 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             content,
         } => TurnState::Queued {
             accepted_input_id: wire_uuid(accepted_input.into_uuid()),
-            content: UserInputContent::text(content.clone()),
+            content: wire_user_content(content),
         },
         ProcessTurnState::QueuedDelegated {
             spawning_request,
@@ -13760,12 +13919,24 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                 let model_call_id = wire_uuid(call.call().into_uuid());
                 match call.disposition() {
                     ProcessFailedModelCallDisposition::KnownFailed => {
-                        match call.provider_failure_cause() {
-                            Some(cause) => FailedTerminalModelCall::known_failed_with_cause(
+                        let provider_cause = call.provider_failure_cause();
+                        let attachment_cause = call.attachment_preparation_failure_cause();
+                        debug_assert!(
+                            provider_cause.is_none() || attachment_cause.is_none(),
+                            "process-read validation rejects overlapping failure causes"
+                        );
+                        match (provider_cause, attachment_cause) {
+                            (Some(cause), _) => FailedTerminalModelCall::known_failed_with_cause(
                                 model_call_id,
                                 wire_provider_failure_cause(cause),
                             ),
-                            None => FailedTerminalModelCall::new(
+                            (None, Some(cause)) => {
+                                FailedTerminalModelCall::known_failed_with_cause(
+                                    model_call_id,
+                                    wire_attachment_preparation_failure_cause(cause),
+                                )
+                            }
+                            (None, None) => FailedTerminalModelCall::new(
                                 model_call_id,
                                 FailedModelCallDisposition::KnownFailed,
                             ),
@@ -13776,6 +13947,7 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                             call.provider_failure_cause().is_none(),
                             "process-read validation rejects causes on cancelled model calls"
                         );
+                        debug_assert!(call.attachment_preparation_failure_cause().is_none());
                         FailedTerminalModelCall::new(
                             model_call_id,
                             FailedModelCallDisposition::Cancelled,
@@ -14372,6 +14544,24 @@ fn wire_provider_failure_cause(
     }
 }
 
+fn wire_attachment_preparation_failure_cause(
+    cause: signalbox_persistence::process_read::ProcessAttachmentPreparationFailureCause,
+) -> FailedModelCallCause {
+    use signalbox_persistence::process_read::ProcessAttachmentPreparationFailureCause;
+
+    match cause {
+        ProcessAttachmentPreparationFailureCause::TooLarge => {
+            FailedModelCallCause::AttachmentTooLarge
+        }
+        ProcessAttachmentPreparationFailureCause::Missing => {
+            FailedModelCallCause::AttachmentMissing
+        }
+        ProcessAttachmentPreparationFailureCause::Corrupt => {
+            FailedModelCallCause::AttachmentCorrupt
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_goal_user_command<Writer>(
     writer: &mut Writer,
@@ -14887,7 +15077,7 @@ enum ProcessUpdateEvent {
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: signalbox_domain::TurnId,
         acceptance_position: u64,
-        content: String,
+        content: UserContent,
     },
     GoalTurnRetired {
         turn: signalbox_domain::TurnId,
@@ -15141,7 +15331,7 @@ impl ProcessUpdateEvent {
                 accepted_input_id: wire_uuid(accepted_input.into_uuid()),
                 turn_id: wire_uuid(turn.into_uuid()),
                 acceptance_position: CanonicalU64::new(*acceptance_position),
-                content: UserInputContent::text(content.clone()),
+                content: wire_user_content(content),
             },
             Self::GoalTurnRetired { turn } => SessionEvent::GoalTurnRetired {
                 turn_id: wire_uuid(turn.into_uuid()),
@@ -15722,16 +15912,16 @@ mod tests {
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_BLOB_READS,
         MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_CONCURRENT_SNAPSHOT_READERS,
-        MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS, MAX_SUBMITTED_INPUT_BYTES,
-        OperationalImportError, PendingConversationImport, ProcessConnectionError,
-        ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
-        RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
-        RequestId, ReviewCommandAdmission, SnapshotReaderAdmission, SnapshotSpoolError,
-        SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
-        acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
-        acquire_review_command_permit, acquire_review_command_permit_while_buffered,
-        acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
-        blob_read_budget, blob_upload_begin_preflight, canonical_review_request_digest,
+        MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS, OperationalImportError,
+        PendingConversationImport, ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent,
+        ProtocolError, RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES,
+        RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS, RequestId, ReviewCommandAdmission,
+        SnapshotReaderAdmission, SnapshotSpoolError, SubmitInputModelExecutionDiagnostic,
+        acquire_import_permit, acquire_import_waiter_permit, acquire_inbound_frame_permit,
+        acquire_inbound_frame_permit_after_input, acquire_review_command_permit,
+        acquire_review_command_permit_while_buffered, acquire_snapshot_reader_permit,
+        admit_snapshot_reader, admitted_user_content, blob_read_budget,
+        blob_upload_begin_preflight, canonical_review_request_digest,
         claude_conversion_failure_disposition, codex_conversion_failure_disposition,
         consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
         foreground_peer_activity, handle_append_conversation_import,
@@ -15856,7 +16046,10 @@ mod tests {
             accepted_input,
             turn,
             acceptance_position: SessionInputPosition::first(),
-            content: "synthetic prompt with tool arguments".to_owned(),
+            content: signalbox_domain::UserContent::try_text(
+                "synthetic prompt with tool arguments".to_owned(),
+            )
+            .expect("the telemetry fixture content is valid"),
         };
         let activation = DispatchedOutboxEventKind::TurnActivated {
             turn,
@@ -18101,7 +18294,8 @@ mod tests {
 
     #[test]
     fn process_submission_admits_the_exact_content_bound() {
-        let exact = UserInputContent::text("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES));
+        let exact =
+            UserInputContent::text("\u{1}".repeat(signalbox_domain::UserContent::MAX_TEXT_BYTES));
         assert!(admitted_user_content(exact).is_ok());
     }
 
@@ -18109,7 +18303,7 @@ mod tests {
     fn process_submission_rejects_content_over_the_bound() {
         assert!(
             admitted_user_content(UserInputContent::text(
-                "x".repeat(MAX_SUBMITTED_INPUT_BYTES + 1),
+                "x".repeat(signalbox_domain::UserContent::MAX_TEXT_BYTES + 1),
             ))
             .is_err()
         );
@@ -18126,7 +18320,9 @@ mod tests {
                 model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1)),
-                    content: UserInputContent::text("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
+                    content: UserInputContent::text(
+                        "\u{1}".repeat(signalbox_domain::UserContent::MAX_TEXT_BYTES),
+                    ),
                 },
             },
         )?;
@@ -18146,7 +18342,9 @@ mod tests {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1)),
                     turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 2)),
                     acceptance_position: CanonicalU64::new(u64::MAX),
-                    content: UserInputContent::text("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
+                    content: UserInputContent::text(
+                        "\u{1}".repeat(signalbox_domain::UserContent::MAX_TEXT_BYTES),
+                    ),
                 },
             },
         )?;

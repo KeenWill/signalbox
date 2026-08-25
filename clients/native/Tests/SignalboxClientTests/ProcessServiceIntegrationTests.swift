@@ -7538,31 +7538,13 @@ private enum ProcessProjectionFixture {
         message: try message(
           """
           {
-            "type":"transcript_text_entry",
+            "type":"transcript_user_entry",
             "entry_index":"0",
             "source_session_id":"\(ProcessDriverFixture.session)",
             "entry_id":"\(ProcessDriverFixture.completionEntry)",
-            "entry":{
-              "type":"user",
-              "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
-              "turn_id":"\(ProcessDriverFixture.turn)"
-            }
-          }
-          """
-        )
-      )
-    )
-    _ = machine.receive(
-      .frame(
-        generation: 1,
-        message: try message(
-          """
-          {
-            "type":"transcript_content",
-            "entry_index":"0",
-            "fragment_index":"0",
-            "final_fragment":true,
-            "content_fragment":"\(userText)"
+            "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "content":[{"type":"text","text":"\(userText)"}]
           }
           """
         )

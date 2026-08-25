@@ -2303,19 +2303,7 @@ impl<'a> Output<'a> {
         match content.parts() {
             [UserInputPart::Text { text }] => self.text(text),
             parts => {
-                let serialized = serde_json::to_string(parts)?;
-                if self.raw {
-                    self.stdout.write_all(serialized.as_bytes())?;
-                } else {
-                    for character in serialized.chars() {
-                        let code = character as u32;
-                        if (0x7f..=0x9f).contains(&code) {
-                            write!(self.stdout, "\\u{code:04x}")?;
-                        } else {
-                            write!(self.stdout, "{character}")?;
-                        }
-                    }
-                }
+                self.user_content_parts_json(parts)?;
                 writeln!(self.stdout)?;
                 if self.raw {
                     self.stdout.flush()?;
@@ -2323,6 +2311,22 @@ impl<'a> Output<'a> {
                 Ok(())
             }
         }
+    }
+
+    fn user_content_parts_json(&mut self, parts: &[UserInputPart]) -> io::Result<()> {
+        let serialized = serde_json::to_string(parts)?;
+        if self.raw {
+            return self.stdout.write_all(serialized.as_bytes());
+        }
+        for character in serialized.chars() {
+            let code = character as u32;
+            if (0x7f..=0x9f).contains(&code) {
+                write!(self.stdout, "\\u{code:04x}")?;
+            } else {
+                write!(self.stdout, "{character}")?;
+            }
+        }
+        Ok(())
     }
 
     fn text_fragment(
@@ -2566,11 +2570,25 @@ impl<'a> Output<'a> {
 
     fn snapshot_entry(&mut self, entry: &SnapshotEntry) -> io::Result<()> {
         match &entry.kind {
+            SnapshotEntryKind::User {
+                accepted_input_id,
+                turn_id,
+                content,
+            } => {
+                write!(
+                    self.stdout,
+                    "user_content source_session={} entry={} accepted_input={accepted_input_id} turn={turn_id} parts=",
+                    entry.source_session_id, entry.entry_id
+                )?;
+                self.user_content_parts_json(content.parts())?;
+                writeln!(self.stdout)?;
+                if self.raw {
+                    self.stdout.flush()?;
+                }
+                Ok(())
+            }
             SnapshotEntryKind::Text(metadata) => {
                 let label = match metadata {
-                    TranscriptTextEntry::User { turn_id, .. } => {
-                        format!("user turn={turn_id}")
-                    }
                     TranscriptTextEntry::Assistant { turn_id, .. } => {
                         format!("assistant turn={turn_id}")
                     }
@@ -3136,7 +3154,7 @@ impl SnapshotSelection {
                 | Self::ToolBatchProposed { .. }
                 | Self::ToolBatchResults { .. }
                 | Self::ToolReconciliation { .. },
-                SnapshotEntryKind::Text(_),
+                SnapshotEntryKind::User { .. } | SnapshotEntryKind::Text(_),
             ) => false,
             (
                 Self::ToolBatchProposed { .. }
@@ -3198,7 +3216,8 @@ impl SnapshotSelection {
                 | Self::ToolBatchProposed { .. }
                 | Self::ToolBatchResults { .. }
                 | Self::ToolReconciliation { .. },
-                SnapshotEntryKind::Text(_)
+                SnapshotEntryKind::User { .. }
+                | SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::ModelIdentityChanged { .. }
                     | TranscriptEntry::DelegatedTask { .. }
@@ -3332,6 +3351,9 @@ const fn failed_model_call_disposition(disposition: FailedModelCallDisposition) 
 const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
     match cause {
         FailedModelCallCause::CredentialRejected => "credential_rejected",
+        FailedModelCallCause::AttachmentTooLarge => "attachment_too_large",
+        FailedModelCallCause::AttachmentMissing => "attachment_missing",
+        FailedModelCallCause::AttachmentCorrupt => "attachment_corrupt",
         FailedModelCallCause::PermissionDenied => "permission_denied",
         FailedModelCallCause::InvalidRequest => "invalid_request",
         FailedModelCallCause::TargetNotFound => "target_not_found",
@@ -4519,6 +4541,40 @@ mod tests {
             usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn snapshot_user_entry_renders_canonical_parts_on_one_line() {
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            9,
+            [ServerMessage::TranscriptUserEntry {
+                entry_index: CanonicalU64::new(0),
+                source_session_id: wire_uuid(1),
+                entry_id: wire_uuid(2),
+                accepted_input_id: wire_uuid(3),
+                turn_id: wire_uuid(4),
+                content: UserInputContent::text("first\nsecond".to_owned()),
+            }],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("user snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        assert!(rendered.starts_with(
+            "user_content source_session=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000002 accepted_input=00000000-0000-0000-0000-000000000003 turn=00000000-0000-0000-0000-000000000004 parts=[{\"type\":\"text\",\"text\":\"first\\nsecond\"}]\n"
+        ));
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("user_content "))
+                .count(),
+            1
+        );
         assert!(stderr.is_empty());
     }
 

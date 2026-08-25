@@ -309,6 +309,8 @@ pub use submit_input::{
     SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput,
     SubmitInputRejectedActiveTurnMismatchReconstitutionInput,
     SubmitInputRejectedActiveTurnPresentReconstitutionInput,
+    SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput,
+    SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
     SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput,
     SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
     SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
@@ -391,10 +393,10 @@ pub use turn_lifecycle::{
     NonEmptyIssuedOperationRefsError, ReconciliationMarker, ReconciliationReason, TurnDisposition,
 };
 pub use user_content::{
-    AttachmentDisplayFilename, AttachmentDisplayFilenameError, AttachmentDisplayFilenameFailure,
-    AttachmentKind, DeclaredMediaType, DeclaredMediaTypeError, DeclaredMediaTypeFailure,
-    NonEmptyUnicodeText, NonEmptyUnicodeTextError, NonEmptyUnicodeTextFailure, UserContent,
-    UserContentError, UserContentFailure, UserContentPart,
+    AttachmentBlobFact, AttachmentDisplayFilename, AttachmentDisplayFilenameError,
+    AttachmentDisplayFilenameFailure, AttachmentKind, DeclaredMediaType, DeclaredMediaTypeError,
+    DeclaredMediaTypeFailure, NonEmptyUnicodeText, NonEmptyUnicodeTextError,
+    NonEmptyUnicodeTextFailure, UserContent, UserContentError, UserContentFailure, UserContentPart,
 };
 pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
 pub use workspace_instruction::{

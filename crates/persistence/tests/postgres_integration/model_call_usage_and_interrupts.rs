@@ -328,6 +328,136 @@ async fn inv014_model_call_credential_reference_is_immutable() -> Result<(), Box
     Ok(())
 }
 
+/// A definitive attachment-preparation failure closes its prepared call and
+/// retains its durable cause.
+///
+/// `model_call_changes_are_guarded` raises on every update whose OLD row is
+/// already terminal, so the cause is only writable by the same
+/// Prepared-to-terminal statement that closes the call. A follow-up update
+/// aborts the whole failure transaction instead, leaving the call and its turn
+/// open, which is why this exercises the `Some(..)` closure end to end rather
+/// than asserting the column shape alone. The pairing constraint is then probed
+/// on its own inside a rolled-back transaction that suspends that guard, because
+/// a maximum without a cause is reachable only on a row already closed as a
+/// known failure.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn definitive_attachment_failure_closes_its_call_with_a_durable_cause()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7100;
+    let fixture = checkpoint_restart_model_call(&pool, seed, false).await?;
+    let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one restart fixture target forms a catalog");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+
+    let failed = repository
+        .fail_prepared_call(
+            fixture.session,
+            fixture.call,
+            Some(AttachmentPreparationFailure::Missing),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 14)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 15)),
+            ),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert_eq!(
+        failed.call().expect("the prepared call closes").id(),
+        fixture.call
+    );
+
+    let durable_cause: (String, Option<String>, Option<Decimal>) = sqlx::query_as(
+        "SELECT state_kind,
+                terminal_attachment_preparation_failure_cause,
+                terminal_attachment_preparation_failure_maximum_bytes
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        durable_cause,
+        ("terminal".to_owned(), Some("missing".to_owned()), None)
+    );
+
+    // A maximum retained without the cause that names it describes no
+    // `AttachmentPreparationFailure`, so the pairing constraint rejects it
+    // rather than leaving the row for a reread to reject. Every other terminal
+    // fact is already durable and unchanged here, so this constraint is the
+    // only one the statement can violate.
+    let mut stripped_cause = pool.begin().await?;
+    sqlx::query("ALTER TABLE model_call DISABLE TRIGGER USER")
+        .execute(&mut *stripped_cause)
+        .await?;
+    let stripped_cause_error = sqlx::query(
+        "UPDATE model_call
+            SET terminal_attachment_preparation_failure_cause = NULL,
+                terminal_attachment_preparation_failure_maximum_bytes = 1
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&mut *stripped_cause)
+    .await
+    .expect_err("a retained maximum cannot outlive its cause");
+    assert_eq!(
+        stripped_cause_error
+            .as_database_error()
+            .and_then(|error| error.constraint()),
+        Some("model_call_attachment_preparation_failure_cause_shape")
+    );
+    stripped_cause.rollback().await?;
+
+    // The reread only reports a committed closure when the durable cause still
+    // matches the failure the caller is reconciling.
+    assert_eq!(
+        repository
+            .reread_prepared_failure(
+                fixture.session,
+                fixture.call,
+                Some(AttachmentPreparationFailure::Missing)
+            )
+            .await?,
+        RetainedPreparedFailureStatus::AlreadyCommitted
+    );
+    assert!(matches!(
+        repository
+            .reread_prepared_failure(fixture.session, fixture.call, None)
+            .await,
+        Err(ModelCallRepositoryError::InvalidTransition(_))
+    ));
+
+    // The turn closed with the call, rather than being left open by a rolled
+    // back failure transaction.
+    let terminal_execution: (Uuid, Uuid) = sqlx::query_as(
+        "SELECT terminal_attempt_id, terminal_model_call_id
+           FROM turn_lifecycle
+          WHERE turn_id = $1
+            AND state_kind = 'terminal'
+            AND terminal_disposition_kind = 'failed'",
+    )
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        terminal_execution,
+        (fixture.attempt.into_uuid(), fixture.call.into_uuid())
+    );
+
+    pool.close().await;
+    drop(container);
+
+    Ok(())
+}
+
 /// INV-006: an uncertain capability-failure closure is reconciled from exact
 /// durable Prepared or complete known-failure state, including its terminal
 /// attempt and call provenance, before any resubmission.
@@ -375,7 +505,7 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
 
     assert_eq!(
         repository
-            .reread_prepared_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call, None)
             .await?,
         RetainedPreparedFailureStatus::Pending
     );
@@ -383,6 +513,7 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
         .fail_prepared_call(
             fixture.session,
             fixture.call,
+            None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 14)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(seed + 15)),
@@ -396,7 +527,7 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
     );
     assert_eq!(
         repository
-            .reread_prepared_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call, None)
             .await?,
         RetainedPreparedFailureStatus::AlreadyCommitted
     );
@@ -448,7 +579,7 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
         .await?;
     assert!(matches!(
         repository
-            .reread_prepared_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call, None)
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
             "retained prepared failure durable closure is incomplete"
@@ -474,7 +605,7 @@ async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_com
         .await?;
     assert!(matches!(
         issued_repository
-            .reread_prepared_failure(issued.session, issued.call)
+            .reread_prepared_failure(issued.session, issued.call, None)
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
             "retained prepared failure durable closure is incomplete"
@@ -569,7 +700,7 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
         .await?;
     assert_eq!(
         repository
-            .reread_prepared_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call, None)
             .await?,
         RetainedPreparedFailureStatus::Cancelled
     );
@@ -592,7 +723,7 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
         .await?;
     assert!(matches!(
         repository
-            .reread_prepared_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call, None)
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
             "retained prepared failure cancellation closure is incomplete"

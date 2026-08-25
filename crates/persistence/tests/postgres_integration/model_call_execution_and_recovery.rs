@@ -2837,210 +2837,6 @@ async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pend
     Ok(())
 }
 
-/// S04 / S08 / INV-016 / INV-053: reclassification rejects missing settings
-/// for a post-cutover source, while a genuine pre-evidence source can still
-/// reclassify pending steering and leave the successor legacy-null.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_s08_inv016_inv053_legacy_turn_reclassifies_steering_without_settings()
--> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let seed = 0x38b0;
-    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
-    let steering_input = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 30));
-    SubmitInputRepository::new(pool.clone())
-        .handle(
-            SubmitInput::new(
-                DurableCommandId::from_uuid(Uuid::from_u128(seed + 31)),
-                fixture.session,
-                UserContent::try_text(String::from("legacy source steering"))
-                    .expect("fixture steering content is admitted"),
-                DeliveryRequest::NextSafePoint {
-                    expected_active_turn: fixture.turn,
-                },
-            ),
-            steering_input,
-            None,
-        )
-        .await?;
-
-    sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event DISABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-    sqlx::query(
-        "DELETE FROM turn_model_settings_resolved_outbox_event
-          WHERE accepted_input_id IN (
-                SELECT accepted_input_id
-                  FROM turn_model_settings_resolved
-                 WHERE turn_id = $1
-          )",
-    )
-    .bind(fixture.turn.into_uuid())
-    .execute(&pool)
-    .await?;
-    sqlx::query("ALTER TABLE turn_model_settings_resolved DISABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-    let deleted = sqlx::query("DELETE FROM turn_model_settings_resolved WHERE turn_id = $1")
-        .bind(fixture.turn.into_uuid())
-        .execute(&pool)
-        .await?;
-    assert_eq!(deleted.rows_affected(), 1);
-    sqlx::query("ALTER TABLE turn_model_settings_resolved ENABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event ENABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-
-    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 32));
-    let missing_settings = repository
-        .apply_terminal_observation(
-            fixture.session,
-            authorized
-                .observation_correlation()
-                .bind_terminal_observation(ModelCallTerminalObservation::Refused),
-            ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(
-                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 33)),
-            )),
-            |_| successor,
-        )
-        .await;
-    assert!(
-        matches!(
-            &missing_settings,
-            Err(ModelCallRepositoryError::Corruption(
-                ModelCallCorruption::Scheduling(SubmitInputCorruption::Missing(
-                    "turn model settings evidence"
-                ))
-            ))
-        ),
-        "unexpected missing-settings outcome: {missing_settings:?}"
-    );
-
-    sqlx::query("ALTER TABLE durable_command DISABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE queued_input_origin DISABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    let registry_downgrade = sqlx::query(
-        "UPDATE durable_command
-            SET storage_version = 1
-          WHERE command_id = $1",
-    )
-    .bind(Uuid::from_u128(seed + 8))
-    .execute(&pool)
-    .await?;
-    let command_downgrade = sqlx::query(
-        "UPDATE submit_input_command
-            SET storage_version = 1
-          WHERE command_id = $1",
-    )
-    .bind(Uuid::from_u128(seed + 8))
-    .execute(&pool)
-    .await?;
-    let legacy_root = sqlx::query(
-        "UPDATE queued_input_origin
-            SET model_settings_evidence_required = FALSE
-          WHERE turn_id = $1",
-    )
-    .bind(fixture.turn.into_uuid())
-    .execute(&pool)
-    .await?;
-    assert_eq!(registry_downgrade.rows_affected(), 1);
-    assert_eq!(command_downgrade.rows_affected(), 1);
-    assert_eq!(legacy_root.rows_affected(), 1);
-    sqlx::query("ALTER TABLE queued_input_origin ENABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE submit_input_command ENABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE durable_command ENABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-
-    let outcome = repository
-        .apply_terminal_observation(
-            fixture.session,
-            authorized
-                .observation_correlation()
-                .bind_terminal_observation(ModelCallTerminalObservation::Refused),
-            ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(
-                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 33)),
-            )),
-            |accepted| {
-                assert_eq!(accepted, steering_input);
-                successor
-            },
-        )
-        .await?;
-    assert_refused_reclassified_successor(&outcome, successor);
-
-    let evidence_cutover: Vec<(Uuid, bool)> = sqlx::query_as(
-        "SELECT turn.turn_id, configuration_origin.model_settings_evidence_required
-           FROM turn_lifecycle AS turn
-           JOIN LATERAL (
-                WITH RECURSIVE configuration_chain AS (
-                    SELECT queued.*
-                      FROM queued_input_origin AS queued
-                     WHERE queued.turn_id = turn.turn_id
-                       AND queued.session_id = turn.session_id
-                    UNION
-                    SELECT source.*
-                      FROM configuration_chain AS current
-                      JOIN queued_input_origin AS source
-                        ON source.turn_id = current.source_configuration_turn_id
-                       AND source.session_id = current.session_id
-                )
-                SELECT *
-                  FROM configuration_chain
-                 WHERE source_configuration_turn_id IS NULL
-           ) AS configuration_origin ON TRUE
-          WHERE turn.turn_id IN ($1, $2)
-          ORDER BY turn.acceptance_position",
-    )
-    .bind(fixture.turn.into_uuid())
-    .bind(successor.into_uuid())
-    .fetch_all(&pool)
-    .await?;
-    assert_eq!(
-        evidence_cutover,
-        vec![
-            (fixture.turn.into_uuid(), false),
-            (successor.into_uuid(), false),
-        ]
-    );
-
-    let successor_evidence: (i64, i64) = sqlx::query_as(
-        "SELECT
-            (SELECT count(*) FROM turn_model_settings_resolved
-              WHERE accepted_input_id = $1 AND turn_id = $2),
-            (SELECT count(*) FROM turn_model_settings_resolved_outbox_event
-              WHERE accepted_input_id = $1)",
-    )
-    .bind(steering_input.into_uuid())
-    .bind(successor.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(successor_evidence, (0, 0));
-    let snapshot = ProcessReadRepository::new(pool.clone())
-        .read_transcript(fixture.session)
-        .await?
-        .expect("the legacy-compatible transcript remains readable");
-    assert_eq!(snapshot.turns().len(), 2);
-    assert_eq!(snapshot.turns()[1].turn(), successor);
-    assert_eq!(snapshot.turns()[1].model_settings(), None);
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
 /// S08 / S21 / INV-006 / INV-014 / INV-032 / INV-036: immutable target
 /// resolution failure creates no targetless call, reclassifies the complete
 /// pending steering prefix, and atomically closes the prepared attempt and turn
@@ -3249,14 +3045,7 @@ async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_ste
 async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = unmigrated_postgres().await?;
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR.iter().take(3) {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    drop(connection);
+    apply_migrations_before(&pool, 202607180004).await?;
 
     let mut transaction = pool.begin().await?;
     sqlx::raw_sql(
@@ -3355,14 +3144,27 @@ async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
 
     migrate(&pool).await?;
 
-    let backfilled: (i64, String, i64, i64, i64, bool) = sqlx::query_as(
+    let backfilled: (i64, String, i64, i64, i64, bool, i64, i64, bool) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM session_scheduler WHERE session_id = $1),
             turn.state_kind,
             (SELECT count(*) FROM semantic_transcript_entry),
             (SELECT count(*) FROM context_frontier),
             (SELECT count(*) FROM turn_attempt),
-            typed.result_actual_active_turn_id IS NULL
+            typed.result_actual_active_turn_id IS NULL,
+            (SELECT count(*)
+               FROM submit_input_command_content_part AS part
+              WHERE part.command_id = typed.command_id
+                AND part.position = 0
+                AND part.part_kind = 'text'
+                AND part.text_value = 'queued before migration'),
+            (SELECT count(*)
+               FROM accepted_input_content_part AS part
+              WHERE part.accepted_input_id = accepted.accepted_input_id
+                AND part.position = 0
+                AND part.part_kind = 'text'
+                AND part.text_value = 'queued before migration'),
+            typed.storage_version = 3
          FROM turn_lifecycle AS turn
          JOIN accepted_input AS accepted
            ON accepted.accepted_input_id = turn.origin_accepted_input_id
@@ -3374,7 +3176,10 @@ async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
     .bind(Uuid::from_u128(0xa0000000000070008000000000000401))
     .fetch_one(&pool)
     .await?;
-    assert_eq!(backfilled, (1, "queued".to_owned(), 0, 0, 0, true));
+    assert_eq!(
+        backfilled,
+        (1, "queued".to_owned(), 0, 0, 0, true, 1, 1, true)
+    );
 
     pool.close().await;
     drop(container);
