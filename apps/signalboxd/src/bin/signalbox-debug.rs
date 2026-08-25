@@ -280,10 +280,7 @@ async fn poll_terminal_transcript(
     loop {
         let rows = sqlx::query_as::<_, TranscriptRow>(
             "SELECT entry.payload_kind,
-                    (SELECT string_agg(part.text_value, '' ORDER BY part.position)
-                       FROM accepted_input_content_part AS part
-                      WHERE part.accepted_input_id = entry.origin_accepted_input_id
-                        AND part.part_kind = 'text'),
+                    accepted_part.text_value,
                     entry.assistant_text_value
                FROM turn_lifecycle AS lifecycle
                JOIN context_frontier_member AS member
@@ -292,6 +289,13 @@ async fn poll_terminal_transcript(
                JOIN semantic_transcript_entry AS entry
                  ON entry.source_session_id = member.source_session_id
                 AND entry.semantic_entry_id = member.semantic_entry_id
+               LEFT JOIN accepted_input AS accepted
+                 ON accepted.session_id = entry.source_session_id
+                AND accepted.accepted_input_id = entry.origin_accepted_input_id
+               LEFT JOIN accepted_input_content_part AS accepted_part
+                 ON accepted_part.accepted_input_id = accepted.accepted_input_id
+                AND accepted_part.position = 0
+                AND accepted_part.part_kind = 'text'
               WHERE lifecycle.session_id = $1
                 AND lifecycle.turn_id = $2
                 AND lifecycle.state_kind = 'terminal'

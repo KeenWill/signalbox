@@ -55,7 +55,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-eight identities defined in `lib.rs`:
+The twenty-nine identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -83,6 +83,7 @@ pub struct ReviewFindingId(/* private */);
 pub struct ReviewExternalLinkId(/* private */);
 pub struct RepoWatchEventId(/* private */);
 pub struct RepoWatchDispatchId(/* private */);
+pub struct CommissionedDispatchId(/* private */);
 pub struct WorkspaceId(/* private */);
 pub struct GitRemoteMintId(/* private */);
 pub struct GitRemoteWithdrawalId(/* private */);
@@ -2310,6 +2311,7 @@ impl NonEmptyUnicodeText {
     pub fn into_string(self) -> String;
     // accessors: as_str()
 }
+// Debug is content-redacted.
 
 pub enum NonEmptyUnicodeTextFailure {
     Empty,
@@ -2322,6 +2324,7 @@ impl NonEmptyUnicodeTextError {
     pub fn into_parts(self) -> (String, NonEmptyUnicodeTextFailure);
     // accessors: failure(), value()
 }
+// Debug is content-redacted.
 
 pub enum AttachmentKind {
     Image,
@@ -2337,8 +2340,9 @@ impl AttachmentBlobFact {
 
 pub struct DeclaredMediaType(/* private String */);
 impl DeclaredMediaType {
+    pub const MAX_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, DeclaredMediaTypeError>;
-    // accessors: as_str()
+    // accessor: as_str()
 }
 
 pub enum DeclaredMediaTypeFailure {
@@ -2354,9 +2358,11 @@ impl DeclaredMediaTypeError {
 
 pub struct AttachmentDisplayFilename(/* private String */);
 impl AttachmentDisplayFilename {
+    pub const MAX_BYTES: usize;
     pub fn try_new(value: String) -> Result<Self, AttachmentDisplayFilenameError>;
-    // accessors: as_str()
+    // accessor: as_str()
 }
+// Debug is content-redacted.
 
 pub enum AttachmentDisplayFilenameFailure {
     Empty,
@@ -2370,11 +2376,10 @@ pub struct AttachmentDisplayFilenameError { /* private */ }
 impl AttachmentDisplayFilenameError {
     // accessors: failure(), value()
 }
+// Debug is content-redacted.
 
 pub enum UserContentPart {
-    Text {
-        value: NonEmptyUnicodeText,
-    },
+    Text { value: NonEmptyUnicodeText },
     Attachment {
         digest: BlobDigest,
         kind: AttachmentKind,
@@ -2388,14 +2393,21 @@ impl UserContentPart {
 
 pub struct UserContent { /* private */ }
 impl UserContent {
+    pub const MAX_PARTS: usize;
     pub const MAX_TEXT_BYTES: usize;
+    pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
     pub fn try_parts(parts: Vec<UserContentPart>) -> Result<Self, UserContentError>;
     pub fn into_parts(self) -> Vec<UserContentPart>;
-    pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
     // accessors: parts(), single_text()
 }
 
-pub enum UserContentError {
+pub struct UserContentError { /* private */ }
+impl UserContentError {
+    pub fn into_parts(self) -> (Vec<UserContentPart>, UserContentFailure);
+    // accessors: failure(), parts()
+}
+
+pub enum UserContentFailure {
     Empty,
     TooManyParts,
     AdjacentTextParts,
@@ -2419,6 +2431,7 @@ impl SubmitInput {
     pub fn prepare_attachment_bytes_too_large(
         self,
         maximum_bytes: NonZeroU64,
+        observed_bytes: NonZeroU64,
     ) -> PreparedSubmitInput;
     pub fn prepare_when_no_active_turn(
         self,
@@ -2505,6 +2518,7 @@ pub enum SubmitInputRejectedResult {
     AttachmentBytesTooLarge {
         session: SessionId,
         maximum_bytes: NonZeroU64,
+        observed_bytes: NonZeroU64,
     },
     SessionNotFound {
         session: SessionId,
@@ -2642,7 +2656,7 @@ pub struct SubmitInputRejectedBlobNotFoundReconstitutionInput {
     /* public named command, actor, session, and absent-digest facts */
 }
 pub struct SubmitInputRejectedAttachmentBytesTooLargeReconstitutionInput {
-    /* public named command, actor, session, and deployment-maximum facts */
+    /* public named command, actor, session, deployment-maximum, and observed-aggregate facts */
 }
 pub struct SubmitInputRejectedNoActiveTurnReconstitutionInput {
     /* public named command, actor, session, and expected-turn facts */
@@ -2726,7 +2740,7 @@ pub enum SubmitInputReconstitutionFailure {
     AppliedDeliveryIsNotNextSafePoint,
     ResultSessionMismatch,
     RejectedBlobDigestNotReferenced,
-    RejectedAttachmentBoundWithoutAttachment,
+    RejectedAttachmentAggregateWithinBound,
     AcceptedCommandMismatch,
     AcceptedInputMismatch,
     AcceptedSessionMismatch,
@@ -3148,6 +3162,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
         runner: RunnerId,
         placement_revision: RunnerGeneration,
         interrupted_tool_attempt: Option<ToolAttemptId>,
+        source_frontier: Option<ContextFrontierId>,
     ) -> Self;
     // accessor: owning_turn()
 }
@@ -3496,6 +3511,9 @@ impl AcceptedInputSchedulingProjection {
     ) -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn active_turn(&self) -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn active_turn_execution(&self) -> Option<ActivatedAcceptedInputTurn>;
+    pub fn active_rendered_frontier_origins(
+        &self,
+    ) -> Option<Vec<AcceptedInputId>>;
     pub fn apply_interrupt_to_model_call_recovery(
         self,
         interrupt: AppliedInterruptCommandResult,
@@ -3543,6 +3561,10 @@ impl AcceptedInputSchedulingProjection {
         -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn earliest_queued_rendered_base_origins(
         &self,
+    ) -> Option<Vec<AcceptedInputId>>;
+    pub fn external_predecessor_rendered_base_origins(
+        &self,
+        turn: TurnId,
     ) -> Option<Vec<AcceptedInputId>>;
     pub fn resolved_snapshot(
         &self,
@@ -5873,12 +5895,141 @@ impl WorkspaceRecord {
 ## application: approval_judge
 
 ```rust
+pub enum ApprovalJudgeDispatchProvenance {
+    RepoWatch(RepoWatchDispatchId),
+    Commissioned(CommissionedDispatchId),
+}
+impl ApprovalJudgeDispatchProvenance {
+    pub const fn into_uuid(self) -> uuid::Uuid;
+}
+
+pub enum ApprovalJudgeDispatchAuthority {
+    PullRequest(ApprovalJudgePullRequestAuthority),
+    Branch(ApprovalJudgeBranchAuthority),
+}
+impl ApprovalJudgeDispatchAuthority {
+    // accessor: dispatch()
+}
+
+pub struct ApprovalJudgePullRequestAuthorityInput {
+    pub dispatch: ApprovalJudgeDispatchProvenance,
+    pub repository: RepositorySlug,
+    pub pull_request: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub head_repository: RepositorySlug,
+    pub head_branch: BranchName,
+    pub base_branch: BranchName,
+}
+
+pub struct ApprovalJudgePullRequestAuthority { /* private */ }
+impl ApprovalJudgePullRequestAuthority {
+    pub const fn new(input: ApprovalJudgePullRequestAuthorityInput) -> Self;
+    // accessors: dispatch(), repository(), pull_request(), head_sha(), head_repository(), head_branch(), base_branch()
+}
+
+pub struct ApprovalJudgeBranchAuthorityInput {
+    pub dispatch: ApprovalJudgeDispatchProvenance,
+    pub repository: RepositorySlug,
+    pub branch: BranchName,
+}
+
+pub struct ApprovalJudgeBranchAuthority { /* private */ }
+impl ApprovalJudgeBranchAuthority {
+    pub const fn new(input: ApprovalJudgeBranchAuthorityInput) -> Self;
+    // accessors: dispatch(), repository(), branch()
+}
+
+pub struct ApprovalJudgeCompletionIdentities { /* private */ }
+impl ApprovalJudgeCompletionIdentities {
+    pub const fn new(
+        continuation_attempt: TurnAttemptId,
+        failure_entry: SemanticTranscriptEntryId,
+        terminal_frontier: ContextFrontierId,
+    ) -> Self;
+    // accessors: continuation_attempt(), failure_entry(), terminal_frontier()
+}
+
 pub trait ApprovalJudgeAuthorization {
     fn request(&self) -> &ToolRequest;
     fn call(&self) -> ModelCallId;
     fn selection(&self) -> DirectModelSelection;
     fn target(&self) -> ResolvedProviderTarget;
     fn credential_reference(&self) -> &str;
+}
+```
+
+## application: commissioned_dispatch
+
+```rust
+pub enum CommissionedDispatchFence {
+    PullRequest {
+        repository: RepositorySlug,
+        pull_request: PullRequestNumber,
+        head_sha: CommitSha,
+        head_repository: RepositorySlug,
+        head_branch: BranchName,
+        base_branch: BranchName,
+    },
+    Branch {
+        repository: RepositorySlug,
+        branch: BranchName,
+    },
+}
+
+pub trait CommissionedDispatchIdGenerator {
+    fn next_dispatch_id(&mut self) -> CommissionedDispatchId;
+    fn next_command_id(&mut self) -> DurableCommandId;
+    fn next_session_id(&mut self) -> SessionId;
+    fn next_accepted_input_id(&mut self) -> AcceptedInputId;
+    fn next_turn_id(&mut self) -> TurnId;
+    fn next_semantic_entry_id(&mut self) -> SemanticTranscriptEntryId;
+    fn next_context_frontier_id(&mut self) -> ContextFrontierId;
+}
+
+pub struct UuidV7CommissionedDispatchIdGenerator;
+
+pub struct CommissionDispatchRequest { /* private */ }
+impl CommissionDispatchRequest {
+    pub fn try_new(
+        command_id: DurableCommandId,
+        template: SessionTemplateName,
+        fence: CommissionedDispatchFence,
+        statement: GoalStatement,
+        context: UserContent,
+    ) -> Result<Self, InvalidDurableCommandId>;
+    pub fn prepare(
+        self,
+        ids: &mut impl CommissionedDispatchIdGenerator,
+        template_provenance: SessionTemplateProvenance,
+        resolved_defaults: SessionConfigurationDefaults,
+    ) -> Result<PreparedCommissionedDispatch, CommissionDispatchPreparationError>;
+    // accessors: command_id(), template(), fence(), statement(),
+    //            initial_content_digest()
+}
+
+// sealed: CommissionDispatchRequest::prepare
+pub struct PreparedCommissionedDispatch { /* private */ }
+impl PreparedCommissionedDispatch {
+    pub fn into_parts(
+        self,
+    ) -> (
+        CommissionedDispatchId,
+        CommissionedDispatchFence,
+        PreparedCreateSession,
+        SubmitInput,
+        AcceptedInputId,
+        TurnId,
+        SemanticTranscriptEntryId,
+        ContextFrontierId,
+        GoalUserCommand,
+    );
+    // accessors: dispatch_id(), fence(), prepared_session(), goal(), session(),
+    //            initial_content_digest()
+}
+
+pub enum CommissionDispatchPreparationError {
+    TemplateMismatch,
+    SessionPreparation,
 }
 ```
 
@@ -6622,26 +6773,10 @@ pub enum RetainedModelCallObservationStatus {
 
 pub struct RetainedModelCallExecutionState { /* private */ }
 
-pub enum AttachmentPreparationFailure {
-    TooLarge { maximum_bytes: u64 },
-    Missing { digest: BlobDigest },
-    Corrupt { digest: BlobDigest },
-    Unavailable,
-}
-// impl ClassifyOperatorFailure
-
 pub enum ModelCallCapabilityPreparation<Capability> {
     Ready(Capability),
     Cancelled,
-    Deferred,
     KnownFailure,
-    AttachmentKnownFailure(AttachmentPreparationFailure),
-    AttachmentUnavailable(AttachmentPreparationFailure),
-}
-
-pub enum ModelCallPreparationErrorStage {
-    Capability,
-    Attachment,
 }
 
 pub enum ModelCallInputTokenCount {
@@ -6663,7 +6798,6 @@ pub trait ModelCallInputTokenCounter {
 pub trait ModelCallProvider {
     type Capability;
     type Error: ClassifyOperatorFailure;
-    fn preparation_error_stage(error: &Self::Error) -> ModelCallPreparationErrorStage;
     fn prepare_capability<Cancellation>(
         &mut self,
         operation: PreparedModelOperation,
@@ -6710,15 +6844,6 @@ pub enum ModelCallExecutionOutcome {
     Checkpointed(ModelCallId),
     TargetUnavailable(Box<FailedModelCallTurn>),
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
-    AttachmentPreparationFailed {
-        failure: AttachmentPreparationFailure,
-        turn: Box<FailedModelCallTurn>,
-    },
-    AttachmentUnavailable(AttachmentPreparationFailure),
-    AttachmentPreparationFailureAlreadyCommitted {
-        failure: AttachmentPreparationFailure,
-        call: ModelCallId,
-    },
     CapabilityFailureAlreadyCommitted(ModelCallId),
     ObservationCommitted(Box<ModelCallTerminalOutcome>),
     AvailabilitySuccessor(Box<AvailabilitySuccessorOutcome>),
@@ -6735,7 +6860,6 @@ pub enum ModelCallExecutionError<
     Prepare(PrepareError),
     Render(ModelFrontierRenderingError),
     CapabilityPreparation(ProviderError),
-    AttachmentPreparation(ProviderError),
     CapabilityFailureCommit(FailureError),
     CapabilityFailureReread(FailureError),
     Authorization(AuthorizationError),
@@ -6836,6 +6960,18 @@ impl ScriptedModelCallProvider {
 }
 // impl ModelCallProvider
 ```
+
+pub enum AttachmentPreparationFailure {
+    TooLarge { maximum_bytes: u64 },
+    Missing { digest: BlobDigest },
+    Corrupt { digest: BlobDigest },
+    Unavailable,
+}
+
+pub enum ModelCallPreparationErrorStage {
+    Capability,
+    Attachment,
+}
 
 ## application: tool_loop
 
@@ -7524,6 +7660,185 @@ pub enum RepoWatchDispatchServiceError<TransactionError> {
     Preparation(RepoWatchDispatchPreparationError),
     Transaction(TransactionError),
 }
+```
+
+## application: repo_watch_webhook
+
+```rust
+pub struct RepoWatchWebhookBodyReferenceV1 { /* private */ }
+impl RepoWatchWebhookBodyReferenceV1 {
+    pub const fn new(hook_id: NonZeroU64, delivery_id: Uuid) -> Self;
+    // accessors: hook_id(), delivery_id()
+}
+
+pub struct RepoWatchWebhookDeliveryV1Input {
+    pub repository: RepositorySlug,
+    pub hook_id: NonZeroU64,
+    pub delivery_id: Uuid,
+    pub event: String,
+    pub action: Option<String>,
+    pub receipt_sequence: NonZeroU64,
+    pub body_digest: [u8; 32],
+}
+
+pub struct RepoWatchWebhookDeliveryV1 { /* private */ }
+impl RepoWatchWebhookDeliveryV1 {
+    pub fn new(input: RepoWatchWebhookDeliveryV1Input) -> Self;
+    // accessors: repository(), hook_id(), delivery_id(), event(), action(),
+    // receipt_sequence(), body_digest(), body_reference()
+}
+
+pub enum RepoWatchPullRequestMissingPolicyV1 {
+    HydrateBeforeApplying,
+    RefreshInstead,
+}
+
+pub enum RepoWatchPullRequestHeadGuardV1 {
+    AbsentOrMatching(CommitSha),
+    Expected(CommitSha),
+}
+
+pub struct RepoWatchWebhookPullRequestContextV1Input {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub head_repository: Option<RepositorySlug>,
+    pub base_branch: BranchName,
+    pub head_branch: BranchName,
+    pub title: PullRequestTitle,
+    pub body: PullRequestBody,
+    pub labels: Vec<LabelName>,
+    pub draft: bool,
+    pub author: Option<RepoWatchAuthorLogin>,
+}
+
+pub struct RepoWatchWebhookPullRequestContextV1 { /* private */ }
+impl RepoWatchWebhookPullRequestContextV1 {
+    pub fn new(input: RepoWatchWebhookPullRequestContextV1Input) -> Self;
+    pub fn delivered(&self) -> Option<PullRequestEventContext>;
+    pub fn with_retained_head_repository(
+        &self,
+        retained: &RepositorySlug,
+    ) -> PullRequestEventContext;
+    // accessors: number(), head_sha(), head_repository()
+}
+
+pub enum RepoWatchObservationChangeV1 {
+    PullRequestContext {
+        context: RepoWatchWebhookPullRequestContextV1,
+        lifecycle: Option<RepoWatchPullRequestLifecycle>,
+        head_guard: RepoWatchPullRequestHeadGuardV1,
+        missing: RepoWatchPullRequestMissingPolicyV1,
+    },
+    ReviewUnion {
+        pull_request: PullRequestNumber,
+        expected_head: CommitSha,
+        review: RepoWatchReviewObservation,
+    },
+    ThreadState {
+        pull_request: PullRequestNumber,
+        expected_head: CommitSha,
+        thread: RepoWatchThreadObservation,
+    },
+    CheckRunUnion {
+        pull_request: PullRequestNumber,
+        expected_head: CommitSha,
+        check_run: RepoWatchCheckRunObservation,
+    },
+    WorkflowRun { run: RepoWatchWorkflowRunObservation },
+    BranchHead {
+        previous: RepoWatchBranchHeadPreviousV1,
+        current: RepoWatchBranchHead,
+    },
+    BranchDeleted {
+        branch: BranchName,
+        expected_previous: CommitSha,
+    },
+}
+
+pub enum RepoWatchBranchHeadPreviousV1 {
+    Absent,
+    Expected(CommitSha),
+}
+
+pub enum RepoWatchTargetedRefreshV1 {
+    PullRequestHydration { pull_request: PullRequestNumber },
+    Mergeability {
+        pull_request: PullRequestNumber,
+        expected_head: CommitSha,
+    },
+    CheckRollup {
+        pull_request: PullRequestNumber,
+        expected_head: CommitSha,
+    },
+    CheckRollupForCommit { head: CommitSha },
+}
+
+pub struct RepoWatchTargetedRefreshCoalescerV1 { /* private */ }
+impl RepoWatchTargetedRefreshCoalescerV1 {
+    pub fn for_delivery_page() -> Self;
+    pub fn unissued(&self, refreshes: &[RepoWatchTargetedRefreshV1]) -> Vec<RepoWatchTargetedRefreshV1>;
+    pub fn record_issued(&mut self, refreshes: &[RepoWatchTargetedRefreshV1]);
+}
+
+pub struct RepoWatchObservationPatchV1 { /* private */ }
+impl RepoWatchObservationPatchV1 {
+    // accessors: changes(), targeted_refreshes()
+}
+
+pub enum RepoWatchObservationApplyV1 {
+    Applied(RepoWatchObservation),
+    DuplicateState,
+    Superseded,
+    Ignored(RepoWatchWebhookIgnoredReasonV1),
+    NeedsTargetedRefresh {
+        observation: RepoWatchObservation,
+        refreshes: Box<[RepoWatchTargetedRefreshV1]>,
+    },
+}
+
+pub enum RepoWatchWebhookApplyError {
+    RepositoryState(RepoWatchRepositoryStateError),
+    ConflictingImmutableFact(&'static str),
+}
+
+pub enum RepoWatchWebhookMappedNoChangeV1 {
+    Ping,
+    ReviewDismissed,
+}
+
+pub enum RepoWatchWebhookIgnoredReasonV1 {
+    UnmappedEvent,
+    UnmappedAction,
+    NonBranchPush,
+    ForeignWorkflowRepository,
+    AbsentWorkflowBranch,
+    AbsentWorkflowHeadRepository,
+    AbsentWorkflowHeadBranch,
+}
+
+pub enum RepoWatchWebhookMappingV1 {
+    Patch(RepoWatchObservationPatchV1),
+    MappedNoChange(RepoWatchWebhookMappedNoChangeV1),
+    Ignored(RepoWatchWebhookIgnoredReasonV1),
+}
+
+pub enum RepoWatchWebhookMappingError {
+    MalformedJson,
+    MissingField(&'static str),
+    InvalidField(&'static str),
+    RepositoryMismatch,
+    ActionMismatch,
+}
+
+pub fn apply_repo_watch_observation_patch_v1(
+    previous: &RepoWatchObservation,
+    patch: &RepoWatchObservationPatchV1,
+) -> Result<RepoWatchObservationApplyV1, RepoWatchWebhookApplyError>;
+
+pub fn map_repo_watch_webhook_delivery_v1(
+    delivery: &RepoWatchWebhookDeliveryV1,
+    exact_body: &[u8],
+) -> Result<RepoWatchWebhookMappingV1, RepoWatchWebhookMappingError>;
 ```
 
 ## application: review_orchestration
@@ -8238,6 +8553,8 @@ impl<
 ## application: scheduler
 
 ```rust
+pub const fn scheduler_pass_admission_cap() -> usize;
+
 pub async fn relinquish_scheduler_capacity<Work>(work: Work) -> Work::Output
 where
     Work: Future;
@@ -8357,6 +8674,7 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         pass: Pass,
         max_in_flight_passes: NonZeroUsize,
     ) -> Self;
+    pub const fn paused(work_source: WorkSource, pass: Pass) -> Self;
     pub fn into_parts(self) -> (WorkSource, Pass);
 }
 impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass>
@@ -8399,7 +8717,6 @@ pub enum StartupScanSessionOutcome {
     },
     RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
     ResumableToolBatch { turn: TurnId },
-    ResumablePreparedModelCall { turn: TurnId },
     AwaitingRecoveryDecision { turn: TurnId },
 }
 
@@ -8764,6 +9081,68 @@ pub trait ToolExecutionTransaction {
     ) -> impl Future<Output = Result<PrepareToolContinuationOutcome, Self::Error>> + Send
     where
         NextSteering: FnMut(AcceptedInputId) -> (SemanticTranscriptEntryId, TurnId) + Send;
+}
+```
+
+## application: turn_liveness
+
+```rust
+pub struct StaleActiveTurnBound(/* private */);
+impl StaleActiveTurnBound {
+    pub const fn hard_ceiling() -> Self;
+    pub fn try_lowered(bound: Duration) -> Result<Self, TurnLivenessBoundError>;
+    pub const fn as_secs(self) -> u64;
+    pub const fn get(self) -> Duration;
+}
+
+pub struct TurnLivenessScanInterval(/* private */);
+impl TurnLivenessScanInterval {
+    pub const fn baseline() -> Self;
+    pub const fn get(self) -> Duration;
+}
+
+pub enum TurnLivenessBoundError {
+    Zero,
+    AboveCeiling,
+    Subsecond,
+}
+// impl Display + std::error::Error
+
+pub struct TurnLivenessEvidence { /* private */ }
+impl TurnLivenessEvidence {
+    pub const fn new(current_attempt: TurnAttemptId, outbox_frontier: Option<u64>) -> Self;
+    pub const fn current_attempt(self) -> TurnAttemptId;
+    pub const fn outbox_frontier(self) -> Option<u64>;
+}
+
+pub struct StaleTurnCandidate { /* private */ }
+impl StaleTurnCandidate {
+    pub const fn new(
+        session: SessionId,
+        turn: TurnId,
+        evidence: TurnLivenessEvidence,
+    ) -> Self;
+    pub const fn session(self) -> SessionId;
+    pub const fn turn(self) -> TurnId;
+    pub const fn evidence(self) -> TurnLivenessEvidence;
+}
+
+pub enum StaleTurnOutcome {
+    Terminalized,
+    Superseded,
+    BlockedByPendingSteering,
+}
+
+pub struct TurnLivenessLedger { /* private */ }
+impl TurnLivenessLedger {
+    pub fn new(bound: StaleActiveTurnBound) -> Self;
+    pub const fn bound(&self) -> StaleActiveTurnBound;
+    pub fn watched_turn_count(&self) -> usize;
+    pub fn reconcile(
+        &mut self,
+        quiescent: &[StaleTurnCandidate],
+        now: Instant,
+    ) -> Box<[StaleTurnCandidate]>;
 }
 ```
 
@@ -10827,7 +11206,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types                     |
 | -------------------------------------------------- | -------------------------------- |
-| domain: lib.rs identities                          | 28                               |
+| domain: lib.rs identities                          | 29                               |
 | domain: actor                                      | 1                                |
 | domain: blob                                       | 3                                |
 | domain: program_journal                            | 25                               |
@@ -10842,7 +11221,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: model_settings                             | 25                               |
 | domain: accepted_input                             | 5                                |
 | domain: delivery_request                           | 2                                |
-| domain: user_content                               | 14                               |
+| domain: user_content                               | 15                               |
 | domain: submit_input                               | 36                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
 | domain: repo_watch                                 | 51                               |
@@ -10867,8 +11246,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                               |
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
-| **signalbox-domain total**                         | **817 (+12 free fn)**            |
-| application: approval_judge                        | 1 (incl. 1 trait)                |
+| **signalbox-domain total**                         | **819 (+12 free fn)**            |
+| application: approval_judge                        | 8 (incl. 1 trait)                |
+| application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
 | application: create_session                        | 8 (incl. 2 traits)               |
 | application: update_session_placement              | 4 (incl. 1 trait)                |
@@ -10881,14 +11261,16 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
 | application: repo_watch                            | 38 (+2 free fn) (incl. 4 traits) |
+| application: repo_watch_webhook                    | 18 (+2 free fn)                  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
 | application: session_metadata                      | 12 (incl. 4 traits)              |
-| application: scheduler                             | 15 (+1 free fn) (incl. 5 traits) |
+| application: scheduler                             | 15 (+2 free fn) (incl. 5 traits) |
 | application: start_eligible_turn                   | 5 (incl. 2 traits)               |
 | application: startup_scan                          | 7 (incl. 2 traits)               |
 | application: submit_input                          | 7 (incl. 2 traits)               |
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 2 traits)               |
-| **signalbox-application total**                    | **264 (+4 free fn)**             |
+| application: turn_liveness                         | 7                                |
+| **signalbox-application total**                    | **302 (+7 free fn)**             |
