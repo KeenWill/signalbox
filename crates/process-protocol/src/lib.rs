@@ -8207,10 +8207,13 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
                 && item.rule_version.value() > 0
                 && operator_status_singleton_is_valid(
                     &item.repository,
-                    item.singleton_scope,
-                    &item.singleton_repository,
-                    item.singleton_pull_request_number,
-                    item.singleton_stack_root_pull_request_number,
+                    &OperatorStatusSingletonAxes {
+                        scope: item.singleton_scope,
+                        repository: item.singleton_repository.as_deref(),
+                        pull_request_number: item.singleton_pull_request_number,
+                        stack_root_pull_request_number: item
+                            .singleton_stack_root_pull_request_number,
+                    },
                 )
                 && (1..=MAX_OPERATOR_STATUS_DISPATCH_SESSIONS).contains(&item.session_ids.len())
                 && values_are_distinct(&item.session_ids)
@@ -8238,10 +8241,13 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
                 && item.rule_version.value() > 0
                 && operator_status_singleton_is_valid(
                     &item.repository,
-                    item.singleton_scope,
-                    &item.singleton_repository,
-                    item.singleton_pull_request_number,
-                    item.singleton_stack_root_pull_request_number,
+                    &OperatorStatusSingletonAxes {
+                        scope: item.singleton_scope,
+                        repository: item.singleton_repository.as_deref(),
+                        pull_request_number: item.singleton_pull_request_number,
+                        stack_root_pull_request_number: item
+                            .singleton_stack_root_pull_request_number,
+                    },
                 )
                 && operator_status_obligation_lineage_is_coherent(item)
                 && values_are_distinct(&item.occupying_session_ids)
@@ -8424,6 +8430,19 @@ fn operator_status_convergence_base_branch_matches_verdict(
     }
 }
 
+/// The singleton axes of one operator-status row, each named at its call site.
+///
+/// The two numeric axes carry one type and mean different things, so they are
+/// supplied by name rather than by position: a pull-request number transposed
+/// with a stack-root pull-request number would otherwise compile silently and
+/// admit rows the singleton grammar refuses.
+struct OperatorStatusSingletonAxes<'a> {
+    scope: OperatorStatusSingletonScope,
+    repository: Option<&'a str>,
+    pull_request_number: Option<CanonicalU64>,
+    stack_root_pull_request_number: Option<CanonicalU64>,
+}
+
 /// Holds the singleton axes of one row against the row's own identity.
 ///
 /// Every repository-keyed singleton is keyed from the repository of the very
@@ -8434,14 +8453,15 @@ fn operator_status_convergence_base_branch_matches_verdict(
 /// grammar onto the singleton axis with it.
 fn operator_status_singleton_is_valid(
     row_repository: &str,
-    scope: OperatorStatusSingletonScope,
-    repository: &Option<String>,
-    pull_request_number: Option<CanonicalU64>,
-    stack_root_pull_request_number: Option<CanonicalU64>,
+    axes: &OperatorStatusSingletonAxes<'_>,
 ) -> bool {
-    let repository_is_valid = repository
-        .as_ref()
-        .is_none_or(|value| value == row_repository);
+    let OperatorStatusSingletonAxes {
+        scope,
+        repository,
+        pull_request_number,
+        stack_root_pull_request_number,
+    } = axes;
+    let repository_is_valid = repository.is_none_or(|value| value == row_repository);
     repository_is_valid
         && match scope {
             OperatorStatusSingletonScope::PullRequest => {
