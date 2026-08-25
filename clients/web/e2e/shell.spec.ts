@@ -625,12 +625,14 @@ test('keeps usage drill-down filters in typed URL state', async ({ page }) => {
 test('focuses lexical search with its registered hotkey', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto(searchUsageFixture.searchPath)
+  // The scenario workspace is lazy-loaded; wait for the search surface before
+  // pressing so the hotkey lands on registered handlers, not the loading shell.
+  const searchInput = page.getByRole('textbox', { name: 'Search canonical session evidence' })
+  await expect(searchInput).toBeVisible()
 
   const modifier = await platformModifier(page)
   await page.keyboard.press(`${modifier}+Shift+F`)
-  await expect(
-    page.getByRole('textbox', { name: 'Search canonical session evidence' }),
-  ).toBeFocused()
+  await expect(searchInput).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
