@@ -46,6 +46,8 @@ const SOURCE_CHUNK_BYTES: u64 = 256 * 1024;
 const TEXT_OUTPUT_BYTES: usize = signalbox_file_media_runtime::MAX_TEXT_BODY_BYTES;
 const METADATA_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_DECOMPRESSED_PAGE_BYTES: usize = 1024 * 1024;
+
+const MAX_TOTAL_DECOMPRESSED_CONTENT_BYTES: usize = 256 * MAX_DECOMPRESSED_PAGE_BYTES;
 // Hard safety ceilings bound object traversal and page-index construction latency.
 const MAX_OBJECTS: usize = 10_000;
 const MAX_PAGES: usize = 10_000;
@@ -705,10 +707,36 @@ fn read_text(
     pages: &[(u32, lopdf::ObjectId)],
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorReadOutput, FileMediaProviderFailure> {
+    read_text_with_decoding_budget(
+        document,
+        pages,
+        cancellation,
+        MAX_TOTAL_DECOMPRESSED_CONTENT_BYTES,
+    )
+}
+
+fn read_text_with_decoding_budget(
+    document: &Document,
+    pages: &[(u32, lopdf::ObjectId)],
+    cancellation: &dyn CancellationSignal,
+    decoding_budget: usize,
+) -> Result<ProcessorReadOutput, FileMediaProviderFailure> {
     let mut text = String::new();
+    let mut remaining_decoded_bytes = decoding_budget;
+    let mut decoded_sizes = BTreeMap::new();
     for (page_number, page_id) in pages {
         require_active(cancellation)?;
         validate_page_contents(document, *page_id)?;
+        if !charge_page_content_decoding(
+            document,
+            *page_id,
+            &mut decoded_sizes,
+            &mut remaining_decoded_bytes,
+        )? {
+            return Ok(ProcessorReadOutput::ExpansionLimitExceeded {
+                limit_kind: String::from(DECODED_CONTENT_LIMIT),
+            });
+        }
         let page_text =
             match document.extract_text_with_limit(&[*page_number], MAX_DECOMPRESSED_PAGE_BYTES) {
                 Ok(text) => text,
@@ -1052,6 +1080,81 @@ fn validate_page_contents(
         _ => return Err(FileMediaProviderFailure::Failed),
     }
     Ok(())
+}
+
+/// Charges the decoded size of every content stream the page references
+/// against the read-wide decompression budget, decoding each referenced
+/// stream once and re-charging its recorded size per use so repeated
+/// references to a shared stream cannot multiply decompression work beyond
+/// the aggregate budget.
+fn charge_page_content_decoding(
+    document: &Document,
+    page_id: lopdf::ObjectId,
+    decoded_sizes: &mut BTreeMap<lopdf::ObjectId, usize>,
+    remaining: &mut usize,
+) -> Result<bool, FileMediaProviderFailure> {
+    let page = document
+        .get_dictionary(page_id)
+        .map_err(|_| FileMediaProviderFailure::Failed)?;
+    let contents = match page.get(b"Contents") {
+        Ok(contents) => contents,
+        Err(LopdfError::DictKey(_)) => return Ok(true),
+        Err(_) => return Err(FileMediaProviderFailure::Failed),
+    };
+    let mut stream_ids = Vec::new();
+    match contents {
+        lopdf::Object::Reference(object_id) => stream_ids.push(*object_id),
+        lopdf::Object::Array(objects) => {
+            for object in objects {
+                stream_ids.push(
+                    object
+                        .as_reference()
+                        .map_err(|_| FileMediaProviderFailure::Failed)?,
+                );
+            }
+        }
+        lopdf::Object::Stream(stream) => {
+            let Some(size) = decoded_content_stream_size(stream, *remaining)? else {
+                return Ok(false);
+            };
+            *remaining -= size;
+            return Ok(true);
+        }
+        lopdf::Object::Null => return Ok(true),
+        _ => return Err(FileMediaProviderFailure::Failed),
+    }
+    for object_id in stream_ids {
+        let size = match decoded_sizes.get(&object_id) {
+            Some(size) => *size,
+            None => {
+                let Ok(Object::Stream(stream)) = document.get_object(object_id) else {
+                    return Err(FileMediaProviderFailure::Failed);
+                };
+                let Some(size) = decoded_content_stream_size(stream, *remaining)? else {
+                    return Ok(false);
+                };
+                decoded_sizes.insert(object_id, size);
+                size
+            }
+        };
+        if size > *remaining {
+            return Ok(false);
+        }
+        *remaining -= size;
+    }
+    Ok(true)
+}
+
+fn decoded_content_stream_size(
+    stream: &Stream,
+    remaining: usize,
+) -> Result<Option<usize>, FileMediaProviderFailure> {
+    let limit = MAX_DECOMPRESSED_PAGE_BYTES.min(remaining);
+    match stream.decompressed_content_with_limit(limit) {
+        Ok(decoded) => Ok(Some(decoded.len())),
+        Err(LopdfError::Decompress(_)) => Ok(None),
+        Err(_) => Err(FileMediaProviderFailure::Failed),
+    }
 }
 
 async fn read_all(
@@ -1789,13 +1892,14 @@ async fn bounded_object_stream_targets(
         ));
     }
     ordered_targets.sort_by_key(|(stream_offset, ..)| *stream_offset);
+    let mut remaining_decoded_bytes = MAX_TOTAL_OBJECT_STREAM_BYTES;
     for (stream_offset, stream_object, stream_reference, compressed_entries) in ordered_targets {
         if cached_range_at(&ranges, stream_offset).is_none() {
             let Some(available) = source.byte_length().get().checked_sub(stream_offset) else {
                 return Ok(None);
             };
             let length =
-                available.min(budget.available_after_reserving(2 * ROOT_VALIDATION_BYTES, 2));
+                available.min(budget.available_after_reserving(3 * ROOT_VALIDATION_BYTES, 3));
             if !budget.can_read(length) {
                 return Ok(None);
             }
@@ -1810,6 +1914,7 @@ async fn bounded_object_stream_targets(
             budget,
             parsed,
             bytes,
+            stream_offset,
             stream_reference,
             (2 * ROOT_VALIDATION_BYTES, 2),
         )
@@ -1819,6 +1924,7 @@ async fn bounded_object_stream_targets(
             stream_reference,
             resolved_length,
             &compressed_entries,
+            &mut remaining_decoded_bytes,
         ) {
             return Ok(None);
         }
@@ -1843,6 +1949,7 @@ fn object_stream_coordinates_are_valid(
     stream_reference: IndirectReference,
     resolved_length: Option<(IndirectReference, u64)>,
     targets: &[(IndirectReference, u64)],
+    remaining_decoded_bytes: &mut usize,
 ) -> bool {
     let Some((facts, encoded)) = parse_object_stream(bytes, stream_reference, resolved_length)
     else {
@@ -1861,10 +1968,11 @@ fn object_stream_coordinates_are_valid(
         encoded,
         &facts.filters,
         facts.decode_parameters.as_deref(),
-        MAX_OBJECT_STREAM_BYTES,
+        MAX_OBJECT_STREAM_BYTES.min(*remaining_decoded_bytes),
     ) else {
         return false;
     };
+    *remaining_decoded_bytes -= decoded.len();
     let Some(header) = decoded.get(..first) else {
         return false;
     };
@@ -2416,6 +2524,7 @@ async fn resolve_object_stream_length(
     budget: &mut ValidationBudget,
     parsed: &ParsedXref,
     stream_bytes: &[u8],
+    stream_offset: u64,
     stream_reference: IndirectReference,
     reservation: (u64, u32),
 ) -> Result<Option<(IndirectReference, u64)>, FileMediaProviderFailure> {
@@ -2424,6 +2533,11 @@ async fn resolve_object_stream_length(
     else {
         return Ok(None);
     };
+    if let Some(length) =
+        cached_uncompressed_integer(parsed, stream_bytes, stream_offset, reference)
+    {
+        return Ok(Some((reference, length)));
+    }
     let length = resolve_bounded_integer_object(
         source,
         budget,
@@ -2434,6 +2548,26 @@ async fn resolve_object_stream_length(
     )
     .await?;
     Ok(length.map(|length| (reference, length)))
+}
+
+/// Resolves an indirect integer object from the already-cached range that
+/// starts at `stream_offset`, so a length probe does not require budget the
+/// preceding range read has already consumed.
+fn cached_uncompressed_integer(
+    parsed: &ParsedXref,
+    stream_bytes: &[u8],
+    stream_offset: u64,
+    reference: IndirectReference,
+) -> Option<u64> {
+    let entry = parsed
+        .live_entries
+        .iter()
+        .find(|entry| entry.reference == reference)?;
+    let XrefLocation::Uncompressed(offset) = entry.location else {
+        return None;
+    };
+    let relative = usize::try_from(offset.checked_sub(stream_offset)?).ok()?;
+    indirect_integer_object(stream_bytes.get(relative..)?, reference)
 }
 
 fn resolve_bounded_integer_object<'a>(
@@ -4558,17 +4692,21 @@ endobj",
         bytes.extend_from_slice(content);
         bytes.extend_from_slice(b"\nendstream\nendobj");
 
+        let mut remaining = MAX_TOTAL_OBJECT_STREAM_BYTES;
+
         assert!(object_stream_coordinates_are_valid(
             &bytes,
             stream,
             None,
             &[(target, 0)],
+            &mut remaining,
         ));
         assert!(!object_stream_coordinates_are_valid(
             &bytes,
             stream,
             None,
             &[(target, 1)],
+            &mut remaining,
         ));
         assert!(!object_stream_coordinates_are_valid(
             &bytes,
@@ -4581,6 +4719,7 @@ endobj",
                 },
                 0,
             )],
+            &mut remaining,
         ));
     }
 
@@ -4676,14 +4815,14 @@ endobj",
             declared_objects: BTreeSet::from([5, 6, 7, 8]),
             object_limit_exceeded: false,
         };
-        let mut budget = ValidationBudget::new(source.byte_length().get(), 3);
+        let mut budget = ValidationBudget::new(source.byte_length().get(), 4);
 
         let validated = bounded_object_stream_targets(&source, &mut budget, &parsed)
             .await
             .expect("bounded validation");
 
         assert!(validated.is_some());
-        assert_eq!(budget.remaining_ranges, 2);
+        assert_eq!(budget.remaining_ranges, 3);
     }
 
     #[tokio::test]
@@ -4749,10 +4888,164 @@ endobj",
             object_number: 5,
             generation: 0,
         };
+        let got = resolve_object_stream_length(
+            &source,
+            &mut budget,
+            &parsed,
+            target,
+            offset,
+            stream,
+            (0, 0),
+        )
+        .await
+        .expect("resolve");
+        assert_eq!(got, Some((length_reference, expected_length)));
+    }
+
+    #[test]
+    fn object_stream_coordinates_charge_the_aggregate_decode_budget() {
+        let stream = IndirectReference {
+            object_number: 5,
+            generation: 0,
+        };
+        let target = IndirectReference {
+            object_number: 7,
+            generation: 0,
+        };
+        let content = b"7 0 null";
+        let mut bytes = format!(
+            "5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length {} >>\nstream\n",
+            content.len()
+        )
+        .into_bytes();
+        bytes.extend_from_slice(content);
+        bytes.extend_from_slice(b"\nendstream\nendobj");
+        let mut remaining = content.len() * 2 + 1;
+
+        assert!(object_stream_coordinates_are_valid(
+            &bytes,
+            stream,
+            None,
+            &[(target, 0)],
+            &mut remaining,
+        ));
+        assert_eq!(remaining, content.len() + 1);
+        assert!(object_stream_coordinates_are_valid(
+            &bytes,
+            stream,
+            None,
+            &[(target, 0)],
+            &mut remaining,
+        ));
+        assert_eq!(remaining, 1);
+        assert!(!object_stream_coordinates_are_valid(
+            &bytes,
+            stream,
+            None,
+            &[(target, 0)],
+            &mut remaining,
+        ));
+    }
+
+    #[tokio::test]
+    async fn bounded_length_probes_resolve_from_the_cached_range() {
+        let target = b"5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length 20 0 R >>\nstream\n7 0 x!\nendstream\nendobj\n";
+        let mut bytes = target.to_vec();
+        let integer_offset = u64::try_from(bytes.len()).expect("offset");
+        bytes.extend_from_slice(b"20 0 obj 6 endobj\n");
+        let source = UnitSource::new(bytes.clone());
+        let parsed = ParsedXref {
+            facts: TrailerFacts::default(),
+            live_entries: vec![
+                LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number: 5,
+                        generation: 0,
+                    },
+                    location: XrefLocation::Uncompressed(0),
+                },
+                LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number: 20,
+                        generation: 0,
+                    },
+                    location: XrefLocation::Uncompressed(integer_offset),
+                },
+            ],
+            declared_objects: BTreeSet::from([5, 20]),
+            object_limit_exceeded: false,
+        };
+        let mut budget = ValidationBudget::new(0, 0);
+        let stream = IndirectReference {
+            object_number: 5,
+            generation: 0,
+        };
+
         let got =
-            resolve_object_stream_length(&source, &mut budget, &parsed, target, stream, (0, 0))
+            resolve_object_stream_length(&source, &mut budget, &parsed, &bytes, 0, stream, (0, 0))
                 .await
                 .expect("resolve");
-        assert_eq!(got, Some((length_reference, expected_length)));
+
+        assert_eq!(
+            got,
+            Some((
+                IndirectReference {
+                    object_number: 20,
+                    generation: 0,
+                },
+                6,
+            ))
+        );
+    }
+
+    #[test]
+    fn text_reads_charge_shared_content_streams_per_use() {
+        struct ActiveSignal;
+        impl CancellationSignal for ActiveSignal {
+            fn is_cancelled(&self) -> bool {
+                false
+            }
+        }
+        let mut document = Document::with_version("1.5");
+        let content_id = document.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            vec![b' '; 64],
+        )));
+        let pages_id = document.new_object_id();
+        let mut kids = Vec::new();
+        let mut pages = Vec::new();
+        for index in 0..4_u32 {
+            let page_id = document.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content_id,
+            });
+            kids.push(Object::Reference(page_id));
+            pages.push((index + 1, page_id));
+        }
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => 4,
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+
+        let allowed =
+            read_text_with_decoding_budget(&document, &pages, &ActiveSignal, 4 * 64).expect("read");
+        assert!(matches!(allowed, ProcessorReadOutput::Text { .. }));
+
+        let capped = read_text_with_decoding_budget(&document, &pages, &ActiveSignal, 4 * 64 - 1)
+            .expect("read");
+        assert!(matches!(
+            capped,
+            ProcessorReadOutput::ExpansionLimitExceeded { .. }
+        ));
     }
 }
