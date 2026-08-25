@@ -370,9 +370,15 @@ async fn run_isolated_worker(
 async fn expected_output(
     path: &Path,
 ) -> Result<(ExpectedBlob, tokio::fs::File), WebBlobRuntimeError> {
+    // NONBLOCK keeps the open itself from waiting on a writer when the worker leaves a FIFO or
+    // other special file at the output path; the regular-file check below then rejects it. Linux
+    // ignores the flag for the regular files this path admits.
     let descriptor = rustix::fs::open(
         path,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
         rustix::fs::Mode::empty(),
     )
     .map_err(|_| WebBlobRuntimeError::ProducerFailed)?;
@@ -412,6 +418,9 @@ async fn publish_output(
     file: tokio::fs::File,
     expected: ExpectedBlob,
 ) -> Result<(), WebBlobRuntimeError> {
+    if expected.byte_length() > registry.max_blob_bytes() {
+        return Err(WebBlobRuntimeError::ProducerFailed);
+    }
     let (store_name, store) = registry.routed_store(BlobStorageClass::GeneratedArtifact);
     let publication = store
         .put(expected, Box::new(file))
@@ -567,7 +576,7 @@ mod tests {
     use tokio::io::{AsyncRead, ReadBuf};
 
     use super::{
-        CandidateCopyError, MAX_DERIVATIVE_BYTES, copy_input_candidate, expected_output,
+        CandidateCopyError, Duration, MAX_DERIVATIVE_BYTES, copy_input_candidate, expected_output,
         validate_encoded_dimensions, worker_transform,
     };
 
@@ -644,6 +653,27 @@ mod tests {
         symlink(&target, &output).expect("fixture output symlink exists");
 
         assert!(expected_output(&output).await.is_err());
+    }
+
+    /// Pinning the worker output must not wait on a writer for a named pipe.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn derivative_output_fifos_are_rejected_without_waiting_for_a_writer() {
+        let workspace = tempfile::tempdir().expect("fixture workspace exists");
+        let output = workspace.path().join("output.png");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &output,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .expect("fixture output FIFO exists");
+
+        let result = tokio::time::timeout(Duration::from_secs(10), expected_output(&output))
+            .await
+            .expect("the pinned open completes without a FIFO writer");
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]

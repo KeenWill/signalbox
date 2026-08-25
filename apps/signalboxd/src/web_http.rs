@@ -24,8 +24,8 @@ use axum::{
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{
-            ACCEPT_RANGES, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
-            CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH, IF_RANGE, ORIGIN, RANGE,
+            ACCEPT_RANGES, ALLOW, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH,
+            CONTENT_RANGE, CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH, IF_RANGE, ORIGIN, RANGE,
             X_CONTENT_TYPE_OPTIONS,
         },
     },
@@ -774,11 +774,13 @@ async fn blob_descriptor(
 }
 
 async fn blob_descriptor_head() -> Response {
-    transport_error(
+    let mut response = transport_error(
         StatusCode::METHOD_NOT_ALLOWED,
         "descriptor_method_not_allowed",
         "blob descriptors are available through GET",
-    )
+    );
+    insert_header(response.headers_mut(), ALLOW, String::from("GET"));
+    response
 }
 
 async fn append_image_derivative_view(
@@ -1618,10 +1620,28 @@ mod tests {
 
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, WebHttpConfiguration,
-        WebHttpConfigurationError, WebHttpRuntime, content_disposition, deterministic_test_router,
-        if_none_match, ndjson_response, parse_byte_range, production_router, reader_body_until,
-        single_range_header, try_acquire_web_blob_read_permit,
+        WebHttpConfigurationError, WebHttpRuntime, blob_descriptor_head, content_disposition,
+        deterministic_test_router, if_none_match, ndjson_response, parse_byte_range,
+        production_router, reader_body_until, single_range_header,
+        try_acquire_web_blob_read_permit,
     };
+
+    /// A descriptor method rejection must name the method clients can use.
+    #[tokio::test]
+    async fn descriptor_method_rejection_advertises_get() {
+        let response = blob_descriptor_head().await;
+        let status = response.status();
+        let allow = response
+            .headers()
+            .get(header::ALLOW)
+            .expect("the rejection advertises an allowed method")
+            .to_str()
+            .expect("the allowed method is ASCII")
+            .to_owned();
+
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(allow, "GET");
+    }
 
     fn loopback_ephemeral() -> SocketAddr {
         "127.0.0.1:0"
