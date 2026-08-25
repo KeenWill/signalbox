@@ -32,7 +32,7 @@ context-compaction record and projection were verified through PR #312
 (`agent/context-compaction-core`); the command path and canonical visible-range
 selection were verified through PR #314 (`agent/context-compaction-protocol`);
 and the canonical call's immutable input-token semantics were verified through
-PR #1137 (`agent/web-usage-cost`). The runner placement-entry paragraphs are the
+this PR (`agent/web-usage-cost`). The runner placement-entry paragraphs are the
 foundation proposal at the bottom of their implementing stack and become
 verified only with those child pull requests. The imported-conversation record
 and converter are owned by [conversation-import](conversation-import.md). Where
