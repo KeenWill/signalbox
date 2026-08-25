@@ -3606,6 +3606,20 @@ impl fmt::Display for HubModelConfigurationError {
                 "model configuration names unknown convergence template `{template}`"
             );
         }
+        // Startup telemetry formats this value, so the failing member and the
+        // closed admission cause must both survive. The path never appears, as
+        // `configuration-and-credentials.md#the-codex_home-delivery` requires.
+        if let Self::InvalidCredentialHome {
+            credential_profile,
+            failure,
+        } = self
+        {
+            return write!(
+                formatter,
+                "model configuration credential profile `{credential_profile}` names an unavailable Codex credential home: {}",
+                failure.cause()
+            );
+        }
         formatter.write_str(match self {
             Self::Read => "model configuration file could not be read",
             Self::InvalidDocument => "model configuration is not valid TOML",
@@ -7624,6 +7638,86 @@ codex_home = {:?}"#,
         assert_eq!(
             HubModelConfiguration::parse(&mixed_delivery).err(),
             Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_mixed_home_and_ambient_delivery_for_codex_in_reverse_order() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-b");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
+        let mixed_delivery = CONFIGURATION.replace(
+            r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            &format!(
+                r#"[[credential_profiles]]
+name = "codex-subscription-overflow"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "codex_home"
+codex_home = {:?}
+
+[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+                home.to_string_lossy()
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&mixed_delivery).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_admits_a_claude_ambient_profile_declared_before_a_codex_home() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-b");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
+        // The Claude `ambient` profile precedes the Codex home in table order,
+        // which is the arrangement an adapter-blind conflict scan rejects.
+        let cross_adapter = CONFIGURATION.replace(
+            r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            &format!(
+                r#"[[credential_profiles]]
+name = "claude-subscription-primary"
+adapter = "claude_cli"
+billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "codex_home"
+codex_home = {:?}"#,
+                home.to_string_lossy()
+            ),
+        );
+
+        let parsed = HubModelConfiguration::parse(&cross_adapter)
+            .expect("a Claude ambient profile does not contest a Codex credential home");
+        assert_eq!(
+            parsed
+                .credential_profile(CODEX_SUBSCRIPTION_PROFILE)
+                .expect("Codex profile remains present")
+                .delivery()
+                .path(),
+            Some(&home)
         );
     }
 

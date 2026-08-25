@@ -106,7 +106,11 @@ durable trigger actions and chain exclusions, and the availability successor
 calls owned by
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine),
 together with durable per-call pool-policy snapshots, are verified against this
-PR (`agent/multi-account-pools`). Codex `codex_home`, `file`, and `oauth`,
+PR (`agent/multi-account-pools`). Codex `codex_home` admission and the
+per-member `CODEX_HOME` the selected profile delivers to each Codex CLI child
+are verified against this PR (`agent/codex-home-pool-delivery`), in
+`apps/signalboxd/src/credential_pools.rs` and
+`crates/model-runtime-codex-cli/src/runtime.rs`. Codex `file` and `oauth`,
 capacity reservations, and legacy family-to-reference migration remain committed
 unimplemented functionality as labeled below. Every other paragraph on this page
 describes behavior verified against the references above.
@@ -1118,10 +1122,10 @@ there. Claude CLI's `file` pair is in the set because this branch lands that
 adapter's contract, which [the `file` delivery](#the-file-delivery) routes.
 Admission is not delivery: of the pairs above, this build supplies a surface for
 Anthropic and OpenAI `file`, Claude CLI `ambient` and `file`, and Codex CLI
-`ambient`, and validates then refuses the rest as undelivered. OpenAI admits the
-reasoning levels `none` through `max` — `ultra` is the Codex effort value and is
-rejected — and the provider-tagged tiers `auto`, `default`, `flex`, `scale`,
-`priority`, and `fast`.
+`ambient` and `codex_home`, and validates then refuses the rest as undelivered.
+OpenAI admits the reasoning levels `none` through `max` — `ultra` is the Codex
+effort value and is rejected — and the provider-tagged tiers `auto`, `default`,
+`flex`, `scale`, `priority`, and `fast`.
 
 A Codex mapping also requires `[codex_cli]` with an absolute executable path
 naming an existing regular file and an absolute, existing `working_directory`;
@@ -1241,12 +1245,11 @@ below. A field owned by another variant is unknown and rejected.
 
 Admitting a pair and supplying a surface for it stay separate questions, and
 this build answers them differently: `ambient` is delivered for both CLI
-adapters, and `file` for `anthropic`, `openai`, and `claude_cli`. The
-`codex_cli` spellings of `file`, `codex_home`, and `oauth` are admitted by their
-sections and then rejected as `UndeliveredCredentialDelivery`
-(`apps/signalboxd/src/credential_pools.rs:214`), so such a document fails
-startup rather than running with an inert setting. Their contracts are stated
-under
+adapters, `file` for `anthropic`, `openai`, and `claude_cli`, and `codex_home`
+for `codex_cli`. The `codex_cli` spellings of `file` and `oauth` are admitted by
+their sections and then rejected as `UndeliveredCredentialDelivery`, so such a
+document fails startup rather than running with an inert setting. Their
+contracts are stated under
 [credential-home and reserved deliveries](#credential-home-and-reserved-deliveries)
 below.
 
@@ -1411,10 +1414,14 @@ unchanged.
 
 ### Credential-home and reserved deliveries
 
-**Committed unimplemented functionality.** Codex CLI `codex_home`, `oauth`, and
-`file` have no present delivery surface: parsing validates their fields and then
-rejects the profile. The agreement between a delivery and its `billing_kind` is
-enforced for every spelling, including these reserved ones, as
+Codex CLI `codex_home` is delivered: parsing admits the directory and the
+runtime supplies it to the selected member's child, as
+[the `codex_home` delivery](#the-codex_home-delivery) states.
+
+**Committed unimplemented functionality.** Codex CLI `oauth` and `file` have no
+present delivery surface: parsing validates their fields and then rejects the
+profile. The agreement between a delivery and its `billing_kind` is enforced for
+every spelling, including these reserved ones, as
 [the credential catalog](#the-static-model-alias-and-web-fetch-catalog) states.
 
 #### The `codex_home` delivery
@@ -1431,13 +1438,15 @@ never the path.
 
 The daemon treats the directory only as a path reference: it never opens,
 copies, parses, serializes, or logs authentication material inside it. Delivery
-is the unimplemented part — no present composition sets `CODEX_HOME` for a Codex
-CLI spawn, because a `codex_home` profile is rejected as
-`UndeliveredCredentialDelivery` at startup before any spawn can select it. The
-child that delivers it replaces each Codex CLI child's inherited `CODEX_HOME`
-with the selected pool member's admitted path and leaves every other member's
-path absent from that process environment; the CLI itself owns every read and
-write beneath the selected home.
+replaces each Codex CLI child's inherited `CODEX_HOME` with the admitted path of
+the profile that operation's credential reference names, and leaves every other
+member's path absent from that process environment; the CLI itself owns every
+read and write beneath the selected home. The runtime re-checks each configured
+home's shape at construction under the same four conditions startup applies, so
+a home that has ceased to qualify fails construction rather than reaching a
+spawn. An operation whose credential reference names neither the runtime's own
+ambient profile nor a configured home is a typed unavailable-credential
+preparation failure and starts no child.
 
 Two `codex_home` profiles for Codex must name different normalized paths, and a
 Codex document may not combine an `ambient` profile with any `codex_home`
@@ -1734,12 +1743,12 @@ automatic repetition could duplicate an accepted request.
 
 This build supplies `file` for the `anthropic` and `openai` direct-HTTP adapters
 and for `claude_cli`; it supplies `ambient` for the `claude_cli` and `codex_cli`
-process adapters. A Codex profile naming `file`, `codex_home`, or `oauth` parses
-and is then rejected at startup as undelivered, on the same principle as the
-capacity-dependent pool keys below — configuration whose effect no surface
-provides is refused rather than admitted inert. The grammar admits all four so
-that a slice supplying one of the reserved Codex deliveries needs no
-configuration contract change.
+process adapters, and `codex_home` for `codex_cli`. A Codex profile naming
+`file` or `oauth` parses and is then rejected at startup as undelivered, on the
+same principle as the capacity-dependent pool keys below — configuration whose
+effect no surface provides is refused rather than admitted inert. The grammar
+admits all four so that a slice supplying one of the reserved Codex deliveries
+needs no configuration contract change.
 
 A refresh rejected as expired, reused, or revoked is permanent. The profile is
 quarantined and re-provisioning is the only recovery, which is the same operator
@@ -2406,10 +2415,12 @@ deployment-side rules that code cannot enforce are stated in
   without disclosing which path served it.
 
 - **External CLI logins.** An `ambient` profile leaves login resolution to the
-  CLI under the adapter's existing child-environment contract. It is the only
-  CLI login delivery this build supplies: a `codex_home` or `oauth` profile is
-  validated and then rejected before anything about it is retained, so what
-  those channels would require of the daemon is stated under
+  CLI under the adapter's existing child-environment contract. A Codex
+  `codex_home` profile instead names the login directory the selected member's
+  child receives as `CODEX_HOME`, and the daemon retains that path as a
+  reference only. An `oauth` profile is validated and then rejected before
+  anything about it is retained, so what that channel would require of the
+  daemon is stated under
   [committed unimplemented functionality](#committed-unimplemented-functionality--credential-lifecycle)
   below rather than here. Whether two profiles denote two independent logins is
   neither promised nor assumed by this inventory: it is
@@ -2547,16 +2558,16 @@ reader can take an entry's position for its tier.
   be migrated, and blocks scheduling rather than being guessed at or dropped —
   the same failure the freeze rule above produces, for the same reason.
 
-- **CLI login channels.** Both `codex_home` and `oauth` remain reserved and are
-  rejected as `UndeliveredCredentialDelivery`. The child that delivers
-  `codex_home` supplies a validated path reference through a per-process
-  `CODEX_HOME`, with the daemon still never reading, copying, or logging the
-  authentication material beneath it. The child that admits `oauth` must invert
-  the home-owned boundary: it must hold the rotating authorization itself and
-  hand each process a scratch home carrying everything that home requires except
-  the refresh token, which is the one value it must never place there. The
-  complete contents are stated once by
-  [the `oauth` delivery](#the-oauth-delivery) and are not enumerated again here.
+- **CLI login channels.** `oauth` remains reserved and is rejected as
+  `UndeliveredCredentialDelivery`. `codex_home` is no longer reserved: the child
+  receives a validated path reference through a per-process `CODEX_HOME`, with
+  the daemon still never reading, copying, or logging the authentication
+  material beneath it. The child that admits `oauth` must invert the home-owned
+  boundary: it must hold the rotating authorization itself and hand each process
+  a scratch home carrying everything that home requires except the refresh
+  token, which is the one value it must never place there. The complete contents
+  are stated once by [the `oauth` delivery](#the-oauth-delivery) and are not
+  enumerated again here.
 
 - **Codex file resolution.** No present composition or runtime delivers a Codex
   `file` profile; the parser validates its fields and then rejects it at

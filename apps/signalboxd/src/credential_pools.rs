@@ -98,6 +98,22 @@ pub enum CredentialHomeAdmissionFailure {
     EmptyDirectory,
 }
 
+impl CredentialHomeAdmissionFailure {
+    /// Operator-facing spelling of this closed cause.
+    ///
+    /// The returned text names the admission condition only. It never carries
+    /// the configured path or any authentication material, so error display
+    /// may quote it beside the profile reference.
+    pub const fn cause(self) -> &'static str {
+        match self {
+            Self::InvalidPath => "path is not absolute and normalized",
+            Self::MissingOrNotDirectory => "path is not an existing directory",
+            Self::UnreadableDirectory => "directory could not be enumerated",
+            Self::EmptyDirectory => "directory contains no provisioned entries",
+        }
+    }
+}
+
 impl fmt::Debug for CredentialDelivery {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -710,18 +726,23 @@ pub(crate) fn parse_credential_profiles(
         let adapter = ModelAdapter::parse(required_string(profile, "adapter")?)?;
         let billing_kind = BillingKind::parse(required_string(profile, "billing_kind")?)?;
         let delivery = CredentialDelivery::parse(profile, adapter, &name, billing_kind)?;
+        // The mixed-delivery rule is a property of one adapter's login store,
+        // so both sides of the pair must be Codex profiles. Another adapter's
+        // `ambient` profile shares no store with a Codex home and must not be
+        // matched here, or admission would turn on profile-table order.
         let conflicts_with_codex_ambient = adapter == ModelAdapter::CodexCli
             && profiles.values().any(|existing| {
-                matches!(
-                    (existing.delivery(), &delivery),
-                    (
-                        CredentialDelivery::Ambient,
-                        CredentialDelivery::CodexHome { .. }
-                    ) | (
-                        CredentialDelivery::CodexHome { .. },
-                        CredentialDelivery::Ambient
+                existing.adapter() == ModelAdapter::CodexCli
+                    && matches!(
+                        (existing.delivery(), &delivery),
+                        (
+                            CredentialDelivery::Ambient,
+                            CredentialDelivery::CodexHome { .. }
+                        ) | (
+                            CredentialDelivery::CodexHome { .. },
+                            CredentialDelivery::Ambient
+                        )
                     )
-                )
             });
         if conflicts_with_codex_ambient {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
@@ -729,16 +750,10 @@ pub(crate) fn parse_credential_profiles(
         if delivery == CredentialDelivery::Ambient && !ambient_adapters.insert(adapter) {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
-        if matches!(
-            &delivery,
-            CredentialDelivery::File { .. } | CredentialDelivery::CodexHome { .. }
-        ) && !file_paths.insert((
-            adapter,
-            delivery
-                .path()
-                .cloned()
-                .ok_or(HubModelConfigurationError::InvalidCredentialDelivery)?,
-        )) {
+        if let CredentialDelivery::File { path, .. } | CredentialDelivery::CodexHome { path, .. } =
+            &delivery
+            && !file_paths.insert((adapter, path.clone()))
+        {
             return Err(HubModelConfigurationError::InvalidCredentialDelivery);
         }
         let parsed = CredentialProfile {
