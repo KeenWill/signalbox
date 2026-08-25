@@ -1000,9 +1000,9 @@ function validateWebImportDescriptor(value) {{
   assertSha256(value.source.source_digest_sha256, "import_descriptor.source.source_digest_sha256");
   assertCanonicalU64(value.raw_record_count, "import_descriptor.raw_record_count");
   assertCanonicalNonnegativeU64(value.entry_count, "import_descriptor.entry_count");
-  assertCanonicalNonnegativeU64(value.sizes.raw_source_bytes, "import_descriptor.sizes.raw_source_bytes");
-  assertCanonicalNonnegativeU64(value.sizes.normalized_source_record_bytes, "import_descriptor.sizes.normalized_source_record_bytes");
-  assertCanonicalNonnegativeU64(value.sizes.normalized_entry_bytes, "import_descriptor.sizes.normalized_entry_bytes");
+  assertCanonicalU64(value.sizes.raw_source_bytes, "import_descriptor.sizes.raw_source_bytes");
+  assertCanonicalU64(value.sizes.normalized_source_record_bytes, "import_descriptor.sizes.normalized_source_record_bytes");
+  assertCanonicalU64(value.sizes.normalized_entry_bytes, "import_descriptor.sizes.normalized_entry_bytes");
   validateWebImportFrontier(value.timeline.first, "import_descriptor.timeline.first");
   validateWebImportFrontier(value.timeline.latest, "import_descriptor.timeline.latest");
   if (value.source.source_session_id !== undefined && value.source.source_session_id !== null) {{
