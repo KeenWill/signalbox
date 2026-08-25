@@ -178,7 +178,14 @@ public struct SignalboxUserInputContent: Codable, Equatable, Sendable {
   public init(from decoder: Decoder) throws {
     var container = try decoder.unkeyedContainer()
     var parts: [SignalboxUserInputPart] = []
-    parts.reserveCapacity(SignalboxProcessProtocol.maximumUserInputParts)
+    // Reserve what the payload actually declares, capped by the retained-parts
+    // bound. Reserving the bound unconditionally would make every one-part
+    // content — the ordinary shape — retain a 256-slot buffer for the life of
+    // the value, so a snapshot admitting many records would hold far more
+    // memory than its retained-byte accounting reports. An absent count
+    // reserves nothing and lets the array grow.
+    let declaredParts = container.count ?? 0
+    parts.reserveCapacity(min(declaredParts, SignalboxProcessProtocol.maximumUserInputParts))
     while !container.isAtEnd && parts.count < SignalboxProcessProtocol.maximumUserInputParts {
       parts.append(try container.decode(SignalboxUserInputPart.self))
     }
