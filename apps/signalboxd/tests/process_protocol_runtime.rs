@@ -3974,35 +3974,34 @@ async fn process_runtime_reads_an_empty_operator_status_snapshot() -> Result<(),
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
+    let repository = RepositorySlug::try_new(String::from("example/repo"))?;
+    let gating_check = CheckRunName::try_new(String::from("ci"))?;
+    let clearance_fixture = OperatorStatusStaleReviewClearanceFixture {
+        review_node_id: String::from("PRR_node"),
+        reviewer: RepoWatchAuthorLogin::try_new(String::from("reviewer"))?,
+        reviewed_head_sha: CommitSha::try_new(String::from(
+            "3333333333333333333333333333333333333333",
+        ))?,
+        dismissal_message: String::from("Superseded by the current head."),
+    };
+    let convergence_fixture = OperatorStatusConvergenceFixture {
+        number: PullRequestNumber::new(41.try_into()?),
+        head_sha: CommitSha::try_new(String::from("1111111111111111111111111111111111111111"))?,
+        base_branch: BranchName::try_new(String::from("main"))?,
+        base_revision: CommitSha::try_new(String::from(
+            "2222222222222222222222222222222222222222",
+        ))?,
+        mergeable_state: MergeableState::Mergeable,
+        settled: true,
+        review_decision: RepoWatchReviewDecision::ChangesRequested,
+        unresolved_threads: Vec::new(),
+        gating_check_count: 1,
+        non_green_gating_checks: vec![gating_check.clone()],
+        verdict: RepoWatchConvergenceVerdict::NotConverged,
+        stale_review_clearance: Some(clearance_fixture.clone()),
+    };
     OperatorStatusFixtureRepository::new(runtime.pool.clone())
-        .seed_pull_request_convergences(
-            &RepositorySlug::try_new(String::from("example/repo"))?,
-            &[OperatorStatusConvergenceFixture {
-                number: PullRequestNumber::new(41.try_into()?),
-                head_sha: CommitSha::try_new(String::from(
-                    "1111111111111111111111111111111111111111",
-                ))?,
-                base_branch: BranchName::try_new(String::from("main"))?,
-                base_revision: CommitSha::try_new(String::from(
-                    "2222222222222222222222222222222222222222",
-                ))?,
-                mergeable_state: MergeableState::Mergeable,
-                settled: true,
-                review_decision: RepoWatchReviewDecision::ChangesRequested,
-                unresolved_threads: Vec::new(),
-                gating_check_count: 1,
-                non_green_gating_checks: vec![CheckRunName::try_new(String::from("ci"))?],
-                verdict: RepoWatchConvergenceVerdict::NotConverged,
-                stale_review_clearance: Some(OperatorStatusStaleReviewClearanceFixture {
-                    review_node_id: String::from("PRR_node"),
-                    reviewer: RepoWatchAuthorLogin::try_new(String::from("reviewer"))?,
-                    reviewed_head_sha: CommitSha::try_new(String::from(
-                        "3333333333333333333333333333333333333333",
-                    ))?,
-                    dismissal_message: String::from("Superseded by the current head."),
-                }),
-            }],
-        )
+        .seed_pull_request_convergences(&repository, std::slice::from_ref(&convergence_fixture))
         .await?;
 
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -4020,16 +4019,16 @@ async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(),
         convergence.message(),
         &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
             Box::new(OperatorStatusPullRequestConvergenceMessage {
-                repository: String::from("example/repo"),
-                pull_request_number: CanonicalU64::new(41),
-                head_sha: String::from("1111111111111111111111111111111111111111"),
-                base_branch: String::from("main"),
-                base_revision: String::from("2222222222222222222222222222222222222222"),
+                repository: repository.as_str().to_owned(),
+                pull_request_number: CanonicalU64::new(convergence_fixture.number.get()),
+                head_sha: convergence_fixture.head_sha.as_str().to_owned(),
+                base_branch: convergence_fixture.base_branch.as_str().to_owned(),
+                base_revision: convergence_fixture.base_revision.as_str().to_owned(),
                 mergeable_state: OperatorStatusMergeableState::Mergeable,
                 review_decision: OperatorStatusReviewDecision::ChangesRequested,
                 unresolved_thread_count: CanonicalU64::new(0),
-                gating_check_count: CanonicalU64::new(1),
-                non_green_gating_checks: vec![String::from("ci")],
+                gating_check_count: CanonicalU64::new(convergence_fixture.gating_check_count),
+                non_green_gating_checks: vec![gating_check.as_str().to_owned()],
                 verdict: OperatorStatusConvergenceVerdict::NotConverged,
                 seal: None,
                 assessed_seconds_ago: CanonicalU64::new(0),
@@ -4042,12 +4041,12 @@ async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(),
         &ServerMessage::OperatorStatus(Box::new(
             OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
                 OperatorStatusPendingStaleReviewClearanceMessage {
-                    repository: String::from("example/repo"),
-                    pull_request_number: CanonicalU64::new(41),
-                    current_head_sha: String::from("1111111111111111111111111111111111111111"),
-                    review_node_id: String::from("PRR_node"),
-                    reviewer: String::from("reviewer"),
-                    reviewed_head_sha: String::from("3333333333333333333333333333333333333333"),
+                    repository: repository.as_str().to_owned(),
+                    pull_request_number: CanonicalU64::new(convergence_fixture.number.get()),
+                    current_head_sha: convergence_fixture.head_sha.as_str().to_owned(),
+                    review_node_id: clearance_fixture.review_node_id.clone(),
+                    reviewer: clearance_fixture.reviewer.as_str().to_owned(),
+                    reviewed_head_sha: clearance_fixture.reviewed_head_sha.as_str().to_owned(),
                     pending_for_seconds: CanonicalU64::new(0),
                 },
             )),

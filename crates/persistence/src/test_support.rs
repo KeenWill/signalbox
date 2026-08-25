@@ -5,6 +5,8 @@
 //! vocabulary and leave the table and column names here, so a schema change is
 //! contained in — and exercised by — the crate that owns the schema.
 
+use std::collections::BTreeMap;
+
 use rust_decimal::Decimal;
 use serde_json::{Value, json};
 use signalbox_application::{RepoWatchConvergenceVerdict, RepoWatchReviewDecision};
@@ -233,6 +235,13 @@ impl OperatorStatusFixtureRepository {
     /// revision. The payload is therefore derived here from the stated
     /// assessments, so a caller states pull requests rather than reproducing
     /// the cursor's storage shape.
+    ///
+    /// An observed repository state names each branch once, and the projection
+    /// joins its assessments against every payload entry carrying their base
+    /// branch: one entry per stated pull request would return an assessment
+    /// once per pull request sharing its base. The branch heads are therefore
+    /// one entry per base branch, and stating one branch at two revisions —
+    /// which no observation produces — is rejected rather than composed.
     pub async fn seed_pull_request_convergences(
         &self,
         repository: &RepositorySlug,
@@ -266,15 +275,21 @@ impl OperatorStatusFixtureRepository {
                 })
             })
             .collect();
-        let branch_heads: Vec<Value> = convergences
-            .iter()
-            .map(|convergence| {
-                json!({
-                    "branch": convergence.base_branch.as_str(),
-                    "head": convergence.base_revision.as_str(),
-                })
-            })
-            .collect();
+        let mut branch_heads: Vec<Value> = Vec::new();
+        let mut stated_branch_heads: BTreeMap<&str, &str> = BTreeMap::new();
+        for convergence in convergences {
+            let branch = convergence.base_branch.as_str();
+            let head = convergence.base_revision.as_str();
+            match stated_branch_heads.insert(branch, head) {
+                None => branch_heads.push(json!({ "branch": branch, "head": head })),
+                Some(stated) if stated != head => {
+                    return Err(sqlx::Error::Protocol(format!(
+                        "operator-status fixture states base branch {branch} at two revisions"
+                    )));
+                }
+                Some(_) => {}
+            }
+        }
         let generation: i64 = sqlx::query_scalar(
             "INSERT INTO repo_watch_cursor (
                 repository, generation, storage_version, cursor_payload,

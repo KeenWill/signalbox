@@ -11,14 +11,14 @@ use signalbox_application::{
     ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority, AuthorizeModelCallOutcome,
     CommissionDispatchRequest, CommissionedDispatchFence, ModelCallCredentialReference,
     RepoWatchBranchHead, RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
-    RepoWatchDispatchService, RepoWatchDispatchTransaction, RepoWatchEventContentIdentityV1,
-    RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPullRequestLifecycle,
-    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,
-    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
-    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
-    RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome, StartEligibleTurnService,
-    UuidV7CommissionedDispatchIdGenerator, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator,
+    RepoWatchConvergenceVerdict, RepoWatchDispatchService, RepoWatchDispatchTransaction,
+    RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
+    RepoWatchReviewDecision, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
+    RepoWatchTemplateResolver, RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome,
+    StartEligibleTurnService, UuidV7CommissionedDispatchIdGenerator,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName,
@@ -67,7 +67,8 @@ use signalbox_persistence::{
     operator_status::{
         ProcessOperatorStatusCounts, ProcessOperatorStatusHeldSlot,
         ProcessOperatorStatusHeldSlotBlocker, ProcessOperatorStatusHeldSlotOrigin,
-        ProcessOperatorStatusItem, ProcessOperatorStatusQueuedObligation,
+        ProcessOperatorStatusItem, ProcessOperatorStatusPullRequestConvergence,
+        ProcessOperatorStatusQueuedObligation, ProcessOperatorStatusReader,
         ProcessOperatorStatusRepository,
     },
     repo_watch::{
@@ -80,6 +81,7 @@ use signalbox_persistence::{
     },
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
+    test_support::{OperatorStatusConvergenceFixture, OperatorStatusFixtureRepository},
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -6868,7 +6870,7 @@ async fn operator_status_reader_names_a_branch_triggered_held_slot() -> Result<(
             .await?
             .expect("the branch dispatch holds one slot"),
     );
-    while reader.next_item().await?.is_some() {}
+    let counts = drained_status_counts(&mut reader).await?;
 
     assert_eq!(held.dispatch_id(), *dispatch_id.as_uuid());
     assert_eq!(
@@ -6877,11 +6879,103 @@ async fn operator_status_reader_names_a_branch_triggered_held_slot() -> Result<(
             branch: String::from(WORKFLOW_BRANCH),
         }
     );
+    assert_eq!(counts.map(ProcessOperatorStatusCounts::held_slots), Some(1));
+    Ok(())
+}
+
+/// Reads the rest of an opened snapshot and returns the counts its exhaustion
+/// commits, so a test body reaches them without draining in place. It carries
+/// no `#[track_caller]` because the attribute is a no-op on an async function
+/// and this helper reports through `?` rather than panicking.
+async fn drained_status_counts(
+    reader: &mut ProcessOperatorStatusReader,
+) -> Result<Option<ProcessOperatorStatusCounts>, Box<dyn Error>> {
+    while reader.next_item().await?.is_some() {}
+    Ok(reader.counts())
+}
+
+/// Two pull requests based on the same branch are one branch head in the
+/// observed repository state. The current-convergence projection joins each
+/// assessment against every cursor entry naming its base branch, so a second
+/// entry for the shared branch would return both assessments twice and inflate
+/// the operator's convergence count.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_status_reader_reports_same_base_branch_pull_requests_once()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let bottom = base_branch_convergence(BOTTOM_PULL_REQUEST_NUMBER)?;
+    let top = base_branch_convergence(TOP_PULL_REQUEST_NUMBER)?;
+    OperatorStatusFixtureRepository::new(pool.clone())
+        .seed_pull_request_convergences(&repository()?, &[bottom.clone(), top.clone()])
+        .await?;
+
+    let mut reader = ProcessOperatorStatusRepository::new(pool.clone())
+        .open()
+        .await?;
+    let first = convergence_status_item(
+        reader
+            .next_item()
+            .await?
+            .expect("the lower-numbered seeded assessment is current"),
+    );
+    let second = convergence_status_item(
+        reader
+            .next_item()
+            .await?
+            .expect("the higher-numbered seeded assessment is current"),
+    );
+    let after_both = reader.next_item().await?;
+
+    assert_eq!(first.pull_request_number(), bottom.number.get());
+    assert_eq!(first.head_sha(), bottom.head_sha.as_str());
+    assert_eq!(first.base_branch(), bottom.base_branch.as_str());
+    assert_eq!(second.pull_request_number(), top.number.get());
+    assert_eq!(second.head_sha(), top.head_sha.as_str());
+    assert_eq!(second.base_branch(), top.base_branch.as_str());
+    assert!(after_both.is_none());
     assert_eq!(
-        reader.counts().map(ProcessOperatorStatusCounts::held_slots),
-        Some(1)
+        reader
+            .counts()
+            .map(ProcessOperatorStatusCounts::pull_request_convergences),
+        Some(2)
     );
     Ok(())
+}
+
+/// One merge-ready assessment on the fixture's canonical base branch and
+/// revision, so two of them share a base. The pull-request number is the only
+/// knob; its head is derived from it and decorrelated from the number's own
+/// value, so a projection reading one where it should read the other cannot
+/// pass. The single green gating check is the evidence the durable
+/// merge-ready verdict requires.
+fn base_branch_convergence(
+    number: u64,
+) -> Result<OperatorStatusConvergenceFixture, Box<dyn Error>> {
+    Ok(OperatorStatusConvergenceFixture {
+        number: PullRequestNumber::new(number.try_into()?),
+        head_sha: CommitSha::try_new(format!("{:040x}", u128::from(u64::MAX - number)))?,
+        base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+        base_revision: CommitSha::try_new(BASE_REVISION.to_owned())?,
+        mergeable_state: MergeableState::Mergeable,
+        settled: true,
+        review_decision: RepoWatchReviewDecision::Approved,
+        unresolved_threads: Vec::new(),
+        gating_check_count: 1,
+        non_green_gating_checks: Vec::new(),
+        verdict: RepoWatchConvergenceVerdict::MergeReady,
+        stale_review_clearance: None,
+    })
+}
+
+#[track_caller]
+fn convergence_status_item(
+    item: ProcessOperatorStatusItem,
+) -> ProcessOperatorStatusPullRequestConvergence {
+    match item {
+        ProcessOperatorStatusItem::PullRequestConvergence(item) => item,
+        item => panic!("fixture expected a pull-request convergence status, got {item:?}"),
+    }
 }
 
 /// The view withholds readiness from an obligation that is parked or has spent
