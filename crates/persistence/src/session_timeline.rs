@@ -18,6 +18,7 @@ use signalbox_application::{
     TimelineRunnerState, TimelineTextExcerpt, TimelineToolApprovalPosture, TimelineToolAttempt,
     TimelineToolBatchState, TimelineToolEffectPosture, TimelineToolSandboxPosture,
     TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    timeline_detail_envelope_bytes,
 };
 use signalbox_domain::{
     ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId,
@@ -287,6 +288,11 @@ impl SessionTimelineRepository {
         {
             return Err(SessionTimelineCorruption::InvalidOrdinal("window totals").into());
         }
+        if item_count == descriptor.sizes.item_count
+            && (first != descriptor.bounds.first || latest != descriptor.bounds.latest)
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window bounds").into());
+        }
         let continuation_before = match first.zip(descriptor.bounds.first) {
             Some((loaded, bound)) if loaded > bound => TimelineContinuation::MoreAt(loaded),
             _ => TimelineContinuation::Exhausted,
@@ -483,7 +489,7 @@ impl SessionTimelineReader for SessionTimelineRepository {
     }
 }
 
-const DETAIL_ENVELOPE_BYTES: u32 = 128;
+const DETAIL_ENVELOPE_BYTES: u32 = timeline_detail_envelope_bytes();
 
 const TURN_DETAIL_ADDRESSES_SQL: &str = r#"
 WITH turn_events AS (
@@ -922,8 +928,12 @@ async fn project_detail_event(
                 DispatchedOutboxEventKind::ModelCallTransition { turn, call, state } => {
                     require_cursor_field(cursor, TimelineBodyField::ModelResponse, 0)?;
                     let response_offset = cursor.map_or(0, |cursor| cursor.offset_bytes);
-                    let include_terminal_evidence =
-                        matches!(state, DispatchedModelCallState::Terminal(_));
+                    let include_terminal_evidence = match state {
+                        DispatchedModelCallState::Prepared
+                        | DispatchedModelCallState::InFlight
+                        | DispatchedModelCallState::CancellationRequested => false,
+                        DispatchedModelCallState::Terminal(_) => true,
+                    };
                     let row = load_model_detail(
                         transaction,
                         *call,

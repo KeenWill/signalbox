@@ -52,6 +52,12 @@ pub const fn min_timeline_detail_bytes() -> u32 {
     256
 }
 
+/// Returns the fixed per-record envelope charge in projected detail accounting.
+#[must_use]
+pub const fn timeline_detail_envelope_bytes() -> u32 {
+    128
+}
+
 /// Stable logical location of one durable session event.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TimelineAddress(NonZeroU64);

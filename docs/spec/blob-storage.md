@@ -499,20 +499,11 @@ rendered frontier; a catalogued digest outside that set is unauthorized. Results
 use the existing text-only tool-result arm and never enter a provider message as
 image or document media.
 
-Content-type-aware readers are committed unimplemented functionality: no present
-surface provides one, and neither its exact inventory nor the formats it
-supports are decided. The compatibility constraint is that attachment stubs and
-the generic read family remain sufficient to add such readers without
-re-deciding visibility.
-
-Content-interpreting processor isolation is committed unimplemented
-functionality: no present decoder, parser, or renderer surface exists. The
-compatibility constraint is that every future content-interpreting reader
-executes inside strong process isolation and treats input validation as
-best-effort defense in depth. The concrete sandbox mechanism is selected by that
-implementation without weakening this posture. Why: parser hardening is an
-unending surface — a malicious payload exploiting a decoder defect must be
-contained by isolation rather than entrusted to an ever-growing validator.
+The provider-neutral reader model, stable typed-read contracts, and decided
+processor boundary are owned by
+[file and media interpretation](file-and-media.md). Attachment stubs and the
+generic read family remain the visibility and unknown-format substrate for that
+layer.
 
 ## Model-call preparation and modalities
 
@@ -580,8 +571,8 @@ new imports write only blob references.
   and the artifact lifecycle bullets in
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts);
   this page's append-only catalog is the constraint they design against.
-- The content-type-aware read-tool inventory and the concrete isolation
-  mechanism its processors use are recorded in
+- Concrete format adapters and their per-family dependency choices remain
+  deferred with
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts).
 - How a tool family's admitted result references a blob rather than embedding
   bytes, and rich image/file result-content arms, remain with

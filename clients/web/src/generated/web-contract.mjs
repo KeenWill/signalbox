@@ -900,6 +900,9 @@ const schemas = {
             "$ref": "#/$defs/WebU64"
           },
           "media_type": {
+            "description": "Visible-ASCII pattern plus the 255 bound express the multipart\ncontract's \"at most 255 visible ASCII bytes\"; for visible ASCII,\nUTF-16 length equals byte length, so maxLength is a byte bound.",
+            "maxLength": 255,
+            "pattern": "^[!-~]+$",
             "type": [
               "string",
               "null"
@@ -2323,6 +2326,8 @@ const schemas = {
             "$ref": "#/$defs/WebU64"
           },
           "text": {
+            "description": "The generator stamps `max_timeline_detail_bytes()` onto this field as\n`maxLength`: UTF-16 length never exceeds UTF-8 length, so every valid\nexcerpt within the detail byte budget passes that pre-encoding bound.",
+            "maxLength": 65536,
             "type": "string"
           },
           "total_bytes": {
@@ -2698,7 +2703,18 @@ const schemas = {
       "continuation_after": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebTimelineAddress"
+            "additionalProperties": false,
+            "description": "Stable browser-visible location of one durable session event.",
+            "properties": {
+              "event_sequence": {
+                "$ref": "#/$defs/WebTimelineEventSequence",
+                "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+              }
+            },
+            "required": [
+              "event_sequence"
+            ],
+            "type": "object"
           },
           {
             "type": "null"
@@ -2708,7 +2724,18 @@ const schemas = {
       "continuation_before": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebTimelineAddress"
+            "additionalProperties": false,
+            "description": "Stable browser-visible location of one durable session event.",
+            "properties": {
+              "event_sequence": {
+                "$ref": "#/$defs/WebTimelineEventSequence",
+                "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+              }
+            },
+            "required": [
+              "event_sequence"
+            ],
+            "type": "object"
           },
           {
             "type": "null"
@@ -2733,7 +2760,9 @@ const schemas = {
     "required": [
       "session_id",
       "items",
-      "projected_structured_bytes"
+      "projected_structured_bytes",
+      "continuation_before",
+      "continuation_after"
     ],
     "title": "WebSessionTimelineWindow",
     "type": "object"
@@ -2876,6 +2905,13 @@ function assertSchema(root, schema, value, path) {
   }
   if (typeof value !== schema.type) {
     fail(path, schema.type);
+  }
+  if (
+    schema.type === "string" &&
+    schema.maxLength !== undefined &&
+    value.length > schema.maxLength
+  ) {
+    fail(path, `at most ${schema.maxLength} characters`);
   }
   if (
     schema.type === "string" &&
@@ -3049,6 +3085,9 @@ function assertTimelineDetailPage(value) {
   let previousAddress = null;
   value.items.forEach((item, index) => {
     const path = `timeline_detail_page.items[${index}]`;
+    if (expectedBodyContinuation !== null) {
+      fail(path, "absent after a continued body");
+    }
     const address = BigInt(item.address.event_sequence);
     if (previousAddress !== null && address <= previousAddress) {
       fail(`${path}.address`, "strictly increasing after the previous item");
@@ -3101,10 +3140,29 @@ function assertTimelineDetailPage(value) {
           const hasFailureCause =
             item.body.provider_failure_cause !== undefined &&
             item.body.provider_failure_cause !== null;
-          if ((item.body.state.disposition === "known_failed") !== hasFailureCause) {
+          if (hasFailureCause && item.body.state.disposition !== "known_failed") {
             fail(
               `${path}.body.provider_failure_cause`,
-              "present exactly for a known_failed terminal model call",
+              "present only for a known_failed terminal model call",
+            );
+          }
+          if (
+            item.body.response !== undefined &&
+            item.body.response !== null &&
+            item.body.state.disposition !== "completed"
+          ) {
+            fail(
+              `${path}.body.response`,
+              "present only for a completed terminal model call",
+            );
+          }
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (hasUsage && item.body.state.disposition === "cancelled") {
+            fail(
+              `${path}.body.usage`,
+              "unreported for a cancelled terminal model call",
             );
           }
         }
@@ -3362,6 +3420,8 @@ function assertTimelineDetailPage(value) {
           fail(`${path}.body.kind`, "the matching header-only event kind");
         }
         break;
+      default:
+        fail(`${path}.body.type`, "a detail body variant this decoder classifies");
     }
     const computedItemBytes = detailEnvelopeBytes + textBytes;
     if (item.projected_body_bytes !== computedItemBytes) {
@@ -3372,9 +3432,6 @@ function assertTimelineDetailPage(value) {
       fail("timeline_detail_page.projected_body_bytes", `at most ${maxProjectedBodyBytes} bytes`);
     }
     if (continuation !== null) {
-      if (expectedBodyContinuation !== null) {
-        fail(path, "at most one continued body per page");
-      }
       expectedBodyContinuation = continuation;
     }
   });
@@ -3402,10 +3459,10 @@ function assertTimelineDetailPage(value) {
     if (expectedBodyContinuation !== null) {
       fail("timeline_detail_page.continuation", "more_body for a continued excerpt");
     }
-    if (
-      previousAddress !== null &&
-      BigInt(value.continuation.address.event_sequence) <= previousAddress
-    ) {
+    if (previousAddress === null) {
+      fail("timeline_detail_page.continuation", "absent on an empty page");
+    }
+    if (BigInt(value.continuation.address.event_sequence) <= previousAddress) {
       fail("timeline_detail_page.continuation.address", "after the final returned item");
     }
   }

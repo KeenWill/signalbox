@@ -327,16 +327,15 @@ test("generated detail decoder rejects an unknown provider failure cause", () =>
   );
 });
 
-test("generated detail decoder requires a cause for known failures", () => {
+test("generated detail decoder accepts a cause-less known failure", () => {
   const page = modelCallDetailPage();
   page.items[0].body.state = {
     type: "terminal",
     disposition: "known_failed",
   };
-  assert.throws(
-    () => decodeWebSessionTimelineDetailPage(page),
-    /present exactly for a known_failed/,
-  );
+  const decoded = decodeWebSessionTimelineDetailPage(page);
+  assert.equal(decoded.items[0].body.state.disposition, "known_failed");
+  assert.equal(decoded.items[0].body.provider_failure_cause, null);
 });
 
 test("generated detail decoder rejects a failure cause on another disposition", () => {
@@ -345,7 +344,22 @@ test("generated detail decoder rejects a failure cause on another disposition", 
   page.items[0].body.provider_failure_cause = "rate_limited";
   assert.throws(
     () => decodeWebSessionTimelineDetailPage(page),
-    /present exactly for a known_failed/,
+    /present only for a known_failed/,
+  );
+});
+
+test("generated detail decoder bounds attachment media types", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.attachments = [
+    {
+      blob_id: `sha256:${"a".repeat(64)}`,
+      length_bytes: "1",
+      media_type: `application/${"x".repeat(256)}`,
+    },
+  ];
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
   );
 });
 
@@ -440,6 +454,105 @@ test("generated detail decoder rejects non-monotonic addresses", () => {
   );
 });
 
+test("generated detail decoder bounds excerpt text before byte accounting", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.text.text = "x".repeat(65537);
+  page.items[0].body.text.total_bytes = "65537";
+  page.items[0].projected_body_bytes = 65665;
+  page.projected_body_bytes = 65665;
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder requires a continued body to end the page", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.text.total_bytes = "6";
+  page.items[0].body.text.continuation = {
+    address: { event_sequence: "7" },
+    field: "input_text",
+    member_index: 0,
+    offset_bytes: "3",
+  };
+  page.items.push({
+    address: { event_sequence: "8" },
+    kind: "session_created",
+    body: { type: "event_fact", kind: "session_created" },
+    projected_body_bytes: 128,
+  });
+  page.projected_body_bytes = 259;
+  page.continuation = {
+    type: "more_body",
+    body: page.items[0].body.text.continuation,
+  };
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /absent after a continued body/,
+  );
+});
+
+test("generated detail decoder rejects a continuation on an empty page", () => {
+  const page = userInputDetailPage();
+  page.items = [];
+  page.projected_body_bytes = 0;
+  page.continuation = {
+    type: "more_at",
+    address: { event_sequence: "9" },
+  };
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /absent on an empty page/,
+  );
+});
+
+test("generated detail decoder rejects a response on a non-completed disposition", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = { type: "terminal", disposition: "refused" };
+  page.items[0].body.response = {
+    text: "x",
+    offset_bytes: "0",
+    total_bytes: "1",
+    continuation: null,
+  };
+  page.items[0].projected_body_bytes = 129;
+  page.projected_body_bytes = 129;
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /present only for a completed terminal model call/,
+  );
+});
+
+test("generated detail decoder rejects a non-ASCII attachment media type", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.attachments = [
+    {
+      blob_id: `sha256:${"a".repeat(64)}`,
+      length_bytes: "1",
+      media_type: "application/café",
+    },
+  ];
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
+test("generated detail decoder rejects usage on a cancelled disposition", () => {
+  const page = modelCallDetailPage();
+  page.items[0].body.state = { type: "terminal", disposition: "cancelled" };
+  page.items[0].body.usage.input_tokens = "1";
+
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /unreported for a cancelled terminal model call/,
+  );
+});
+
 test("generated detail decoder requires more-at to advance", () => {
   const page = userInputDetailPage();
   page.continuation = {
@@ -526,5 +639,18 @@ test("generated window decoder rejects an invalid session ID", () => {
         continuation_after: null,
       }),
     /matching/,
+  );
+});
+
+test("generated window decoder requires both continuation fields", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionTimelineWindow({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        items: [],
+        projected_structured_bytes: 0,
+        continuation_before: null,
+      }),
+    /continuation_after must be present/,
   );
 });

@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::{Value, json};
 use signalbox_application::{
     max_timeline_detail_bytes, max_timeline_detail_items, max_timeline_window_bytes,
-    max_timeline_window_items,
+    max_timeline_window_items, timeline_detail_envelope_bytes,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -374,7 +374,11 @@ pub struct WebSessionTimelineWindow {
     pub session_id: WebSessionId,
     pub items: Vec<WebSessionTimelineItem>,
     pub projected_structured_bytes: u32,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation_before: Option<WebTimelineAddress>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation_after: Option<WebTimelineAddress>,
 }
 
@@ -407,6 +411,9 @@ pub struct WebTimelineBodyContinuation {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineTextExcerpt {
+    /// The generator stamps `max_timeline_detail_bytes()` onto this field as
+    /// `maxLength`: UTF-16 length never exceeds UTF-8 length, so every valid
+    /// excerpt within the detail byte budget passes that pre-encoding bound.
     pub text: String,
     pub offset_bytes: WebU64,
     pub total_bytes: WebU64,
@@ -448,6 +455,10 @@ impl<'de> Deserialize<'de> for WebBlobId {
 pub struct WebTimelineBlobReference {
     pub blob_id: WebBlobId,
     pub length_bytes: WebU64,
+    /// Visible-ASCII pattern plus the 255 bound express the multipart
+    /// contract's "at most 255 visible ASCII bytes"; for visible ASCII,
+    /// UTF-16 length equals byte length, so maxLength is a byte bound.
+    #[schemars(length(max = 255), regex(pattern = r"^[!-~]+$"))]
     pub media_type: Option<String>,
 }
 
@@ -1130,6 +1141,14 @@ pub struct WebSessionTimelineDetailPage {
     pub continuation: Option<WebTimelineDetailContinuation>,
 }
 
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
 /// Layer that owns one browser API failure.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1211,10 +1230,17 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
     let error_schema = canonical_schema(schemars::schema_for!(WebApiErrorResponse).to_value());
     let descriptor_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineDescriptor).to_value());
-    let window_schema =
+    let mut window_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
-    let detail_schema =
+    make_property_nullable(&mut window_schema, "continuation_before")?;
+    make_property_nullable(&mut window_schema, "continuation_after")?;
+    let mut detail_schema =
         canonical_schema(schemars::schema_for!(WebSessionTimelineDetailPage).to_value());
+    set_string_max_length(
+        &mut detail_schema,
+        "/$defs/WebTimelineTextExcerpt/properties/text",
+        max_timeline_detail_bytes(),
+    )?;
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -1261,6 +1287,32 @@ fn canonical_schema(mut schema: Value) -> Value {
     schema
 }
 
+fn make_property_nullable(
+    schema: &mut Value,
+    property_name: &str,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(&format!("/properties/{property_name}"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let concrete = property.take();
+    *property = json!({ "anyOf": [concrete, { "type": "null" }] });
+    Ok(())
+}
+
+fn set_string_max_length(
+    schema: &mut Value,
+    property_pointer: &str,
+    max_length: u32,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(property_pointer)
+        .and_then(Value::as_object_mut)
+        .filter(|property| property.get("type").and_then(Value::as_str) == Some("string"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    property.insert("maxLength".to_owned(), json!(max_length));
+    Ok(())
+}
+
 fn runtime_module(
     bootstrap_schema: &Value,
     example_schema: &Value,
@@ -1278,6 +1330,8 @@ fn runtime_module(
         "WebSessionTimelineDetailPage": detail_schema,
     });
     schemas.sort_all_objects();
+    let max_detail_bytes = max_timeline_detail_bytes();
+    let detail_envelope_bytes = timeline_detail_envelope_bytes();
     let schemas = serde_json::to_string_pretty(&schemas)
         .map_err(|_| GenerateWebContractError::Serialization)?;
     Ok(format!(
@@ -1425,6 +1479,13 @@ function assertSchema(root, schema, value, path) {{
   }}
   if (
     schema.type === "string" &&
+    schema.maxLength !== undefined &&
+    value.length > schema.maxLength
+  ) {{
+    fail(path, `at most ${{schema.maxLength}} characters`);
+  }}
+  if (
+    schema.type === "string" &&
     (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
     value.length > 20
   ) {{
@@ -1565,8 +1626,8 @@ function assertModelSettingsSnapshot(snapshot, path) {{
 }}
 
 function assertTimelineDetailPage(value) {{
-  const maxProjectedBodyBytes = 65536;
-  const detailEnvelopeBytes = 128;
+  const maxProjectedBodyBytes = {max_detail_bytes};
+  const detailEnvelopeBytes = {detail_envelope_bytes};
   const terminalKinds = new Set([
     "turn_failed",
     "turn_completed",
@@ -1595,6 +1656,9 @@ function assertTimelineDetailPage(value) {{
   let previousAddress = null;
   value.items.forEach((item, index) => {{
     const path = `timeline_detail_page.items[${{index}}]`;
+    if (expectedBodyContinuation !== null) {{
+      fail(path, "absent after a continued body");
+    }}
     const address = BigInt(item.address.event_sequence);
     if (previousAddress !== null && address <= previousAddress) {{
       fail(`${{path}}.address`, "strictly increasing after the previous item");
@@ -1647,10 +1711,29 @@ function assertTimelineDetailPage(value) {{
           const hasFailureCause =
             item.body.provider_failure_cause !== undefined &&
             item.body.provider_failure_cause !== null;
-          if ((item.body.state.disposition === "known_failed") !== hasFailureCause) {{
+          if (hasFailureCause && item.body.state.disposition !== "known_failed") {{
             fail(
               `${{path}}.body.provider_failure_cause`,
-              "present exactly for a known_failed terminal model call",
+              "present only for a known_failed terminal model call",
+            );
+          }}
+          if (
+            item.body.response !== undefined &&
+            item.body.response !== null &&
+            item.body.state.disposition !== "completed"
+          ) {{
+            fail(
+              `${{path}}.body.response`,
+              "present only for a completed terminal model call",
+            );
+          }}
+          const hasUsage = Object.values(item.body.usage).some(
+            (count) => count !== undefined && count !== null,
+          );
+          if (hasUsage && item.body.state.disposition === "cancelled") {{
+            fail(
+              `${{path}}.body.usage`,
+              "unreported for a cancelled terminal model call",
             );
           }}
         }}
@@ -1908,6 +1991,8 @@ function assertTimelineDetailPage(value) {{
           fail(`${{path}}.body.kind`, "the matching header-only event kind");
         }}
         break;
+      default:
+        fail(`${{path}}.body.type`, "a detail body variant this decoder classifies");
     }}
     const computedItemBytes = detailEnvelopeBytes + textBytes;
     if (item.projected_body_bytes !== computedItemBytes) {{
@@ -1918,9 +2003,6 @@ function assertTimelineDetailPage(value) {{
       fail("timeline_detail_page.projected_body_bytes", `at most ${{maxProjectedBodyBytes}} bytes`);
     }}
     if (continuation !== null) {{
-      if (expectedBodyContinuation !== null) {{
-        fail(path, "at most one continued body per page");
-      }}
       expectedBodyContinuation = continuation;
     }}
   }});
@@ -1948,10 +2030,10 @@ function assertTimelineDetailPage(value) {{
     if (expectedBodyContinuation !== null) {{
       fail("timeline_detail_page.continuation", "more_body for a continued excerpt");
     }}
-    if (
-      previousAddress !== null &&
-      BigInt(value.continuation.address.event_sequence) <= previousAddress
-    ) {{
+    if (previousAddress === null) {{
+      fail("timeline_detail_page.continuation", "absent on an empty page");
+    }}
+    if (BigInt(value.continuation.address.event_sequence) <= previousAddress) {{
       fail("timeline_detail_page.continuation.address", "after the final returned item");
     }}
   }}
