@@ -412,8 +412,8 @@ fn production_router_with_budget(
     // summaries, and operator state, so it belongs here for the same reason the
     // descriptor and timeline reads do: the listener is unauthenticated, and a
     // rebound origin must not reach session data with an attacker's authority.
-    // `/bootstrap` stays outside the gate because it carries only the static
-    // contract description and no session data.
+    // `same_origin_router` additionally gates the whole listener, `/bootstrap`
+    // and the static assets included, so this route layer is the inner of two.
     let session_reads = Router::new()
         .route("/sessions/{session_id}", get(session_descriptor))
         .route(
@@ -430,8 +430,6 @@ fn production_router_with_budget(
     // so they belong here for the same reason the session reads do: the
     // listener is unauthenticated, and a rebound origin must not reach blob
     // content or trigger derivations with an attacker's authority.
-    // `/bootstrap` stays outside the gate because it carries only the static
-    // contract description and no session or blob data.
     let blob_reads = Router::new()
         .route(
             "/blobs/{digest}/descriptor",
@@ -3102,24 +3100,6 @@ mod tests {
         );
         assert_eq!(body["error"]["kind"], "transport");
         assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
-    }
-
-    #[tokio::test]
-    async fn contract_bootstrap_admits_any_host_authority() {
-        // The bootstrap route carries only the static contract description and
-        // no session data, so it stays outside the loopback gate; pinning that
-        // keeps a future widening of the gate from breaking asset-origin
-        // discovery.
-        let request = Request::get("/api/bootstrap")
-            .header(header::HOST, "attacker.example")
-            .body(Body::empty())
-            .expect("the request is valid");
-        let response = production_router(None, None, None, None)
-            .oneshot(request)
-            .await
-            .expect("the production router responds");
-
-        assert_eq!(response.status(), StatusCode::OK);
     }
 
     /// Drives a session read at the loopback gate and reports only the status.

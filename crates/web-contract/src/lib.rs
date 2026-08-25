@@ -1254,6 +1254,12 @@ function assertSchema(root, schema, value, path) {{
     }}
     return;
   }}
+  if (schema.type === "null") {{
+    if (value !== null) {{
+      fail(path, "null");
+    }}
+    return;
+  }}
   if (schema.type === "string") {{
     if (typeof value !== "string") {{
       fail(path, "string");
@@ -1267,8 +1273,11 @@ function assertSchema(root, schema, value, path) {{
     ) {{
       fail(path, "an unsigned 64-bit integer");
     }}
+    if (schema.minLength !== undefined && Array.from(value).length < schema.minLength) {{
+      fail(path, `at least ${{schema.minLength}} Unicode scalar values`);
+    }}
     if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {{
-      fail(path, `a string matching ${{schema.pattern}}`);
+      fail(path, `matching ${{schema.pattern}}`);
     }}
     if (
       (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
@@ -1278,33 +1287,6 @@ function assertSchema(root, schema, value, path) {{
     }}
     if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {{
       fail(path, `at most ${{schema.maxLength}} Unicode scalar values`);
-    }}
-    return;
-  }}
-  if (schema.type === "null") {{
-    if (value !== null) {{
-      fail(path, "null");
-    }}
-    return;
-  }}
-  if (schema.type === "string") {{
-    if (typeof value !== "string") {{
-      fail(path, "string");
-    }}
-    if (schema.minLength !== undefined && value.length < schema.minLength) {{
-      fail(path, `at least ${{schema.minLength}} characters`);
-    }}
-    if (schema.maxLength !== undefined && value.length > schema.maxLength) {{
-      fail(path, `at most ${{schema.maxLength}} characters`);
-    }}
-    if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {{
-      fail(path, `matching ${{schema.pattern}}`);
-    }}
-    if (
-      (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
-      (value.length > 20 || BigInt(value) > 18446744073709551615n)
-    ) {{
-      fail(path, "an unsigned 64-bit integer");
     }}
     return;
   }}
