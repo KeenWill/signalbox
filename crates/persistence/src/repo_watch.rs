@@ -17,8 +17,8 @@ use signalbox_application::{
     RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
     RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
-    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
-    repo_watch_events_have_equal_identified_content,
+    RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWorkflowRunObservation, repo_watch_events_have_equal_identified_content,
 };
 use signalbox_domain::{
     BranchName, CheckRunName, CommitSha, GitHubObjectId, LabelName, PullRequestBody,
@@ -43,12 +43,15 @@ use crate::{
         repo_watch_event_kind_to_str, repo_watch_event_producer_from_str,
         repo_watch_event_producer_to_str, repo_watch_event_target_from_str,
         repo_watch_event_target_to_str, repo_watch_mergeable_state_from_str,
-        repo_watch_mergeable_state_to_str, repo_watch_pull_request_lifecycle_from_str,
-        repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
-        repo_watch_reaction_change_to_str, repo_watch_reaction_subject_kind_from_str,
-        repo_watch_reaction_subject_kind_to_str, repo_watch_reaction_subject_to_storage,
-        repo_watch_review_decision_to_str, repo_watch_review_state_from_str,
-        repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
+        repo_watch_mergeable_state_to_str, repo_watch_observed_review_state_to_str,
+        repo_watch_pull_request_lifecycle_from_str, repo_watch_pull_request_lifecycle_to_str,
+        repo_watch_reaction_change_from_str, repo_watch_reaction_change_to_str,
+        repo_watch_reaction_subject_kind_from_str, repo_watch_reaction_subject_kind_to_str,
+        repo_watch_reaction_subject_to_storage, repo_watch_review_decision_to_str,
+        repo_watch_review_state_from_str, repo_watch_review_state_to_str,
+        repo_watch_stale_review_clearance_outcome_to_str,
+        repo_watch_stale_review_clearance_reason_from_str,
+        repo_watch_stale_review_clearance_reason_to_str, repo_watch_thread_state_from_str,
         repo_watch_thread_state_to_str,
     },
 };
@@ -344,6 +347,7 @@ pub enum RepoWatchStoreError {
     EventBatchTooLarge,
     ConvergenceEvidenceTooLarge,
     ConvergenceEvidenceMismatch,
+    StaleReviewClearanceMismatch,
 }
 
 impl fmt::Display for RepoWatchStoreError {
@@ -392,6 +396,9 @@ impl fmt::Display for RepoWatchStoreError {
             }
             Self::ConvergenceEvidenceMismatch => formatter
                 .write_str("repository-watch convergence evidence names another cursor state"),
+            Self::StaleReviewClearanceMismatch => formatter.write_str(
+                "repository-watch stale review clearance names ineligible or changed evidence",
+            ),
         }
     }
 }
@@ -409,7 +416,8 @@ impl Error for RepoWatchStoreError {
             | Self::CursorGenerationExhausted
             | Self::EventBatchTooLarge
             | Self::ConvergenceEvidenceTooLarge
-            | Self::ConvergenceEvidenceMismatch => None,
+            | Self::ConvergenceEvidenceMismatch
+            | Self::StaleReviewClearanceMismatch => None,
         }
     }
 }
@@ -418,6 +426,174 @@ impl From<sqlx::Error> for RepoWatchStoreError {
     fn from(error: sqlx::Error) -> Self {
         Self::Database(error)
     }
+}
+
+/// One stale-review clearance intent's durable identity.
+///
+/// Distinct from its claim token so the two cannot be transposed at a call
+/// site: they are both UUIDs, and swapping them turns a valid renewal, record,
+/// or release into a silent no-op against a row that does not exist.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RepoWatchStaleReviewClearanceId(Uuid);
+
+impl RepoWatchStaleReviewClearanceId {
+    pub const fn new(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> Uuid {
+        self.0
+    }
+}
+
+/// One clearance claim's ownership token.
+///
+/// Every write that acts on a claimed intent carries this token, so a watcher
+/// whose lease expired and was taken over cannot act on the newer claimant's
+/// intent.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RepoWatchStaleReviewClearanceClaimToken(Uuid);
+
+impl RepoWatchStaleReviewClearanceClaimToken {
+    pub const fn new(value: Uuid) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> Uuid {
+        self.0
+    }
+}
+
+/// Whether a claim renewal still owns its intent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchStaleReviewClearanceRenewal {
+    /// The lease was extended; this watcher still owns the intent.
+    Retained,
+    /// Another watcher has claimed the intent since this lease was taken.
+    Lost,
+}
+
+/// Durable intent created before one stale review dismissal request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchPlannedStaleReviewClearance {
+    clearance_id: RepoWatchStaleReviewClearanceId,
+    claim_token: RepoWatchStaleReviewClearanceClaimToken,
+    number: PullRequestNumber,
+    current_head_sha: CommitSha,
+    base_branch: BranchName,
+    base_revision: CommitSha,
+    review_node_id: Box<str>,
+    reviewer: RepoWatchAuthorLogin,
+    reviewed_head_sha: CommitSha,
+    dismissal_message: Box<str>,
+}
+
+/// Field-labeled construction input for one planned-clearance test fixture.
+///
+/// Production code reaches a planned clearance only through
+/// [`PostgresRepoWatchStore::plan_stale_review_clearances`], which is what
+/// makes the intent durable before any forge mutation. A caller that only
+/// needs the value — the poller's pre-dismissal revalidation, which reads the
+/// planned clearance and never creates one — would otherwise need a database
+/// to test against.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Debug)]
+pub struct RepoWatchPlannedStaleReviewClearanceFixture {
+    pub clearance_id: RepoWatchStaleReviewClearanceId,
+    pub claim_token: RepoWatchStaleReviewClearanceClaimToken,
+    pub number: PullRequestNumber,
+    pub current_head_sha: CommitSha,
+    pub base_branch: BranchName,
+    pub base_revision: CommitSha,
+    pub review_node_id: String,
+    pub reviewer: RepoWatchAuthorLogin,
+    pub reviewed_head_sha: CommitSha,
+    pub dismissal_message: String,
+}
+
+impl RepoWatchPlannedStaleReviewClearance {
+    /// Builds one planned clearance without a store, for tests that exercise
+    /// what happens to an already-planned intent.
+    #[cfg(feature = "test-support")]
+    pub fn from_fixture(fixture: RepoWatchPlannedStaleReviewClearanceFixture) -> Self {
+        Self {
+            clearance_id: fixture.clearance_id,
+            claim_token: fixture.claim_token,
+            number: fixture.number,
+            current_head_sha: fixture.current_head_sha,
+            base_branch: fixture.base_branch,
+            base_revision: fixture.base_revision,
+            review_node_id: fixture.review_node_id.into_boxed_str(),
+            reviewer: fixture.reviewer,
+            reviewed_head_sha: fixture.reviewed_head_sha,
+            dismissal_message: fixture.dismissal_message.into_boxed_str(),
+        }
+    }
+
+    pub const fn clearance_id(&self) -> RepoWatchStaleReviewClearanceId {
+        self.clearance_id
+    }
+
+    pub const fn claim_token(&self) -> RepoWatchStaleReviewClearanceClaimToken {
+        self.claim_token
+    }
+
+    pub const fn number(&self) -> PullRequestNumber {
+        self.number
+    }
+
+    pub const fn current_head_sha(&self) -> &CommitSha {
+        &self.current_head_sha
+    }
+
+    pub const fn base_branch(&self) -> &BranchName {
+        &self.base_branch
+    }
+
+    pub const fn base_revision(&self) -> &CommitSha {
+        &self.base_revision
+    }
+
+    pub const fn review_node_id(&self) -> &str {
+        &self.review_node_id
+    }
+
+    pub const fn reviewer(&self) -> &RepoWatchAuthorLogin {
+        &self.reviewer
+    }
+
+    pub const fn reviewed_head_sha(&self) -> &CommitSha {
+        &self.reviewed_head_sha
+    }
+
+    pub const fn dismissal_message(&self) -> &str {
+        &self.dismissal_message
+    }
+}
+
+/// Terminal observation for one durable stale-review clearance intent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchStaleReviewClearanceOutcome {
+    Dismissed,
+    AlreadyDismissed,
+    ClearedElsewhere,
+    Superseded,
+}
+
+/// Closed durable reason for planning one stale-review clearance.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchStaleReviewClearanceReason {
+    OnlyStaleReviewBlocks,
+}
+
+/// Provider state observed while settling a clearance intent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchObservedReviewState {
+    Approved,
+    ChangesRequested,
+    Commented,
+    Dismissed,
+    Pending,
 }
 
 impl From<RepoWatchPersistenceCorruption> for RepoWatchStoreError {
@@ -668,19 +844,19 @@ impl PostgresRepoWatchStore {
             let unchanged_assessment_id: Option<Uuid> = sqlx::query_scalar(
                 "SELECT current.assessment_id
                       FROM (
-                            SELECT assessment_id, base_branch, base_revision, mergeable_state,
-                                   settled, review_decision, unresolved_threads,
+                            SELECT assessment_id, head_sha, base_branch, base_revision,
+                                   mergeable_state, settled, review_decision, unresolved_threads,
                                    gating_check_count, non_green_gating_checks,
                                    verdict_kind
                               FROM repo_watch_pull_request_convergence_assessment
                              WHERE repository = $1
                                AND pull_request_number = $2
-                               AND head_sha = $3
-                               AND base_revision = $4
                              ORDER BY recorded_at DESC, assessment_id DESC
                              LIMIT 1
                            ) AS current
-                     WHERE current.base_branch = $5
+                     WHERE current.head_sha = $3
+                       AND current.base_revision = $4
+                       AND current.base_branch = $5
                        AND current.mergeable_state = $6
                        AND current.settled = $7
                        AND current.review_decision = $8
@@ -776,6 +952,381 @@ impl PostgresRepoWatchStore {
         Ok(())
     }
 
+    /// Durably records eligible exact-head dismissal intents before any forge
+    /// mutation. Existing equal intents are replayed with their original ID.
+    pub async fn plan_stale_review_clearances(
+        &self,
+        repository: &RepositorySlug,
+        cursor_generation: RepoWatchCursorGeneration,
+        candidates: &[RepoWatchStaleReviewClearanceCandidate],
+    ) -> Result<Vec<RepoWatchPlannedStaleReviewClearance>, RepoWatchStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(repository.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        let cursor = load_cursor_in_transaction(&mut transaction, repository)
+            .await?
+            .ok_or(RepoWatchStoreError::StaleReviewClearanceMismatch)?;
+        if cursor.generation() != cursor_generation {
+            transaction.rollback().await?;
+            return Err(RepoWatchStoreError::StaleReviewClearanceMismatch);
+        }
+        let mut review_ids = HashSet::with_capacity(candidates.len());
+        let mut planned = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            if !review_ids.insert(candidate.review_node_id()) {
+                transaction.rollback().await?;
+                return Err(RepoWatchStoreError::StaleReviewClearanceMismatch);
+            }
+            let assessment = sqlx::query_as::<_, ClearanceAssessmentRow>(
+                // An empty non-green list is evidence of a green head only when
+                // the head has a gating check to be green about, so this query
+                // requires a positive gating-check count exactly as the
+                // in-memory candidate rule does. Without it the durable gate
+                // would admit a head whose sole blocker is the review because
+                // it has no other gate at all.
+                //
+                // Settlement and mergeability are required here for the same
+                // reason, and against the row rather than against the writer:
+                // the assessment this reads is whichever watcher recorded it
+                // last, so a newer assessment appended for the unchanged cursor
+                // while this watcher reconciled must be proven to carry the
+                // clearance predicate itself. An unsettled head's empty
+                // non-green list is the absence of evidence, and `unknown`
+                // mergeability is GitHub still computing rather than affirmative
+                // evidence; either would link a dismissal intent claiming
+                // `only_stale_review_blocks` to an assessment recording another
+                // blocker. The daemon records settlement only for a decided
+                // mergeability, so admitting `mergeable` alone refuses no intent
+                // the in-memory rule admits.
+                "SELECT assessment_id, base_branch, base_revision
+                   FROM (
+                         SELECT assessment_id, head_sha, base_branch, base_revision, review_decision,
+                                unresolved_threads, non_green_gating_checks,
+                                mergeable_state, settled, verdict_kind, gating_check_count
+                           FROM repo_watch_pull_request_convergence_assessment
+                          WHERE repository = $1
+                            AND pull_request_number = $2
+                          ORDER BY recorded_at DESC, assessment_id DESC
+                          LIMIT 1
+                        ) AS current
+                  WHERE current.head_sha = $3
+                    AND current.review_decision = 'changes_requested'
+                    AND cardinality(current.unresolved_threads) = 0
+                    AND cardinality(current.non_green_gating_checks) = 0
+                    AND current.gating_check_count > 0
+                    AND current.settled
+                    AND current.mergeable_state = 'mergeable'
+                    AND current.verdict_kind = 'not_converged'",
+            )
+            .bind(repository.as_str())
+            .bind(Decimal::from(candidate.number().get()))
+            .bind(candidate.current_head_sha().as_str())
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RepoWatchStoreError::StaleReviewClearanceMismatch)?;
+            let dismissal_message = stale_review_dismissal_message(candidate);
+            let clearance_id = Uuid::now_v7();
+            sqlx::query(
+                "INSERT INTO repo_watch_stale_review_clearance
+                    (clearance_id, assessment_id, repository,
+                     pull_request_number, current_head_sha, base_revision, review_node_id,
+                     reviewer, reviewed_head_sha, dismissal_message, reason_kind)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                 ON CONFLICT (assessment_id, review_node_id) DO NOTHING",
+            )
+            .bind(clearance_id)
+            .bind(assessment.assessment_id)
+            .bind(repository.as_str())
+            .bind(Decimal::from(candidate.number().get()))
+            .bind(candidate.current_head_sha().as_str())
+            .bind(&assessment.base_revision)
+            .bind(candidate.review_node_id())
+            .bind(candidate.reviewer().as_str())
+            .bind(candidate.reviewed_head_sha().as_str())
+            .bind(&dismissal_message)
+            .bind(repo_watch_stale_review_clearance_reason_to_str(
+                RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks,
+            ))
+            .execute(&mut *transaction)
+            .await?;
+            let stored = sqlx::query_as::<_, PlannedClearanceRow>(
+                "SELECT clearance.clearance_id,
+                        clearance.dismissal_message,
+                        clearance.reviewer,
+                        clearance.reviewed_head_sha,
+                        CASE WHEN result.clearance_id IS NULL
+                             THEN 'pending' ELSE 'completed'
+                        END AS completion_state
+                   FROM repo_watch_stale_review_clearance AS clearance
+                   LEFT JOIN repo_watch_stale_review_clearance_result AS result
+                     ON result.clearance_id = clearance.clearance_id
+                  WHERE clearance.assessment_id = $1
+                    AND clearance.review_node_id = $2
+                    AND clearance.repository = $3
+                    AND clearance.pull_request_number = $4
+                    AND clearance.current_head_sha = $5
+                    AND clearance.base_revision = $6",
+            )
+            .bind(assessment.assessment_id)
+            .bind(candidate.review_node_id())
+            .bind(repository.as_str())
+            .bind(Decimal::from(candidate.number().get()))
+            .bind(candidate.current_head_sha().as_str())
+            .bind(&assessment.base_revision)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(RepoWatchStoreError::StaleReviewClearanceMismatch)?;
+            if stored.completion_state == ClearanceCompletionState::Completed {
+                continue;
+            }
+            let claim_token = Uuid::now_v7();
+            let claimed = sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO repo_watch_stale_review_clearance_claim
+                    (clearance_id, claim_token, claimed_until)
+                 VALUES ($1, $2, clock_timestamp() + interval '2 minutes')
+                 ON CONFLICT (clearance_id) DO UPDATE
+                     SET claim_token = EXCLUDED.claim_token,
+                         claimed_until = EXCLUDED.claimed_until
+                   WHERE repo_watch_stale_review_clearance_claim.claimed_until
+                         <= clock_timestamp()
+                 RETURNING claim_token",
+            )
+            .bind(stored.clearance_id)
+            .bind(claim_token)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let Some(claim_token) = claimed else {
+                continue;
+            };
+            planned.push(RepoWatchPlannedStaleReviewClearance {
+                clearance_id: RepoWatchStaleReviewClearanceId::new(stored.clearance_id),
+                claim_token: RepoWatchStaleReviewClearanceClaimToken::new(claim_token),
+                number: candidate.number(),
+                current_head_sha: candidate.current_head_sha().clone(),
+                base_branch: BranchName::try_new(assessment.base_branch.clone())
+                    .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?,
+                base_revision: CommitSha::try_new(assessment.base_revision.clone())
+                    .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?,
+                review_node_id: candidate.review_node_id().into(),
+                reviewer: RepoWatchAuthorLogin::try_new(stored.reviewer)
+                    .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?,
+                reviewed_head_sha: CommitSha::try_new(stored.reviewed_head_sha)
+                    .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?,
+                dismissal_message: stored.dismissal_message.into_boxed_str(),
+            });
+        }
+        transaction.commit().await?;
+        Ok(planned)
+    }
+
+    /// Claims one bounded rotating page of intents lacking a terminal result.
+    pub async fn claim_pending_stale_review_clearances(
+        &self,
+        repository: &RepositorySlug,
+    ) -> Result<Vec<RepoWatchPlannedStaleReviewClearance>, RepoWatchStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(repository.as_str())
+            .execute(&mut *transaction)
+            .await?;
+        let after = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT after_clearance_id
+               FROM repo_watch_stale_review_clearance_recovery_cursor
+              WHERE repository = $1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?
+        .flatten();
+        let mut rows = sqlx::query_as::<_, PendingClearanceRow>(
+            "SELECT clearance.clearance_id,
+                    clearance.pull_request_number,
+                    clearance.current_head_sha,
+                    assessment.base_branch,
+                    clearance.base_revision,
+                    clearance.review_node_id,
+                    clearance.reviewer,
+                    clearance.reviewed_head_sha,
+                    clearance.dismissal_message,
+                    clearance.reason_kind
+               FROM repo_watch_stale_review_clearance AS clearance
+               JOIN repo_watch_pull_request_convergence_assessment AS assessment
+                 ON assessment.assessment_id = clearance.assessment_id
+               LEFT JOIN repo_watch_stale_review_clearance_result AS result
+                 ON result.clearance_id = clearance.clearance_id
+               LEFT JOIN repo_watch_stale_review_clearance_claim AS claim
+                 ON claim.clearance_id = clearance.clearance_id
+              WHERE clearance.repository = $1
+                AND result.clearance_id IS NULL
+                AND ($2::uuid IS NULL OR clearance.clearance_id > $2)
+                AND (claim.clearance_id IS NULL
+                     OR claim.claimed_until <= clock_timestamp())
+              ORDER BY clearance.clearance_id
+              LIMIT 128",
+        )
+        .bind(repository.as_str())
+        .bind(after)
+        .fetch_all(&mut *transaction)
+        .await?;
+        if rows.is_empty() && after.is_some() {
+            rows = sqlx::query_as::<_, PendingClearanceRow>(
+                "SELECT clearance.clearance_id,
+                        clearance.pull_request_number,
+                        clearance.current_head_sha,
+                        assessment.base_branch,
+                        clearance.base_revision,
+                        clearance.review_node_id,
+                        clearance.reviewer,
+                        clearance.reviewed_head_sha,
+                        clearance.dismissal_message,
+                        clearance.reason_kind
+                   FROM repo_watch_stale_review_clearance AS clearance
+                   JOIN repo_watch_pull_request_convergence_assessment AS assessment
+                     ON assessment.assessment_id = clearance.assessment_id
+                   LEFT JOIN repo_watch_stale_review_clearance_result AS result
+                     ON result.clearance_id = clearance.clearance_id
+                   LEFT JOIN repo_watch_stale_review_clearance_claim AS claim
+                     ON claim.clearance_id = clearance.clearance_id
+                  WHERE clearance.repository = $1
+                    AND result.clearance_id IS NULL
+                    AND (claim.clearance_id IS NULL
+                         OR claim.claimed_until <= clock_timestamp())
+                  ORDER BY clearance.clearance_id
+                  LIMIT 128",
+            )
+            .bind(repository.as_str())
+            .fetch_all(&mut *transaction)
+            .await?;
+        }
+        let mut claimed = Vec::with_capacity(rows.len());
+        for row in rows {
+            let claim_token = Uuid::now_v7();
+            let acquired = sqlx::query_scalar::<_, Uuid>(
+                "INSERT INTO repo_watch_stale_review_clearance_claim
+                    (clearance_id, claim_token, claimed_until)
+                 VALUES ($1, $2, clock_timestamp() + interval '2 minutes')
+                 ON CONFLICT (clearance_id) DO UPDATE
+                     SET claim_token = EXCLUDED.claim_token,
+                         claimed_until = EXCLUDED.claimed_until
+                   WHERE repo_watch_stale_review_clearance_claim.claimed_until
+                         <= clock_timestamp()
+                 RETURNING claim_token",
+            )
+            .bind(row.clearance_id)
+            .bind(claim_token)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            if let Some(claim_token) = acquired {
+                claimed.push(decode_pending_clearance(
+                    row,
+                    RepoWatchStaleReviewClearanceClaimToken::new(claim_token),
+                )?);
+            }
+        }
+        let next_after = claimed
+            .last()
+            .map(RepoWatchPlannedStaleReviewClearance::clearance_id);
+        sqlx::query(
+            "INSERT INTO repo_watch_stale_review_clearance_recovery_cursor
+                (repository, after_clearance_id)
+             VALUES ($1, $2)
+             ON CONFLICT (repository) DO UPDATE
+                 SET after_clearance_id = EXCLUDED.after_clearance_id",
+        )
+        .bind(repository.as_str())
+        .bind(next_after.map(RepoWatchStaleReviewClearanceId::get))
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(claimed)
+    }
+
+    /// Renews the exact ownership token immediately before provider delivery.
+    pub async fn renew_stale_review_clearance_claim(
+        &self,
+        clearance_id: RepoWatchStaleReviewClearanceId,
+        claim_token: RepoWatchStaleReviewClearanceClaimToken,
+    ) -> Result<RepoWatchStaleReviewClearanceRenewal, RepoWatchStoreError> {
+        let renewed = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE repo_watch_stale_review_clearance_claim
+                SET claimed_until = clock_timestamp() + interval '2 minutes'
+              WHERE clearance_id = $1
+                AND claim_token = $2
+              RETURNING clearance_id",
+        )
+        .bind(clearance_id.get())
+        .bind(claim_token.get())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(match renewed {
+            Some(_) => RepoWatchStaleReviewClearanceRenewal::Retained,
+            None => RepoWatchStaleReviewClearanceRenewal::Lost,
+        })
+    }
+
+    /// Appends the first terminal provider observation for one clearance.
+    pub async fn record_stale_review_clearance_outcome(
+        &self,
+        clearance_id: RepoWatchStaleReviewClearanceId,
+        claim_token: RepoWatchStaleReviewClearanceClaimToken,
+        outcome: RepoWatchStaleReviewClearanceOutcome,
+        provider_state: RepoWatchObservedReviewState,
+    ) -> Result<(), RepoWatchStoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let recorded = sqlx::query(
+            "INSERT INTO repo_watch_stale_review_clearance_result
+                (clearance_id, outcome_kind, provider_review_state)
+             SELECT $1,$3,$4
+               FROM repo_watch_stale_review_clearance_claim
+              WHERE clearance_id = $1
+                AND claim_token = $2
+             ON CONFLICT (clearance_id) DO NOTHING",
+        )
+        .bind(clearance_id.get())
+        .bind(claim_token.get())
+        .bind(repo_watch_stale_review_clearance_outcome_to_str(outcome))
+        .bind(repo_watch_observed_review_state_to_str(provider_state))
+        .execute(&mut *transaction)
+        .await?;
+        if recorded.rows_affected() != 1 {
+            transaction.rollback().await?;
+            return Err(RepoWatchStoreError::StaleReviewClearanceMismatch);
+        }
+        sqlx::query(
+            "DELETE FROM repo_watch_stale_review_clearance_claim
+              WHERE clearance_id = $1
+                AND claim_token = $2",
+        )
+        .bind(clearance_id.get())
+        .bind(claim_token.get())
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Releases a reconciliation claim after the provider still reports the
+    /// review as blocking, allowing a current poll to revalidate and claim the
+    /// same intent for retry.
+    pub async fn release_stale_review_clearance_claim(
+        &self,
+        clearance_id: RepoWatchStaleReviewClearanceId,
+        claim_token: RepoWatchStaleReviewClearanceClaimToken,
+    ) -> Result<(), RepoWatchStoreError> {
+        sqlx::query(
+            "DELETE FROM repo_watch_stale_review_clearance_claim
+              WHERE clearance_id = $1
+                AND claim_token = $2",
+        )
+        .bind(clearance_id.get())
+        .bind(claim_token.get())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn load_event_page(
         &self,
         repository: &RepositorySlug,
@@ -824,6 +1375,96 @@ impl PostgresRepoWatchStore {
 struct CursorRow {
     generation: i64,
     cursor_payload: Json<Value>,
+}
+
+#[derive(sqlx::FromRow)]
+struct PlannedClearanceRow {
+    clearance_id: Uuid,
+    dismissal_message: String,
+    reviewer: String,
+    reviewed_head_sha: String,
+    completion_state: ClearanceCompletionState,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, sqlx::Type)]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+enum ClearanceCompletionState {
+    Pending,
+    Completed,
+}
+
+#[derive(sqlx::FromRow)]
+struct ClearanceAssessmentRow {
+    assessment_id: Uuid,
+    base_branch: String,
+    base_revision: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct PendingClearanceRow {
+    clearance_id: Uuid,
+    pull_request_number: Decimal,
+    current_head_sha: String,
+    base_branch: String,
+    base_revision: String,
+    review_node_id: String,
+    reviewer: String,
+    reviewed_head_sha: String,
+    dismissal_message: String,
+    reason_kind: String,
+}
+
+fn decode_pending_clearance(
+    row: PendingClearanceRow,
+    claim_token: RepoWatchStaleReviewClearanceClaimToken,
+) -> Result<RepoWatchPlannedStaleReviewClearance, RepoWatchStoreError> {
+    repo_watch_stale_review_clearance_reason_from_str(&row.reason_kind)
+        .ok_or(RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
+    let number = positive_u64_from_numeric(row.pull_request_number)
+        .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
+    let number = pull_request_number(number, "stale review pull request")?;
+    let current_head_sha = CommitSha::try_new(row.current_head_sha)
+        .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
+    let base_branch = BranchName::try_new(row.base_branch)
+        .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
+    let base_revision = CommitSha::try_new(row.base_revision)
+        .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
+    if !RepoWatchStaleReviewClearanceCandidate::review_node_id_is_valid(&row.review_node_id)
+        || row.dismissal_message.is_empty()
+        || row.dismissal_message.len() > 1024
+        || row.dismissal_message.contains('\0')
+    {
+        return Err(RepoWatchPersistenceCorruption::InvalidStoredDomainValue.into());
+    }
+    let reviewer = RepoWatchAuthorLogin::try_new(row.reviewer)
+        .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
+    let reviewed_head_sha = CommitSha::try_new(row.reviewed_head_sha)
+        .map_err(|_| RepoWatchPersistenceCorruption::InvalidStoredDomainValue)?;
+    if current_head_sha == reviewed_head_sha {
+        return Err(RepoWatchPersistenceCorruption::InvalidStoredDomainValue.into());
+    }
+    Ok(RepoWatchPlannedStaleReviewClearance {
+        clearance_id: RepoWatchStaleReviewClearanceId::new(row.clearance_id),
+        claim_token,
+        number,
+        current_head_sha,
+        base_branch,
+        base_revision,
+        review_node_id: row.review_node_id.into_boxed_str(),
+        reviewer,
+        reviewed_head_sha,
+        dismissal_message: row.dismissal_message.into_boxed_str(),
+    })
+}
+
+fn stale_review_dismissal_message(candidate: &RepoWatchStaleReviewClearanceCandidate) -> String {
+    format!(
+        "Repository watch dismissed stale review {} by {}: every review thread is resolved and every other convergence gate is green on current head {}; the review targeted superseded head {}.",
+        candidate.review_node_id(),
+        candidate.reviewer().as_str(),
+        candidate.current_head_sha().as_str(),
+        candidate.reviewed_head_sha().as_str(),
+    )
 }
 
 async fn load_cursor_in_transaction(

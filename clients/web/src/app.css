@@ -245,6 +245,15 @@ kbd {
 .contract-state.failed::before {
   background: var(--danger);
 }
+.bootstrap-retry {
+  padding: 0.28rem 0.48rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--surface-1);
+  color: var(--text);
+  font-size: 0.62rem;
+  cursor: pointer;
+}
 .surface-body {
   min-height: 0;
   overflow: auto;
@@ -474,8 +483,11 @@ kbd {
   font-size: 0.62rem;
 }
 .product-inspector dd {
+  min-width: 0;
   margin: 0;
+  overflow-wrap: anywhere;
   font-family: ui-monospace, monospace;
+  text-align: right;
 }
 .mobile-navigation {
   position: fixed;
@@ -483,6 +495,12 @@ kbd {
   inset: 0 auto 0 0;
   width: min(310px, 86vw);
   background: var(--surface-1);
+}
+.mobile-navigation-close {
+  position: absolute;
+  z-index: 1;
+  top: 0.65rem;
+  right: 0.55rem;
 }
 
 @media (max-width: 1259px) {
@@ -1070,12 +1088,15 @@ kbd {
   display: grid;
   padding: 0.4rem;
 }
-.command-list button {
+.command-list button,
+.command-list > div {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
   padding: 0.55rem 0.65rem;
+}
+.command-list button {
   border: 0;
   border-radius: 3px;
   background: transparent;
@@ -1086,7 +1107,8 @@ kbd {
 .command-list button:focus-visible {
   background: var(--surface-3);
 }
-.command-list button span {
+.command-list button span,
+.command-list > div span {
   display: grid;
   gap: 0.15rem;
 }
@@ -1201,4 +1223,221 @@ kbd {
 
 .layout-focus .navigation-pane {
   display: none;
+}
+
+.session-workspace-surface {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+.session-open-form {
+  display: grid;
+  grid-template-columns: minmax(260px, 520px) auto;
+  align-items: end;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.session-open-form label {
+  display: grid;
+  gap: 5px;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.session-open-form input {
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+}
+.session-open-form button,
+.session-window-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--surface-3);
+  color: var(--text);
+  font-weight: 700;
+}
+.session-open-form button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.availability-tag.ready {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 42%, var(--border));
+}
+.session-entry {
+  min-height: 190px;
+}
+.session-load-state {
+  padding: 28px;
+  border: 1px dashed var(--border-strong);
+  color: var(--text-muted);
+}
+.session-workspace {
+  display: grid;
+  min-height: 0;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.session-workspace-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.session-workspace-header h2 {
+  margin: 3px 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.82rem;
+}
+.session-workspace-header p {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+}
+.session-telemetry {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(68px, 1fr));
+  gap: 1px;
+  margin: 0;
+  border: 1px solid var(--border);
+  background: var(--border);
+}
+.session-telemetry div {
+  min-width: 0;
+  padding: 7px 9px;
+  background: var(--surface-1);
+}
+.session-telemetry dt,
+.session-item-detail dt {
+  color: var(--text-muted);
+  font-size: 0.56rem;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.session-telemetry dd,
+.session-item-detail dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+.session-window-controls {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-1);
+}
+.session-window-controls button svg {
+  width: 14px;
+}
+.session-window-controls kbd,
+.session-window-controls > span {
+  color: var(--text-muted);
+}
+.session-window-controls > span {
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.62rem;
+}
+.session-timeline {
+  display: grid;
+  gap: 1px;
+  max-height: min(58vh, 720px);
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+  background: var(--border);
+  list-style: none;
+}
+.session-timeline [role="option"] {
+  background: var(--surface-2);
+  box-shadow: inset 2px 0 transparent;
+}
+.session-timeline [role="option"].selected {
+  background: var(--accent-muted);
+  box-shadow: inset 2px 0 var(--accent);
+}
+.session-item-summary {
+  display: grid;
+  grid-template-columns: 16px 20ch minmax(160px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+}
+.session-item-summary svg {
+  width: 14px;
+  color: var(--text-muted);
+}
+.session-address,
+.session-item-summary small {
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.62rem;
+}
+.session-item-summary strong {
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.session-timeline.presentation-condensed .session-item-summary small {
+  display: none;
+}
+.session-item-detail {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) 1fr;
+  gap: 18px;
+  margin: 0;
+  padding: 2px 34px 10px calc(10px + 16px + 8px + 20ch + 8px);
+}
+
+@media (max-width: 760px) {
+  .session-open-form,
+  .session-workspace-header {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .session-telemetry {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .session-window-controls {
+    flex-wrap: wrap;
+  }
+  .session-window-controls > span {
+    flex-basis: 100%;
+    margin: 2px 0 0;
+  }
+  .session-item-summary {
+    grid-template-columns: 16px 20ch minmax(100px, 1fr);
+  }
+  .session-item-summary small {
+    display: none;
+  }
+  .session-item-detail {
+    grid-template-columns: 1fr;
+    padding-left: calc(10px + 16px + 8px + 20ch + 8px);
+  }
 }

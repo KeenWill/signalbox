@@ -31,24 +31,26 @@ use signalbox_application::{
     ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallInputTokenCount,
     ModelCallInputTokenCounter, NoToolCatalog, OperatorFailureClass, PreparedModelOperation,
     ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
-    SchedulerLoop, SchedulerLoopExit, ScriptedModelCallProvider, ScriptedModelCallStep,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
-    UuidV7ModelCallExecutionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
+    RepoWatchConvergenceVerdict, RepoWatchReviewDecision, SchedulerLoop, SchedulerLoopExit,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
+    StartEligibleTurnService, StartupScanService, UuidV7ModelCallExecutionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, BlobDigest, ContextCompactionId,
-    ContextCompactionTokenUsage, ContextFrontierId, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, ImportedConversationFormat, ImportedConversationId,
-    ImportedSessionRelationship, ImportedTranscriptEntryId, InitialToolApproval, ModelCallId,
+    ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, BlobDigest, BranchName,
+    CheckRunName, CommitSha, ContextCompactionId, ContextCompactionTokenUsage, ContextFrontierId,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities,
+    ImportedConversationFormat, ImportedConversationId, ImportedSessionRelationship,
+    ImportedTranscriptEntryId, InitialToolApproval, MergeableState, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments, ProviderModelIdentity,
-    ReplaceSessionMetadataResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionMetadataContent, ToolCallProposal, ToolName, ToolRequestId, ToolResponsePartIdentity,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
+    PullRequestNumber, ReplaceSessionMetadataResult, RepoWatchAuthorLogin, RepositorySlug,
+    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent, ToolCallProposal,
+    ToolName, ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TurnId,
 };
 use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeModelCallProvider};
 use signalbox_model_runtime::{
@@ -74,7 +76,10 @@ use signalbox_persistence::{
     session_metadata::SessionMetadataRepository,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
-    test_support::{FleetSoakCensus, FleetSoakCensusRepository},
+    test_support::{
+        FleetSoakCensus, FleetSoakCensusRepository, OperatorStatusConvergenceFixture,
+        OperatorStatusFixtureRepository, OperatorStatusStaleReviewClearanceFixture,
+    },
 };
 use signalbox_process_protocol::{
     BlobChunk, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame,
@@ -84,17 +89,20 @@ use signalbox_process_protocol::{
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
     ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
     MetadataActor, ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
-    ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel,
-    RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
-    ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
-    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
-    ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
-    ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
-    ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
-    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
-    SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
-    TranscriptTextEntry, TurnState, decode_server_line, encode_client_line,
+    ModelSettingsPrecedence, ModelSettingsSnapshot, OperatorStatusConvergenceVerdict,
+    OperatorStatusEndMessage, OperatorStatusMergeableState, OperatorStatusMessage,
+    OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
+    OperatorStatusReviewDecision, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
+    ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
+    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
+    ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
+    ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts,
+    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassTerminalOutcome,
+    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
+    ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame,
+    ServerMessage, SessionEvent, SessionMetadata, SessionPlacement, SettingOverlay,
+    SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry,
+    TurnState, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
@@ -2213,14 +2221,17 @@ async fn execute_streamed_turn_until(
         RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
             .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                runtime.pool.clone(),
-                model_configuration.target_catalog(),
-                ModelCallCredentialReference::new("streaming-fixture"),
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    runtime.pool.clone(),
+                    model_configuration.target_catalog(),
+                    ModelCallCredentialReference::new("streaming-fixture"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2260,14 +2271,17 @@ async fn execute_recorded_turn(
         RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
             .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                runtime.pool.clone(),
-                model_configuration.target_catalog(),
-                ModelCallCredentialReference::new("recording-fixture"),
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    runtime.pool.clone(),
+                    model_configuration.target_catalog(),
+                    ModelCallCredentialReference::new("recording-fixture"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2341,10 +2355,13 @@ async fn execute_guarded_turn(
     .with_session_credentials(model_configuration.credential_family_catalog());
     let guarded_repository = repository.clone();
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            repository,
-            InProcessAttemptDispatchGate::default(),
-            provider,
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository,
+                InProcessAttemptDispatchGate::default(),
+                provider,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -2360,7 +2377,12 @@ async fn execute_guarded_turn(
         model_configuration,
         compaction_model,
         execution,
-    );
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
     let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
     let observation_pool = runtime.pool.clone();
     let session = SessionId::from_uuid(session_id.into_uuid());
@@ -2599,15 +2621,19 @@ fn start_fleet_scheduler(
     let configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
     let provider = RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog())
         .with_text_delta_sink(runtime.provider_text_delta_sink());
-    let (execution, fatal) = FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-        PostgresModelCallRepository::new(
-            runtime.pool.clone(),
-            configuration.target_catalog(),
-            ModelCallCredentialReference::new("fleet-soak-fixture"),
-        ),
-        InProcessAttemptDispatchGate::default(),
-        provider,
-    ));
+    let (execution, fatal) =
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    runtime.pool.clone(),
+                    configuration.target_catalog(),
+                    ModelCallCredentialReference::new("fleet-soak-fixture"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
+        ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
             UuidV7StartEligibleTurnIdGenerator,
@@ -3317,10 +3343,15 @@ async fn activate_turn(pool: &PgPool, session: SessionId) -> Result<(), Box<dyn 
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),
     );
-    assert!(matches!(
-        service.execute(session).await?,
-        StartEligibleTurnOutcome::Activated(_)
-    ));
+    let StartEligibleTurnOutcome::Activated(activated) = service.execute(session).await? else {
+        return Err(io::Error::other("the fixture turn must activate").into());
+    };
+    let recorded = signalboxd::WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new())
+        .prepare(session, activated.turn())
+        .await?;
+    if !recorded {
+        return Err(io::Error::other("the fixture instruction manifest must record").into());
+    }
     Ok(())
 }
 
@@ -3924,6 +3955,137 @@ async fn process_runtime_lists_the_alias_session_projection() -> Result<(), Box<
         &ServerMessage::SessionsEnd {
             session_count: CanonicalU64::new(1),
         }
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn process_runtime_reads_an_empty_operator_status_snapshot() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+
+    connection
+        .request(1, ClientRequest::ReadOperatorStatus {})
+        .await?;
+
+    let start = response_within(&mut connection).await?;
+    assert_eq!(
+        start.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::Start {}))
+    );
+    let end = response_within(&mut connection).await?;
+    assert_eq!(
+        end.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
+            OperatorStatusEndMessage {
+                held_slot_count: CanonicalU64::new(0),
+                queued_obligation_count: CanonicalU64::new(0),
+                pull_request_convergence_count: CanonicalU64::new(0),
+                pending_stale_review_clearance_count: CanonicalU64::new(0),
+            },
+        ))))
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(), Box<dyn Error>> {
+    let runtime = RunningRuntime::start().await?;
+    let repository = RepositorySlug::try_new(String::from("example/repo"))?;
+    let gating_check = CheckRunName::try_new(String::from("ci"))?;
+    let clearance_fixture = OperatorStatusStaleReviewClearanceFixture {
+        review_node_id: String::from("PRR_node"),
+        reviewer: RepoWatchAuthorLogin::try_new(String::from("reviewer"))?,
+        reviewed_head_sha: CommitSha::try_new(String::from(
+            "3333333333333333333333333333333333333333",
+        ))?,
+        dismissal_message: String::from("Superseded by the current head."),
+    };
+    let convergence_fixture = OperatorStatusConvergenceFixture {
+        number: PullRequestNumber::new(41.try_into()?),
+        head_sha: CommitSha::try_new(String::from("1111111111111111111111111111111111111111"))?,
+        base_branch: BranchName::try_new(String::from("main"))?,
+        base_revision: CommitSha::try_new(String::from(
+            "2222222222222222222222222222222222222222",
+        ))?,
+        mergeable_state: MergeableState::Mergeable,
+        settled: true,
+        review_decision: RepoWatchReviewDecision::ChangesRequested,
+        unresolved_threads: Vec::new(),
+        gating_check_count: 1,
+        non_green_gating_checks: vec![gating_check.clone()],
+        verdict: RepoWatchConvergenceVerdict::NotConverged,
+        stale_review_clearance: Some(clearance_fixture.clone()),
+    };
+    OperatorStatusFixtureRepository::new(runtime.pool.clone())
+        .seed_pull_request_convergences(&repository, std::slice::from_ref(&convergence_fixture))
+        .await?;
+
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request(1, ClientRequest::ReadOperatorStatus {})
+        .await?;
+
+    let start = response_within(&mut connection).await?;
+    assert_eq!(
+        start.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::Start {}))
+    );
+    let convergence = response_within(&mut connection).await?;
+    assert_eq!(
+        convergence.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+            Box::new(OperatorStatusPullRequestConvergenceMessage {
+                repository: repository.as_str().to_owned(),
+                pull_request_number: CanonicalU64::new(convergence_fixture.number.get()),
+                head_sha: convergence_fixture.head_sha.as_str().to_owned(),
+                base_branch: convergence_fixture.base_branch.as_str().to_owned(),
+                base_revision: convergence_fixture.base_revision.as_str().to_owned(),
+                mergeable_state: OperatorStatusMergeableState::Mergeable,
+                review_decision: OperatorStatusReviewDecision::ChangesRequested,
+                unresolved_thread_count: CanonicalU64::new(0),
+                gating_check_count: CanonicalU64::new(convergence_fixture.gating_check_count),
+                non_green_gating_checks: vec![gating_check.as_str().to_owned()],
+                verdict: OperatorStatusConvergenceVerdict::NotConverged,
+                seal: None,
+                assessed_seconds_ago: CanonicalU64::new(0),
+            },)
+        ),))
+    );
+    let clearance = response_within(&mut connection).await?;
+    assert_eq!(
+        clearance.message(),
+        &ServerMessage::OperatorStatus(Box::new(
+            OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
+                OperatorStatusPendingStaleReviewClearanceMessage {
+                    repository: repository.as_str().to_owned(),
+                    pull_request_number: CanonicalU64::new(convergence_fixture.number.get()),
+                    current_head_sha: convergence_fixture.head_sha.as_str().to_owned(),
+                    review_node_id: clearance_fixture.review_node_id.clone(),
+                    reviewer: clearance_fixture.reviewer.as_str().to_owned(),
+                    reviewed_head_sha: clearance_fixture.reviewed_head_sha.as_str().to_owned(),
+                    pending_for_seconds: CanonicalU64::new(0),
+                },
+            )),
+        ))
+    );
+    let end = response_within(&mut connection).await?;
+    assert_eq!(
+        end.message(),
+        &ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
+            OperatorStatusEndMessage {
+                held_slot_count: CanonicalU64::new(0),
+                queued_obligation_count: CanonicalU64::new(0),
+                pull_request_convergence_count: CanonicalU64::new(1),
+                pending_stale_review_clearance_count: CanonicalU64::new(1),
+            },
+        ))))
     );
 
     drop(connection);
@@ -5094,13 +5256,7 @@ async fn park_turn_on_ambiguous_model_call(
     session_id: CanonicalUuid,
 ) -> Result<(), Box<dyn Error>> {
     let session = SessionId::from_uuid(session_id.into_uuid());
-    let mut activation = StartEligibleTurnService::new(
-        UuidV7StartEligibleTurnIdGenerator,
-        StartEligibleTurnRepository::new(pool.clone()),
-    );
-    let StartEligibleTurnOutcome::Activated(_) = activation.execute(session).await? else {
-        return Err(io::Error::other("the queued fixture turn must activate").into());
-    };
+    activate_turn(pool, session).await?;
 
     let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
     let calls = PostgresModelCallRepository::new(
@@ -6983,6 +7139,15 @@ async fn activate_expected_turn(
         StartEligibleTurnOutcome::Activated(activated)
             if activated.turn().into_uuid() == expected_turn.into_uuid() =>
         {
+            let recorded =
+                signalboxd::WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new())
+                    .prepare(session, activated.turn())
+                    .await?;
+            if !recorded {
+                return Err(
+                    io::Error::other("the fixture instruction manifest must record").into(),
+                );
+            }
             Ok(())
         }
         StartEligibleTurnOutcome::Activated(activated) => Err(io::Error::other(format!(
@@ -8615,10 +8780,13 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     .with_session_credentials(guarded_configuration.credential_family_catalog());
     let guarded_repository = repository.clone();
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            repository,
-            InProcessAttemptDispatchGate::default(),
-            provider,
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository,
+                InProcessAttemptDispatchGate::default(),
+                provider,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -8644,7 +8812,12 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         guarded_configuration,
         compaction_model,
         execution,
-    );
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
     let session = SessionId::from_uuid(session_id.into_uuid());
     let first_attempt = pass.run(session).await;
     assert_context_still_exceeded(first_attempt, queued_turn);
@@ -8754,10 +8927,13 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
     );
     let guarded_repository = repository.clone();
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            repository,
-            InProcessAttemptDispatchGate::default(),
-            provider,
+        FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                repository,
+                InProcessAttemptDispatchGate::default(),
+                provider,
+            ),
+            signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
         Arc::new(RuntimeContextCompactionModel::new(
@@ -8773,7 +8949,12 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
         model_configuration,
         compaction_model,
         execution,
-    );
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        runtime.pool.clone(),
+        None,
+        Vec::new(),
+    ));
     let session = SessionId::from_uuid(session_id.into_uuid());
 
     let outcome = pass.run(session).await;

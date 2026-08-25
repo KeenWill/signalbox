@@ -7,11 +7,15 @@ export interface CommandContext {
   dispatch: AppDispatch
   getState: () => RootState
   timelineIds: readonly string[]
-  focusTimeline: () => void
-  navigate?: (path: string) => void
   paneSize?: number
-  navigateScenario?: () => void
+  sessionId?: string
+  timelineWindowAvailable?: boolean
+  focusTimeline: () => void
+  loadTimelineWindow?: (anchor: 'first' | 'latest') => void
+  navigate?: (path: string) => void
   configuresTranscriptDetail?: boolean
+  openSession?: (sessionId: string) => void
+  toggleTimelineExpansion?: () => void
 }
 
 export interface CommandBinding {
@@ -33,8 +37,6 @@ interface CommandDefinitionShape {
 
 const always = () => true
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
-const scenarioNavigation = (context: CommandContext) => context.navigateScenario !== undefined
-const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
 const transcriptDetail = (context: CommandContext) =>
   context.timelineIds.length > 0 || context.configuresTranscriptDetail === true
 const paneSizeProvided = (context: CommandContext) => context.paneSize !== undefined
@@ -57,7 +59,7 @@ export const commandRegistry = [
   {
     id: 'navigate.sessions',
     title: 'Go to Sessions',
-    description: 'Open the bounded session index.',
+    description: 'Open the bounded session workspace.',
     category: 'Navigate',
     bindings: [{ label: 'g s', registration: { kind: 'sequence', sequence: ['G', 'S'] } }],
     available: productNavigation,
@@ -127,15 +129,6 @@ export const commandRegistry = [
     run: (context) => context.navigate?.('/settings'),
   },
   {
-    id: 'navigate.scenario',
-    title: 'Open Scenario studio',
-    description: 'Open the deterministic scenario workspace.',
-    category: 'Navigate',
-    bindings: [],
-    available: scenarioNavigation,
-    run: (context) => context.navigateScenario?.(),
-  },
-  {
     id: 'palette.open',
     title: 'Open command palette',
     description: 'Browse every available application command.',
@@ -150,13 +143,13 @@ export const commandRegistry = [
     description: 'Review modal navigation and command bindings.',
     category: 'Surface',
     bindings: [{ label: '?', registration: { kind: 'hotkey', hotkey: { key: '/', shift: true } } }],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.overlaySet('help')),
   },
   {
     id: 'navigation.open',
-    title: 'Open navigation',
-    description: 'Open navigation for the current application surface.',
+    title: 'Open scenario navigation',
+    description: 'Choose a deterministic development scenario.',
     category: 'Surface',
     bindings: [],
     available: always,
@@ -207,29 +200,48 @@ export const commandRegistry = [
     },
   },
   {
+    id: 'selection.toggleExpansion',
+    title: 'Toggle selected timeline item detail',
+    description: 'Expand or collapse the selected timeline item.',
+    category: 'View',
+    bindings: [{ label: 'Enter / Space' }],
+    available: (context) =>
+      context.getState().app.selectedTimeline !== null &&
+      context.timelineIds.includes(context.getState().app.selectedTimeline ?? '') &&
+      context.toggleTimelineExpansion !== undefined,
+    run: (context) => context.toggleTimelineExpansion?.(),
+  },
+  {
     id: 'selection.first',
-    title: 'Select first loaded item',
-    description: 'Move to the earliest item in the loaded cursor window.',
+    title: 'Go to first timeline item',
+    description: 'Load the first timeline window or select its first loaded item.',
     category: 'Navigate',
     bindings: [
       { label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } },
       { label: 'Home' },
     ],
-    available: (context) => context.timelineIds.length > 0,
-    run: (context) => context.dispatch(actions.timelineSelected(context.timelineIds[0] ?? null)),
+    available: (context) =>
+      context.timelineIds.length > 0 || context.timelineWindowAvailable === true,
+    run: (context) => {
+      if (context.loadTimelineWindow) context.loadTimelineWindow('first')
+      else context.dispatch(actions.timelineSelected(context.timelineIds[0] ?? null))
+    },
   },
   {
     id: 'selection.last',
-    title: 'Select latest loaded item',
-    description: 'Move to the latest item in the loaded cursor window.',
+    title: 'Go to latest timeline item',
+    description: 'Load the latest timeline window or select its latest loaded item.',
     category: 'Navigate',
     bindings: [
       { label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } },
       { label: 'End' },
     ],
-    available: (context) => context.timelineIds.length > 0,
-    run: (context) =>
-      context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null)),
+    available: (context) =>
+      context.timelineIds.length > 0 || context.timelineWindowAvailable === true,
+    run: (context) => {
+      if (context.loadTimelineWindow) context.loadTimelineWindow('latest')
+      else context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null))
+    },
   },
   {
     id: 'layout.toggle',
@@ -348,6 +360,18 @@ export const commandRegistry = [
     bindings: [],
     available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('results')),
+  },
+  {
+    id: 'session.open',
+    title: 'Open session workspace',
+    description: 'Open a bounded workspace for an exact session identity.',
+    category: 'Navigate',
+    bindings: [],
+    available: (context) => context.sessionId !== undefined && context.openSession !== undefined,
+    run: (context) => {
+      if (context.sessionId === undefined) return
+      context.openSession?.(context.sessionId)
+    },
   },
   {
     id: 'pane.navigation.preview',

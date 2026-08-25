@@ -18,9 +18,10 @@ use arguments::{
 use connection::ProcessClient;
 use error::ClientError;
 use presentation::{
-    BlobUploadPresentation, ChildResultPresentation, ConversationRow, ImportedEntryRow, Output,
-    SessionAwaitRegisteredPresentation, SessionMessageSentPresentation, SessionMetadataRow,
-    SessionSpawnedPresentation, SnapshotSelection,
+    BlobUploadPresentation, ChildResultPresentation, ConversationRow, ImportedEntryRow,
+    OperatorStatusPresentationCounts, Output, SessionAwaitRegisteredPresentation,
+    SessionMessageSentPresentation, SessionMetadataRow, SessionSpawnedPresentation,
+    SnapshotSelection,
 };
 use rustix::{
     fd::OwnedFd,
@@ -37,11 +38,11 @@ use signalbox_process_protocol::{
     GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_BLOB_CHUNK_BYTES,
     MAX_BLOB_READ_BYTES, MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
     MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
-    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ModelSelection, ModelSettingsOverlay, OperatorStatusMessage, ProtocolVersion, RejectionDetail,
+    RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput,
+    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
+    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
     ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
     ReviewRunSnapshot, RunnerConnectionHealth, RunnerProjection, RunnerProjectionState,
     RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
@@ -484,6 +485,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::SessionsStart {}
         | ServerMessage::SessionSummary { .. }
         | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::OperatorStatus(..)
         | ServerMessage::TemplatesStart {}
         | ServerMessage::TemplateSummary { .. }
         | ServerMessage::TemplatesEnd { .. }
@@ -591,6 +593,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::SessionsStart {}
         | ServerMessage::SessionSummary { .. }
         | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::OperatorStatus(..)
         | ServerMessage::TemplatesStart {}
         | ServerMessage::TemplateSummary { .. }
         | ServerMessage::TemplatesEnd { .. }
@@ -706,6 +709,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::SessionsStart {}
         | ServerMessage::SessionSummary { .. }
         | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::OperatorStatus(..)
         | ServerMessage::TemplatesStart {}
         | ServerMessage::TemplateSummary { .. }
         | ServerMessage::TemplatesEnd { .. }
@@ -904,6 +908,7 @@ async fn execute(
         | Command::Session(_)
         | Command::Goal(_)
         | Command::Imported { .. }
+        | Command::Status
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -929,6 +934,7 @@ async fn execute(
         | Command::Session(_)
         | Command::Goal(_)
         | Command::Imported { .. }
+        | Command::Status
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -962,6 +968,7 @@ async fn execute(
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
+        | Command::Status
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -1068,6 +1075,7 @@ async fn execute(
         } => imported(&mut client, &mut output, imported_conversation_id).await,
         Command::Session(command) => session_delegation(&mut client, &mut output, command).await,
         Command::Goal(command) => goal(&mut client, &mut output, command).await,
+        Command::Status => status(&mut client, &mut output).await,
         Command::List => list(&mut client, &mut output).await,
         Command::Templates => list_templates(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
@@ -4860,6 +4868,128 @@ fn write_assistant_texts(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+enum OperatorStatusPhase {
+    HeldSlots,
+    QueuedObligations,
+    PullRequestConvergences,
+    PendingStaleReviewClearances,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct OperatorStatusCounts {
+    held_slots: u64,
+    queued_obligations: u64,
+    pull_request_convergences: u64,
+    pending_stale_review_clearances: u64,
+}
+
+async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(), ClientError> {
+    let mut connection = client.request(ClientRequest::ReadOperatorStatus {}).await?;
+    match connection.message().await? {
+        ServerMessage::OperatorStatus(message)
+            if matches!(message.as_ref(), OperatorStatusMessage::Start {}) => {}
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(code, message, detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "operator status did not begin with its start frame",
+            ));
+        }
+    }
+    let mut spool = tempfile::tempfile()?;
+    let mut phase = OperatorStatusPhase::HeldSlots;
+    let mut counts = OperatorStatusCounts::default();
+    loop {
+        let frame = connection.frame().await?;
+        let item_phase = match frame.message() {
+            ServerMessage::OperatorStatus(message) => match message.as_ref() {
+                OperatorStatusMessage::HeldSlot(_) => {
+                    counts.held_slots = status_increment(counts.held_slots)?;
+                    Some(OperatorStatusPhase::HeldSlots)
+                }
+                OperatorStatusMessage::QueuedObligation(_) => {
+                    counts.queued_obligations = status_increment(counts.queued_obligations)?;
+                    Some(OperatorStatusPhase::QueuedObligations)
+                }
+                OperatorStatusMessage::PullRequestConvergence(_) => {
+                    counts.pull_request_convergences =
+                        status_increment(counts.pull_request_convergences)?;
+                    Some(OperatorStatusPhase::PullRequestConvergences)
+                }
+                OperatorStatusMessage::PendingStaleReviewClearance(_) => {
+                    counts.pending_stale_review_clearances =
+                        status_increment(counts.pending_stale_review_clearances)?;
+                    Some(OperatorStatusPhase::PendingStaleReviewClearances)
+                }
+                OperatorStatusMessage::End(item)
+                    if counts
+                        == (OperatorStatusCounts {
+                            held_slots: item.held_slot_count.value(),
+                            queued_obligations: item.queued_obligation_count.value(),
+                            pull_request_convergences: item.pull_request_convergence_count.value(),
+                            pending_stale_review_clearances: item
+                                .pending_stale_review_clearance_count
+                                .value(),
+                        }) =>
+                {
+                    break;
+                }
+                OperatorStatusMessage::Start {} | OperatorStatusMessage::End(_) => {
+                    return Err(ClientError::Protocol(
+                        "operator status sequence or count was invalid",
+                    ));
+                }
+            },
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "operator status sequence or count was invalid",
+                ));
+            }
+        };
+        let Some(item_phase) = item_phase else {
+            return Err(ClientError::Protocol(
+                "operator status sequence was invalid",
+            ));
+        };
+        if item_phase < phase {
+            return Err(ClientError::Protocol(
+                "operator status sections were out of order",
+            ));
+        }
+        phase = item_phase;
+        spool.write_all(&encode_server_line(&frame)?)?;
+    }
+    output.operator_status_counts(OperatorStatusPresentationCounts {
+        held_slots: counts.held_slots,
+        queued_obligations: counts.queued_obligations,
+        pull_request_convergences: counts.pull_request_convergences,
+        pending_stale_review_clearances: counts.pending_stale_review_clearances,
+    })?;
+    spool.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(spool);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        output.operator_status_item(decode_server_line(&line)?.message())?;
+        line.clear();
+    }
+    Ok(output.operator_status_model_usage_omitted()?)
+}
+
+fn status_increment(value: u64) -> Result<u64, ClientError> {
+    value
+        .checked_add(1)
+        .ok_or(ClientError::Protocol("operator status count overflowed"))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
