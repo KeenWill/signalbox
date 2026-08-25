@@ -13,9 +13,9 @@ mod value;
 pub use declaration::{
     FileMediaProvider, FileMediaProviderDeclaration, FileMediaProviderFailure,
     FileMediaProviderFuture, FileMediaProviderReadRequest, FileMediaProviderValidationRequest,
-    ProbeDeclaration, ProbeStrength, ReadAccessPattern, ReadOutputKind, ReadViewBounds,
-    ReadViewDeclaration, ReaderDeclaration, ReaderDeclarationInput, RegistryDeclarationError,
-    StreamingTextFallback,
+    ProbeDeclaration, ProbeDeclarationInput, ProbeStrength, ReadAccessPattern, ReadOutputKind,
+    ReadViewBounds, ReadViewDeclaration, ReaderDeclaration, ReaderDeclarationInput,
+    RegistryDeclarationError, StreamingTextFallback,
 };
 pub use detection::{
     CancellationSignal, FileInspection, FileInspectionStatus, FileMediaFailure, FileMediaProcessor,
@@ -45,8 +45,9 @@ pub use registry::{
 pub use value::{
     AttachmentKind, BoundedMetadata, CanonicalJsonObjectSchema, CanonicalMediaType,
     DeclaredMediaType, DisplayFilename, FileDigest, FileReaderName, FileReaderProviderName,
-    FileReaderRevision, FileUse, MediaTypeParseError, ReadContinuationCursor, ReadViewName,
-    ReaderIdentity, ReasonCode, RegistryValueError, VisiblePartSelector,
+    FileReaderRevision, FileUse, JsonParseLimits, MediaTypeParseError, ReadContinuationCursor,
+    ReadViewName, ReaderIdentity, ReasonCode, RegistryValueError, VisiblePartSelector,
+    parse_json_without_duplicate_members, parse_json_without_duplicate_members_bounded,
 };
 
 /// Stable model-facing inspection tool name.

@@ -3814,6 +3814,9 @@ pub(crate) async fn load_scheduling_projection(
             manifest.eligibility_hash_algorithm
                 AS instruction_eligibility_hash_algorithm,
             manifest.eligibility_hash AS instruction_eligibility_hash,
+            manifest.admitted_set_hash_algorithm
+                AS instruction_admitted_set_hash_algorithm,
+            manifest.admitted_set_hash AS instruction_admitted_set_hash,
             manifest.manifest_hash_algorithm
                 AS instruction_manifest_hash_algorithm,
             manifest.manifest_hash AS instruction_manifest_hash,

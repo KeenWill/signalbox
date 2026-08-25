@@ -6,10 +6,11 @@ use signalbox_file_media_runtime::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider,
     FileMediaProviderDeclaration, FileMediaProviderFailure, FileMediaProviderFuture,
     FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileReadInput,
-    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration, ProbeStrength,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
-    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
-    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration,
+    ProbeDeclarationInput, ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
+    ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
+    StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
 };
 
 const PROVIDER_NAME: &str = "video";
@@ -246,7 +247,12 @@ fn reader_declaration(
         reader: FileReaderName::try_new(kind.reader())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(kind.media_type())?],
-        probe: ProbeDeclaration::new(PROBE_PREFIX_BYTES, 0, PROBE_RANGE_COUNT, METADATA_BYTES),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: PROBE_PREFIX_BYTES,
+            suffix_bytes: 0,
+            range_count: PROBE_RANGE_COUNT,
+            cumulative_bytes: METADATA_BYTES,
+        }),
         views: vec![metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
