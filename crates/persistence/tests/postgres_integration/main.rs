@@ -1898,6 +1898,20 @@ async fn postgres_before_approval_event_migration()
     Ok((container, pool, database_url))
 }
 
+/// `command_registry`'s inspection query names every registered durable
+/// command's typed table regardless of the database's migration state (see
+/// `crates/persistence/src/command_registry.rs`), so a "before" fixture used
+/// by any path that inspects a durable command must still carry every such
+/// table even though it otherwise predates the migration under test.
+/// `override_denied_tool_request_command` (added by `202608170006`, after
+/// this fixture's boundary) is the only registry table introduced between
+/// this boundary and that migration — no other `COMMAND_KIND_DEFINITIONS`
+/// table is created in `202608140001..202608170006` — so admitting that one
+/// migration alone satisfies the registry while every workspace-instruction
+/// table (created by `202608140001` itself) stays absent, preserving this
+/// fixture's "historical DB" premise.
+const OVERRIDE_DENIED_TOOL_REQUEST_COMMAND_MIGRATION_VERSION: i64 = 202608170006;
+
 async fn postgres_before_workspace_instruction_migration()
 -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
     let (container, pool, database_url) = unmigrated_postgres().await?;
@@ -1905,10 +1919,10 @@ async fn postgres_before_workspace_instruction_migration()
     connection
         .ensure_migrations_table("_sqlx_migrations")
         .await?;
-    for migration in MIGRATOR
-        .iter()
-        .take_while(|migration| migration.version < 202608140001)
-    {
+    for migration in MIGRATOR.iter().filter(|migration| {
+        migration.version < 202608140001
+            || migration.version == OVERRIDE_DENIED_TOOL_REQUEST_COMMAND_MIGRATION_VERSION
+    }) {
         connection.apply("_sqlx_migrations", migration).await?;
     }
     drop(connection);
@@ -1920,10 +1934,10 @@ async fn apply_workspace_instruction_migration(pool: &PgPool) -> Result<(), Box<
     connection
         .ensure_migrations_table("_sqlx_migrations")
         .await?;
-    for migration in MIGRATOR
-        .iter()
-        .filter(|migration| migration.version >= 202608140001)
-    {
+    for migration in MIGRATOR.iter().filter(|migration| {
+        migration.version >= 202608140001
+            && migration.version != OVERRIDE_DENIED_TOOL_REQUEST_COMMAND_MIGRATION_VERSION
+    }) {
         connection.apply("_sqlx_migrations", migration).await?;
     }
     Ok(())
