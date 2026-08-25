@@ -24,6 +24,7 @@ members = [
     "crates/model-runtime-codex-cli",
     "crates/model-runtime-openai",
     "crates/model-provider-runtime",
+    "crates/model-reference-catalog",
     "crates/persistence",
     "crates/process-protocol",
     "crates/program-runtime",
