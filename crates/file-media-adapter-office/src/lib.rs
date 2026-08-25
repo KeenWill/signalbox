@@ -2337,11 +2337,7 @@ fn normalized_part_target(target: &str, base: &str) -> Result<String, XmlIssue> 
     let unresolved = target
         .strip_prefix('/')
         .map_or_else(|| format!("{base}{target}"), String::from);
-    let name = normalized_package_target(&unresolved).map_err(|_| XmlIssue::Malformed)?;
-    if !name.ends_with(".xml") {
-        return Err(XmlIssue::Malformed);
-    }
-    Ok(name)
+    normalized_package_target(&unresolved).map_err(|_| XmlIssue::Malformed)
 }
 
 fn spreadsheet_shared_strings(bytes: &[u8]) -> Result<Vec<String>, XmlIssue> {
@@ -3705,6 +3701,33 @@ mod tests {
                 .expect("the slide target should resolve"),
             vec![(String::from("rId1"), String::from("ppt/custom/slide.xml"))]
         );
+    }
+
+    #[test]
+    fn relationship_selected_parts_do_not_require_xml_extensions() {
+        let workbook_xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet.data"/></Relationships>"#;
+        let presentation_xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide.data"/></Relationships>"#;
+        let shared_strings_xml = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="tables/strings.data"/></Relationships>"#;
+
+        let workbook = workbook_relationship_targets(workbook_xml)
+            .expect("extension-independent worksheet target should parse");
+        let presentation = presentation_relationship_targets(presentation_xml)
+            .expect("extension-independent slide target should parse");
+        let shared_strings = workbook_shared_strings_target(shared_strings_xml)
+            .expect("extension-independent shared-string target should parse");
+
+        assert_eq!(
+            workbook,
+            vec![(
+                String::from("rId1"),
+                Some(String::from("xl/worksheets/sheet.data")),
+            )]
+        );
+        assert_eq!(
+            presentation,
+            vec![(String::from("rId2"), String::from("ppt/slides/slide.data"),)]
+        );
+        assert_eq!(shared_strings, Some(String::from("xl/tables/strings.data")));
     }
 
     #[test]
