@@ -825,6 +825,94 @@ describe('generated timeline detail decoder', () => {
     })
   })
 
+  it('rejects a page containing both a projected tool and goal member', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '21' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            state: {
+              type: 'proposed',
+              frontier_id: '00000000-0000-0000-0000-000000000008',
+            },
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000004',
+                tool_name: 'exec',
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+                evidence: { type: 'request_only' },
+              },
+            ],
+            goal_events: [{ type: 'user_stopped', generation: '1' }],
+          },
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 128,
+    }
+
+    expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(
+      'timeline_detail_page.items[0].body must be at most one projected tool or goal member',
+    )
+  })
+
+  it('rejects a tool member containing arguments and result text', () => {
+    const excerpt = { text: '', offset_bytes: '0', total_bytes: '0' }
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '22' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            state: {
+              type: 'results_projected',
+              frontier_id: '00000000-0000-0000-0000-000000000008',
+            },
+            projected_member_index: 0,
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000004',
+                tool_name: 'exec',
+                arguments: excerpt,
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+                evidence: {
+                  type: 'physical_attempt',
+                  attempt_id: '00000000-0000-0000-0000-000000000005',
+                  state: 'completed',
+                  effect_posture: 'effect_free',
+                  sandbox_posture: 'sandboxed',
+                  result_present: true,
+                  failure_present: false,
+                  result: excerpt,
+                },
+              },
+            ],
+            goal_events: [],
+          },
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 128,
+    }
+
+    expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(
+      'timeline_detail_page.items[0].body.tools[0] must be exactly one projected text field',
+    )
+  })
+
   it('accepts delegation wait mode and lifecycle provenance', () => {
     const page = {
       session_id: ambiguousModelCallPage.session_id,

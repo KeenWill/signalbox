@@ -24,6 +24,13 @@ export const defaultBrowserPreferences: BrowserPreferences = {
   keyOverrides: {},
 }
 
+export const createDefaultBrowserPreferences = (): BrowserPreferences => ({
+  ...defaultBrowserPreferences,
+  paneSizes: { ...defaultBrowserPreferences.paneSizes },
+  lastLogicalPositions: {},
+  keyOverrides: {},
+})
+
 export const BROWSER_PREFERENCES_KEY = 'signalbox.web.preferences.v1'
 export const MAX_SAVED_LOGICAL_POSITIONS = 128
 export const MAX_KEY_OVERRIDES = 64
@@ -92,6 +99,34 @@ const boundedRecord = (
   return Object.fromEntries(entries.slice(-maximum) as [string, string][])
 }
 
+const MAX_U64 = (1n << 64n) - 1n
+const canonicalSessionId = (value: string): boolean =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
+const canonicalTimelineAddress = (value: string): boolean => {
+  if (!/^[1-9]\d*$/.test(value)) return false
+  try {
+    return BigInt(value) <= MAX_U64
+  } catch {
+    return false
+  }
+}
+// Logical positions are keyed by canonical session ids and hold canonical timeline addresses;
+// entries from older schema generations are dropped rather than rejected wholesale.
+const boundedLogicalPositions = (value: unknown): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(
+      boundedRecord(
+        value,
+        MAX_SAVED_LOGICAL_POSITIONS,
+        'preferences.lastLogicalPositions',
+        isBoundedLogicalPosition,
+      ),
+    ).filter(
+      ([sessionId, position]) =>
+        canonicalSessionId(sessionId) && canonicalTimelineAddress(position),
+    ),
+  )
+
 export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError('preferences must be an object')
@@ -132,12 +167,7 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
       inspector: boundedNumber(panes.inspector, 200, 480, 'preferences.paneSizes.inspector'),
     },
     remoteMedia: oneOf(candidate.remoteMedia, ['ask', 'block', 'allow'], 'preferences.remoteMedia'),
-    lastLogicalPositions: boundedRecord(
-      candidate.lastLogicalPositions,
-      MAX_SAVED_LOGICAL_POSITIONS,
-      'preferences.lastLogicalPositions',
-      isBoundedLogicalPosition,
-    ),
+    lastLogicalPositions: boundedLogicalPositions(candidate.lastLogicalPositions),
     keyOverrides: boundedRecord(
       candidate.keyOverrides,
       MAX_KEY_OVERRIDES,
@@ -150,15 +180,15 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
 export const loadBrowserPreferences = (): BrowserPreferences => {
   try {
     const storage = globalThis.localStorage
-    if (storage === undefined) return defaultBrowserPreferences
+    if (storage === undefined) return createDefaultBrowserPreferences()
     const stored = storage.getItem(BROWSER_PREFERENCES_KEY)
-    if (stored === null) return defaultBrowserPreferences
+    if (stored === null) return createDefaultBrowserPreferences()
     if (!isWithinUtf8ByteLimit(stored, MAX_BROWSER_PREFERENCES_BYTES)) {
-      return defaultBrowserPreferences
+      return createDefaultBrowserPreferences()
     }
     return decodeBrowserPreferences(JSON.parse(stored))
   } catch {
-    return defaultBrowserPreferences
+    return createDefaultBrowserPreferences()
   }
 }
 

@@ -7,8 +7,16 @@ export interface CommandContext {
   getState: () => RootState
   timelineIds: readonly string[]
   focusTimeline: () => void
+  selectTimeline?: (eventSequence: string) => void
+  openTimelineWindow?: (anchor: 'first' | 'latest') => void
   navigate?: (path: string) => void
   navigateScenario?: () => void
+}
+
+const selectTimeline = (context: CommandContext, eventSequence: string | undefined): void => {
+  const selected = eventSequence ?? null
+  context.dispatch(actions.timelineSelected(selected))
+  if (selected !== null) context.selectTimeline?.(selected)
 }
 
 export interface CommandBinding {
@@ -138,7 +146,7 @@ export const commandRegistry = [
     description: 'Review modal navigation and command bindings.',
     category: 'Surface',
     bindings: [{ label: '?', registration: { kind: 'hotkey', hotkey: { key: '/', shift: true } } }],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.overlaySet('help')),
   },
   {
@@ -171,13 +179,13 @@ export const commandRegistry = [
       { label: 'j', registration: { kind: 'hotkey', hotkey: 'J' } },
       { label: 'ArrowDown' },
     ],
-    available: (context) => context.timelineIds.length > 0,
+    available: scenarioTimeline,
     run: (context) => {
       const current = context.getState().app.selectedTimeline
       const currentIndex = context.timelineIds.indexOf(current ?? '')
       const nextIndex =
         currentIndex < 0 ? 0 : Math.min(currentIndex + 1, context.timelineIds.length - 1)
-      context.dispatch(actions.timelineSelected(context.timelineIds[nextIndex] ?? null))
+      selectTimeline(context, context.timelineIds[nextIndex])
     },
   },
   {
@@ -186,12 +194,12 @@ export const commandRegistry = [
     description: 'Move the timeline selection toward the first item.',
     category: 'Navigate',
     bindings: [{ label: 'k', registration: { kind: 'hotkey', hotkey: 'K' } }, { label: 'ArrowUp' }],
-    available: (context) => context.timelineIds.length > 0,
+    available: scenarioTimeline,
     run: (context) => {
       const current = context.getState().app.selectedTimeline
       const currentIndex = Math.max(context.timelineIds.indexOf(current ?? ''), 0)
       const previousIndex = Math.max(currentIndex - 1, 0)
-      context.dispatch(actions.timelineSelected(context.timelineIds[previousIndex] ?? null))
+      selectTimeline(context, context.timelineIds[previousIndex])
     },
   },
   {
@@ -203,8 +211,11 @@ export const commandRegistry = [
       { label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } },
       { label: 'Home' },
     ],
-    available: (context) => context.timelineIds.length > 0,
-    run: (context) => context.dispatch(actions.timelineSelected(context.timelineIds[0] ?? null)),
+    available: scenarioTimeline,
+    run: (context) => {
+      if (context.openTimelineWindow) context.openTimelineWindow('first')
+      else selectTimeline(context, context.timelineIds[0])
+    },
   },
   {
     id: 'selection.last',
@@ -215,9 +226,11 @@ export const commandRegistry = [
       { label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } },
       { label: 'End' },
     ],
-    available: (context) => context.timelineIds.length > 0,
-    run: (context) =>
-      context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null)),
+    available: scenarioTimeline,
+    run: (context) => {
+      if (context.openTimelineWindow) context.openTimelineWindow('latest')
+      else selectTimeline(context, context.timelineIds.at(-1))
+    },
   },
   {
     id: 'layout.toggle',

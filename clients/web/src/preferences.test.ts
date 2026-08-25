@@ -48,7 +48,6 @@ describe('browser preferences', () => {
       layout: 'dashboard',
       density: 'comfortable',
       paneSizes: { navigation: -50, inspector: 50_000 },
-      remoteMedia: 'proxy',
     } as const
     expect(() => decodeBrowserPreferences(stored)).toThrow(
       'preferences must match the current exact schema',
@@ -58,8 +57,8 @@ describe('browser preferences', () => {
   it('bounds retained logical positions', () => {
     const lastLogicalPositions = Object.fromEntries(
       Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [
-        `session-${index}`,
-        `cursor-${index}`,
+        `00000000-0000-0000-0000-${String(index).padStart(12, '0')}`,
+        String(index + 1),
       ]),
     )
 
@@ -69,6 +68,21 @@ describe('browser preferences', () => {
     })
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
+  })
+
+  it('rejects malformed remembered session identities and timeline addresses', () => {
+    const validSession = '00000000-0000-0000-0000-000000000991'
+    const decoded = decodeBrowserPreferences({
+      ...defaultBrowserPreferences,
+      lastLogicalPositions: {
+        [validSession]: '42',
+        'not-a-session': '42',
+        '00000000-0000-0000-0000-000000000992': 'cursor-1',
+        '00000000-0000-0000-0000-000000000993': '18446744073709551616',
+      },
+    })
+
+    expect(decoded.lastLogicalPositions).toEqual({ [validSession]: '42' })
   })
 
   it('bounds retained key overrides', () => {
@@ -160,17 +174,20 @@ describe('browser preferences', () => {
     ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
   })
 
-  it('accepts UTF-8 logical positions exactly at their byte ceilings', () => {
+  it('accepts payloads at the byte ceilings while dropping non-canonical entries', () => {
     const decoded = decodeBrowserPreferences({
       ...defaultBrowserPreferences,
       lastLogicalPositions: {
         ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES / 2)]: '😀'.repeat(
           MAX_LOGICAL_POSITION_VALUE_BYTES / 4,
         ),
+        '00000000-0000-0000-0000-000000000991': '42',
       },
     })
 
-    expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(1)
+    expect(decoded.lastLogicalPositions).toEqual({
+      '00000000-0000-0000-0000-000000000991': '42',
+    })
   })
 
   it('rejects key-override keys and values above their UTF-8 byte ceilings', () => {

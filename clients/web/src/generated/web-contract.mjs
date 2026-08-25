@@ -3311,6 +3311,9 @@ function assertTimelineDetailPage(value) {
         if (item.kind !== "tool_batch_transition") {
           fail(`${path}.kind`, "tool_batch_transition for a tool_batch body");
         }
+        if (item.body.tools.length + item.body.goal_events.length > 1) {
+          fail(`${path}.body`, "at most one projected tool or goal member");
+        }
         const tool = item.body.tools[0];
         const goal = item.body.goal_events[0];
         const memberIndex = item.body.projected_member_index;
