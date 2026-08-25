@@ -4,6 +4,8 @@
 //! depending inward on `signalbox-domain`.
 
 mod approval_judge;
+mod attention;
+mod blob_derivation;
 mod commissioned_dispatch;
 mod convergence_reconciliation;
 mod conversation_import;
@@ -19,6 +21,7 @@ mod repo_watch_webhook;
 mod review_orchestration;
 mod review_workflow;
 mod scheduler;
+mod search;
 mod session_delegation;
 mod session_metadata;
 mod session_timeline;
@@ -39,6 +42,17 @@ pub use approval_judge::{
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
     ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority,
     ApprovalJudgePullRequestAuthorityInput,
+};
+pub use attention::{
+    AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
+    AttentionChanges, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts, AttentionReader,
+    AttentionSnapshot, AttentionState, AttentionSummary, max_attention_change_items,
+    max_attention_goal_summary_characters, max_attention_snapshot_items,
+};
+pub use blob_derivation::{
+    BlobDerivationIdGenerator, BlobDerivationRecordOutcome, BlobDerivationServiceError,
+    BlobDerivationServiceOutcome, BlobDerivationStore, DeterministicBlobDerivationRequest,
+    DeterministicBlobDerivationService, DeterministicBlobProducer, UuidV7BlobDerivationIdGenerator,
 };
 pub use commissioned_dispatch::{
     CommissionDispatchPreparationError, CommissionDispatchRequest, CommissionedDispatchFence,
@@ -151,6 +165,14 @@ pub use scheduler::{
     InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
     SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
     SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_pass_admission_cap,
+};
+pub use search::{
+    SearchArtifactId, SearchArtifactProjection, SearchArtifactProjectionClass, SearchContentClass,
+    SearchCursor, SearchHighlight, SearchPage, SearchPageLimit, SearchPageLimitError,
+    SearchProjectionText, SearchProjectionTextError, SearchProjectionWriter, SearchQuery,
+    SearchReader, SearchResult, SearchResultSource, SearchScope, SearchService, SearchStrategy,
+    SearchText, SearchTextError, max_search_page_items, max_search_projection_text_bytes,
+    max_search_query_bytes, max_search_snippet_bytes,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{

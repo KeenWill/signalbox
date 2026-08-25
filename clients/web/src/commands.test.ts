@@ -75,6 +75,94 @@ describe('command registry', () => {
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
   })
 
+  it('selects the next immutable imported frontier through the command registry', () => {
+    const importEntryIds = ['import-entry-1', 'import-entry-2'] as const
+    let selectedImportEntry: (typeof importEntryIds)[number] = importEntryIds[0]
+
+    invokeCommand('imports.entry.next', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      importEntryIds,
+      selectedImportEntry,
+      canSelectImportEntry: true,
+      selectImportEntry: (id) => {
+        selectedImportEntry = id as (typeof importEntryIds)[number]
+      },
+    })
+
+    expect(selectedImportEntry).toBe(importEntryIds[1])
+  })
+
+  it('does not run imported-entry navigation while exact recovery freezes selection', () => {
+    const selected: string[] = []
+
+    invokeCommand('imports.entry.next', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      importEntryIds: ['import-entry-1', 'import-entry-2'],
+      selectedImportEntry: 'import-entry-1',
+      canSelectImportEntry: false,
+      selectImportEntry: (id) => selected.push(id),
+    })
+
+    expect(selected).toEqual([])
+  })
+
+  it('runs available continuation actions through stable command identities', () => {
+    const relationships: Array<'resume' | 'fork'> = []
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      canContinueImport: true,
+      continueImport: (relationship: 'resume' | 'fork') => relationships.push(relationship),
+    }
+
+    invokeCommand('imports.continue.resume', context)
+    invokeCommand('imports.continue.fork', context)
+
+    expect(relationships).toEqual(['resume', 'fork'])
+  })
+
+  it('does not run an unavailable continuation command', () => {
+    const relationships: Array<'resume' | 'fork'> = []
+
+    invokeCommand('imports.continue.resume', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      canContinueImport: false,
+      continueImport: (relationship) => relationships.push(relationship),
+    })
+
+    expect(relationships).toEqual([])
+  })
+
+  it('runs available exact-retry recovery actions through stable command identities', () => {
+    const recoveryActions: string[] = []
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      focusTimeline: () => undefined,
+      canRetryImport: true,
+      retryImport: () => recoveryActions.push('retry'),
+      canAbandonImport: true,
+      abandonImport: () => recoveryActions.push('abandon'),
+    }
+
+    invokeCommand('imports.continue.retry', context)
+    invokeCommand('imports.continue.abandon', context)
+
+    expect(recoveryActions).toEqual(['retry', 'abandon'])
+  })
+
   it('delegates first and latest commands to the owning server-window loader', () => {
     const loaded: Array<'first' | 'latest'> = []
     const context = {
