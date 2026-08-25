@@ -36,6 +36,7 @@ const IMPORT_PAGE_ITEMS = 100
 const IMPORT_WINDOW_RADIUS = 50
 const EMPTY_FILTER = ''
 const SCENARIO_MODEL_SELECTION = '00000000-0000-7000-8000-000000000777'
+const CANONICAL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 type FormatFilter = WebImportFormat | typeof EMPTY_FILTER
 type ModelKind = 'direct' | 'alias'
@@ -47,15 +48,19 @@ const formatOptions: ReadonlyArray<{ value: FormatFilter; label: string }> = [
   { value: 'codex_rollout_jsonl_v1', label: 'Codex rollout · converter 1' },
 ]
 
+// continuation_corrupt is retained and ambiguous: the daemon can raise it while loading a
+// command that did commit, so it never proves the absence of a durable commit.
 const isRetryableContinuationError = (error: unknown): boolean =>
   error instanceof ImportReceiptCorrelationError ||
   !(error instanceof ImportApiError) ||
-  ['continuation_commit_ambiguous', 'continuation_unavailable'].includes(error.detail.error.code)
+  ['continuation_commit_ambiguous', 'continuation_unavailable', 'continuation_corrupt'].includes(
+    error.detail.error.code,
+  )
 
 const isAmbiguousContinuationError = (error: unknown): boolean =>
   error instanceof ImportReceiptCorrelationError ||
   !(error instanceof ImportApiError) ||
-  error.detail.error.code === 'continuation_commit_ambiguous'
+  ['continuation_commit_ambiguous', 'continuation_corrupt'].includes(error.detail.error.code)
 
 // The exact command must outlive this tab: once its POST leaves the browser, the daemon may
 // have committed it, so the only safe replacement source after a reload is a durable copy of
@@ -454,12 +459,17 @@ export function ImportsWorkspace({
     !continuation.isPending &&
     (errorNamesRetainedCommand ? retryableContinuationFailure : continuationAmbiguous)
   const ambiguousContinuationFailure = commandRetainedForRetry && continuationAmbiguous
+  // The retained-command decoder and the generated contract require canonical lowercase
+  // UUIDs, so the model selection is canonicalized before it is retained or sent: a raw
+  // noncanonical spelling would persist a slot that restoration silently skips.
+  const canonicalModelSelectionId = modelSelectionId.trim().toLowerCase()
+  const modelSelectionCanonical = CANONICAL_UUID_PATTERN.test(canonicalModelSelectionId)
 
   const continueAt = async (relationship: WebImportedSessionRelationship) => {
     if (
       !continuationAvailable ||
       !selectedFrontier ||
-      modelSelectionId.trim().length === 0 ||
+      !modelSelectionCanonical ||
       hasRetainedCommand
     ) {
       return
@@ -479,8 +489,8 @@ export function ImportsWorkspace({
         relationship,
         initial_model_selection:
           modelKind === 'direct'
-            ? { kind: 'direct', selection_id: modelSelectionId.trim() }
-            : { kind: 'alias', alias_id: modelSelectionId.trim() },
+            ? { kind: 'direct', selection_id: canonicalModelSelectionId }
+            : { kind: 'alias', alias_id: canonicalModelSelectionId },
       }
       // The POST leaves the browser only after the exact payload is durably retained:
       // sending first would let a reload destroy the sole copy of a command the daemon
@@ -739,7 +749,7 @@ export function ImportsWorkspace({
                       disabled={
                         !continuationAvailable ||
                         !selectedFrontier ||
-                        modelSelectionId.trim().length === 0 ||
+                        !modelSelectionCanonical ||
                         continuation.isPending ||
                         hasRetainedCommand
                       }
@@ -752,7 +762,7 @@ export function ImportsWorkspace({
                       disabled={
                         !continuationAvailable ||
                         !selectedFrontier ||
-                        modelSelectionId.trim().length === 0 ||
+                        !modelSelectionCanonical ||
                         continuation.isPending ||
                         hasRetainedCommand
                       }
