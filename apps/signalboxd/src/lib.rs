@@ -93,8 +93,9 @@ pub use conversation_introspection::{
     ConversationIntrospectionError, PostgresConversationIntrospection,
 };
 pub use credential_pools::{
-    CredentialDelivery, CredentialPool, CredentialPoolAction, CredentialPoolExhaustion,
-    CredentialPoolMember, CredentialPoolTieBreak, CredentialPoolTrigger, CredentialProfile,
+    CredentialDelivery, CredentialHomeAdmissionFailure, CredentialPool, CredentialPoolAction,
+    CredentialPoolExhaustion, CredentialPoolMember, CredentialPoolTieBreak, CredentialPoolTrigger,
+    CredentialProfile,
 };
 pub use daemon_tools::{
     BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonToolCatalog,

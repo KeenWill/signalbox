@@ -3375,6 +3375,71 @@ async fn subprocess_environment_is_allowlisted() {
     assert_eq!(result.spawns, 1);
 }
 
+#[tokio::test]
+async fn selected_member_home_reaches_each_spawn_and_changes_with_the_reference() {
+    // Pool rotation reaches the adapter by pinning the successor member's
+    // credential reference on the next operation. Exercise both sides of that
+    // boundary: the same runtime must deliver the pre- and post-rotation homes
+    // from those exact references.
+    let temporary = tempfile::tempdir().expect("test working directory is created");
+    let first_home = temporary.path().join("synthetic-home-a");
+    let second_home = temporary.path().join("synthetic-home-b");
+    std::fs::create_dir(&first_home).expect("first synthetic home is created");
+    std::fs::create_dir(&second_home).expect("second synthetic home is created");
+    std::fs::write(first_home.join("fixture-marker"), "synthetic")
+        .expect("first synthetic home is nonempty");
+    std::fs::write(second_home.join("fixture-marker"), "synthetic")
+        .expect("second synthetic home is nonempty");
+    let first_reference = CredentialReference::new("codex-a");
+    let second_reference = CredentialReference::new("codex-b");
+    let mut config = CodexCliConfig::new(fake_cli(), temporary.path(), first_reference.clone())
+        .with_credential_homes([
+            (first_reference.clone(), first_home.clone()),
+            (second_reference.clone(), second_home.clone()),
+        ]);
+    config.exchange_timeout = OFFLINE_HARNESS_TIMEOUT;
+    config.interrupt_grace = Duration::from_millis(100);
+    let runtime = CodexCliRuntime::new(config).expect("synthetic homes are admitted");
+    let mut first_operation = operation(
+        "selected_credential_home",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    first_operation.credential_reference = first_reference;
+    let first_prepared = prepare(&runtime, first_operation).await;
+    let mut first_observations = Vec::new();
+    runtime
+        .execute(
+            first_prepared,
+            &mut first_observations,
+            CancellationSignal::never(),
+        )
+        .await;
+    let delivered_first =
+        std::fs::read_to_string(temporary.path().join("fake-codex-selected-home"))
+            .expect("first spawn records its synthetic home");
+    assert_eq!(delivered_first, first_home.to_string_lossy());
+    let mut second_operation = operation(
+        "selected_credential_home",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+    );
+    second_operation.credential_reference = second_reference;
+    let second_prepared = prepare(&runtime, second_operation).await;
+    let mut second_observations = Vec::new();
+    runtime
+        .execute(
+            second_prepared,
+            &mut second_observations,
+            CancellationSignal::never(),
+        )
+        .await;
+    let delivered_second =
+        std::fs::read_to_string(temporary.path().join("fake-codex-selected-home"))
+            .expect("second spawn records its synthetic home");
+    assert_eq!(delivered_second, second_home.to_string_lossy());
+}
+
 /// INV-035: credential-shaped CLI text and tool JSON are redacted before
 /// observations or terminal evidence leave the adapter.
 #[tokio::test]
