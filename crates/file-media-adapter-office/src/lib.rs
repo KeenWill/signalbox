@@ -78,6 +78,12 @@ const MAX_ENTRY_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_TOTAL_EXPANDED_BYTES: u64 = 16 * 1024 * 1024;
 // numeric-bound: ceiling - protects XML parsing from adversarial nesting and scope cloning
 const MAX_XML_DEPTH: usize = 256;
+// numeric-bound: ceiling - bounds one namespace prefix so cloned scopes stay small
+const MAX_NAMESPACE_PREFIX_BYTES: usize = 64;
+// numeric-bound: ceiling - bounds one namespace name so cloned scopes stay small
+const MAX_NAMESPACE_URI_BYTES: usize = 1024;
+// numeric-bound: ceiling - bounds live declarations per scope so per-element clones cannot amplify
+const MAX_NAMESPACE_DECLARATIONS: usize = 128;
 // numeric-bound: ceiling - protects worker framing from oversized metadata output
 const METADATA_OUTPUT_BYTES: usize = 16 * 1024;
 const CONTENT_TYPES: &str = "[Content_Types].xml";
@@ -622,7 +628,12 @@ async fn validate_selected_probe_entries(
             .find(|entry| entry.name == kind.marker())
             .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
         validate_selected_probe_entry(entry)?;
-        read_probe_local_header(source, cancellation, entry).await?;
+        let data_offset = read_probe_local_header(source, cancellation, entry).await?;
+        require_range(
+            source.byte_length().get(),
+            data_offset,
+            entry.compressed_bytes,
+        )?;
     }
     Ok(())
 }
@@ -1859,7 +1870,13 @@ fn apply_namespace_declarations(
         let value = attribute
             .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
             .map_err(|_| XmlIssue::Malformed)?;
+        if prefix.len() > MAX_NAMESPACE_PREFIX_BYTES || value.len() > MAX_NAMESPACE_URI_BYTES {
+            return Err(XmlIssue::Malformed);
+        }
         scope.insert(prefix.to_vec(), value.as_bytes().to_vec());
+        if scope.len() > MAX_NAMESPACE_DECLARATIONS {
+            return Err(XmlIssue::Malformed);
+        }
     }
     Ok(())
 }
@@ -3632,8 +3649,8 @@ mod tests {
 
     #[test]
     fn package_relationships_require_unique_ids() {
-        let missing = br#"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>"#;
-        let duplicate = br#"<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\"><Relationship Id=\"duplicate\" Type=\"urn:extension\" Target=\"custom.xml\"/><Relationship Id=\"duplicate\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"word/document.xml\"/></Relationships>"#;
+        let missing = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
+        let duplicate = br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="duplicate" Type="urn:extension" Target="custom.xml"/><Relationship Id="duplicate" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>"#;
 
         assert!(matches!(
             validate_package_relationships(missing, &[OfficeKind::Docx]),
@@ -4070,12 +4087,91 @@ mod tests {
 
     #[test]
     fn text_extraction_rejects_unsupported_mandatory_namespaces() {
-        let xml = br#"<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:mc=\"http://schemas.openxmlformats.org/markup-compatibility/2006\" xmlns:ext=\"urn:unsupported\" mc:MustUnderstand=\"ext\"><w:t>text</w:t></w:document>"#;
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" xmlns:ext="urn:unsupported" mc:MustUnderstand="ext"><w:t>text</w:t></w:document>"#;
 
         assert!(matches!(
             extract_xml_text(xml, OfficeKind::Docx),
             Err(XmlIssue::Malformed)
         ));
+    }
+
+    #[test]
+    fn namespace_scopes_bound_declaration_count_and_size() {
+        let mut many = String::from(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"",
+        );
+        for index in 0..MAX_NAMESPACE_DECLARATIONS {
+            many.push_str(&format!(" xmlns:n{index}=\"urn:n{index}\""));
+        }
+        many.push_str("><w:t>text</w:t></w:document>");
+
+        assert!(matches!(
+            extract_xml_text(many.as_bytes(), OfficeKind::Docx),
+            Err(XmlIssue::Malformed)
+        ));
+
+        let long_uri = format!(
+            "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" xmlns:ext=\"urn:{}\"><w:t>text</w:t></w:document>",
+            "a".repeat(MAX_NAMESPACE_URI_BYTES)
+        );
+
+        assert!(matches!(
+            extract_xml_text(long_uri.as_bytes(), OfficeKind::Docx),
+            Err(XmlIssue::Malformed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn selected_probe_entries_require_complete_payload_ranges() {
+        let name = b"word/document.xml";
+        let mut header = Vec::new();
+        header.extend_from_slice(b"PK\x03\x04");
+        header.extend_from_slice(&[20, 0]);
+        header.extend_from_slice(&0_u16.to_le_bytes());
+        header.extend_from_slice(&8_u16.to_le_bytes());
+        header.extend_from_slice(&[0; 4]);
+        header.extend_from_slice(&0xAABB_CCDD_u32.to_le_bytes());
+        header.extend_from_slice(&64_u32.to_le_bytes());
+        header.extend_from_slice(&32_u32.to_le_bytes());
+        header.extend_from_slice(
+            &u16::try_from(name.len())
+                .expect("name length")
+                .to_le_bytes(),
+        );
+        header.extend_from_slice(&0_u16.to_le_bytes());
+        header.extend_from_slice(name);
+        let entry = CentralEntry {
+            name: String::from("word/document.xml"),
+            flags: 0,
+            compression: 8,
+            crc32: 0xAABB_CCDD,
+            compressed_bytes: 64,
+            expanded_bytes: 32,
+            local_offset: 0,
+        };
+        let inventory = CentralInventory {
+            entries: 1,
+            expanded_bytes: 32,
+            entries_by_name: vec![entry],
+            kinds: vec![OfficeKind::Docx],
+            encrypted: false,
+        };
+
+        let truncated = BytesSource(header.clone());
+        assert!(
+            validate_selected_probe_entries(&truncated, &NeverCancelled, &inventory)
+                .await
+                .is_err()
+        );
+
+        let mut complete_bytes = header;
+        complete_bytes.extend_from_slice(&[0_u8; 64]);
+        let complete = BytesSource(complete_bytes);
+        assert!(
+            validate_selected_probe_entries(&complete, &NeverCancelled, &inventory)
+                .await
+                .is_ok()
+        );
     }
 
     #[test]
