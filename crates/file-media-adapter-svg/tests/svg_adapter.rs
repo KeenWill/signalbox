@@ -541,6 +541,17 @@ async fn animation_element_is_rejected_as_active_content() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+async fn color_animation_element_is_rejected_as_active_content() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><animateColor attributeName="fill" from="red" to="blue"/></svg>"#,
+        ),
+        "active_content",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn foreign_namespaced_script_is_rejected_as_active_content() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(

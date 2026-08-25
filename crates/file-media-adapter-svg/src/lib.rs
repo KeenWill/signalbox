@@ -118,8 +118,12 @@ impl FileMediaProvider for SvgProvider {
             }
             let maximum_source_bytes = SOURCE_BYTES.min(request.maximum_source_bytes);
             if source.byte_length().get() > maximum_source_bytes {
-                if source.byte_length().get() > SOURCE_BYTES {
-                    let probe_length = source.byte_length().get().min(PROBE_BYTES);
+                let probe_length = source
+                    .byte_length()
+                    .get()
+                    .min(PROBE_BYTES)
+                    .min(maximum_source_bytes);
+                if source.byte_length().get() > SOURCE_BYTES && probe_length > 0 {
                     let prefix = read_range(
                         source,
                         SourceRange {
@@ -796,6 +800,7 @@ fn active_element(name: &[u8]) -> bool {
             | b"object"
             | b"embed"
             | b"animate"
+            | b"animateColor"
             | b"animateMotion"
             | b"animateTransform"
             | b"set"
