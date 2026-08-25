@@ -13,6 +13,7 @@ mod support;
 
 mod approval_decisions;
 mod attention;
+mod convergence_sweep;
 mod delegated_result_rereads;
 mod delegation_schema;
 mod delegation_transactions;
@@ -47,7 +48,8 @@ use signalbox_application::{
     EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
     ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
     ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallObservationCommitOutcome, ModelConversationMessage, OperatorFailureClass,
+    ModelCallObservationCommitOutcome, ModelCallReconciliationFailureKind,
+    ModelCallReconciliationOutcome, ModelConversationMessage, OperatorFailureClass,
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
     ReplaceSessionDefaultsService, RetainedModelCallObservationStatus,
     RetainedPreparedFailureStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
@@ -113,6 +115,10 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
+    model_call_reconciliation::{
+        ModelCallReconciliationRepositoryError, PostgresModelCallReconciliationRepository,
+        RECONCILIATION_ACQUIRE_WAIT, RECONCILIATION_LOCK_WAIT,
+    },
     model_execution::{
         CredentialPoolRuntimeAction, CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
@@ -3483,6 +3489,9 @@ fn assert_goal_command_applied(outcome: GoalCommandHandlingOutcome) {
         }
         GoalCommandHandlingOutcome::ConflictingReuse { command_id } => {
             panic!("the fixture goal command identity is already used: {command_id:?}")
+        }
+        GoalCommandHandlingOutcome::TargetBusy { session } => {
+            panic!("the fixture goal command target is held by session: {session:?}")
         }
         GoalCommandHandlingOutcome::LineageMoved => {
             panic!("the fixture goal command expected a lineage head that had moved")
