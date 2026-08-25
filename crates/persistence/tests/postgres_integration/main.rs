@@ -13,6 +13,7 @@ mod support;
 
 mod approval_decisions;
 mod attention;
+mod convergence_sweep;
 mod delegated_result_rereads;
 mod delegation_schema;
 mod delegation_transactions;
@@ -24,6 +25,7 @@ mod outbox_dispatch_and_process_read;
 mod restart_recovery_and_submit;
 mod session_creation_and_submit;
 mod session_plan;
+mod session_timeline;
 mod tool_round_lifecycle;
 mod turn_activation;
 mod turn_liveness;
@@ -46,10 +48,11 @@ use signalbox_application::{
     EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
     ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
     ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallObservationCommitOutcome, ModelConversationMessage, OperatorFailureClass,
+    ModelCallObservationCommitOutcome, ModelCallReconciliationFailureKind,
+    ModelCallReconciliationOutcome, ModelConversationMessage, OperatorFailureClass,
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
-    ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
-    RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
+    ReplaceSessionDefaultsService, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
     SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
@@ -112,6 +115,10 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
+    model_call_reconciliation::{
+        ModelCallReconciliationRepositoryError, PostgresModelCallReconciliationRepository,
+        RECONCILIATION_ACQUIRE_WAIT, RECONCILIATION_LOCK_WAIT,
+    },
     model_execution::{
         CredentialPoolRuntimeAction, CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
@@ -3500,6 +3507,9 @@ fn assert_goal_command_applied(outcome: GoalCommandHandlingOutcome) {
         GoalCommandHandlingOutcome::ConflictingReuse { command_id } => {
             panic!("the fixture goal command identity is already used: {command_id:?}")
         }
+        GoalCommandHandlingOutcome::TargetBusy { session } => {
+            panic!("the fixture goal command target is held by session: {session:?}")
+        }
         GoalCommandHandlingOutcome::LineageMoved => {
             panic!("the fixture goal command expected a lineage head that had moved")
         }
@@ -4757,9 +4767,9 @@ async fn assert_delegated_capability_reread_rejects_damage(
     assert_eq!(
         fixture
             .repository
-            .reread_capability_failure(fixture.child, fixture.call)
+            .reread_prepared_failure(fixture.child, fixture.call)
             .await?,
-        RetainedCapabilityFailureStatus::AlreadyCommitted
+        RetainedPreparedFailureStatus::AlreadyCommitted
     );
     match damage {
         DelegatedCapabilityResultDamage::InitialTask => {
@@ -4860,13 +4870,13 @@ async fn assert_delegated_capability_reread_rejects_damage(
     }
     let error = fixture
         .repository
-        .reread_capability_failure(fixture.child, fixture.call)
+        .reread_prepared_failure(fixture.child, fixture.call)
         .await
         .expect_err("damaged delegated delivery cannot authenticate a capability failure");
     assert!(matches!(
         error,
         ModelCallRepositoryError::InvalidTransition(
-            "retained capability failure durable closure is incomplete"
+            "retained prepared failure durable closure is incomplete"
         )
     ));
 
