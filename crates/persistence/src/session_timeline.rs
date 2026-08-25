@@ -874,8 +874,12 @@ async fn project_detail_event(
                 DispatchedOutboxEventKind::ModelCallTransition { turn, call, state } => {
                     require_cursor_field(cursor, TimelineBodyField::ModelResponse, 0)?;
                     let response_offset = cursor.map_or(0, |cursor| cursor.offset_bytes);
-                    let include_terminal_evidence =
-                        matches!(state, DispatchedModelCallState::Terminal(_));
+                    let include_terminal_evidence = match state {
+                        DispatchedModelCallState::Prepared
+                        | DispatchedModelCallState::InFlight
+                        | DispatchedModelCallState::CancellationRequested => false,
+                        DispatchedModelCallState::Terminal(_) => true,
+                    };
                     let row = load_model_detail(
                         transaction,
                         *call,

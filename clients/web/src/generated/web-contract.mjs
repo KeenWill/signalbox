@@ -561,7 +561,9 @@ const schemas = {
             "$ref": "#/$defs/WebU64"
           },
           "media_type": {
+            "description": "Visible-ASCII pattern plus the 255 bound express the multipart\ncontract's \"at most 255 visible ASCII bytes\"; for visible ASCII,\nUTF-16 length equals byte length, so maxLength is a byte bound.",
             "maxLength": 255,
+            "pattern": "^[!-~]+$",
             "type": [
               "string",
               "null"
@@ -1336,6 +1338,8 @@ function assertTimelineDetailPage(value) {
           fail(`${path}.body.kind`, "the matching header-only event kind");
         }
         break;
+      default:
+        fail(`${path}.body.type`, "a detail body variant this decoder classifies");
     }
     const computedItemBytes = detailEnvelopeBytes + textBytes;
     if (item.projected_body_bytes !== computedItemBytes) {

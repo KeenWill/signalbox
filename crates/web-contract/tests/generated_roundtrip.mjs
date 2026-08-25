@@ -527,6 +527,21 @@ test("generated detail decoder rejects a response on a non-completed disposition
   );
 });
 
+test("generated detail decoder rejects a non-ASCII attachment media type", () => {
+  const page = userInputDetailPage();
+  page.items[0].body.attachments = [
+    {
+      blob_id: `sha256:${"a".repeat(64)}`,
+      length_bytes: "1",
+      media_type: "application/café",
+    },
+  ];
+  assert.throws(
+    () => decodeWebSessionTimelineDetailPage(page),
+    /one recognized variant/,
+  );
+});
+
 test("generated detail decoder rejects usage on a cancelled disposition", () => {
   const page = modelCallDetailPage();
   page.items[0].body.state = { type: "terminal", disposition: "cancelled" };

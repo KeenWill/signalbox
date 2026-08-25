@@ -414,7 +414,10 @@ impl<'de> Deserialize<'de> for WebBlobId {
 pub struct WebTimelineBlobReference {
     pub blob_id: WebBlobId,
     pub length_bytes: WebU64,
-    #[schemars(length(max = 255))]
+    /// Visible-ASCII pattern plus the 255 bound express the multipart
+    /// contract's "at most 255 visible ASCII bytes"; for visible ASCII,
+    /// UTF-16 length equals byte length, so maxLength is a byte bound.
+    #[schemars(length(max = 255), regex(pattern = r"^[!-~]+$"))]
     pub media_type: Option<String>,
 }
 
@@ -1065,6 +1068,8 @@ function assertTimelineDetailPage(value) {{
           fail(`${{path}}.body.kind`, "the matching header-only event kind");
         }}
         break;
+      default:
+        fail(`${{path}}.body.type`, "a detail body variant this decoder classifies");
     }}
     const computedItemBytes = detailEnvelopeBytes + textBytes;
     if (item.projected_body_bytes !== computedItemBytes) {{
