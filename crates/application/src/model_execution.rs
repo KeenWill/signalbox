@@ -54,7 +54,7 @@ use signalbox_domain::{
     StopRequestedModelCallTurn, StoppedToolResponsePartIdentity,
     StoppedToolRoundModelCallIdentities, ToolApprovalDecision, ToolAttemptEnd, ToolDenialReason,
     ToolExecutionError, ToolRequest, ToolRequestId, ToolResponsePartIdentity, ToolResultContent,
-    ToolRoundModelCallIdentities, TurnAttemptId, TurnId, UserContent,
+    ToolRoundModelCallIdentities, TurnAttemptId, TurnId, UserContent, UserContentPart,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 
@@ -522,6 +522,27 @@ fn render_frontier_messages<'a>(
 /// Reading the lengths of already-resident durable facts allocates nothing,
 /// which is what lets the ceiling be enforced before the clone rather than
 /// after it.
+///
+/// Sums the text a user-content part array carries.
+///
+/// Ordered user content holds text parts and attachment parts. Only the text
+/// parts carry bytes that scale with what the renderer clones; an attachment
+/// part carries a fixed-width digest, a bounded media-type declaration, and an
+/// optional bounded display filename, all of which sit outside this sum for the
+/// same reason the fixed-width identities do. Exactly one text part reduces
+/// this to the single-text length the ceiling counted before user content grew
+/// a part array, so the bound does not move for content that did not change
+/// shape.
+fn user_content_text_bytes(content: &UserContent) -> usize {
+    content
+        .parts()
+        .iter()
+        .fold(0_usize, |total, part| match part {
+            UserContentPart::Text { value } => total.saturating_add(value.as_str().len()),
+            UserContentPart::Attachment { .. } => total,
+        })
+}
+
 fn projected_frontier_content_bytes<'a>(
     entries: impl IntoIterator<
         Item = (
@@ -548,7 +569,7 @@ fn projected_frontier_content_bytes<'a>(
             SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
             | SemanticTranscriptEntryPayload::SteeringAcceptedInput { accepted_input, .. } => {
                 // Absent origin content refuses the render instead of cloning.
-                origin_content(*accepted_input).map_or(0, |content| content.text().as_str().len())
+                origin_content(*accepted_input).map_or(0, user_content_text_bytes)
             }
             SemanticTranscriptEntryPayload::DelegatedTask { content, .. }
             | SemanticTranscriptEntryPayload::DelegationMessage { content, .. } => {
@@ -5811,7 +5832,7 @@ mod tests {
             let bytes = match message {
                 ModelConversationMessage::ContextSummary { content, .. }
                 | ModelConversationMessage::Assistant { content, .. } => content.as_str().len(),
-                ModelConversationMessage::User { content, .. } => content.text().as_str().len(),
+                ModelConversationMessage::User { content, .. } => user_content_text_bytes(content),
                 ModelConversationMessage::DelegatedTask { content, .. }
                 | ModelConversationMessage::DelegationMessage { content, .. } => {
                     content.as_str().len()
