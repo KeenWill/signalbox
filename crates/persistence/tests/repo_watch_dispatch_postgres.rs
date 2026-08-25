@@ -1474,9 +1474,9 @@ async fn checkpoint_delegated_approval_at(
     };
     let turn = activated.turn();
     drop(activated);
-    // Model-call preparation authenticates the turn-start instruction
-    // manifest the daemon records after activation; this fixture drives
-    // preparation directly, so it records the empty manifest itself.
+    // The daemon records a turn-start instruction manifest for every activated
+    // turn before any model work, so this fixture stands in for that write the
+    // way the other PostgreSQL fixtures do.
     record_empty_instruction_manifest(pool, session).await?;
 
     let repository = PostgresModelCallRepository::new(
