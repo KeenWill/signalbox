@@ -3809,6 +3809,18 @@ pub(crate) async fn load_scheduling_projection(
             call.context_frontier_id,
             call.state_kind,
             call.terminal_disposition_kind,
+            manifest.turn_instruction_manifest_id,
+            manifest.boundary_kind AS instruction_manifest_boundary_kind,
+            manifest.eligibility_hash_algorithm
+                AS instruction_eligibility_hash_algorithm,
+            manifest.eligibility_hash AS instruction_eligibility_hash,
+            manifest.admitted_set_hash_algorithm
+                AS instruction_admitted_set_hash_algorithm,
+            manifest.admitted_set_hash AS instruction_admitted_set_hash,
+            manifest.manifest_hash_algorithm
+                AS instruction_manifest_hash_algorithm,
+            manifest.manifest_hash AS instruction_manifest_hash,
+            discovery.scan_complete AS instruction_discovery_complete,
             lifecycle.origin_kind AS turn_origin_kind,
             lifecycle.pinned_provider_model_identity_id,
             (attempt.continued_from_attempt_id IS NOT NULL)
@@ -3821,6 +3833,12 @@ pub(crate) async fn load_scheduling_projection(
            JOIN turn_lifecycle AS lifecycle
              ON lifecycle.turn_id = call.turn_id
             AND lifecycle.session_id = call.session_id
+      LEFT JOIN turn_instruction_manifest AS manifest
+             ON manifest.turn_instruction_manifest_id = call.turn_instruction_manifest_id
+            AND manifest.session_id = call.session_id
+            AND manifest.turn_id = call.turn_id
+      LEFT JOIN instruction_discovery AS discovery
+             ON discovery.instruction_discovery_id = manifest.instruction_discovery_id
           WHERE call.session_id = $1
             AND call.model_call_id = ANY($2)
           ORDER BY call.model_call_id",
@@ -3858,6 +3876,9 @@ pub(crate) async fn load_scheduling_projection(
         let frontier_uuid: Uuid = required(&row, "context_frontier_id")?;
         let turn_uuid: Uuid = required(&row, "turn_id")?;
         let turn = turn_id_from_uuid(turn_uuid);
+        crate::model_execution::authenticate_model_call_instruction_manifest(
+            &row, session_id, turn,
+        )?;
         let turn_origin_kind: String = required(&row, "turn_origin_kind")?;
         if turn_origin_kind == "delegation" {
             delegated_turns.insert(turn);

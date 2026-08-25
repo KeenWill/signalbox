@@ -55,6 +55,7 @@ toml = { version = "1.1.3", default-features = false, features = [
 signalbox-conversation-import-claude-code = { path = "../conversation-import-claude-code" }
 signalbox-conversation-import-codex = { path = "../conversation-import-codex" }
 signalbox-expect-table = { path = "../expect-table" }
+tempfile = "3.25.0"
 
 [[test]]
 name = "approval_judge_eval_postgres"
