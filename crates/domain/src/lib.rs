@@ -324,15 +324,18 @@ pub use tool::{
     DecideToolRequestAppliedResult, DecideToolRequestConstructionError,
     DecideToolRequestPreparationError, DecideToolRequestRejectedResult, DecideToolRequestResult,
     DelegateApprovalRecommendation, DelegateToolApproval, DelegateToolApprovalError,
-    InitialToolApproval, NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecider,
-    ToolApprovalDecision, ToolApprovalPosture, ToolApprovalResolution,
-    ToolApprovalResolutionReconstitutionError, ToolApprovalResolutionReconstitutionInput,
-    ToolArgumentsError, ToolArgumentsFailure, ToolArgumentsKind, ToolCallProposal,
-    ToolDecisionRationale, ToolDecisionRationaleError, ToolDecisionSource, ToolDenialReason,
-    ToolDenialReasonError, ToolDenialReasonFailure, ToolEffectClass, ToolName, ToolNameError,
-    ToolNameFailure, ToolPermissionDefault, ToolRequest, ToolRequestOrdinal,
-    ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent, ToolResultText,
-    ToolResultTextError, ToolResultTextFailure, ToolUsingAssistantResponse,
+    InitialToolApproval, NormalizedToolArguments, OverrideDeniedToolRequest,
+    OverrideDeniedToolRequestAppliedResult, OverrideDeniedToolRequestConstructionError,
+    OverrideDeniedToolRequestPreparationError, OverrideDeniedToolRequestRejectedResult,
+    OverrideDeniedToolRequestResult, PreparedDecideToolRequest, PreparedOverrideDeniedToolRequest,
+    RecordedUserOverride, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalPosture,
+    ToolApprovalResolution, ToolApprovalResolutionReconstitutionError,
+    ToolApprovalResolutionReconstitutionInput, ToolArgumentsError, ToolArgumentsFailure,
+    ToolArgumentsKind, ToolCallProposal, ToolDecisionRationale, ToolDecisionRationaleError,
+    ToolDecisionSource, ToolDenialReason, ToolDenialReasonError, ToolDenialReasonFailure,
+    ToolEffectClass, ToolName, ToolNameError, ToolNameFailure, ToolPermissionDefault, ToolRequest,
+    ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent,
+    ToolResultText, ToolResultTextError, ToolResultTextFailure, ToolUsingAssistantResponse,
     ToolUsingAssistantResponseError,
 };
 pub use tool_attempt::{
@@ -373,9 +376,10 @@ pub use turn_eligibility::{
     ActivatedAcceptedInputTurn, ActivatedDelegatedTurn, ActivatedTurn,
     ActiveTurnSchedulingReconstitutionInput, CancelledTurnExecutionReconstitutionInput,
     ConsumedSteeringInput, ConsumedSteeringReconstitutionInput,
-    ContinuationRoundReconstitutionInput, DelegatedTurnActivationInput,
-    DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegatedWakeTurnActivationInput,
-    FailedAcceptedInputTurn, FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
+    ContinuationRoundReconstitutionInput, DelegatedModelCallRecoveryReconstitutionInput,
+    DelegatedTurnActivationInput, DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState,
+    DelegatedWakeTurnActivationInput, FailedAcceptedInputTurn,
+    FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
     PreparedAcceptedInputTurnActivation, PreparedAcceptedInputTurnFailure,
     PreparedDelegatedTurnActivation, PreparedTurnActivation,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -554,6 +558,11 @@ define_identity!(
 );
 
 define_identity!(
+    /// Identifies one durable operator-commissioned dispatch audit record.
+    CommissionedDispatchId
+);
+
+define_identity!(
     /// Identifies one durable workspace an authority grant may be scoped to.
     WorkspaceId
 );
@@ -621,11 +630,12 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptedInputId, ContextFrontierId, DurableCommandId, GitRemoteMintId,
-        GitRemoteWithdrawalId, ImportedConversationId, ImportedTranscriptEntryId, ModelCallId,
-        ProviderTargetEvidenceId, RepoWatchDispatchId, RepoWatchEventId, RunnerAuthenticationId,
-        RunnerEnrollmentId, RunnerId, RunnerLeaseId, SemanticTranscriptEntryId, SessionId,
-        ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId, WorkspaceId, WorkspaceManifestId,
+        AcceptedInputId, CommissionedDispatchId, ContextFrontierId, DurableCommandId,
+        GitRemoteMintId, GitRemoteWithdrawalId, ImportedConversationId, ImportedTranscriptEntryId,
+        ModelCallId, ProviderTargetEvidenceId, RepoWatchDispatchId, RepoWatchEventId,
+        RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId,
+        SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+        WorkspaceId, WorkspaceManifestId,
     };
     use uuid::Uuid;
 
@@ -666,6 +676,7 @@ mod tests {
         assert_uuid_contract!(WorkspaceManifestId);
         assert_uuid_contract!(RepoWatchEventId);
         assert_uuid_contract!(RepoWatchDispatchId);
+        assert_uuid_contract!(CommissionedDispatchId);
         assert_uuid_contract!(WorkspaceId);
         assert_uuid_contract!(GitRemoteMintId);
         assert_uuid_contract!(GitRemoteWithdrawalId);

@@ -1005,6 +1005,47 @@ impl RunnerProtocolStore {
         .transpose()
     }
 
+    /// Loads every durable connection-loss cursor that still requires session
+    /// propagation, including cursors left pending by an earlier daemon.
+    pub async fn load_pending_connection_losses(
+        &self,
+    ) -> Result<Vec<RunnerConnectionLossSnapshot>, RunnerProtocolStoreError> {
+        let rows = sqlx::query(
+            "SELECT propagation.enrollment_id, propagation.loss_epoch,
+                    loss.connection_epoch, loss.connection_event_ordinal
+               FROM runner_connection_loss_propagation AS propagation
+               JOIN runner_connection_loss_epoch AS loss
+                 ON loss.enrollment_id = propagation.enrollment_id
+                AND loss.loss_epoch = propagation.loss_epoch
+              WHERE propagation.state_kind = 'pending'
+              ORDER BY propagation.enrollment_id, propagation.loss_epoch",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let enrollment = runner_enrollment_id(row.decode_column("enrollment_id")?);
+                let loss_epoch = RunnerConnectionLossEpoch::try_from_u64(decode_u64(
+                    row.decode_column("loss_epoch")?,
+                )?)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+                let connection_epoch = RunnerConnectionEpoch::try_from_u64(decode_u64(
+                    row.decode_column("connection_epoch")?,
+                )?)
+                .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+                let connection_event_ordinal =
+                    NonZeroU64::new(decode_u64(row.decode_column("connection_event_ordinal")?)?)
+                        .ok_or(RunnerProtocolCorruption::InvalidEncoding)?;
+                Ok(RunnerConnectionLossSnapshot {
+                    enrollment,
+                    loss_epoch,
+                    connection_epoch,
+                    connection_event_ordinal,
+                })
+            })
+            .collect()
+    }
+
     /// Loads the next bounded, ordered session page for one durable loss cursor.
     pub async fn load_connection_loss_propagation_page(
         &self,

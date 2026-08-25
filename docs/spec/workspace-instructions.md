@@ -647,17 +647,18 @@ region closes normally and the result stays parseable rather than being cut
 mid-object.
 
 `instructions_read` names one eligible bundle and requests deliberate admission.
-The daemon re-reads and validates it under its registered root, compares the
-source hash with registration evidence, applies the per-bundle render budget,
-reads at most the registered source byte length plus one byte exactly as preview
-does — a source that has grown is proved stale by that extra byte, so unbounded
-growth never buys unbounded admission-time I/O, and returns only a typed
-admission receipt containing identity, source hash, rendered hash, byte length,
-truncation evidence, and durable admission identity. The rendered instruction
-body is never tool-result content and therefore never enters semantic
-tool-result history. A changed or missing source fails with stale-source
-evidence rather than admitting unregistered bytes. Skill-resource reads require
-a later resource-address and hash contract.
+The daemon re-reads and validates it under the authorizing root frozen in the
+session's eligibility entry, compares the source hash with registration
+evidence, applies the per-bundle render budget, reads at most the registered
+source byte length plus one byte exactly as preview does — a source that has
+grown is proved stale by that extra byte, so unbounded growth never buys
+unbounded admission-time I/O, and returns only a typed admission receipt
+containing identity, source hash, rendered hash, byte length, truncation
+evidence, and durable admission identity. The rendered instruction body is never
+tool-result content and therefore never enters semantic tool-result history. A
+changed or missing source fails with stale-source evidence rather than admitting
+unregistered bytes. Skill-resource reads require a later resource-address and
+hash contract.
 
 Admission is idempotent by bundle within the effective admitted set. A distinct
 request for an already admitted bundle returns an `already_admitted` receipt

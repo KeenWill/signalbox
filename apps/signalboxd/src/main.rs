@@ -13,6 +13,7 @@ use std::{
     ffi::OsString,
     fmt, fs,
     future::Future,
+    num::NonZeroUsize,
     path::{Component, Path, PathBuf},
     process::ExitCode,
     sync::Arc,
@@ -22,8 +23,9 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
     InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StartEligibleTurnService,
-    StartupScanService, UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StaleActiveTurnBound,
+    StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -38,6 +40,7 @@ use signalbox_model_runtime_anthropic::{
 };
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 use signalbox_persistence::{
+    convergence_sweep::PostgresConvergenceSweepStore,
     conversation_import::backfill_imported_conversation_display_titles,
     migrate,
     model_execution::PostgresModelCallRepository,
@@ -53,16 +56,21 @@ use signalboxd::runner_protocol_runtime::{
 };
 use signalboxd::{
     ActivatedTurnPass, BaseDaemonCredentialInputs, BlobStoreRegistry,
-    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, DaemonToolCatalog,
-    DaemonToolComposition, DaemonTools, DaemonToolsConstructionError, FatalExecutionSupervisor,
-    FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport,
-    HubModelConfiguration, HubModelConfigurationError, LocalProcessListener, LocalSocketError,
-    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
-    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
-    RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
-    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
-    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
-    model_adapter::ConfiguredModelRuntime, usage_limits::UsageLimitedModelCallProvider,
+    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, ConvergenceSweepRuntime,
+    DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
+    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
+    GitHubCodeHostTransport, HubModelConfiguration, HubModelConfigurationError,
+    LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter,
+    OtlpRuntime, PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, PrometheusServer, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
+    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
+    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
+    TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime,
+    model_adapter::ConfiguredModelRuntime,
+    usage_limits::UsageLimitedModelCallProvider,
+    web_http::{
+        WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError,
+    },
 };
 use tracing_subscriber::prelude::*;
 
@@ -435,6 +443,7 @@ enum SanitizedStartupCause<'a> {
     Database(&'a FencedHubDatabaseError),
     Tools(&'a DaemonToolsConstructionError),
     Socket(&'a LocalSocketError),
+    WebHttpConfiguration(&'a WebHttpConfigurationError),
     Static(&'static str),
 }
 
@@ -448,6 +457,7 @@ impl fmt::Display for SanitizedStartupCause<'_> {
             Self::Database(error) => error.fmt(formatter),
             Self::Tools(error) => error.fmt(formatter),
             Self::Socket(error) => error.fmt(formatter),
+            Self::WebHttpConfiguration(error) => error.fmt(formatter),
             Self::Static(cause) => formatter.write_str(cause),
         }
     }
@@ -617,6 +627,9 @@ enum RuntimeTaskExit {
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
+    ConvergenceSweep,
+    WebHttp(Result<(), WebHttpRuntimeError>),
+    TurnLiveness,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -657,6 +670,9 @@ enum RuntimeTaskDefect {
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
     RepositoryWatchCompletedBeforeShutdown,
+    ConvergenceSweepCompletedBeforeShutdown,
+    WebHttpCompletedBeforeShutdown,
+    TurnLivenessCompletedBeforeShutdown,
     TaskCancelled,
     TaskPanicked,
     TaskJoinFailed,
@@ -672,6 +688,11 @@ impl RuntimeTaskDefect {
             Self::RepositoryWatchCompletedBeforeShutdown => {
                 "repository_watch_completed_before_shutdown"
             }
+            Self::ConvergenceSweepCompletedBeforeShutdown => {
+                "convergence_sweep_completed_before_shutdown"
+            }
+            Self::WebHttpCompletedBeforeShutdown => "web_http_completed_before_shutdown",
+            Self::TurnLivenessCompletedBeforeShutdown => "turn_liveness_completed_before_shutdown",
             Self::TaskCancelled => "runtime_task_cancelled",
             Self::TaskPanicked => "runtime_task_panicked",
             Self::TaskJoinFailed => "runtime_task_join_failed",
@@ -929,6 +950,15 @@ fn report_repository_watch_runtime_defect(error: &RepositoryWatchRuntimeError) {
     );
 }
 
+fn report_web_http_runtime_failure(error: &WebHttpRuntimeError) {
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        failure_class = ?OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+        cause = %error,
+        "browser HTTP runtime failed"
+    );
+}
+
 /// Records an unexpected top-level task state using closed evidence only.
 ///
 /// The cause names the task-control condition without formatting `JoinError`,
@@ -957,7 +987,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
-        | Ok(RuntimeTaskExit::RepositoryWatch(Ok(()))) => RuntimeTaskCompletion::Clean,
+        | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
+        | Ok(RuntimeTaskExit::ConvergenceSweep)
+        | Ok(RuntimeTaskExit::WebHttp(Ok(())))
+        | Ok(RuntimeTaskExit::TurnLiveness) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
             report_process_runtime_failure(&error);
             RuntimeTaskCompletion::Failed
@@ -969,6 +1002,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         Ok(RuntimeTaskExit::RepositoryWatch(Err(error))) => {
             report_repository_watch_runtime_defect(&error);
             RuntimeTaskCompletion::Defect
+        }
+        Ok(RuntimeTaskExit::WebHttp(Err(error))) => {
+            report_web_http_runtime_failure(&error);
+            RuntimeTaskCompletion::Failed
         }
         Err(error) => {
             report_runtime_task_defect(joined_task_defect(&error));
@@ -1103,6 +1140,12 @@ async fn run_hub(
             SanitizedStartupCause::Configuration(&error),
         )
     })?;
+    let web_configuration = WebHttpConfiguration::from_environment().map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::WebHttpConfiguration(&error),
+        )
+    })?;
     let prometheus_runtime = initialize_prometheus(telemetry_configuration).await;
     let model_configuration = HubModelConfiguration::read(configuration.model_configuration_file())
         .map_err(|error| {
@@ -1158,6 +1201,11 @@ async fn run_hub(
             })?;
         repository_watch
             .validate_template_contexts(&declarations)
+            .and_then(|()| {
+                repository_watch.validate_convergence_template(
+                    template_configuration.summaries().map(|(name, _)| name),
+                )
+            })
             .map_err(|error| {
                 erase_startup_cause(
                     RuntimePhase::Configuration,
@@ -1389,7 +1437,7 @@ async fn run_hub(
                 tracing::warn!(
                     phase = ?RuntimePhase::StartupScan,
                     session = %session.into_uuid(),
-                    "session holds its slot awaiting a user reconciliation decision"
+                    "session holds its slot awaiting a durable recovery decision"
                 );
             }
             Ok(())
@@ -1414,6 +1462,24 @@ async fn run_hub(
                     .repositories()
                     .iter()
                     .map(|repository| repository.repository().clone())
+                    .collect()
+            });
+    let configured_convergence_targets =
+        model_configuration
+            .repository_watch()
+            .map_or_else(Vec::new, |configuration| {
+                if configuration.convergence_sweep().is_none() {
+                    return Vec::new();
+                }
+                configuration
+                    .repositories()
+                    .iter()
+                    .flat_map(|repository| {
+                        repository
+                            .convergence_pull_requests()
+                            .iter()
+                            .map(|pull_request| (repository.repository().clone(), *pull_request))
+                    })
                     .collect()
             });
     let repository_watch_store = PostgresRepoWatchDispatchStore::new(
@@ -1536,6 +1602,21 @@ async fn run_hub(
             return Err(failure);
         }
     };
+    let web_http_runtime = match WebHttpRuntime::bind(web_configuration, pool.clone()).await {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::SocketBinding,
+                SanitizedStartupCause::Static("web_http_listener_bind_failed"),
+            );
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+    };
     tracing::info!(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
@@ -1543,6 +1624,11 @@ async fn run_hub(
     let repository_watch_reconciliation = async {
         repository_watch_store
             .process_pending_lifecycle_cutoffs(|| DurableCommandId::from_uuid(uuid::Uuid::now_v7()))
+            .await?;
+        repository_watch_store
+            .process_pending_convergence_cutoffs(|| {
+                DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+            })
             .await
     };
     match await_while_guarded(&mut database, repository_watch_reconciliation).await {
@@ -1599,6 +1685,60 @@ async fn run_hub(
         },
         None => None,
     };
+    let convergence_sweep_runtime = match model_configuration.repository_watch() {
+        Some(configuration) => match ConvergenceSweepRuntime::try_new(
+            pool.clone(),
+            configuration,
+            template_configuration.clone(),
+            model_configuration.clone(),
+            eligibility_nudge.clone(),
+        ) {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static(
+                        "convergence_sweep_transport_construction_failed",
+                    ),
+                );
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        },
+        None => None,
+    };
+    let convergence_sweep_store = PostgresConvergenceSweepStore::new(pool.clone());
+    let convergence_target_admission =
+        convergence_sweep_store.reconcile_configured_targets(&configured_convergence_targets);
+    match await_while_guarded(&mut database, convergence_target_admission).await {
+        GuardedAwait::Completed(Ok(())) => {}
+        GuardedAwait::Completed(Err(_)) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("convergence_target_admission_failed"),
+            );
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            if let Some(registry) = blob_store_registry.as_ref() {
+                registry.disarm_staging_sweep();
+            }
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
+    }
     // Every fallible construction above has succeeded, so the revisions this
     // consumes belong to a daemon that reaches its runtime. A startup that
     // failed earlier retired and activated nothing, leaving the previous
@@ -1687,6 +1827,12 @@ async fn run_hub(
             StartEligibleTurnRepository::new(scheduler_pool.clone()),
         ),
         execution,
+    )
+    .with_occupancy_recovery(scheduler_pool.clone(), eligibility_nudge.clone());
+    let turn_liveness_runtime = TurnLivenessRuntime::new(
+        scheduler_pool.clone(),
+        StaleActiveTurnBound::hard_ceiling(),
+        TurnLivenessScanInterval::baseline(),
     );
     let pass = GoalAwareEligibilityPass::new(
         activated_pass,
@@ -1696,11 +1842,30 @@ async fn run_hub(
             eligibility_nudge,
         ),
     );
-    let mut scheduler = SchedulerLoop::new(work_source, pass);
+    let scheduler_max_in_flight_passes = model_configuration.scheduler_max_in_flight_passes();
+    let mut scheduler = match scheduler_max_in_flight_passes {
+        Some(limit) => match NonZeroUsize::new(limit) {
+            Some(limit) => SchedulerLoop::with_max_in_flight(work_source, pass, limit),
+            None => SchedulerLoop::paused(work_source, pass),
+        },
+        None => SchedulerLoop::new(work_source, pass),
+    };
+    if let Some((metrics, _server)) = prometheus_runtime.as_ref() {
+        scheduler = scheduler.with_occupancy_observer(Arc::new(metrics.clone()));
+    }
+    if let Some(limit) = scheduler_max_in_flight_passes {
+        tracing::info!(
+            max_in_flight_passes = limit,
+            "scheduler pass admission uses the deployment override"
+        );
+    }
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
+    let (convergence_sweep_shutdown, convergence_sweep_shutdown_receiver) = watch::channel(false);
+    let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
+    let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Scheduler(
@@ -1717,6 +1882,9 @@ async fn run_hub(
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Runner(runner_runtime.run(runner_shutdown_receiver).await)
     });
+    runtime_tasks.spawn(async move {
+        RuntimeTaskExit::WebHttp(web_http_runtime.run(web_http_shutdown_receiver).await)
+    });
     if let Some(repository_watch_runtime) = repository_watch_runtime {
         runtime_tasks.spawn(async move {
             RuntimeTaskExit::RepositoryWatch(
@@ -1726,6 +1894,20 @@ async fn run_hub(
             )
         });
     }
+    if let Some(convergence_sweep_runtime) = convergence_sweep_runtime {
+        runtime_tasks.spawn(async move {
+            convergence_sweep_runtime
+                .run(convergence_sweep_shutdown_receiver)
+                .await;
+            RuntimeTaskExit::ConvergenceSweep
+        });
+    }
+    runtime_tasks.spawn(async move {
+        turn_liveness_runtime
+            .run(turn_liveness_shutdown_receiver)
+            .await;
+        RuntimeTaskExit::TurnLiveness
+    });
     tracing::info!(phase = ?RuntimePhase::Scheduling, "daemon runtime started");
 
     let mut outcome = {
@@ -1773,6 +1955,28 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
+                    Some(Ok(RuntimeTaskExit::ConvergenceSweep)) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::ConvergenceSweepCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    Some(Ok(RuntimeTaskExit::WebHttp(Err(error)))) => {
+                        report_web_http_runtime_failure(&error);
+                        RuntimeStopCause::RuntimeFailed
+                    }
+                    Some(Ok(RuntimeTaskExit::WebHttp(Ok(())))) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::WebHttpCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    Some(Ok(RuntimeTaskExit::TurnLiveness)) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::TurnLivenessCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::Scheduler(_))) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::SchedulerCompletedBeforeShutdown,
@@ -1800,6 +2004,9 @@ async fn run_hub(
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
             let _ = repository_watch_shutdown.send(true);
+            let _ = convergence_sweep_shutdown.send(true);
+            let _ = web_http_shutdown.send(true);
+            let _ = turn_liveness_shutdown.send(true);
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),

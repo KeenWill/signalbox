@@ -5,11 +5,11 @@
 //! docs/spec/sessions-and-transcript.md keep complete eligibility derivation
 //! and atomic activation behind the authoritative transaction boundary.
 
-use std::future::Future;
+use std::{future::Future, sync::Arc};
 
 use signalbox_domain::{
     AcceptedInputTurnActivationIdentities, ActivatedTurn, ContextFrontierId,
-    SemanticTranscriptEntryId, SessionId, TurnAttemptId,
+    SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
 };
 
 /// Application effect supplying fresh identities for one activation candidate.
@@ -80,6 +80,28 @@ pub trait StartEligibleTurnTransaction {
         session: SessionId,
         identities: AcceptedInputTurnActivationIdentities,
     ) -> impl Future<Output = Result<StartEligibleTurnOutcome, Self::Error>> + Send;
+
+    /// Runs one authoritative eligibility pass and reports an activated turn
+    /// at the adapter's earliest durable commit boundary.
+    ///
+    /// The default preserves adapters whose result and commit boundary are the
+    /// same. Persistence adapters with a separate commit acknowledgement wait
+    /// override this method and invoke the observer before awaiting commit.
+    fn handle_with_activation_observer(
+        &mut self,
+        session: SessionId,
+        identities: AcceptedInputTurnActivationIdentities,
+        observer: Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<Output = Result<StartEligibleTurnOutcome, Self::Error>> + Send {
+        let outcome = self.handle(session, identities);
+        async move {
+            let outcome = outcome.await?;
+            if let StartEligibleTurnOutcome::Activated(activated) = &outcome {
+                observer(activated.turn());
+            }
+            Ok(outcome)
+        }
+    }
 }
 
 /// Coordinates one session's eligibility-time activation pass.
@@ -149,6 +171,33 @@ where
         let mut transaction = self.transaction.clone();
         async move {
             let outcome = transaction.handle(session, identities).await?;
+            report_turn_activation(session, &outcome);
+            Ok(outcome)
+        }
+    }
+
+    /// Starts one pass and reports activation at the transaction adapter's
+    /// earliest durable commit boundary.
+    pub fn execute_with_cloned_transaction_and_observer(
+        &mut self,
+        session: SessionId,
+        observer: Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<Output = Result<StartEligibleTurnOutcome, Transaction::Error>> + Send + 'static
+    where
+        Transaction: Clone + Send + 'static,
+        Transaction::Error: Send + 'static,
+    {
+        let identities = AcceptedInputTurnActivationIdentities::new(
+            self.ids.next_model_identity_entry_id(),
+            self.ids.next_origin_entry_id(),
+            self.ids.next_starting_frontier_id(),
+            self.ids.next_initial_attempt_id(),
+        );
+        let mut transaction = self.transaction.clone();
+        async move {
+            let outcome = transaction
+                .handle_with_activation_observer(session, identities, observer)
+                .await?;
             report_turn_activation(session, &outcome);
             Ok(outcome)
         }

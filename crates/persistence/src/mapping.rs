@@ -2,10 +2,14 @@
 
 use std::{error::Error, fmt};
 
+use crate::repo_watch_webhook::RepoWatchWebhookDisposition;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
-use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
+use signalbox_application::{
+    RepoWatchConvergenceVerdict, RepoWatchPullRequestLifecycle, RepoWatchReviewDecision,
+    RepoWatchThreadState,
+};
 use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
     CodexCliServiceTier, DangerousToolAutoApproval, DelegateApprovalRecommendation,
@@ -22,6 +26,112 @@ use signalbox_domain::{
     SettingOverlay, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault, ToolRequestId,
     TurnId, UpdateSessionPlacementRejectionKind, ValidatedModelSettings, WorkspaceOrigin,
 };
+
+pub(crate) const SESSION_CREATED: &str = "session_created";
+pub(crate) const SESSION_MODEL_SETTINGS_CHANGED: &str = "session_model_settings_changed";
+pub(crate) const TURN_MODEL_SETTINGS_RESOLVED: &str = "turn_model_settings_resolved";
+pub(crate) const INPUT_ACCEPTED: &str = "input_accepted";
+pub(crate) const GOAL_TURN_RETIRED: &str = "goal_turn_retired";
+pub(crate) const TURN_ACTIVATED: &str = "turn_activated";
+pub(crate) const TURN_FAILED: &str = "turn_failed";
+pub(crate) const MODEL_CALL_TRANSITION: &str = "model_call_transition";
+pub(crate) const TOOL_BATCH_TRANSITION: &str = "tool_batch_transition";
+pub(crate) const TOOL_APPROVAL_DECIDED: &str = "tool_approval_decided";
+pub(crate) const CONTEXT_COMPACTED: &str = "context_compacted";
+pub(crate) const TURN_COMPLETED: &str = "turn_completed";
+pub(crate) const TURN_REFUSED: &str = "turn_refused";
+pub(crate) const TURN_CANCELLED: &str = "turn_cancelled";
+pub(crate) const TURN_RECONCILIATION_REQUIRED: &str = "turn_reconciliation_required";
+pub(crate) const RUNNER_STATE_TRANSITION: &str = "runner_state_transition";
+pub(crate) const DELEGATION_UPDATE: &str = "delegation_update";
+pub(crate) const DELEGATION_WAKE: &str = "delegation_wake";
+
+const OUTBOX_EVENT_DISCRIMINATOR_SPELLINGS: [&str; 18] = [
+    SESSION_CREATED,
+    SESSION_MODEL_SETTINGS_CHANGED,
+    TURN_MODEL_SETTINGS_RESOLVED,
+    INPUT_ACCEPTED,
+    GOAL_TURN_RETIRED,
+    TURN_ACTIVATED,
+    TURN_FAILED,
+    MODEL_CALL_TRANSITION,
+    TOOL_BATCH_TRANSITION,
+    TOOL_APPROVAL_DECIDED,
+    CONTEXT_COMPACTED,
+    TURN_COMPLETED,
+    TURN_REFUSED,
+    TURN_CANCELLED,
+    TURN_RECONCILIATION_REQUIRED,
+    RUNNER_STATE_TRANSITION,
+    DELEGATION_UPDATE,
+    DELEGATION_WAKE,
+];
+
+const fn outbox_event_kind_utf8_byte_bounds() -> (u64, u64) {
+    let mut minimum = u64::MAX;
+    let mut maximum = 0_u64;
+    let mut index = 0;
+    while index < OUTBOX_EVENT_DISCRIMINATOR_SPELLINGS.len() {
+        let length = OUTBOX_EVENT_DISCRIMINATOR_SPELLINGS[index].len() as u64;
+        if length < minimum {
+            minimum = length;
+        }
+        if length > maximum {
+            maximum = length;
+        }
+        index += 1;
+    }
+    (minimum, maximum)
+}
+
+pub(crate) const OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS: (u64, u64) =
+    outbox_event_kind_utf8_byte_bounds();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum OutboxEventDiscriminator {
+    SessionCreated,
+    SessionModelSettingsChanged,
+    TurnModelSettingsResolved,
+    InputAccepted,
+    GoalTurnRetired,
+    TurnActivated,
+    TurnFailed,
+    ModelCallTransition,
+    ToolBatchTransition,
+    ToolApprovalDecided,
+    ContextCompacted,
+    TurnCompleted,
+    TurnRefused,
+    TurnCancelled,
+    TurnReconciliationRequired,
+    RunnerStateTransition,
+    DelegationUpdate,
+    DelegationWake,
+}
+
+pub(crate) fn outbox_event_discriminator_from_str(value: &str) -> Option<OutboxEventDiscriminator> {
+    Some(match value {
+        SESSION_CREATED => OutboxEventDiscriminator::SessionCreated,
+        SESSION_MODEL_SETTINGS_CHANGED => OutboxEventDiscriminator::SessionModelSettingsChanged,
+        TURN_MODEL_SETTINGS_RESOLVED => OutboxEventDiscriminator::TurnModelSettingsResolved,
+        INPUT_ACCEPTED => OutboxEventDiscriminator::InputAccepted,
+        GOAL_TURN_RETIRED => OutboxEventDiscriminator::GoalTurnRetired,
+        TURN_ACTIVATED => OutboxEventDiscriminator::TurnActivated,
+        TURN_FAILED => OutboxEventDiscriminator::TurnFailed,
+        MODEL_CALL_TRANSITION => OutboxEventDiscriminator::ModelCallTransition,
+        TOOL_BATCH_TRANSITION => OutboxEventDiscriminator::ToolBatchTransition,
+        TOOL_APPROVAL_DECIDED => OutboxEventDiscriminator::ToolApprovalDecided,
+        CONTEXT_COMPACTED => OutboxEventDiscriminator::ContextCompacted,
+        TURN_COMPLETED => OutboxEventDiscriminator::TurnCompleted,
+        TURN_REFUSED => OutboxEventDiscriminator::TurnRefused,
+        TURN_CANCELLED => OutboxEventDiscriminator::TurnCancelled,
+        TURN_RECONCILIATION_REQUIRED => OutboxEventDiscriminator::TurnReconciliationRequired,
+        RUNNER_STATE_TRANSITION => OutboxEventDiscriminator::RunnerStateTransition,
+        DELEGATION_UPDATE => OutboxEventDiscriminator::DelegationUpdate,
+        DELEGATION_WAKE => OutboxEventDiscriminator::DelegationWake,
+        _ => return None,
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ProgramRequestStorageKind {
@@ -180,7 +290,206 @@ pub(crate) fn program_reject_reason_from_str(value: &str) -> Option<RejectReason
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
-use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
+use crate::repo_watch::{
+    RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome,
+    RepoWatchStaleReviewClearanceReason,
+};
+
+use crate::{
+    approval_judge::FailedApprovalJudgeDisposition,
+    convergence_sweep::{ConvergenceSweepDecision, ConvergenceSweepFailureKind},
+    outbox::DispatchedRunnerState,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConvergenceSweepStateStorageKind {
+    Observed,
+    RetryWait,
+    Parked,
+}
+
+pub(crate) const fn convergence_sweep_state_to_str(
+    value: ConvergenceSweepStateStorageKind,
+) -> &'static str {
+    match value {
+        ConvergenceSweepStateStorageKind::Observed => "observed",
+        ConvergenceSweepStateStorageKind::RetryWait => "retry_wait",
+        ConvergenceSweepStateStorageKind::Parked => "parked",
+    }
+}
+
+pub(crate) fn convergence_sweep_state_from_str(
+    value: &str,
+) -> Option<ConvergenceSweepStateStorageKind> {
+    match value {
+        "observed" => Some(ConvergenceSweepStateStorageKind::Observed),
+        "retry_wait" => Some(ConvergenceSweepStateStorageKind::RetryWait),
+        "parked" => Some(ConvergenceSweepStateStorageKind::Parked),
+        _ => None,
+    }
+}
+
+pub(crate) const fn convergence_sweep_failure_to_str(
+    value: ConvergenceSweepFailureKind,
+) -> &'static str {
+    match value {
+        ConvergenceSweepFailureKind::FactsFetch => "facts_fetch",
+        ConvergenceSweepFailureKind::CommissionRefused => "commission_refused",
+        ConvergenceSweepFailureKind::TemplateDrift => "template_drift",
+        ConvergenceSweepFailureKind::NoModelActivity => "no_model_activity",
+        ConvergenceSweepFailureKind::StateAccess => "state_access",
+    }
+}
+
+pub(crate) fn convergence_sweep_failure_from_str(
+    value: &str,
+) -> Option<ConvergenceSweepFailureKind> {
+    match value {
+        "facts_fetch" => Some(ConvergenceSweepFailureKind::FactsFetch),
+        "commission_refused" => Some(ConvergenceSweepFailureKind::CommissionRefused),
+        "template_drift" => Some(ConvergenceSweepFailureKind::TemplateDrift),
+        "no_model_activity" => Some(ConvergenceSweepFailureKind::NoModelActivity),
+        "state_access" => Some(ConvergenceSweepFailureKind::StateAccess),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ConvergenceSweepOutcomeStorageKind {
+    Dispatched,
+    Converged,
+    CoolingOff,
+    LiveSession,
+    FactsFetchFailed,
+    CommissionRefused,
+    TemplateDrift,
+    NoModelActivity,
+    StateAccessFailed,
+}
+
+pub(crate) const fn convergence_sweep_outcome_to_str(
+    value: ConvergenceSweepOutcomeStorageKind,
+) -> &'static str {
+    match value {
+        ConvergenceSweepOutcomeStorageKind::Dispatched => "dispatched",
+        ConvergenceSweepOutcomeStorageKind::Converged => "converged",
+        ConvergenceSweepOutcomeStorageKind::CoolingOff => "cooling_off",
+        ConvergenceSweepOutcomeStorageKind::LiveSession => "live_session",
+        ConvergenceSweepOutcomeStorageKind::FactsFetchFailed => "facts_fetch_failed",
+        ConvergenceSweepOutcomeStorageKind::CommissionRefused => "commission_refused",
+        ConvergenceSweepOutcomeStorageKind::TemplateDrift => "template_drift",
+        ConvergenceSweepOutcomeStorageKind::NoModelActivity => "no_model_activity",
+        ConvergenceSweepOutcomeStorageKind::StateAccessFailed => "state_access_failed",
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn convergence_sweep_outcome_from_str(
+    value: &str,
+) -> Option<ConvergenceSweepOutcomeStorageKind> {
+    match value {
+        "dispatched" => Some(ConvergenceSweepOutcomeStorageKind::Dispatched),
+        "converged" => Some(ConvergenceSweepOutcomeStorageKind::Converged),
+        "cooling_off" => Some(ConvergenceSweepOutcomeStorageKind::CoolingOff),
+        "live_session" => Some(ConvergenceSweepOutcomeStorageKind::LiveSession),
+        "facts_fetch_failed" => Some(ConvergenceSweepOutcomeStorageKind::FactsFetchFailed),
+        "commission_refused" => Some(ConvergenceSweepOutcomeStorageKind::CommissionRefused),
+        "template_drift" => Some(ConvergenceSweepOutcomeStorageKind::TemplateDrift),
+        "no_model_activity" => Some(ConvergenceSweepOutcomeStorageKind::NoModelActivity),
+        "state_access_failed" => Some(ConvergenceSweepOutcomeStorageKind::StateAccessFailed),
+        _ => None,
+    }
+}
+
+pub(crate) const fn convergence_sweep_failure_outcome(
+    value: ConvergenceSweepFailureKind,
+) -> ConvergenceSweepOutcomeStorageKind {
+    match value {
+        ConvergenceSweepFailureKind::FactsFetch => {
+            ConvergenceSweepOutcomeStorageKind::FactsFetchFailed
+        }
+        ConvergenceSweepFailureKind::CommissionRefused => {
+            ConvergenceSweepOutcomeStorageKind::CommissionRefused
+        }
+        ConvergenceSweepFailureKind::TemplateDrift => {
+            ConvergenceSweepOutcomeStorageKind::TemplateDrift
+        }
+        ConvergenceSweepFailureKind::NoModelActivity => {
+            ConvergenceSweepOutcomeStorageKind::NoModelActivity
+        }
+        ConvergenceSweepFailureKind::StateAccess => {
+            ConvergenceSweepOutcomeStorageKind::StateAccessFailed
+        }
+    }
+}
+
+pub(crate) const fn convergence_sweep_operator_need_to_str(
+    value: ConvergenceSweepFailureKind,
+) -> &'static str {
+    match value {
+        ConvergenceSweepFailureKind::FactsFetch => "repair_facts_fetch",
+        ConvergenceSweepFailureKind::CommissionRefused => "repair_commission",
+        ConvergenceSweepFailureKind::TemplateDrift => "repair_template",
+        ConvergenceSweepFailureKind::NoModelActivity => "inspect_inactive_session",
+        ConvergenceSweepFailureKind::StateAccess => "repair_sweep_state",
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn convergence_sweep_operator_need_from_str(
+    value: &str,
+) -> Option<ConvergenceSweepFailureKind> {
+    match value {
+        "repair_facts_fetch" => Some(ConvergenceSweepFailureKind::FactsFetch),
+        "repair_commission" => Some(ConvergenceSweepFailureKind::CommissionRefused),
+        "repair_template" => Some(ConvergenceSweepFailureKind::TemplateDrift),
+        "inspect_inactive_session" => Some(ConvergenceSweepFailureKind::NoModelActivity),
+        "repair_sweep_state" => Some(ConvergenceSweepFailureKind::StateAccess),
+        _ => None,
+    }
+}
+
+pub(crate) const fn convergence_sweep_decision_outcome(
+    value: ConvergenceSweepDecision,
+) -> ConvergenceSweepOutcomeStorageKind {
+    match value {
+        ConvergenceSweepDecision::Converged => ConvergenceSweepOutcomeStorageKind::Converged,
+        ConvergenceSweepDecision::CoolingOff => ConvergenceSweepOutcomeStorageKind::CoolingOff,
+        ConvergenceSweepDecision::LiveSession => ConvergenceSweepOutcomeStorageKind::LiveSession,
+    }
+}
+
+/// Closed evaluation-corpus source discriminators stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EvaluationCorpusSourceStorageKind {
+    /// Cases originated in a repository checkout.
+    Repository,
+    /// Cases were authored directly into the instance database.
+    DatabaseNative,
+    /// Cases are addressed through a blob-store binding.
+    BlobReference,
+}
+
+/// Encodes an evaluation-corpus source as its closed PostgreSQL spelling.
+pub const fn evaluation_corpus_source_to_str(
+    value: EvaluationCorpusSourceStorageKind,
+) -> &'static str {
+    match value {
+        EvaluationCorpusSourceStorageKind::Repository => "repository",
+        EvaluationCorpusSourceStorageKind::DatabaseNative => "database_native",
+        EvaluationCorpusSourceStorageKind::BlobReference => "blob_reference",
+    }
+}
+
+/// Decodes an evaluation-corpus source from its closed PostgreSQL spelling.
+pub fn evaluation_corpus_source_from_str(value: &str) -> Option<EvaluationCorpusSourceStorageKind> {
+    match value {
+        "repository" => Some(EvaluationCorpusSourceStorageKind::Repository),
+        "database_native" => Some(EvaluationCorpusSourceStorageKind::DatabaseNative),
+        "blob_reference" => Some(EvaluationCorpusSourceStorageKind::BlobReference),
+        _ => None,
+    }
+}
 
 /// Closed stored states for one durable runner-loss propagation cursor.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -337,6 +646,34 @@ pub fn delegation_wake_subject_from_str(value: &str) -> Option<DelegationWakeSto
     match value {
         "result" => Some(DelegationWakeStorageKind::Result),
         "message" => Some(DelegationWakeStorageKind::Message),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_webhook_disposition_to_str(
+    value: RepoWatchWebhookDisposition,
+) -> &'static str {
+    match value {
+        RepoWatchWebhookDisposition::Projected => "projected",
+        RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
+        RepoWatchWebhookDisposition::Superseded => "superseded",
+        RepoWatchWebhookDisposition::Ignored => "ignored",
+        RepoWatchWebhookDisposition::Quarantined => "quarantined",
+    }
+}
+
+/// Paired with the encoder above so a renamed or added disposition cannot
+/// update the writer while leaving a reader interpreting the old spelling.
+#[cfg(feature = "test-support")]
+pub(crate) fn repo_watch_webhook_disposition_from_str(
+    value: &str,
+) -> Option<RepoWatchWebhookDisposition> {
+    match value {
+        "projected" => Some(RepoWatchWebhookDisposition::Projected),
+        "duplicate_state" => Some(RepoWatchWebhookDisposition::DuplicateState),
+        "superseded" => Some(RepoWatchWebhookDisposition::Superseded),
+        "ignored" => Some(RepoWatchWebhookDisposition::Ignored),
+        "quarantined" => Some(RepoWatchWebhookDisposition::Quarantined),
         _ => None,
     }
 }
@@ -662,6 +999,7 @@ pub(crate) enum ToolApprovalDecisionSourceStorageKind {
     PolicyAuto,
     SessionBlanket,
     Delegate,
+    UserOverride,
 }
 
 pub(crate) const fn tool_approval_decision_source_to_str(
@@ -672,6 +1010,7 @@ pub(crate) const fn tool_approval_decision_source_to_str(
         ToolApprovalDecisionSourceStorageKind::PolicyAuto => "policy_auto",
         ToolApprovalDecisionSourceStorageKind::SessionBlanket => "session_blanket",
         ToolApprovalDecisionSourceStorageKind::Delegate => "delegate",
+        ToolApprovalDecisionSourceStorageKind::UserOverride => "user_override",
     }
 }
 
@@ -683,6 +1022,7 @@ pub(crate) fn tool_approval_decision_source_from_str(
         "policy_auto" => Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto),
         "session_blanket" => Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket),
         "delegate" => Some(ToolApprovalDecisionSourceStorageKind::Delegate),
+        "user_override" => Some(ToolApprovalDecisionSourceStorageKind::UserOverride),
         _ => None,
     }
 }
@@ -702,6 +1042,8 @@ pub(crate) enum DurableCommandKind {
     SubmitInput,
     /// Tool-request decision.
     DecideToolRequest,
+    /// Delegate-denial override.
+    OverrideDeniedToolRequest,
     /// Review-workflow command.
     ReviewWorkflow,
     /// Review-orchestration command.
@@ -731,6 +1073,7 @@ pub(crate) const fn durable_command_kind_to_str(value: DurableCommandKind) -> &'
         DurableCommandKind::ReplaceSessionMetadata => "replace_session_metadata",
         DurableCommandKind::SubmitInput => "submit_input",
         DurableCommandKind::DecideToolRequest => "decide_tool_request",
+        DurableCommandKind::OverrideDeniedToolRequest => "override_denied_tool_request",
         DurableCommandKind::ReviewWorkflow => "review_workflow",
         DurableCommandKind::ReviewOrchestration => "review_orchestration",
         DurableCommandKind::CompactSession => "compact_session",
@@ -753,6 +1096,7 @@ pub(crate) fn durable_command_kind_from_str(value: &str) -> Option<DurableComman
         "replace_session_metadata" => Some(DurableCommandKind::ReplaceSessionMetadata),
         "submit_input" => Some(DurableCommandKind::SubmitInput),
         "decide_tool_request" => Some(DurableCommandKind::DecideToolRequest),
+        "override_denied_tool_request" => Some(DurableCommandKind::OverrideDeniedToolRequest),
         "review_workflow" => Some(DurableCommandKind::ReviewWorkflow),
         "review_orchestration" => Some(DurableCommandKind::ReviewOrchestration),
         "compact_session" => Some(DurableCommandKind::CompactSession),
@@ -1055,6 +1399,7 @@ pub(crate) fn repo_watch_lifecycle_cutoff_disposition_from_str(
 pub(crate) enum RepoWatchEvaluationOutcomeStorageKind {
     NotMatched,
     TargetClosed,
+    TargetConverged,
     Occupied,
     Coalesced,
     Cooldown,
@@ -1067,6 +1412,7 @@ pub(crate) const fn repo_watch_evaluation_outcome_to_str(
     match value {
         RepoWatchEvaluationOutcomeStorageKind::NotMatched => "not_matched",
         RepoWatchEvaluationOutcomeStorageKind::TargetClosed => "target_closed",
+        RepoWatchEvaluationOutcomeStorageKind::TargetConverged => "target_converged",
         RepoWatchEvaluationOutcomeStorageKind::Occupied => "occupied",
         RepoWatchEvaluationOutcomeStorageKind::Coalesced => "coalesced",
         RepoWatchEvaluationOutcomeStorageKind::Cooldown => "cooldown",
@@ -1080,6 +1426,7 @@ pub(crate) fn repo_watch_evaluation_outcome_from_str(
     match value {
         "not_matched" => Some(RepoWatchEvaluationOutcomeStorageKind::NotMatched),
         "target_closed" => Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed),
+        "target_converged" => Some(RepoWatchEvaluationOutcomeStorageKind::TargetConverged),
         "occupied" => Some(RepoWatchEvaluationOutcomeStorageKind::Occupied),
         "coalesced" => Some(RepoWatchEvaluationOutcomeStorageKind::Coalesced),
         "cooldown" => Some(RepoWatchEvaluationOutcomeStorageKind::Cooldown),
@@ -1093,6 +1440,7 @@ pub(crate) fn repo_watch_evaluation_outcome_from_str(
 pub(crate) enum RepoWatchObligationSettlementStorageKind {
     Deactivated,
     TargetClosed,
+    TargetConverged,
     Dispatched,
 }
 
@@ -1102,6 +1450,7 @@ pub(crate) const fn repo_watch_obligation_settlement_to_str(
     match value {
         RepoWatchObligationSettlementStorageKind::Deactivated => "deactivated",
         RepoWatchObligationSettlementStorageKind::TargetClosed => "target_closed",
+        RepoWatchObligationSettlementStorageKind::TargetConverged => "target_converged",
         RepoWatchObligationSettlementStorageKind::Dispatched => "dispatched",
     }
 }
@@ -1112,6 +1461,7 @@ pub(crate) fn repo_watch_obligation_settlement_from_str(
     match value {
         "deactivated" => Some(RepoWatchObligationSettlementStorageKind::Deactivated),
         "target_closed" => Some(RepoWatchObligationSettlementStorageKind::TargetClosed),
+        "target_converged" => Some(RepoWatchObligationSettlementStorageKind::TargetConverged),
         "dispatched" => Some(RepoWatchObligationSettlementStorageKind::Dispatched),
         _ => None,
     }
@@ -1243,6 +1593,113 @@ pub(crate) fn repo_watch_mergeable_state_from_str(value: &str) -> Option<Mergeab
         "mergeable" => Some(MergeableState::Mergeable),
         "conflicting" => Some(MergeableState::Conflicting),
         "unknown" => Some(MergeableState::Unknown),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_review_decision_to_str(
+    value: RepoWatchReviewDecision,
+) -> &'static str {
+    match value {
+        RepoWatchReviewDecision::None => "none",
+        RepoWatchReviewDecision::Approved => "approved",
+        RepoWatchReviewDecision::ReviewRequired => "review_required",
+        RepoWatchReviewDecision::ChangesRequested => "changes_requested",
+    }
+}
+
+pub fn repo_watch_review_decision_from_str(value: &str) -> Option<RepoWatchReviewDecision> {
+    match value {
+        "none" => Some(RepoWatchReviewDecision::None),
+        "approved" => Some(RepoWatchReviewDecision::Approved),
+        "review_required" => Some(RepoWatchReviewDecision::ReviewRequired),
+        "changes_requested" => Some(RepoWatchReviewDecision::ChangesRequested),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_stale_review_clearance_outcome_to_str(
+    value: RepoWatchStaleReviewClearanceOutcome,
+) -> &'static str {
+    match value {
+        RepoWatchStaleReviewClearanceOutcome::Dismissed => "dismissed",
+        RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed => "already_dismissed",
+        RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere => "cleared_elsewhere",
+        RepoWatchStaleReviewClearanceOutcome::Superseded => "superseded",
+    }
+}
+
+pub fn repo_watch_stale_review_clearance_outcome_from_str(
+    value: &str,
+) -> Option<RepoWatchStaleReviewClearanceOutcome> {
+    match value {
+        "dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::Dismissed),
+        "already_dismissed" => Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
+        "cleared_elsewhere" => Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
+        "superseded" => Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_stale_review_clearance_reason_to_str(
+    value: RepoWatchStaleReviewClearanceReason,
+) -> &'static str {
+    match value {
+        RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks => "only_stale_review_blocks",
+    }
+}
+
+pub(crate) fn repo_watch_stale_review_clearance_reason_from_str(
+    value: &str,
+) -> Option<RepoWatchStaleReviewClearanceReason> {
+    match value {
+        "only_stale_review_blocks" => {
+            Some(RepoWatchStaleReviewClearanceReason::OnlyStaleReviewBlocks)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_observed_review_state_to_str(
+    value: RepoWatchObservedReviewState,
+) -> &'static str {
+    match value {
+        RepoWatchObservedReviewState::Approved => "approved",
+        RepoWatchObservedReviewState::ChangesRequested => "changes_requested",
+        RepoWatchObservedReviewState::Commented => "commented",
+        RepoWatchObservedReviewState::Dismissed => "dismissed",
+        RepoWatchObservedReviewState::Pending => "pending",
+    }
+}
+
+pub fn repo_watch_observed_review_state_from_str(
+    value: &str,
+) -> Option<RepoWatchObservedReviewState> {
+    match value {
+        "approved" => Some(RepoWatchObservedReviewState::Approved),
+        "changes_requested" => Some(RepoWatchObservedReviewState::ChangesRequested),
+        "commented" => Some(RepoWatchObservedReviewState::Commented),
+        "dismissed" => Some(RepoWatchObservedReviewState::Dismissed),
+        "pending" => Some(RepoWatchObservedReviewState::Pending),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_convergence_verdict_to_str(
+    value: RepoWatchConvergenceVerdict,
+) -> &'static str {
+    match value {
+        RepoWatchConvergenceVerdict::NotConverged => "not_converged",
+        RepoWatchConvergenceVerdict::InternallyConverged => "internally_converged",
+        RepoWatchConvergenceVerdict::MergeReady => "merge_ready",
+    }
+}
+
+pub fn repo_watch_convergence_verdict_from_str(value: &str) -> Option<RepoWatchConvergenceVerdict> {
+    match value {
+        "not_converged" => Some(RepoWatchConvergenceVerdict::NotConverged),
+        "internally_converged" => Some(RepoWatchConvergenceVerdict::InternallyConverged),
+        "merge_ready" => Some(RepoWatchConvergenceVerdict::MergeReady),
         _ => None,
     }
 }
@@ -2213,7 +2670,10 @@ mod tests {
     use std::{collections::BTreeSet, str::FromStr};
 
     use rust_decimal::Decimal;
-    use signalbox_application::{RepoWatchPullRequestLifecycle, RepoWatchThreadState};
+    use signalbox_application::{
+        RepoWatchConvergenceVerdict, RepoWatchPullRequestLifecycle, RepoWatchReviewDecision,
+        RepoWatchThreadState,
+    };
     use signalbox_domain::{
         AcceptedInputId, BoundChildAction, CheckConclusion, ChecksOutcome,
         DelegateApprovalRecommendation, DelegationMessageDirection, DelegationOutcomeKind,
@@ -2228,47 +2688,63 @@ mod tests {
     };
     use sqlx::types::Uuid;
 
-    use crate::outbox::DispatchedRunnerState;
+    use crate::{
+        convergence_sweep::{ConvergenceSweepDecision, ConvergenceSweepFailureKind},
+        outbox::DispatchedRunnerState,
+        repo_watch::{RepoWatchObservedReviewState, RepoWatchStaleReviewClearanceOutcome},
+    };
 
     use super::{
         ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
+        ConvergenceSweepOutcomeStorageKind, ConvergenceSweepStateStorageKind,
         DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
         DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
-        PlanEventStorageKind, PositiveOrdinalMappingError, RepoWatchEvaluationOutcomeStorageKind,
-        RepoWatchLifecycleCutoffDispositionStorageKind, RepoWatchObligationSettlementStorageKind,
-        RunnerLossPropagationStateStorageKind, SessionCreationCauseStorageKind,
-        SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
-        StoredModelSettingsError, ToolApprovalDecisionSourceStorageKind,
-        ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        EvaluationCorpusSourceStorageKind, PlanEventStorageKind, PositiveOrdinalMappingError,
+        RepoWatchEvaluationOutcomeStorageKind, RepoWatchLifecycleCutoffDispositionStorageKind,
+        RepoWatchObligationSettlementStorageKind, RunnerLossPropagationStateStorageKind,
+        SessionCreationCauseStorageKind, SessionPlacementRejectionStorageKind,
+        SessionPlacementResultStorageKind, StoredModelSettingsError,
+        ToolApprovalDecisionSourceStorageKind, ToolAttemptDispositionStorageKind,
+        accepted_input_id_from_uuid, accepted_input_id_to_uuid,
         approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
         approval_judge_state_from_str, approval_judge_state_to_str,
         approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
-        bound_child_action_from_str, bound_child_action_to_str, defaults_version_from_numeric,
-        defaults_version_to_numeric, delegation_message_direction_from_str,
-        delegation_message_direction_to_str, delegation_outcome_kind_from_str,
-        delegation_outcome_kind_to_str, delegation_outcome_reason_from_str,
-        delegation_outcome_reason_to_str, delegation_policy_kind_from_str,
-        delegation_policy_kind_to_str, delegation_rejection_kind_from_str,
-        delegation_rejection_kind_to_str, delegation_transition_failure_from_str,
-        delegation_transition_failure_to_str, delegation_update_kind_from_str,
-        delegation_update_kind_to_str, delegation_wait_mode_from_str, delegation_wait_mode_to_str,
+        bound_child_action_from_str, bound_child_action_to_str, convergence_sweep_decision_outcome,
+        convergence_sweep_failure_from_str, convergence_sweep_failure_outcome,
+        convergence_sweep_failure_to_str, convergence_sweep_operator_need_from_str,
+        convergence_sweep_operator_need_to_str, convergence_sweep_outcome_from_str,
+        convergence_sweep_outcome_to_str, convergence_sweep_state_from_str,
+        convergence_sweep_state_to_str, defaults_version_from_numeric, defaults_version_to_numeric,
+        delegation_message_direction_from_str, delegation_message_direction_to_str,
+        delegation_outcome_kind_from_str, delegation_outcome_kind_to_str,
+        delegation_outcome_reason_from_str, delegation_outcome_reason_to_str,
+        delegation_policy_kind_from_str, delegation_policy_kind_to_str,
+        delegation_rejection_kind_from_str, delegation_rejection_kind_to_str,
+        delegation_transition_failure_from_str, delegation_transition_failure_to_str,
+        delegation_update_kind_from_str, delegation_update_kind_to_str,
+        delegation_wait_mode_from_str, delegation_wait_mode_to_str,
         delegation_wake_subject_from_str, delegation_wake_subject_to_str,
         dispatched_runner_state_from_str, dispatched_runner_state_to_str,
         durable_command_id_from_uuid, durable_command_id_to_uuid, durable_command_kind_from_str,
-        durable_command_kind_to_str, input_position_from_numeric, input_position_to_numeric,
+        durable_command_kind_to_str, evaluation_corpus_source_from_str,
+        evaluation_corpus_source_to_str, input_position_from_numeric, input_position_to_numeric,
         model_change_adjustments_from_json, model_change_adjustments_to_json,
         model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
         plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
         repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
-        repo_watch_checks_outcome_to_str, repo_watch_evaluation_outcome_from_str,
+        repo_watch_checks_outcome_to_str, repo_watch_convergence_verdict_from_str,
+        repo_watch_convergence_verdict_to_str, repo_watch_evaluation_outcome_from_str,
         repo_watch_evaluation_outcome_to_str, repo_watch_event_kind_from_str,
         repo_watch_event_kind_to_str, repo_watch_lifecycle_cutoff_disposition_from_str,
         repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_mergeable_state_from_str,
         repo_watch_mergeable_state_to_str, repo_watch_obligation_settlement_from_str,
-        repo_watch_obligation_settlement_to_str, repo_watch_pull_request_lifecycle_from_str,
+        repo_watch_obligation_settlement_to_str, repo_watch_observed_review_state_from_str,
+        repo_watch_observed_review_state_to_str, repo_watch_pull_request_lifecycle_from_str,
         repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
-        repo_watch_reaction_change_to_str, repo_watch_review_state_from_str,
-        repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
+        repo_watch_reaction_change_to_str, repo_watch_review_decision_from_str,
+        repo_watch_review_decision_to_str, repo_watch_review_state_from_str,
+        repo_watch_review_state_to_str, repo_watch_stale_review_clearance_outcome_from_str,
+        repo_watch_stale_review_clearance_outcome_to_str, repo_watch_thread_state_from_str,
         repo_watch_thread_state_to_str, runner_loss_propagation_state_from_str,
         runner_loss_propagation_state_to_str, runner_placement_loss_source_from_str,
         runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
@@ -2282,6 +2758,113 @@ mod tests {
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
         turn_id_to_uuid,
     };
+
+    #[test]
+    fn convergence_sweep_state_mapping_is_closed() {
+        assert_convergence_sweep_state_mapping(ConvergenceSweepStateStorageKind::Observed);
+        assert_convergence_sweep_state_mapping(ConvergenceSweepStateStorageKind::RetryWait);
+        assert_convergence_sweep_state_mapping(ConvergenceSweepStateStorageKind::Parked);
+        assert_eq!(convergence_sweep_state_from_str("unknown"), None);
+    }
+
+    #[track_caller]
+    fn assert_convergence_sweep_state_mapping(value: ConvergenceSweepStateStorageKind) {
+        assert_eq!(
+            convergence_sweep_state_from_str(convergence_sweep_state_to_str(value)),
+            Some(value)
+        );
+    }
+
+    #[test]
+    fn convergence_sweep_failure_mappings_are_closed() {
+        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::FactsFetch);
+        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::CommissionRefused);
+        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::TemplateDrift);
+        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::NoModelActivity);
+        assert_convergence_sweep_failure_mappings(ConvergenceSweepFailureKind::StateAccess);
+        assert_eq!(convergence_sweep_failure_from_str("unknown"), None);
+        assert_eq!(convergence_sweep_operator_need_from_str("unknown"), None);
+    }
+
+    #[track_caller]
+    fn assert_convergence_sweep_failure_mappings(failure: ConvergenceSweepFailureKind) {
+        assert_eq!(
+            convergence_sweep_failure_from_str(convergence_sweep_failure_to_str(failure)),
+            Some(failure)
+        );
+        let outcome = convergence_sweep_failure_outcome(failure);
+        assert_eq!(
+            convergence_sweep_outcome_from_str(convergence_sweep_outcome_to_str(outcome)),
+            Some(outcome)
+        );
+        assert_eq!(
+            convergence_sweep_operator_need_from_str(convergence_sweep_operator_need_to_str(
+                failure
+            )),
+            Some(failure)
+        );
+    }
+
+    #[test]
+    fn convergence_sweep_outcome_mapping_is_closed() {
+        assert_convergence_sweep_outcome_mapping(ConvergenceSweepOutcomeStorageKind::Dispatched);
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_decision_outcome(
+            ConvergenceSweepDecision::Converged,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_decision_outcome(
+            ConvergenceSweepDecision::CoolingOff,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_decision_outcome(
+            ConvergenceSweepDecision::LiveSession,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::FactsFetch,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::CommissionRefused,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::TemplateDrift,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::NoModelActivity,
+        ));
+        assert_convergence_sweep_outcome_mapping(convergence_sweep_failure_outcome(
+            ConvergenceSweepFailureKind::StateAccess,
+        ));
+        assert_eq!(convergence_sweep_outcome_from_str("unknown"), None);
+    }
+
+    #[track_caller]
+    fn assert_convergence_sweep_outcome_mapping(value: ConvergenceSweepOutcomeStorageKind) {
+        assert_eq!(
+            convergence_sweep_outcome_from_str(convergence_sweep_outcome_to_str(value)),
+            Some(value)
+        );
+    }
+
+    #[test]
+    fn evaluation_corpus_source_mapping_is_closed() {
+        assert_eq!(
+            evaluation_corpus_source_from_str(evaluation_corpus_source_to_str(
+                EvaluationCorpusSourceStorageKind::Repository,
+            )),
+            Some(EvaluationCorpusSourceStorageKind::Repository)
+        );
+        assert_eq!(
+            evaluation_corpus_source_from_str(evaluation_corpus_source_to_str(
+                EvaluationCorpusSourceStorageKind::DatabaseNative,
+            )),
+            Some(EvaluationCorpusSourceStorageKind::DatabaseNative)
+        );
+        assert_eq!(
+            evaluation_corpus_source_from_str(evaluation_corpus_source_to_str(
+                EvaluationCorpusSourceStorageKind::BlobReference,
+            )),
+            Some(EvaluationCorpusSourceStorageKind::BlobReference)
+        );
+        assert_eq!(evaluation_corpus_source_from_str("unknown"), None);
+    }
 
     #[test]
     fn runner_loss_propagation_state_mapping_is_closed() {
@@ -3323,6 +3906,133 @@ mod tests {
             Some(RunnerPlacementLossSource::Registration),
         );
         assert_eq!(runner_placement_loss_source_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn repository_watch_review_decision_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
+                RepoWatchReviewDecision::None,
+            )),
+            Some(RepoWatchReviewDecision::None),
+        );
+        assert_eq!(
+            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
+                RepoWatchReviewDecision::Approved,
+            )),
+            Some(RepoWatchReviewDecision::Approved),
+        );
+        assert_eq!(
+            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
+                RepoWatchReviewDecision::ReviewRequired,
+            )),
+            Some(RepoWatchReviewDecision::ReviewRequired),
+        );
+        assert_eq!(
+            repo_watch_review_decision_from_str(repo_watch_review_decision_to_str(
+                RepoWatchReviewDecision::ChangesRequested,
+            )),
+            Some(RepoWatchReviewDecision::ChangesRequested),
+        );
+        assert_eq!(repo_watch_review_decision_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn repository_watch_convergence_verdict_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_convergence_verdict_from_str(repo_watch_convergence_verdict_to_str(
+                RepoWatchConvergenceVerdict::NotConverged,
+            )),
+            Some(RepoWatchConvergenceVerdict::NotConverged),
+        );
+        assert_eq!(
+            repo_watch_convergence_verdict_from_str(repo_watch_convergence_verdict_to_str(
+                RepoWatchConvergenceVerdict::InternallyConverged,
+            )),
+            Some(RepoWatchConvergenceVerdict::InternallyConverged),
+        );
+        assert_eq!(
+            repo_watch_convergence_verdict_from_str(repo_watch_convergence_verdict_to_str(
+                RepoWatchConvergenceVerdict::MergeReady,
+            )),
+            Some(RepoWatchConvergenceVerdict::MergeReady),
+        );
+        assert_eq!(repo_watch_convergence_verdict_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn repository_watch_review_clearance_outcome_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::Dismissed,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::Dismissed),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::AlreadyDismissed),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::ClearedElsewhere),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str(
+                repo_watch_stale_review_clearance_outcome_to_str(
+                    RepoWatchStaleReviewClearanceOutcome::Superseded,
+                ),
+            ),
+            Some(RepoWatchStaleReviewClearanceOutcome::Superseded),
+        );
+        assert_eq!(
+            repo_watch_stale_review_clearance_outcome_from_str("unknown"),
+            None
+        );
+    }
+
+    #[test]
+    fn repository_watch_observed_review_state_mapping_is_closed() {
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Approved,
+            )),
+            Some(RepoWatchObservedReviewState::Approved),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::ChangesRequested,
+            ),),
+            Some(RepoWatchObservedReviewState::ChangesRequested),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Commented,
+            )),
+            Some(RepoWatchObservedReviewState::Commented),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Dismissed,
+            )),
+            Some(RepoWatchObservedReviewState::Dismissed),
+        );
+        assert_eq!(
+            repo_watch_observed_review_state_from_str(repo_watch_observed_review_state_to_str(
+                RepoWatchObservedReviewState::Pending,
+            )),
+            Some(RepoWatchObservedReviewState::Pending),
+        );
+        assert_eq!(repo_watch_observed_review_state_from_str("unknown"), None);
     }
 
     #[test]
