@@ -214,7 +214,7 @@ struct CandidateRead {
 #[cfg(unix)]
 impl CandidateRead {
     fn new(bytes: Vec<u8>) -> Self {
-        let source_hash = InstructionDigest::sha256(&bytes);
+        let source_hash = InstructionDigest::source_content(&bytes);
         let is_utf8 = std::str::from_utf8(&bytes).is_ok();
         Self {
             bytes,

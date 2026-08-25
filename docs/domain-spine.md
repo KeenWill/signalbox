@@ -5898,6 +5898,8 @@ pub struct TurnInstructionManifestId(Uuid);
 pub struct InstructionDigest([u8; 32]);
 impl InstructionDigest {
     pub fn sha256(bytes: &[u8]) -> Self;
+    pub fn source_content(bytes: &[u8]) -> Self;
+    pub fn empty_admitted_set() -> Self;
     pub const fn from_sha256(bytes: [u8; 32]) -> Self;
     pub const fn as_bytes(&self) -> &[u8; 32];
 }
@@ -5983,6 +5985,7 @@ impl InstructionBundleRegistration {
 
 pub struct EmptyTurnInstructionManifestEvidence {
     pub eligibility_hash: InstructionDigest,
+    pub admitted_set_hash: InstructionDigest,
     pub manifest_hash: InstructionDigest,
 }
 pub struct TurnInstructionManifest { /* private */ }
@@ -5998,7 +6001,8 @@ impl TurnInstructionManifest {
         turn: TurnId,
         evidence: EmptyTurnInstructionManifestEvidence,
     ) -> Option<Self>;
-    // accessors: id(), session(), turn(), eligibility_hash(), manifest_hash()
+    // accessors: id(), session(), turn(), eligibility_hash(), admitted_set_hash(),
+    // manifest_hash()
 }
 ```
 
