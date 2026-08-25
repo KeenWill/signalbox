@@ -2,10 +2,10 @@
 --
 -- 202608150001_repo_watch_event_content_identity.sql introduced
 -- repo_watch_event.producer and constrained it to 'poll', because polling was
--- then the only intake that wrote an ordinary event row. The owner ruled on
--- 2026-08-25 that the webhook rollout gate is met and that primary mode is
--- authorized, so an authenticated delivery now commits ordinary rows itself and
--- records the transport that observed them.
+-- then the only intake that wrote an ordinary event row. The 2026-08-25 rollout
+-- ruling found the webhook parity gate met and authorized primary mode, so an
+-- authenticated delivery now commits ordinary rows itself and records the
+-- transport that observed them.
 --
 -- The repo_watch_webhook_parity view is deliberately untouched. Its poll side
 -- still reads producer = 'poll', so a webhook-produced row never appears there

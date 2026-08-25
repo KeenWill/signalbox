@@ -1594,9 +1594,9 @@ unmapped or missed fact is observed grows with it.
 no divergence: it is zero `repo_watch_webhook_parity` rows whose status is
 `webhook_only` or `poll_only` and whose cause is null, measured over a real
 workday. Divergence that names a closed cause is understood and does not hold
-the gate. Dogfood parity reached zero uncaused rows and the owner ruled the gate
-met on 2026-08-25, which is what authorizes both primary mode and the hourly
-cadence above.
+the gate. Dogfood parity reached zero uncaused rows, and the gate was ruled met
+on 2026-08-25, which is what authorizes both primary mode and the hourly cadence
+above.
 
 **Committed unimplemented functionality.** Two of the four closed parity causes
 remain unreachable: the runtime records `cross_drain_shadow_gap` and derives

@@ -5093,18 +5093,18 @@ mod tests {
     /// durable round trip the cursor performs on every commit.
     #[test]
     fn identity_frontier_entries_carry_their_owning_pull_request() -> Result<(), Box<dyn Error>> {
-        let owner = pull_request_number(PULL_REQUEST_NUMBER);
+        let owning = pull_request_number(PULL_REQUEST_NUMBER);
         let frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
             RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
                 stream_identity_for(0),
                 NonZeroU64::MIN,
-                owner,
+                owning,
             ),
             RepoWatchEventIdentityFrontierEntryV1::new(stream_identity_for(1), NonZeroU64::MIN),
         ])?;
 
         let entries = frontier.entries().collect::<Vec<_>>();
-        assert_eq!(entries[0].pull_request_number(), Some(owner));
+        assert_eq!(entries[0].pull_request_number(), Some(owning));
         assert_eq!(entries[1].pull_request_number(), None);
         Ok(())
     }
