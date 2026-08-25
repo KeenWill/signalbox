@@ -19,6 +19,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
     })
 
@@ -30,6 +32,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       paneSize: 320,
     })
@@ -37,6 +41,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       paneSize: 440,
     })
@@ -51,6 +57,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       sessionId: '00000000-0000-0000-0000-000000000991',
       openSession: (sessionId) => opened.push(sessionId),
