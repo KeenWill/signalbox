@@ -568,7 +568,12 @@ mod tests {
                     .parse::<CanonicalMediaType>()
                     .expect("fixture media type is valid"),
             ],
-            probe: ProbeDeclaration::new(1, 0, 0, 1),
+            probe: ProbeDeclaration::new(ProbeDeclarationInput {
+                prefix_bytes: 1,
+                suffix_bytes: 0,
+                range_count: 0,
+                cumulative_bytes: 1,
+            }),
             validation,
             views: vec![view],
             reason_codes: vec![
