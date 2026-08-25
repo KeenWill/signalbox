@@ -1908,7 +1908,7 @@ async fn postgres_before_attention_migration()
         .await?;
     for migration in MIGRATOR
         .iter()
-        .take_while(|migration| migration.version < 202608250100)
+        .take_while(|migration| migration.version < 202608250300)
     {
         connection.apply("_sqlx_migrations", migration).await?;
     }
