@@ -539,11 +539,14 @@ describe('BoundedSessionHistory', () => {
     const request = async () =>
       new Response(
         JSON.stringify({
-          contract: { name: 'signalbox.web-http', version: '1' },
+          contract: { name: 'signalbox.web-http', version: '2' },
           capabilities: {
             bounded_json: true,
             same_origin_json_mutations: true,
             ndjson_streaming: true,
+            immutable_blob_content: true,
+            blob_derivations: true,
+            image_derivatives: true,
             bounded_session_timeline: false,
           },
           limits: {
@@ -565,11 +568,14 @@ describe('BoundedSessionHistory', () => {
     const request = async () =>
       new Response(
         JSON.stringify({
-          contract: { name: 'signalbox.web-http', version: '1' },
+          contract: { name: 'signalbox.web-http', version: '2' },
           capabilities: {
             bounded_json: false,
             same_origin_json_mutations: true,
             ndjson_streaming: true,
+            immutable_blob_content: true,
+            blob_derivations: true,
+            image_derivatives: true,
             bounded_session_timeline: true,
           },
           limits: {
@@ -591,11 +597,14 @@ describe('BoundedSessionHistory', () => {
     const request = async () =>
       new Response(
         JSON.stringify({
-          contract: { name: 'signalbox.web-http', version: '1' },
+          contract: { name: 'signalbox.web-http', version: '2' },
           capabilities: {
             bounded_json: true,
             same_origin_json_mutations: true,
             ndjson_streaming: true,
+            immutable_blob_content: true,
+            blob_derivations: true,
+            image_derivatives: true,
             bounded_session_timeline: true,
           },
           limits: {
@@ -617,11 +626,14 @@ describe('BoundedSessionHistory', () => {
     const request = async () =>
       new Response(
         JSON.stringify({
-          contract: { name: 'signalbox.web-http', version: '1' },
+          contract: { name: 'signalbox.web-http', version: '2' },
           capabilities: {
             bounded_json: true,
             same_origin_json_mutations: true,
             ndjson_streaming: true,
+            immutable_blob_content: true,
+            blob_derivations: true,
+            image_derivatives: true,
             bounded_session_timeline: true,
           },
           limits: {
@@ -645,11 +657,14 @@ describe('BoundedSessionHistory', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            contract: { name: 'signalbox.web-http', version: '1' },
+            contract: { name: 'signalbox.web-http', version: '2' },
             capabilities: {
               bounded_json: true,
               same_origin_json_mutations: true,
               ndjson_streaming: true,
+              immutable_blob_content: true,
+              blob_derivations: true,
+              image_derivatives: true,
               bounded_session_timeline: true,
             },
             limits: {
@@ -696,11 +711,14 @@ describe('BoundedSessionHistory', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            contract: { name: 'signalbox.web-http', version: '1' },
+            contract: { name: 'signalbox.web-http', version: '2' },
             capabilities: {
               bounded_json: true,
               same_origin_json_mutations: true,
               ndjson_streaming: true,
+              immutable_blob_content: true,
+              blob_derivations: true,
+              image_derivatives: true,
               bounded_session_timeline: true,
             },
             limits: {
@@ -1194,11 +1212,14 @@ describe('BoundedSessionHistory', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            contract: { name: 'signalbox.web-http', version: '1' },
+            contract: { name: 'signalbox.web-http', version: '2' },
             capabilities: {
               bounded_json: true,
               same_origin_json_mutations: true,
               ndjson_streaming: true,
+              immutable_blob_content: true,
+              blob_derivations: true,
+              image_derivatives: true,
               bounded_session_timeline: true,
             },
             limits: {
@@ -1249,11 +1270,14 @@ describe('BoundedSessionHistory', () => {
       .mockResolvedValueOnce(
         new Response(
           JSON.stringify({
-            contract: { name: 'signalbox.web-http', version: '1' },
+            contract: { name: 'signalbox.web-http', version: '2' },
             capabilities: {
               bounded_json: true,
               same_origin_json_mutations: true,
               ndjson_streaming: true,
+              immutable_blob_content: true,
+              blob_derivations: true,
+              image_derivatives: true,
               bounded_session_timeline: true,
             },
             limits: {

@@ -35,7 +35,10 @@ use tokio::{
     time::Instant,
 };
 
-use crate::{BlobStorageClass, BlobStoreRegistry};
+use crate::{
+    BlobStorageClass, BlobStoreRegistry,
+    blob_read_runtime::{BlobReadError, open_recorded_blob_verified},
+};
 
 const WORKER_ARGUMENT: &str = "--web-image-derivative-worker-v1";
 const THUMBNAIL_EDGE_PX: u32 = 256;
@@ -227,6 +230,31 @@ impl DeterministicBlobProducer for ImageProducer {
         let (expected, output) = expected_output(&output_path).await?;
         publish_output(&self.catalog, &self.registry, output, expected).await?;
         Ok(Box::new([expected.digest()]))
+    }
+
+    async fn outputs_retrievable(&mut self, outputs: &[BlobDigest]) -> Result<bool, Self::Error> {
+        for &output in outputs {
+            let Some(entry) = self
+                .catalog
+                .find(output)
+                .await
+                .map_err(|_| WebBlobRuntimeError::Unavailable)?
+            else {
+                return Ok(false);
+            };
+            match open_recorded_blob_verified(&self.registry, &entry).await {
+                Ok(_) => {}
+                Err(BlobReadError::Unavailable) => return Err(WebBlobRuntimeError::Unavailable),
+                Err(
+                    BlobReadError::Missing
+                    | BlobReadError::Corrupt
+                    | BlobReadError::Integrity
+                    | BlobReadError::NotFound
+                    | BlobReadError::RangeOutOfBounds { .. },
+                ) => return Ok(false),
+            }
+        }
+        Ok(true)
     }
 }
 

@@ -7,12 +7,15 @@ interface RouteEvidence {
 }
 
 const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
+  contract: { name: 'signalbox.web-http', version: '2' },
   capabilities: {
     bounded_json: true,
     bounded_session_timeline: true,
     same_origin_json_mutations: true,
     ndjson_streaming: true,
+    immutable_blob_content: true,
+    blob_derivations: true,
+    image_derivatives: true,
   },
   limits: {
     max_json_body_bytes: 65_536,

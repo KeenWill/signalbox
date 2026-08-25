@@ -445,11 +445,14 @@ deterministic append reloads the one winning record.
 
 Image thumbnail (256-pixel edge) and preview (1,600-pixel edge) transforms are
 lazy deterministic producers. Repeated requests reuse the recorded key without
-executing the producer. A miss copies and re-verifies the source into a private
-temporary workspace, rejecting inputs above 64 MiB and bounding the copy to 120
-seconds, then invokes the current daemon executable through the configured
-filesystem-confined supervisor with no network, a 120-second deadline, and at
-most two concurrent workers. The decoder accepts only the enabled GIF, JPEG,
+executing the producer, provided its recorded output is still retrievable from
+the store; a record whose replicas are missing or fail verification triggers
+reproduction so the store's repair path can heal them, without appending a new
+derivation record. A miss (or an unretrievable cache hit) copies and
+re-verifies the source into a private temporary workspace, rejecting inputs
+above 64 MiB and bounding the copy to 120 seconds, then invokes the current
+daemon executable through the configured filesystem-confined supervisor with
+no network, a 120-second deadline, and at most two concurrent workers. The decoder accepts only the enabled GIF, JPEG,
 PNG, and WebP formats, limits either axis to 16,384 pixels, total pixels to
 67,108,864, decoder allocation to 320 MiB, and the PNG output to 16 MiB. The
 digest of the exact worker executable is the implementation provenance.

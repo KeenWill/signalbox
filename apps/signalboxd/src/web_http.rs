@@ -283,6 +283,10 @@ pub fn production_router(
     pool: Option<PgPool>,
     blobs: Option<WebBlobRuntime>,
 ) -> Router {
+    let http_state = WebHttpState {
+        blobs,
+        blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
+    };
     let session_reads = Router::new()
         .route("/sessions/{session_id}", get(session_descriptor))
         .route(
@@ -293,8 +297,15 @@ pub fn production_router(
         .with_state(WebApiState {
             timeline: pool.map(SessionTimelineRepository::new),
         });
-    let api = Router::new()
-        .route("/bootstrap", get(contract_bootstrap))
+    // Every route that reads session-attached content sits behind the
+    // loopback authority gate. Blob descriptors and bytes are reachable by
+    // digest alone and a descriptor read can start isolated derivation work,
+    // so they belong here for the same reason the session reads do: the
+    // listener is unauthenticated, and a rebound origin must not reach blob
+    // content or trigger derivations with an attacker's authority.
+    // `/bootstrap` stays outside the gate because it carries only the static
+    // contract description and no session or blob data.
+    let blob_reads = Router::new()
         .route(
             "/blobs/{digest}/descriptor",
             get(blob_descriptor).head(blob_descriptor_head),
@@ -307,11 +318,13 @@ pub fn production_router(
             "/blobs/{digest}/download",
             get(blob_download).head(blob_download),
         )
-        .with_state(WebHttpState {
-            blobs,
-            blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
-        })
+        .route_layer(middleware::from_fn(validate_loopback_host))
+        .with_state(http_state.clone());
+    let api = Router::new()
+        .route("/bootstrap", get(contract_bootstrap))
+        .with_state(http_state)
         .merge(session_reads)
+        .merge(blob_reads)
         .fallback(api_not_found);
     let router = Router::new().nest("/api", api);
     match asset_root {
@@ -1927,6 +1940,7 @@ mod tests {
     #[tokio::test]
     async fn malformed_blob_query_is_a_structured_transport_error() {
         let request = Request::get("/api/blobs/not-a-digest/descriptor")
+            .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
         let response = production_router(None, None, None)
@@ -1947,6 +1961,7 @@ mod tests {
         let request = Request::head(
             "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/descriptor",
         )
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
         let response = production_router(None, None, None)
@@ -2282,6 +2297,61 @@ mod tests {
                 session_read_status_for_host(host).await,
                 StatusCode::FORBIDDEN,
                 "`{host}` is neither localhost nor a loopback literal",
+            );
+        }
+    }
+
+    const BLOB_READ_PATHS: [&str; 3] = [
+        "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/descriptor?media_type=image/png",
+        "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/content/image-png",
+        "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/download?media_type=image/png",
+    ];
+
+    /// Drives a blob read at the loopback gate and reports only the status.
+    ///
+    /// Each path is otherwise valid — a well-formed digest, and a
+    /// `media_type` query where the route requires one — so a `FORBIDDEN`
+    /// can only come from the gate, never from the handler behind it.
+    async fn blob_read_status_for_host(path: &str, host: &str) -> StatusCode {
+        let request = Request::get(path)
+            .header(header::HOST, host)
+            .body(Body::empty())
+            .expect("the request is valid");
+        production_router(None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn blob_reads_reject_non_loopback_host_authorities() {
+        // Mirrors `session_reads_reject_non_loopback_host_authorities`: the
+        // descriptor, content, and download routes were registered outside
+        // the guarded router and had to be moved into it too, since a
+        // rebound origin that knows a digest could otherwise read blob
+        // bytes, or start image derivation work, with an attacker's
+        // authority.
+        for path in BLOB_READ_PATHS {
+            assert_eq!(
+                blob_read_status_for_host(path, "attacker.example").await,
+                StatusCode::FORBIDDEN,
+                "`{path}` must reject a non-loopback authority",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn blob_reads_admit_loopback_host_authorities() {
+        // A regression that moved the guard without preserving admission
+        // would 403 legitimate same-origin blob reads; each path here must
+        // reach its handler and fail only because no blob runtime is
+        // configured in this fixture.
+        for path in BLOB_READ_PATHS {
+            assert_eq!(
+                blob_read_status_for_host(path, "localhost").await,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "`{path}` is a loopback authority and must reach the handler",
             );
         }
     }
