@@ -758,6 +758,16 @@ class GitHubGraphQLTests(unittest.TestCase):
 
         self.assertFalse(comment_only_patch(changed_file))
 
+    def test_python_hunk_content_that_looks_like_a_header_is_not_comment_only(
+        self,
+    ) -> None:
+        changed_file = {
+            "filename": "tool.py",
+            "patch": "@@ -1 +1 @@\n-# explanation\n+++danger()",
+        }
+
+        self.assertFalse(comment_only_patch(changed_file))
+
     def test_edited_rename_is_not_review_exempt(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         comparison = {
@@ -919,7 +929,7 @@ class GitHubGraphQLTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "timed out"):
                 client._load_review_exempt_status([pull_request])
 
-    def test_change_request_review_is_not_quiet_evidence(self) -> None:
+    def test_change_request_review_is_only_wave_evidence(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         head = "a" * 40
         pull_request = {
@@ -949,6 +959,35 @@ class GitHubGraphQLTests(unittest.TestCase):
         client._finalize_review_evidence([pull_request])
 
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
+        self.assertEqual(
+            pull_request["observed_codex_reviews"], {"review-node": head}
+        )
+
+    def test_codex_review_without_authenticated_request_is_not_wave_evidence(
+        self,
+    ) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        head = "a" * 40
+        pull_request = {
+            "head_oid": head,
+            "check_rollup_state": "SUCCESS",
+            "checks": [],
+            "review_threads": [],
+            "_review_comments": [],
+            "_reviews": [
+                {
+                    "id": "review-node",
+                    "author": {"login": "chatgpt-codex-connector"},
+                    "state": "COMMENTED",
+                    "submittedAt": "2026-08-16T10:01:00Z",
+                    "commit": {"oid": head},
+                    "comments": {"totalCount": 0},
+                }
+            ],
+        }
+
+        client._finalize_review_evidence([pull_request])
+
         self.assertEqual(pull_request["observed_codex_reviews"], {})
 
     def test_oid_revalidation_can_abort_on_change(self) -> None:
@@ -1395,6 +1434,33 @@ class GitHubGraphQLTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_later_decline_supersedes_an_escalation_marker(self) -> None:
+        threads = [
+            {
+                "isResolved": False,
+                "comments": {
+                    "nodes": [
+                        {"author": {"login": "reviewer"}, "body": "Finding"},
+                        {
+                            "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
+                            "body": "Escalated without disposition",
+                        },
+                        {
+                            "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
+                            "body": "Declined: superseded escalation.",
+                        },
+                    ]
+                },
+            }
+        ]
+
+        normalized = normalize_review_threads(threads, "owner")
+
+        self.assertFalse(normalized[0]["isEscalated"])
+        self.assertEqual(normalized[0]["dispositionKind"], "declined")
 
     def test_wave_five_escalation_is_eligible_without_extension(self) -> None:
         self._assert_escalation_boundary(wave=5, total_waves=5, eligible=True)

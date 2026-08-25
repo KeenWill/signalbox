@@ -484,7 +484,7 @@ query($id: ID!, $after: String!) {
                 if (
                     reviewed_oid is None
                     or submitted_at is None
-                    or review.get("state") in {"DISMISSED", "CHANGES_REQUESTED"}
+                    or review.get("state") == "DISMISSED"
                     or (
                         isinstance(pull_request.get("body_last_edited_at"), str)
                         and pull_request["body_last_edited_at"] > submitted_at
@@ -513,6 +513,7 @@ query($id: ID!, $after: String!) {
                     and author_login(review).casefold()
                     == CODEX_REVIEWER_LOGIN.casefold()
                     and isinstance(review_id, str)
+                    and request_times
                 ):
                     observed_codex_reviews[review_id] = reviewed_oid
                 review_threads = [
@@ -533,6 +534,7 @@ query($id: ID!, $after: String!) {
                 )
                 if (
                     request_times
+                    and review.get("state") != "CHANGES_REQUESTED"
                     and author_login(review) is not None
                     and author_login(review).casefold()
                     == CODEX_REVIEWER_LOGIN.casefold()
@@ -1183,11 +1185,13 @@ def comment_only_patch(file: dict[str, Any]) -> bool:
         source: list[str] = []
         changed_rows: set[int] = set()
         saw_change = False
+        inside_hunk = False
         for line in patch.splitlines():
             if line.startswith("@@"):
+                inside_hunk = True
                 source.append("\n")
                 continue
-            if line.startswith(("+++", "---")) or not line:
+            if not inside_hunk or not line:
                 continue
             marker = line[0]
             if marker == " ":
@@ -1328,6 +1332,10 @@ def normalize_review_threads(
             disposition_kind(comment.get("body") or "")
             for comment in author_replies
         ]
+        latest_disposition = next(
+            (kind for kind in reversed(dispositions) if kind is not None),
+            None,
+        )
         fixing_commits = [
             fixing_commit(comment.get("body") or "")
             for comment in author_replies
@@ -1382,14 +1390,11 @@ def normalize_review_threads(
         normalized_thread = {
             "isResolved": thread["isResolved"],
             "isDispositioned": dispositioned,
-            "isEscalated": "escalated" in dispositions,
+            "isEscalated": latest_disposition == "escalated",
             "isInformational": informational,
             "latestReviewerAt": latest_reviewer_at,
             "dispositionAt": disposition_at,
-            "dispositionKind": next(
-                (kind for kind in reversed(dispositions) if kind is not None),
-                None,
-            ),
+            "dispositionKind": latest_disposition,
             "fixingCommit": next(
                 (commit for commit in reversed(fixing_commits) if commit is not None),
                 None,
