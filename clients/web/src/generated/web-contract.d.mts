@@ -53,7 +53,7 @@ type WebAttentionSort = "last_activity_descending" | "session_identity_ascending
 type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" | "ambiguous" | "awaiting_reconciliation" | "runner_lost" | "idle";
 
 type WebAttentionSummary = {
-  readonly action?: WebAttentionAction | null;
+  readonly action: WebAttentionAction | null;
   readonly active_turn_count: WebU64;
   readonly archived: boolean;
   readonly current_turn_id: string | null;

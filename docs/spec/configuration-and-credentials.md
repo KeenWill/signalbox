@@ -8,6 +8,9 @@ bootstrap are verified against this PR (`agent/web-http-transport`). The
 composed bounded session descriptor and historical-window routes are verified
 against this PR (`agent/web-session-timeline`). The fleet-attention snapshot and
 monitor stream are verified against this PR (`agent/web-attention-projections`).
+The bounded session catalog route, its hot-page follow stream, and the bounded
+replacement batching are verified against this PR
+(`agent/web-session-catalog-follow`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).

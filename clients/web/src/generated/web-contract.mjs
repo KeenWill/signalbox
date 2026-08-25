@@ -249,6 +249,7 @@ const schemas = {
           "active_turn_count",
           "queued_turn_count",
           "state",
+          "action",
           "judge",
           "last_activity"
         ],
@@ -617,6 +618,7 @@ const schemas = {
           "active_turn_count",
           "queued_turn_count",
           "state",
+          "action",
           "judge",
           "last_activity"
         ],

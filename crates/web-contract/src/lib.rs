@@ -424,6 +424,18 @@ fn nullable_title_summary_schema(_generator: &mut schemars::SchemaGenerator) -> 
     })
 }
 
+/// Present-nullable operator action. A state owing no action carries `null`,
+/// and the runtime validator compares the property against exactly that
+/// spelling, so absence must stay rejected while `null` stays legal. As with
+/// `nullable_title_summary_schema`, `#[schemars(required)]` alone would render
+/// the `Option` as its inner enum and drop the `null` arm.
+fn nullable_attention_action_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    let action = generator.subschema_for::<WebAttentionAction>();
+    schemars::json_schema!({
+        "anyOf": [action, {"type": "null"}],
+    })
+}
+
 /// Layer that owns one browser API failure.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -548,6 +560,8 @@ pub struct WebAttentionSummary {
     pub active_turn_count: WebU64,
     pub queued_turn_count: WebU64,
     pub state: WebAttentionState,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required, schema_with = "nullable_attention_action_schema")]
     pub action: Option<WebAttentionAction>,
     pub goal_block: Option<WebAttentionGoalBlock>,
     pub judge: WebAttentionJudgeFacts,
