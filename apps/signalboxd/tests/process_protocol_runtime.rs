@@ -34,7 +34,8 @@ use signalbox_application::{
     RepoWatchConvergenceVerdict, RepoWatchReviewDecision, SchedulerLoop, SchedulerLoopExit,
     ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, UuidV7ModelCallExecutionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    scheduler_ordinary_pass_limit,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
@@ -673,7 +674,7 @@ where
         let witness = self.witness.clone();
         async move {
             let batch = self.inner.find_sessions().await?;
-            let (sessions, continuation) = batch.clone().into_parts();
+            let (sessions, _dispatch_starts, continuation) = batch.clone().into_parts();
             witness.record_batch(&sessions, continuation);
             Ok(batch)
         }
@@ -2425,7 +2426,10 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
 // slices: they need the same fleet census but not more boot infrastructure.
 
 // numeric-bound: derived ceiling from SCHEDULER_PASS_ADMISSION_CAP
-const FLEET_SESSION_COUNT: usize = scheduler_pass_admission_cap();
+// One place inside the shared admission cap stays reserved for a
+// repository-watch dispatch start, so a fleet that saturates ordinary
+// scheduler capacity is one session smaller than the cap itself.
+const FLEET_SESSION_COUNT: usize = scheduler_ordinary_pass_limit();
 // numeric-bound: tunable - keeps each fault observation short in CI
 const FLEET_ASSERTION_BOUND: Duration = Duration::from_secs(2);
 // numeric-bound: tunable - admits contended CI scheduling without weakening assertions
