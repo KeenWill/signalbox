@@ -8,15 +8,19 @@
 use std::{error::Error, num::NonZeroU64};
 
 use signalbox_application::{
-    SessionTimelineDetailBody, TimelineAddress, TimelineBodyField, TimelineContinuation,
-    TimelineDelegationDetail, TimelineDetailCursor, TimelineDetailLimits, TimelineToolState,
-    TimelineWindowAnchor, TimelineWindowLimits, ToolCatalog,
+    PrepareToolContinuationOutcome, SessionTimelineDetailBody, TimelineAddress,
+    TimelineBodyContinuation, TimelineBodyField, TimelineContinuation, TimelineDelegationDetail,
+    TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits, TimelineToolState,
+    TimelineWindowAnchor, TimelineWindowLimits, ToolContinuationIdentities,
 };
 use signalbox_domain::{
-    CreateSession, DirectModelSelection, DurableCommandId, ModelSelectionRequest,
-    SessionConfigurationDefaults, SessionCreationCause, SessionCreationProvenance, SessionId,
-    ToolApprovalDecision, ToolAttemptId, ToolAttemptObservation, ToolEffectClass, ToolName,
-    TranscriptAncestry, TurnAttemptId,
+    ContextFrontierId, CreateSession, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, ModelCallId, ModelSelectionRequest, ModelTargetCatalog,
+    ModelTargetDefinition, ProviderModelIdentity, ResolvedProviderTarget,
+    SemanticTranscriptEntryId, SessionConfigurationDefaults, SessionCreationCause,
+    SessionCreationProvenance, SessionId, ToolApprovalDecision, ToolAttemptId,
+    ToolAttemptObservation, ToolEffectClass, ToolResultContent, ToolResultText, TranscriptAncestry,
+    TurnAttemptId,
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
@@ -29,8 +33,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::{
-    AMBIGUITY_FIXTURE_TOOL, Decimal, ambiguity_fixture_catalog, checkpoint_confirmed_tool_round,
-    commission_fixture_session_goal, decide_tool_request, insert_frontier, migrated_postgres,
+    Decimal, checkpoint_confirmed_tool_round, commission_fixture_session_goal, decide_tool_request,
+    insert_frontier, migrated_postgres, model_credential_reference,
     prepared_complete_delegation_outbox, stop_fixture_session_goal, test_session_credential_pin,
 };
 
@@ -308,15 +312,8 @@ async fn transition_detail_freezes_attempt_state_before_later_resolution()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x99b0;
-    let declared_effect_class = ambiguity_fixture_catalog()
-        .definition(
-            &ToolName::try_new(String::from(AMBIGUITY_FIXTURE_TOOL))
-                .expect("the fixture tool name is admitted"),
-        )
-        .expect("the fixture catalog declares the proposed tool")
-        .effect_class();
     let (fixture, _, _, request) =
-        checkpoint_confirmed_tool_round(&pool, seed, AMBIGUITY_FIXTURE_TOOL, "{}").await?;
+        checkpoint_confirmed_tool_round(&pool, seed, "current_time", "{}").await?;
     let tool_loop = PostgresToolLoopRepository::new(pool.clone());
     tool_loop
         .decide(
@@ -334,7 +331,7 @@ async fn transition_detail_freezes_attempt_state_before_later_resolution()
             fixture.session,
             fixture.turn,
             attempt,
-            declared_effect_class,
+            ToolEffectClass::EffectFree,
         )
         .await?
         .expect("the approved request prepares its physical attempt");
@@ -345,14 +342,55 @@ async fn transition_detail_freezes_attempt_state_before_later_resolution()
         .commit_observation(
             authorized_attempt
                 .executor_fence()
-                .bind(ToolAttemptObservation::Ambiguous),
+                .bind(ToolAttemptObservation::Completed {
+                    result: ToolResultContent::Text(
+                        ToolResultText::try_new(String::from("2026-07-26T12:00:00Z"))
+                            .expect("bounded fixture result"),
+                    ),
+                }),
         )
         .await?;
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
+    let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        selection,
+        ResolvedProviderTarget::naming(provider),
+    )])
+    .expect("one continuation target forms a catalog");
+    let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x28));
+    let continuation = PostgresToolLoopRepository::with_model_calls(
+        pool.clone(),
+        targets,
+        model_credential_reference(),
+    )
+    .prepare_continuation(
+        fixture.session,
+        fixture.turn,
+        fixture.call,
+        ToolContinuationIdentities::new(
+            vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                seed + 0x26,
+            ))],
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x27)),
+            continuation_call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x29)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2a)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x2b)),
+        ),
+        |_| panic!("the fixture has no pending steering"),
+    )
+    .await?;
+    assert_eq!(
+        continuation,
+        PrepareToolContinuationOutcome::Checkpointed(continuation_call)
+    );
 
-    // A later sanctioned path (a sibling member settling, or runner-recovery
-    // crash resolution) advances the same live attempt row in place; the
-    // committed recovery transition must keep projecting the evidence it saw.
-    // The guard trigger admits that narrow path only with full runner-recovery
+    // A later in-place advancement of the same live attempt row (the class the
+    // runner-recovery carve-out performs through its own scaffolding) must not
+    // change what the committed results-projected transition projects. The
+    // guard trigger admits that class only with full runner-recovery
     // scaffolding, so this fixture applies the row change directly.
     let mut later_resolution = pool.begin().await?;
     sqlx::query("ALTER TABLE tool_attempt DISABLE TRIGGER ALL")
@@ -360,9 +398,11 @@ async fn transition_detail_freezes_attempt_state_before_later_resolution()
         .await?;
     sqlx::query(
         "UPDATE tool_attempt
-            SET terminal_disposition_kind = 'completed',
-                result_content_kind = 'text',
-                result_text = 'resolved later'
+            SET terminal_disposition_kind = 'known_failed',
+                result_content_kind = NULL,
+                result_text = NULL,
+                error_kind = 'execution_failed',
+                error_detail = 'later failure'
           WHERE attempt_id = $1",
     )
     .bind(attempt.into_uuid())
@@ -377,7 +417,7 @@ async fn transition_detail_freezes_attempt_state_before_later_resolution()
         "SELECT event_sequence::bigint
            FROM tool_batch_transition_outbox_event
           WHERE producing_model_call_id = $1
-            AND transition_kind = 'recovery_required'",
+            AND transition_kind = 'results_projected'",
     )
     .bind(fixture.call.into_uuid())
     .fetch_one(&pool)
@@ -394,7 +434,7 @@ async fn transition_detail_freezes_attempt_state_before_later_resolution()
             TimelineDetailLimits::new(1, 512).expect("fixture limits are bounded"),
         )
         .await?
-        .expect("the recovery transition detail exists");
+        .expect("the results-projected transition detail exists");
     let SessionTimelineDetailBody::ToolBatch {
         tools,
         projected_member_index,
@@ -406,18 +446,29 @@ async fn transition_detail_freezes_attempt_state_before_later_resolution()
     assert_eq!(*projected_member_index, Some(0));
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].attempt_id, Some(attempt));
-    assert_eq!(tools[0].state, Some(TimelineToolState::Ambiguous));
-    assert_eq!(tools[0].result, None);
-    assert_eq!(tools[0].failure, None);
-    assert_eq!(page.continuation, None);
+    assert_eq!(tools[0].state, Some(TimelineToolState::Completed));
+    assert_eq!(tools[0].cause_code, None);
+    // The snapshot still advertises the completed result as the next field,
+    // never the failure the live row later acquired.
+    assert_eq!(
+        page.continuation,
+        Some(TimelineDetailContinuation::MoreBody(
+            TimelineBodyContinuation {
+                address,
+                field: TimelineBodyField::ToolResult,
+                member_index: 0,
+                offset_bytes: 0,
+            }
+        ))
+    );
 
-    let stale_result_cursor = repository
+    let stale_failure_cursor = repository
         .read_item_details(
             fixture.session,
             address,
             Some(TimelineDetailCursor {
                 address,
-                field: Some(TimelineBodyField::ToolResult),
+                field: Some(TimelineBodyField::ToolFailure),
                 member_index: 0,
                 offset_bytes: 0,
             }),
@@ -425,7 +476,7 @@ async fn transition_detail_freezes_attempt_state_before_later_resolution()
         )
         .await;
     assert!(matches!(
-        stale_result_cursor,
+        stale_failure_cursor,
         Err(SessionTimelineRepositoryError::InvalidDetailQuery)
     ));
 
