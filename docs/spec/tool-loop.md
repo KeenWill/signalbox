@@ -1050,14 +1050,17 @@ rather than extending it, and may fix `D` to its own closed token vocabulary so
 the projection stays machine-readable. **Committed unimplemented
 functionality.** The instruction family is the one such mapping so far, fixed by
 [workspace instructions](workspace-instructions.md#enumeration-preview-and-admission):
-its admission and enumeration failures select `execution_failed` with `D` set to
-exactly one closed reason token and no other text. OpenAI carries that JSON as
-ordinary tool-message content because its wire shape has no failure flag;
-Anthropic also receives the provider-neutral failure flag. Malformed proposal
-arguments remain exact after preparation-time credential scrubbing on the
-durable request but replay as the exact provider-neutral JSON object
-`{"signalbox_invalid_arguments":true}`, allowing the paired typed error result
-to reach either provider without pretending the placeholder is durable evidence.
+its four execution-stage failures select `execution_failed` with `D` set to
+exactly one closed reason token and no other text, while its two pre-approval
+reasons, which resolve before approval and create no attempt, select
+`invalid_arguments` with `D` the token `not_eligible` or JSON null for arguments
+that did not decode. OpenAI carries that JSON as ordinary tool-message content
+because its wire shape has no failure flag; Anthropic also receives the
+provider-neutral failure flag. Malformed proposal arguments remain exact after
+preparation-time credential scrubbing on the durable request but replay as the
+exact provider-neutral JSON object `{"signalbox_invalid_arguments":true}`,
+allowing the paired typed error result to reach either provider without
+pretending the placeholder is durable evidence.
 
 The first compiled tool is `current_time`:
 
