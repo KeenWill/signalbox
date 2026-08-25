@@ -7,6 +7,7 @@ final class ProcessProtocolTests: XCTestCase {
   private let sessionID = "11111111-1111-4111-8111-111111111111"
   private let turnID = "22222222-2222-4222-8222-222222222222"
   private let toolRequestID = "33333333-3333-4333-8333-333333333333"
+  private let blobDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
   func testClientFrameUsesVersionOneAndCanonicalStringScalars() throws {
     let frame = SignalboxProcessClientFrame(
@@ -127,7 +128,71 @@ final class ProcessProtocolTests: XCTestCase {
 
     XCTAssertEqual(
       String(decoding: encoded, as: UTF8.self),
-      #"{"request":{"command_id":"\#(turnID)","content":"Stop and continue","descendant_scope":"parent_and_descendants","expected_active_turn_id":"\#(turnID)","expected_defaults_version":"3","model_settings":{"fast_mode":{"kind":"inherit"},"reasoning_level":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session_id":"\#(sessionID)","type":"stop_turn"},"request_id":"9","version":1}"#
+      #"{"request":{"command_id":"\#(turnID)","content":[{"text":"Stop and continue","type":"text"}],"descendant_scope":"parent_and_descendants","expected_active_turn_id":"\#(turnID)","expected_defaults_version":"3","model_settings":{"fast_mode":{"kind":"inherit"},"reasoning_level":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session_id":"\#(sessionID)","type":"stop_turn"},"request_id":"9","version":1}"#
+    )
+  }
+
+  /// INV-012 / INV-060: multipart decoding preserves ordered attachment
+  /// metadata and structural replay equality.
+  func testUserInputContentPreservesOrderedAttachmentMetadata() throws {
+    let content = try SignalboxUserInputContent(validating: [
+      .text("before"),
+      .attachment(
+        digest: try SignalboxCanonicalBlobDigest(validating: blobDigest),
+        kind: .document,
+        mediaType: "application/pdf",
+        displayFilename: "brief.pdf"
+      ),
+      .text("after"),
+    ])
+
+    let encoded = try SignalboxJSONCoding.encoder().encode(content)
+    let decoded = try SignalboxJSONCoding.decoder().decode(
+      SignalboxUserInputContent.self,
+      from: encoded
+    )
+
+    XCTAssertEqual(decoded, content)
+  }
+
+  func testUserInputContentRejectsAdjacentTextParts() {
+    XCTAssertThrowsError(
+      try SignalboxUserInputContent(validating: [.text("first"), .text("second")])
+    )
+  }
+
+  /// INV-012: native multipart decoding stops at the retained-parts bound
+  /// without decoding an unbounded remainder.
+  func testUserInputContentDecodingStopsAtThePartLimit() throws {
+    let retained = Array(
+      repeating: #"{"type":"text","text":"x"}"#,
+      count: SignalboxProcessProtocol.maximumUserInputParts
+    )
+    let encoded = Data(("[" + (retained + ["false"]).joined(separator: ",") + "]").utf8)
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxUserInputContent.self, from: encoded)
+    ) { error in
+      guard case DecodingError.dataCorrupted(let context) = error else {
+        return XCTFail("Expected the multipart count error, got \(error).")
+      }
+      XCTAssertEqual(context.debugDescription, "User input part count is invalid.")
+    }
+  }
+
+  func testUserInputContentDisplayTextEscapesFilenameLineBreaks() throws {
+    let content = try SignalboxUserInputContent(validating: [
+      .attachment(
+        digest: try SignalboxCanonicalBlobDigest(validating: blobDigest),
+        kind: .document,
+        mediaType: "application/pdf",
+        displayFilename: "brief.pdf\n[trusted-looking transcript line]"
+      )
+    ])
+
+    XCTAssertEqual(
+      content.displayText,
+      "[attachment document \"brief.pdf\\n[trusted-looking transcript line]\" \(blobDigest)]"
     )
   }
 

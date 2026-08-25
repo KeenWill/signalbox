@@ -55,9 +55,9 @@ use signalbox_persistence::{
     submit_input::SubmitInputRepository, tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
-    InputDelivery, ModelSettingsOverlay, ProtocolVersion, RequestId, ServerMessage, ToolDecision,
-    decode_server_line, encode_client_line,
+    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputDelivery,
+    ModelSettingsOverlay, ProtocolVersion, RequestId, ServerMessage, ToolDecision,
+    UserInputContent, decode_server_line, encode_client_line,
 };
 use signalbox_tools_exec::{
     BwrapAvailability, CaptureCompleteness, ProcessOutcome, ProcessOutput, ProcessRequest,
@@ -4366,7 +4366,7 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
         .await?;
     let request = fixture.wait_for_requests(1).await?[0];
 
-    let steering_content = InputContent::new(String::from("steer the parked tool round"));
+    let steering_content = UserInputContent::text(String::from("steer the parked tool round"));
     let steering_frame = ClientFrame::try_new_for_version(
         ProtocolVersion::One,
         RequestId::try_new(1)?,
