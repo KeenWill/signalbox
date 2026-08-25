@@ -236,7 +236,7 @@ The version-one compiled ceilings are:
 `FileMediaCeilings` admits only positive effective values at or below its
 compiled maxima. `FileMediaProcessCeilings` keeps the protocol frame fixed at
 1,048,576 bytes while admitting only positive resource values at or below their
-compiled maxima; descendants are fixed at zero (INV-072). Each worker snapshot
+compiled maxima; descendants are fixed at zero (INV-088). Each worker snapshot
 is additionally capped by its effective worker address-space budget; bubblewrap
 and all distinct worker snapshots together cannot exceed the 64 MiB aggregate
 snapshot ceiling. The text body ceiling reserves enough frame space for
