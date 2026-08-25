@@ -4270,6 +4270,11 @@ pub enum RejectionDetail {
         /// Authoritative active turn.
         active_turn_id: CanonicalUuid,
     },
+    /// A commissioned target already has a live session.
+    CommissionTargetBusy {
+        /// Authoritative live session currently owning the target.
+        session_id: CanonicalUuid,
+    },
     /// The caller named a turn that no longer holds the session slot.
     ActiveTurnMismatch {
         /// Target session.
@@ -4598,6 +4603,7 @@ impl RejectionDetail {
             | Self::SessionPlacementVersionExhausted { .. }
             | Self::GoalCommandRejected { .. }
             | Self::ActiveTurnPresent { .. }
+            | Self::CommissionTargetBusy { .. }
             | Self::ActiveTurnMismatch { .. }
             | Self::NoActiveTurn { .. }
             | Self::TurnNotAwaitingReconciliation { .. }
@@ -4914,6 +4920,10 @@ pub enum TurnState {
         ended_attempt_id: CanonicalUuid,
         /// Ambiguous call awaiting recovery.
         recovery_model_call_id: CanonicalUuid,
+        /// Durable automatic reconciliation attempts already claimed.
+        automatic_reconciliation_attempts: CanonicalU64,
+        /// True only when the automatic attempt budget is exhausted.
+        operator_action_required: bool,
     },
     /// The turn is parked on a user decision for a tool request.
     ActiveAwaitingToolApproval {
@@ -5034,6 +5044,8 @@ enum RawTurnState {
     ActiveAwaitingModelCallRecovery {
         ended_attempt_id: CanonicalUuid,
         recovery_model_call_id: CanonicalUuid,
+        automatic_reconciliation_attempts: CanonicalU64,
+        operator_action_required: bool,
     },
     ActiveAwaitingToolApproval {
         tool_request_id: CanonicalUuid,
@@ -5158,9 +5170,13 @@ impl<'de> Deserialize<'de> for TurnState {
             RawTurnState::ActiveAwaitingModelCallRecovery {
                 ended_attempt_id,
                 recovery_model_call_id,
+                automatic_reconciliation_attempts,
+                operator_action_required,
             } => Self::ActiveAwaitingModelCallRecovery {
                 ended_attempt_id,
                 recovery_model_call_id,
+                automatic_reconciliation_attempts,
+                operator_action_required,
             },
             RawTurnState::ActiveAwaitingToolApproval { tool_request_id } => {
                 Self::ActiveAwaitingToolApproval { tool_request_id }
@@ -8102,6 +8118,7 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
         | RejectionDetail::UnsupportedServiceTier { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
         | RejectionDetail::NoActiveTurn { .. }
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
@@ -8208,6 +8225,7 @@ fn validate_conversation_import_detail(
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
         | RejectionDetail::NoActiveTurn { .. }
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
