@@ -701,18 +701,18 @@ an open workspace or prevents following any listed session.
 
 Already-redacted provider text deltas are ephemeral presentation, carry no
 durable cursor, and are split at UTF-8 boundaries at most 8,192 bytes long — a
-bound the contract crate owns and the generated decoder enforces. Deltas
-already queued when the repeatable-read snapshot completes are discarded, since
-one raced against the snapshot's own reads may describe a call the snapshot
-already shows terminal and nothing later would clear it. Lag absorption uses
-the earlier boundary: only a lag confined to the records queued before the
-snapshot was established — each proven covered by the snapshot cursor — is
-absorbed silently. Falling behind past them, or a monitor queue that reaches
-its bounded capacity while retained fragment text is still draining, emits one
-`resync_required` item, whose cursor is always positive, and ends the response.
-A client resynchronizes by replacing all transient presentation with a fresh
-bounded live snapshot and resumes durable history above its cursor; it does not
-reload the historical transcript.
+bound the contract crate owns and the generated decoder enforces. Deltas already
+queued when the repeatable-read snapshot completes are discarded, since one
+raced against the snapshot's own reads may describe a call the snapshot already
+shows terminal and nothing later would clear it. Lag absorption uses the earlier
+boundary: only a lag confined to the records queued before the snapshot was
+established — each proven covered by the snapshot cursor — is absorbed silently.
+Falling behind past them, or a monitor queue that reaches its bounded capacity
+while retained fragment text is still draining, emits one `resync_required`
+item, whose cursor is always positive, and ends the response. A client
+resynchronizes by replacing all transient presentation with a fresh bounded live
+snapshot and resumes durable history above its cursor; it does not reload the
+historical transcript.
 
 ## Bounded browser session timeline
 
