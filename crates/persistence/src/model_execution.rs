@@ -21,8 +21,8 @@ use signalbox_application::{
     FailPreparedModelCallTransaction, ModelCallAuthorizationReread, ModelCallCredentialReference,
     ModelCallObservationCommitOutcome, ModelCallTerminalIdentityCandidates, OperatorFailureClass,
     PrepareModelCallOutcome, PrepareModelCallTransaction, PrepareToolContinuationOutcome,
-    ResolvedToolConversationEntry, RetainedCapabilityFailureStatus,
-    RetainedModelCallObservationStatus,
+    ResolvedToolConversationEntry, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus,
 };
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase,
@@ -30,11 +30,11 @@ use signalbox_domain::{
     AssistantText, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CancelledModelCallTurn,
     CancelledToolRoundModelCallTurn, CompletedModelCallTurn, ConsumedSteeringReconstitutionInput,
     CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
-    DelegatedTurnActivationInput, DelegatedWakeTurnActivationInput, DelegationContent,
-    DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, DirectModelSelection,
-    DurableCommandId, FailedModelCallTurn, FailedModelCallTurnIdentities, FastMode,
-    FrozenAliasDefinition, FrozenModelSelection, ModelAlias, ModelCallDisposition,
-    ModelCallExecution, ModelCallExecutionReconstitutionFailure,
+    DelegatedModelCallRecoveryReconstitutionInput, DelegatedTurnActivationInput,
+    DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
+    DelegationOutcomeReason, DirectModelSelection, DurableCommandId, FailedModelCallTurn,
+    FailedModelCallTurnIdentities, FastMode, FrozenAliasDefinition, FrozenModelSelection,
+    ModelAlias, ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
     ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
     ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
@@ -70,7 +70,7 @@ use crate::{
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{
         SubmitInputCorruption, SubmitInputRepositoryError, decode_goal_origin_configuration,
-        load_scheduling_projection, require_recorded_batch,
+        load_scheduling_projection, require_applied_interrupt_from_attempt, require_recorded_batch,
     },
 };
 
@@ -1359,7 +1359,7 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
-    /// Atomically closes a trustworthy capability failure before send.
+    /// Atomically closes a trustworthy prepared failure before send.
     pub async fn fail_prepared_call<NextTurn>(
         &self,
         session: SessionId,
@@ -1385,7 +1385,7 @@ impl PostgresModelCallRepository {
                 )
                 .map_err(|_| {
                     ModelCallRepositoryError::InvalidTransition(
-                        "capability failure requires a Prepared call",
+                        "prepared failure requires a Prepared call",
                     )
                 })?;
             persist_failed_with_delegated_child_result(
@@ -1401,12 +1401,12 @@ impl PostgresModelCallRepository {
         finish_commit(transaction, result).await
     }
 
-    /// Rereads whether an unchanged pre-send capability failure committed.
-    pub async fn reread_capability_failure(
+    /// Rereads whether an unchanged pre-send prepared failure committed.
+    pub async fn reread_prepared_failure(
         &self,
         session: SessionId,
         call: ModelCallId,
-    ) -> Result<RetainedCapabilityFailureStatus, ModelCallRepositoryError> {
+    ) -> Result<RetainedPreparedFailureStatus, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
@@ -1422,7 +1422,7 @@ impl PostgresModelCallRepository {
             .fetch_optional(&mut *transaction)
             .await?
             .ok_or(ModelCallCorruption::Missing(
-                "retained capability-failure model call",
+                "retained prepared-failure model call",
             ))?;
             let (turn, attempt, source_frontier, state, disposition) = stored;
             match (state.as_str(), disposition.as_deref()) {
@@ -1433,10 +1433,10 @@ impl PostgresModelCallRepository {
                     )?;
                     execution.resume_prepared_call().map_err(|_| {
                         ModelCallRepositoryError::InvalidTransition(
-                            "retained capability failure could not resume Prepared",
+                            "retained prepared failure could not resume Prepared",
                         )
                     })?;
-                    Ok(RetainedCapabilityFailureStatus::Pending)
+                    Ok(RetainedPreparedFailureStatus::Pending)
                 }
                 ("terminal", Some("known_failed")) => {
                     let transition_history_matches = sqlx::query_scalar::<_, bool>(
@@ -1490,10 +1490,10 @@ impl PostgresModelCallRepository {
                     )
                     .await?;
                     if transition_history_matches && closure_matches && delegated_result_matches {
-                        Ok(RetainedCapabilityFailureStatus::AlreadyCommitted)
+                        Ok(RetainedPreparedFailureStatus::AlreadyCommitted)
                     } else {
                         Err(ModelCallRepositoryError::InvalidTransition(
-                            "retained capability failure durable closure is incomplete",
+                            "retained prepared failure durable closure is incomplete",
                         ))
                     }
                 }
@@ -1508,15 +1508,15 @@ impl PostgresModelCallRepository {
                     )
                     .await?
                     {
-                        Ok(RetainedCapabilityFailureStatus::Cancelled)
+                        Ok(RetainedPreparedFailureStatus::Cancelled)
                     } else {
                         Err(ModelCallRepositoryError::InvalidTransition(
-                            "retained capability failure cancellation closure is incomplete",
+                            "retained prepared failure cancellation closure is incomplete",
                         ))
                     }
                 }
                 _ => Err(ModelCallRepositoryError::InvalidTransition(
-                    "retained capability failure durable state changed",
+                    "retained prepared failure durable state changed",
                 )),
             }
         }
@@ -2523,6 +2523,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        _cause: signalbox_application::PreparedModelCallFailureCause,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> Result<FailedModelCallTurn, Self::Error>
@@ -2543,8 +2544,8 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         call: ModelCallId,
-    ) -> Result<RetainedCapabilityFailureStatus, Self::Error> {
-        self.reread_capability_failure(session, call).await
+    ) -> Result<RetainedPreparedFailureStatus, Self::Error> {
+        self.reread_prepared_failure(session, call).await
     }
 }
 
@@ -4024,6 +4025,19 @@ pub(crate) async fn require_live_execution_for_restart(
     .await
 }
 
+struct LoadedDelegatedLiveTurn {
+    active: signalbox_domain::ActivatedTurn,
+    starting_snapshot: ResolvedContextFrontierSnapshot,
+    recovery: Option<DelegatedModelCallRecovery>,
+}
+
+pub(crate) struct DelegatedModelCallRecovery {
+    pub(crate) active: signalbox_domain::ActivatedTurn,
+    pub(crate) call: signalbox_domain::EndedModelCall,
+    pub(crate) attempt: signalbox_domain::EndedTurnAttempt,
+    pub(crate) source_snapshot: ResolvedContextFrontierSnapshot,
+}
+
 pub(crate) async fn load_delegated_runner_recovery_for_interrupt(
     connection: &mut PgConnection,
     requested_session: SessionId,
@@ -4070,13 +4084,24 @@ pub(crate) async fn load_delegated_runner_recovery_for_interrupt(
     Ok(
         load_delegated_live_turn(connection, requested_session, &scheduling)
             .await?
-            .filter(|(active, _)| {
+            .filter(|loaded| {
                 matches!(
-                    active.phase(),
+                    loaded.active.phase(),
                     signalbox_domain::ActiveTurnPhase::AwaitingRunnerRecovery { .. }
                 )
-            }),
+            })
+            .map(|loaded| (loaded.active, loaded.starting_snapshot)),
     )
+}
+
+pub(crate) async fn load_delegated_model_call_recovery(
+    connection: &mut PgConnection,
+    session: SessionId,
+    scheduling: &signalbox_domain::AcceptedInputSchedulingProjection,
+) -> Result<Option<DelegatedModelCallRecovery>, ModelCallRepositoryError> {
+    Ok(load_delegated_live_turn(connection, session, scheduling)
+        .await?
+        .and_then(|loaded| loaded.recovery))
 }
 
 async fn require_live_execution_with_targets(
@@ -4102,7 +4127,7 @@ async fn require_live_execution_with_targets(
         .map_err(map_scheduling_error)?;
     let delegated = load_delegated_live_turn(connection, requested_session, &scheduling).await?;
     let (active_turn, starting_snapshot) = match delegated {
-        Some(value) => value,
+        Some(loaded) => (loaded.active, loaded.starting_snapshot),
         None => {
             let active = scheduling
                 .active_turn_execution()
@@ -4243,13 +4268,7 @@ async fn load_delegated_live_turn(
     connection: &mut PgConnection,
     session: SessionId,
     scheduling: &signalbox_domain::AcceptedInputSchedulingProjection,
-) -> Result<
-    Option<(
-        signalbox_domain::ActivatedTurn,
-        ResolvedContextFrontierSnapshot,
-    )>,
-    ModelCallRepositoryError,
-> {
+) -> Result<Option<LoadedDelegatedLiveTurn>, ModelCallRepositoryError> {
     let row = sqlx::query(
         "SELECT
             task.spawning_tool_request_id,
@@ -4261,7 +4280,13 @@ async fn load_delegated_live_turn(
             lifecycle.starting_frontier_id,
             attempt.turn_attempt_id AS projection_attempt_id,
             attempt.state_kind AS attempt_state_kind,
+            attempt.end_variant,
+            attempt.end_disposition,
+            attempt.interrupt_command_id,
+            attempt.interrupt_predecessor_turn_id AS attempt_interrupt_predecessor_turn_id,
             lifecycle.active_phase_kind,
+            lifecycle.recovery_model_call_id,
+            lifecycle.pinned_provider_model_identity_id,
             lifecycle.runner_recovery_runner_id,
             lifecycle.runner_recovery_placement_revision,
             lifecycle.runner_recovery_tool_attempt_id,
@@ -4310,6 +4335,13 @@ async fn load_delegated_live_turn(
                                 attempt.turn_attempt_id
                     )
                 )
+                OR (
+                    lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
+                    AND attempt.turn_attempt_id = lifecycle.current_attempt_id
+                    AND attempt.state_kind = 'ended'
+                    AND attempt.end_variant IN ('without_stop', 'after_cancellation')
+                    AND attempt.end_disposition IN ('ambiguous', 'lost')
+                )
           )
          JOIN session_defaults_version AS defaults
            ON defaults.session_id = task.child_session_id
@@ -4319,7 +4351,8 @@ async fn load_delegated_live_turn(
           AND lifecycle.state_kind = 'active'
           AND NOT lifecycle.delegation_runtime_terminal
           AND lifecycle.active_phase_kind IN (
-                'running', 'awaiting_runner_recovery'
+                'running', 'awaiting_runner_recovery',
+                'awaiting_model_call_recovery'
           )
           AND goal_turn_is_runtime_relevant(
                 lifecycle.session_id, lifecycle.turn_id
@@ -4365,7 +4398,88 @@ async fn load_delegated_live_turn(
     .ok_or(ModelCallCorruption::Inconsistent(
         "delegated live-turn projection",
     ))?;
-    let phase = decode_delegated_active_phase(&row, turn, initial_attempt)?;
+    let recovery_call = (required::<String>(&row, "active_phase_kind")?
+        == "awaiting_model_call_recovery")
+        .then(|| required::<Uuid>(&row, "recovery_model_call_id").map(ModelCallId::from_uuid))
+        .transpose()?;
+    let phase = decode_delegated_active_phase(connection, &row, turn, initial_attempt).await?;
+    finish_loaded_delegated_turn(
+        connection,
+        session,
+        turn,
+        starting_frontier,
+        prepared,
+        phase,
+        recovery_call,
+    )
+    .await
+    .map(Some)
+}
+
+async fn finish_loaded_delegated_turn(
+    connection: &mut PgConnection,
+    session: SessionId,
+    turn: TurnId,
+    starting_frontier: signalbox_domain::ContextFrontierId,
+    prepared: PreparedDelegatedTurnActivation,
+    phase: ActiveTurnSchedulingReconstitutionInput,
+    recovery_call: Option<ModelCallId>,
+) -> Result<LoadedDelegatedLiveTurn, ModelCallRepositoryError> {
+    let pending = load_delegated_pending_steering(connection, session, turn).await?;
+    let consumed = load_delegated_consumed_steering(connection, session, turn).await?;
+    let stored_snapshot = load_call_snapshot(connection, session, starting_frontier)
+        .await?
+        .reconstitute()
+        .ok_or(ModelCallCorruption::Inconsistent(
+            "delegated starting snapshot",
+        ))?;
+
+    if let Some(recovery_call_id) = recovery_call {
+        let (pinned, calls) = load_live_turn_calls(connection, session, turn).await?;
+        let pinned = pinned.ok_or(ModelCallCorruption::Missing(
+            "delegated recovery pinned target",
+        ))?;
+        let recovery_call = calls
+            .into_iter()
+            .find(|call| {
+                call.id() == recovery_call_id
+                    && call.state()
+                        == ModelCallReconstitutionState::Terminal(ModelCallDisposition::Ambiguous)
+            })
+            .ok_or(ModelCallCorruption::Missing(
+                "delegated recovery model call",
+            ))?;
+        let source_snapshot =
+            load_call_snapshot(connection, session, recovery_call.frontier()).await?;
+        let (active, call, attempt, source_snapshot, prepared_snapshot) = prepared
+            .with_reconstituted_model_call_recovery(
+                DelegatedModelCallRecoveryReconstitutionInput::new(
+                    phase,
+                    pinned,
+                    recovery_call,
+                    source_snapshot,
+                    pending,
+                    consumed,
+                ),
+            )
+            .ok_or(ModelCallCorruption::Inconsistent(
+                "delegated recovery evidence",
+            ))?;
+        if stored_snapshot != prepared_snapshot {
+            return Err(ModelCallCorruption::Inconsistent("delegated starting snapshot").into());
+        }
+        return Ok(LoadedDelegatedLiveTurn {
+            active: active.clone(),
+            starting_snapshot: stored_snapshot,
+            recovery: Some(DelegatedModelCallRecovery {
+                active,
+                call,
+                attempt,
+                source_snapshot,
+            }),
+        });
+    }
+
     let (active, _, prepared_snapshot) =
         prepared
             .with_reconstituted_phase(phase)
@@ -4373,28 +4487,26 @@ async fn load_delegated_live_turn(
                 "delegated live-turn phase",
             ))?;
     let active = active
-        .with_pending_steering(load_delegated_pending_steering(connection, session, turn).await?)
+        .with_pending_steering(pending)
         .ok_or(ModelCallCorruption::Inconsistent(
             "delegated pending steering",
-        ))?;
-    let active = active
-        .with_consumed_steering(load_delegated_consumed_steering(connection, session, turn).await?)
+        ))?
+        .with_consumed_steering(consumed)
         .ok_or(ModelCallCorruption::Inconsistent(
             "delegated consumed steering",
-        ))?;
-    let stored_snapshot = load_call_snapshot(connection, session, starting_frontier)
-        .await?
-        .reconstitute()
-        .ok_or(ModelCallCorruption::Inconsistent(
-            "delegated starting snapshot",
         ))?;
     if stored_snapshot != prepared_snapshot {
         return Err(ModelCallCorruption::Inconsistent("delegated starting snapshot").into());
     }
-    Ok(Some((active.into(), stored_snapshot)))
+    Ok(LoadedDelegatedLiveTurn {
+        active: active.into(),
+        starting_snapshot: stored_snapshot,
+        recovery: None,
+    })
 }
 
-fn decode_delegated_active_phase(
+async fn decode_delegated_active_phase(
+    connection: &mut PgConnection,
     row: &PgRow,
     turn: TurnId,
     projection_attempt: signalbox_domain::TurnAttemptId,
@@ -4435,6 +4547,68 @@ fn decode_delegated_active_phase(
                 ),
             )
         }
+        "awaiting_model_call_recovery" => {
+            let call = ModelCallId::from_uuid(required(row, "recovery_model_call_id")?);
+            if required::<String>(row, "attempt_state_kind")? != "ended" {
+                return Err(
+                    ModelCallCorruption::Inconsistent("delegated recovery attempt state").into(),
+                );
+            }
+            match (
+                required::<String>(row, "end_variant")?.as_str(),
+                required::<String>(row, "end_disposition")?.as_str(),
+            ) {
+                ("without_stop", "ambiguous") => Ok(
+                    ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery(
+                        turn,
+                        projection_attempt,
+                        call,
+                    ),
+                ),
+                ("without_stop", "lost") => Ok(
+                    ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery_after_restart(
+                        turn,
+                        projection_attempt,
+                        call,
+                    ),
+                ),
+                ("after_cancellation", disposition @ ("ambiguous" | "lost")) => {
+                    let command = durable_command_id_from_uuid(required(
+                        row,
+                        "interrupt_command_id",
+                    )?)
+                    .map_err(|_| {
+                        ModelCallCorruption::Inconsistent(
+                            "delegated recovery interrupt identity",
+                        )
+                    })?;
+                    let recorded = require_recorded_batch(connection, &[command])
+                        .await
+                        .map_err(map_scheduling_error)?;
+                    let interrupt = require_applied_interrupt_from_attempt(row, turn, &recorded)
+                        .map_err(map_scheduling_error)?;
+                    if disposition == "ambiguous" {
+                        Ok(ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery_after_cancellation(
+                            turn,
+                            projection_attempt,
+                            call,
+                            interrupt,
+                        ))
+                    } else {
+                        Ok(ActiveTurnSchedulingReconstitutionInput::awaiting_model_call_recovery_after_cancellation_restart(
+                            turn,
+                            projection_attempt,
+                            call,
+                            interrupt,
+                        ))
+                    }
+                }
+                _ => Err(ModelCallCorruption::Inconsistent(
+                    "delegated recovery attempt end",
+                )
+                .into()),
+            }
+        }
         value => Err(ModelCallCorruption::Unsupported {
             field: "delegated active phase",
             value: value.to_owned(),
@@ -4447,13 +4621,7 @@ async fn load_delegated_live_wake_turn(
     connection: &mut PgConnection,
     session: SessionId,
     scheduling: &signalbox_domain::AcceptedInputSchedulingProjection,
-) -> Result<
-    Option<(
-        signalbox_domain::ActivatedTurn,
-        ResolvedContextFrontierSnapshot,
-    )>,
-    ModelCallRepositoryError,
-> {
+) -> Result<Option<LoadedDelegatedLiveTurn>, ModelCallRepositoryError> {
     let row = sqlx::query(
         "SELECT
             wake.turn_id,
@@ -4466,7 +4634,13 @@ async fn load_delegated_live_wake_turn(
             lifecycle.starting_frontier_id,
             attempt.turn_attempt_id AS projection_attempt_id,
             attempt.state_kind AS attempt_state_kind,
+            attempt.end_variant,
+            attempt.end_disposition,
+            attempt.interrupt_command_id,
+            attempt.interrupt_predecessor_turn_id AS attempt_interrupt_predecessor_turn_id,
             lifecycle.active_phase_kind,
+            lifecycle.recovery_model_call_id,
+            lifecycle.pinned_provider_model_identity_id,
             lifecycle.runner_recovery_runner_id,
             lifecycle.runner_recovery_placement_revision,
             lifecycle.runner_recovery_tool_attempt_id,
@@ -4494,7 +4668,8 @@ async fn load_delegated_live_wake_turn(
           AND lifecycle.state_kind = 'active'
           AND NOT lifecycle.delegation_runtime_terminal
           AND lifecycle.active_phase_kind IN (
-                'running', 'awaiting_runner_recovery'
+                'running', 'awaiting_runner_recovery',
+                'awaiting_model_call_recovery'
           )
          JOIN turn_lifecycle AS predecessor
            ON predecessor.turn_id = lifecycle.immediate_predecessor_turn_id
@@ -4530,6 +4705,13 @@ async fn load_delegated_live_wake_turn(
                          WHERE continuation.continued_from_attempt_id =
                                 attempt.turn_attempt_id
                     )
+                )
+                OR (
+                    lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
+                    AND attempt.turn_attempt_id = lifecycle.current_attempt_id
+                    AND attempt.state_kind = 'ended'
+                    AND attempt.end_variant IN ('without_stop', 'after_cancellation')
+                    AND attempt.end_disposition IN ('ambiguous', 'lost')
                 )
           )
          JOIN session_defaults_version AS defaults
@@ -4615,33 +4797,22 @@ async fn load_delegated_live_wake_turn(
         .ok_or(ModelCallCorruption::Inconsistent(
             "delegated wake live-turn projection",
         ))?;
-    let phase = decode_delegated_active_phase(&row, turn, initial_attempt)?;
-    let (active, _, prepared_snapshot) =
-        prepared
-            .with_reconstituted_phase(phase)
-            .ok_or(ModelCallCorruption::Inconsistent(
-                "delegated wake live-turn phase",
-            ))?;
-    let active = active
-        .with_pending_steering(load_delegated_pending_steering(connection, session, turn).await?)
-        .ok_or(ModelCallCorruption::Inconsistent(
-            "delegated wake pending steering",
-        ))?;
-    let active = active
-        .with_consumed_steering(load_delegated_consumed_steering(connection, session, turn).await?)
-        .ok_or(ModelCallCorruption::Inconsistent(
-            "delegated wake consumed steering",
-        ))?;
-    let stored_snapshot = load_call_snapshot(connection, session, starting_frontier)
-        .await?
-        .reconstitute()
-        .ok_or(ModelCallCorruption::Inconsistent(
-            "delegated wake starting snapshot",
-        ))?;
-    if stored_snapshot != prepared_snapshot {
-        return Err(ModelCallCorruption::Inconsistent("delegated wake starting snapshot").into());
-    }
-    Ok(Some((active.into(), stored_snapshot)))
+    let recovery_call = (required::<String>(&row, "active_phase_kind")?
+        == "awaiting_model_call_recovery")
+        .then(|| required::<Uuid>(&row, "recovery_model_call_id").map(ModelCallId::from_uuid))
+        .transpose()?;
+    let phase = decode_delegated_active_phase(connection, &row, turn, initial_attempt).await?;
+    finish_loaded_delegated_turn(
+        connection,
+        session,
+        turn,
+        starting_frontier,
+        prepared,
+        phase,
+        recovery_call,
+    )
+    .await
+    .map(Some)
 }
 
 async fn load_delegated_pending_steering(
@@ -5703,6 +5874,7 @@ pub(crate) async fn insert_prepared_call(
     credential_pool_policy: Option<&CredentialPoolRuntimePolicy>,
     input_includes_cache_tokens: bool,
 ) -> Result<(), ModelCallRepositoryError> {
+    crate::convergence_sweep::lock_model_activity_fence(connection, prepared.session()).await?;
     let call = prepared.call();
     let (kind, direct, alias, alias_selected) = encode_selection(call.selection());
     for steering in prepared.consumed_steering() {
@@ -6401,6 +6573,29 @@ async fn persist_failed_with_delegated_child_result(
     persist_delegated_child_result(connection, &DelegationOutcome::from_failed_child(failed)).await
 }
 
+pub(crate) async fn persist_automatic_reconciliation(
+    connection: &mut PgConnection,
+    reconciliation: &ReconciliationRequiredModelCallTurn,
+) -> Result<(), ModelCallRepositoryError> {
+    lock_delegated_child_result_frontier(
+        connection,
+        reconciliation.session(),
+        reconciliation.turn(),
+    )
+    .await?;
+    persist_reconciliation_required(
+        connection,
+        reconciliation,
+        ProviderReportedTokenUsage::unreported(),
+    )
+    .await?;
+    persist_delegated_child_result(
+        connection,
+        &DelegationOutcome::from_reconciliation_required_child(reconciliation),
+    )
+    .await
+}
+
 async fn lock_delegated_child_result_frontier(
     connection: &mut PgConnection,
     child: SessionId,
@@ -6679,7 +6874,7 @@ async fn persist_delegated_child_result(
     Ok(())
 }
 
-async fn persist_reconciliation_required(
+pub(crate) async fn persist_reconciliation_required(
     connection: &mut PgConnection,
     reconciliation: &ReconciliationRequiredModelCallTurn,
     usage: ProviderReportedTokenUsage,

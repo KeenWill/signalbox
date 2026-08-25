@@ -20,6 +20,34 @@ use crate::repo_watch_dispatch::{
     stored_rule_version,
 };
 
+pub(crate) enum DispatchObligationBlocker {
+    Existing,
+    RepoWatchDispatch(RepoWatchDispatchId),
+    ExternalSession(SessionId),
+}
+
+impl DispatchObligationBlocker {
+    fn replaces_existing(&self) -> bool {
+        !matches!(self, Self::Existing)
+    }
+
+    fn stored_dispatch(&self) -> Option<Uuid> {
+        match self {
+            Self::Existing => None,
+            Self::RepoWatchDispatch(dispatch) => Some(*dispatch.as_uuid()),
+            Self::ExternalSession(_) => None,
+        }
+    }
+
+    fn stored_external_session(&self) -> Option<Uuid> {
+        match self {
+            Self::Existing => None,
+            Self::RepoWatchDispatch(_) => None,
+            Self::ExternalSession(session) => Some(session.into_uuid()),
+        }
+    }
+}
+
 // Delay after the first failed attempt, doubling per further consecutive
 // failure. Below the interval at which a watched repository is polled the delay
 // would not separate attempts at all; well above it, a lineage recovering from
@@ -194,6 +222,13 @@ impl PostgresRepoWatchDispatchStore {
                 AND obligation.parked_at IS NULL
                 AND obligation.failed_attempts
                      < repo_watch_dispatch_attempt_budget()
+                AND NOT coalesce((
+                    SELECT event.event_kind IN ('commissioned', 'resumed', 'superseded')
+                      FROM goal_event AS event
+                     WHERE event.session_id = obligation.external_blocking_session_id
+                     ORDER BY event.event_ordinal DESC
+                     LIMIT 1
+                ), false)
                 AND (
                     obligation.last_failed_attempt_at IS NULL
                     OR extract(epoch FROM (
@@ -334,7 +369,7 @@ pub(crate) async fn active_obligation_exists(
 pub(crate) async fn record_dispatch_obligation(
     transaction: &mut Transaction<'_, Postgres>,
     obligation: RepoWatchDispatchId,
-    blocking_dispatch: Option<RepoWatchDispatchId>,
+    blocker: DispatchObligationBlocker,
     event: &RepoWatchEvent,
     rule_id: &RepoWatchRuleId,
     rule_version: RepoWatchRuleVersion,
@@ -356,29 +391,36 @@ pub(crate) async fn record_dispatch_obligation(
                 SET repository = $1,
                     latest_event_id = $2,
                     matched_event_count = matched_event_count + 1,
-                    blocking_dispatch_id = COALESCE($3, blocking_dispatch_id),
+                    blocking_dispatch_id = CASE WHEN $3 THEN $4
+                        ELSE blocking_dispatch_id END,
+                    external_blocking_session_id = CASE WHEN $3 THEN $5
+                        ELSE external_blocking_session_id END,
                     latest_match_at = clock_timestamp()
-              WHERE obligation_id = $4",
+              WHERE obligation_id = $6",
         )
         .bind(event.repository().as_str())
         .bind(event.id().as_uuid())
-        .bind(blocking_dispatch.map(|value| *value.as_uuid()))
+        .bind(blocker.replaces_existing())
+        .bind(blocker.stored_dispatch())
+        .bind(blocker.stored_external_session())
         .bind(obligation_id)
         .execute(&mut **transaction)
         .await?;
         return Ok(());
     }
-    let blocking_dispatch =
-        blocking_dispatch.ok_or(RepoWatchDispatchRepositoryError::Corruption(
-            "new repository-watch obligation lacks its blocking dispatch",
-        ))?;
+    if matches!(blocker, DispatchObligationBlocker::Existing) {
+        return Err(RepoWatchDispatchRepositoryError::Corruption(
+            "new repository-watch obligation lacks its blocker",
+        ));
+    }
     sqlx::query(
         "INSERT INTO repo_watch_dispatch_obligation
             (obligation_id, repository, rule_id, rule_version,
              singleton_scope, singleton_repository, singleton_pull_request_number,
              singleton_stack_root_pull_request_number, first_repository,
-             first_event_id, latest_event_id, matched_event_count, blocking_dispatch_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $2, $9, $9, 1, $10)",
+             first_event_id, latest_event_id, matched_event_count, blocking_dispatch_id,
+             external_blocking_session_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $2, $9, $9, 1, $10, $11)",
     )
     .bind(obligation.as_uuid())
     .bind(event.repository().as_str())
@@ -389,9 +431,40 @@ pub(crate) async fn record_dispatch_obligation(
     .bind(singleton.pull_request)
     .bind(singleton.stack_root_pull_request)
     .bind(event.id().as_uuid())
-    .bind(blocking_dispatch.as_uuid())
+    .bind(blocker.stored_dispatch())
+    .bind(blocker.stored_external_session())
     .execute(&mut **transaction)
     .await?;
+    Ok(())
+}
+
+pub(crate) async fn replace_dispatch_obligation_blocker(
+    transaction: &mut Transaction<'_, Postgres>,
+    obligation: Uuid,
+    blocker: DispatchObligationBlocker,
+) -> Result<(), RepoWatchDispatchRepositoryError> {
+    if matches!(blocker, DispatchObligationBlocker::Existing) {
+        return Err(RepoWatchDispatchRepositoryError::Corruption(
+            "repository-watch obligation blocker replacement lacks a blocker",
+        ));
+    }
+    let updated = sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET blocking_dispatch_id = $2,
+                external_blocking_session_id = $3
+          WHERE obligation_id = $1
+            AND settled_kind IS NULL",
+    )
+    .bind(obligation)
+    .bind(blocker.stored_dispatch())
+    .bind(blocker.stored_external_session())
+    .execute(&mut **transaction)
+    .await?;
+    if updated.rows_affected() != 1 {
+        return Err(RepoWatchDispatchRepositoryError::Corruption(
+            "repository-watch obligation disappeared during blocker replacement",
+        ));
+    }
     Ok(())
 }
 
@@ -432,6 +505,9 @@ pub(crate) async fn load_obligation_admission(
         ),
         Some(RepoWatchObligationSettlementStorageKind::TargetClosed) => Ok(
             ObligationAdmission::Settled(RepoWatchRuleEvaluationOutcome::TargetClosed),
+        ),
+        Some(RepoWatchObligationSettlementStorageKind::TargetConverged) => Ok(
+            ObligationAdmission::Settled(RepoWatchRuleEvaluationOutcome::TargetConverged),
         ),
         Some(RepoWatchObligationSettlementStorageKind::Dispatched) => {
             let dispatch_id: Uuid = row.try_get("settled_dispatch_id")?;
@@ -489,6 +565,35 @@ pub(crate) async fn settle_target_closed_obligation(
     if affected != 1 {
         return Err(RepoWatchDispatchRepositoryError::Corruption(
             "closed-target obligation settlement lost its active row",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) async fn settle_target_converged_obligation(
+    transaction: &mut Transaction<'_, Postgres>,
+    obligation: Uuid,
+    event: RepoWatchEventId,
+) -> Result<(), RepoWatchDispatchRepositoryError> {
+    let affected = sqlx::query(
+        "UPDATE repo_watch_dispatch_obligation
+            SET settled_kind = $3,
+                settled_at = clock_timestamp()
+          WHERE obligation_id = $1
+            AND latest_event_id = $2
+            AND settled_kind IS NULL",
+    )
+    .bind(obligation)
+    .bind(event.as_uuid())
+    .bind(repo_watch_obligation_settlement_to_str(
+        RepoWatchObligationSettlementStorageKind::TargetConverged,
+    ))
+    .execute(&mut **transaction)
+    .await?
+    .rows_affected();
+    if affected != 1 {
+        return Err(RepoWatchDispatchRepositoryError::Corruption(
+            "converged-target obligation settlement lost its active row",
         ));
     }
     Ok(())
