@@ -772,6 +772,10 @@ public enum SignalboxToolApprovalEventDecider: Decodable, Equatable, Sendable {
     modelSelectionID: SignalboxCanonicalUUID,
     modelCallID: SignalboxCanonicalUUID
   )
+  case userOverride(
+    commandID: SignalboxCanonicalUUID,
+    overriddenToolRequestID: SignalboxCanonicalUUID
+  )
 
   public init(from decoder: Decoder) throws {
     let tagged = try SignalboxTaggedPayload(from: decoder)
@@ -787,6 +791,15 @@ public enum SignalboxToolApprovalEventDecider: Decodable, Equatable, Sendable {
       self = .delegate(
         modelSelectionID: try decoder.decode("model_selection_id"),
         modelCallID: try decoder.decode("model_call_id")
+      )
+    case "user_override":
+      try tagged.rejectUnadmittedFields(
+        ["type", "command_id", "overridden_tool_request_id"],
+        decoder: decoder
+      )
+      self = .userOverride(
+        commandID: try decoder.decode("command_id"),
+        overriddenToolRequestID: try decoder.decode("overridden_tool_request_id")
       )
     default:
       throw DecodingError.dataCorrupted(
@@ -4231,6 +4244,13 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
         shapeMatches = rationale.map(validRationale) ?? false
       case .deny(let reason):
         shapeMatches = reason == nil && (rationale.map(validRationale) ?? false)
+      }
+    case .userOverride:
+      switch decision {
+      case .approve:
+        shapeMatches = rationale == nil
+      case .deny:
+        shapeMatches = false
       }
     }
     guard shapeMatches else {

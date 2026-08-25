@@ -751,6 +751,7 @@ may lower but never raise these process ceilings:
 | Probes / concurrent workers per inspect | 32 / 2                 |
 | Aggregate probe ranges / source bytes   | 64 / 1,048,576         |
 | Aggregate probe memory / CPU / wall     | 1 GiB / 120 s / 120 s  |
+| Per-validation ranges / source bytes    | 4,096 / 1,073,741,824  |
 | Source verification traversals / bytes  | inventory / aggregate  |
 | Snapshot bytes per request / process    | 64 GiB / 256 GiB       |
 | Per-read ranges / cumulative source     | 4,096 / 1,073,741,824  |

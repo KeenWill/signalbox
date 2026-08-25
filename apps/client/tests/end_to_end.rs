@@ -53,6 +53,7 @@ use signalboxd::{
     ActivatedTurnExecution, ActivatedTurnPass, FatalExecutionSupervisor, FileCredentialAccess,
     HubModelConfiguration, LocalProcessListener, ModelAdapter, PostgresProviderModelExecution,
     ProcessRuntime, ProcessRuntimeError, SessionTemplateConfiguration,
+    WorkspaceInstructionPreparedExecution, WorkspaceInstructionRuntime,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -1788,14 +1789,17 @@ context_window_tokens = 200000
         model_configuration,
     );
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                pool.clone(),
-                targets,
-                ModelCallCredentialReference::new("scripted-imported-continuation"),
+        FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    pool.clone(),
+                    targets,
+                    ModelCallCredentialReference::new("scripted-imported-continuation"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
+            WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new()),
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2040,14 +2044,17 @@ context_window_tokens = 200000
         model_configuration,
     );
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                pool.clone(),
-                targets,
-                ModelCallCredentialReference::new("scripted-terminal"),
+        FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    pool.clone(),
+                    targets,
+                    ModelCallCredentialReference::new("scripted-terminal"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
+            WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new()),
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2426,14 +2433,17 @@ context_window_tokens = 200000
     assert_eq!(activation_recovery.stderr, pass_activated.stderr);
 
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                pool.clone(),
-                targets,
-                ModelCallCredentialReference::new("scripted-review"),
+        FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    pool.clone(),
+                    targets,
+                    ModelCallCredentialReference::new("scripted-review"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
+            WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new()),
         ));
     execution.execute(activated).await?;
     assert!(!fatal_execution.is_triggered());
@@ -2818,7 +2828,12 @@ context_window_tokens = 200000
             InProcessAttemptDispatchGate::default(),
             provider,
         )
-        .with_tool_loop(tool_dispatch_gate, tool_catalog, CompletingFixtureExecutor),
+        .with_tool_loop(tool_dispatch_gate, tool_catalog, CompletingFixtureExecutor)
+        .with_workspace_instructions(WorkspaceInstructionRuntime::new(
+            pool.clone(),
+            None,
+            Vec::new(),
+        )),
     );
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2979,11 +2994,14 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
         model_configuration,
     );
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(pool.clone(), targets, credential_reference)
-                .with_session_credentials(credential_families),
-            InProcessAttemptDispatchGate::default(),
-            provider,
+        FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(pool.clone(), targets, credential_reference)
+                    .with_session_credentials(credential_families),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+            ),
+            WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new()),
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
