@@ -379,6 +379,24 @@ async fn invalid_utf8_streaming_text_candidate_is_unknown() -> Result<(), Box<dy
 }
 
 #[tokio::test]
+async fn complete_json_source_ending_mid_scalar_is_unknown() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::json_then_incomplete_scalar());
+
+    let inspection = support::inspect(&source, "application/octet-stream").await?;
+    support::assert_unknown(inspection);
+    Ok(())
+}
+
+#[tokio::test]
+async fn complete_csv_source_ending_mid_scalar_is_unknown() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(fixtures::csv_then_incomplete_scalar());
+
+    let inspection = support::inspect(&source, "application/octet-stream").await?;
+    support::assert_unknown(inspection);
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_at_the_declared_depth_limit_remains_readable() -> Result<(), Box<dyn Error>> {
     let bytes = fixtures::json_at_structured_depth();
     let expected = serde_json::from_slice(&bytes)?;
