@@ -21,8 +21,21 @@ use signalboxd::approval_judge_eval::{
     render_eval_case,
 };
 
+mod database;
+pub mod manifest;
+pub mod store;
+
+pub use database::DatabaseCorpusStore;
+pub use store::{
+    CorpusKey, CorpusRegistration, CorpusSourceDescriptor, CorpusStore, CorpusStoreCorruption,
+    CorpusStoreError, CorpusStoreFuture, DigestParseError, DiskCorpusStore, Sha256Digest,
+};
+
 /// The only corpus format this pre-alpha harness currently accepts.
 pub const CORPUS_FORMAT_VERSION: u32 = 1;
+// Hard safety ceiling bounding manifest, hashing, and durable-index memory and
+// storage amplification from attacker-controlled case identities.
+const MAX_CASE_ID_BYTES: usize = 128;
 
 /// A versioned collection of labeled approval-judge cases.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -151,6 +164,11 @@ pub fn request_fingerprint(case: &ApprovalJudgeCase) -> String {
 pub fn decode_corpus(bytes: &[u8]) -> Result<ApprovalJudgeCorpus, CorpusLoadError> {
     let corpus: ApprovalJudgeCorpus =
         serde_json::from_slice(bytes).map_err(CorpusLoadError::Json)?;
+    validate_corpus(&corpus)?;
+    Ok(corpus)
+}
+
+pub(crate) fn validate_corpus(corpus: &ApprovalJudgeCorpus) -> Result<(), CorpusLoadError> {
     if corpus.format_version != CORPUS_FORMAT_VERSION {
         return Err(CorpusLoadError::UnsupportedFormatVersion {
             observed: corpus.format_version,
@@ -161,9 +179,18 @@ pub fn decode_corpus(bytes: &[u8]) -> Result<ApprovalJudgeCorpus, CorpusLoadErro
     }
     let mut case_ids = HashSet::with_capacity(corpus.cases.len());
     for case in &corpus.cases {
-        if case.id.trim().is_empty() {
-            return Err(CorpusLoadError::BlankCaseId);
+        if let Some(field) = nul_case_field(case) {
+            return Err(CorpusLoadError::NulCaseString {
+                id: case.id.clone(),
+                field,
+            });
         }
+        validate_case_id(&case.id).map_err(|error| match error {
+            CaseIdError::Blank => CorpusLoadError::BlankCaseId,
+            CaseIdError::Invalid => CorpusLoadError::InvalidCaseId {
+                id: case.id.clone(),
+            },
+        })?;
         if !case_ids.insert(case.id.as_str()) {
             return Err(CorpusLoadError::DuplicateCaseId {
                 id: case.id.clone(),
@@ -175,7 +202,58 @@ pub fn decode_corpus(bytes: &[u8]) -> Result<ApprovalJudgeCorpus, CorpusLoadErro
             });
         }
     }
-    Ok(corpus)
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaseIdError {
+    Blank,
+    Invalid,
+}
+
+fn validate_case_id(id: &str) -> Result<(), CaseIdError> {
+    if id.trim().is_empty() {
+        return Err(CaseIdError::Blank);
+    }
+    if id.len() > MAX_CASE_ID_BYTES || id.chars().any(char::is_control) {
+        return Err(CaseIdError::Invalid);
+    }
+    Ok(())
+}
+
+fn nul_case_field(case: &ApprovalJudgeCase) -> Option<&'static str> {
+    if case.id.contains('\0') {
+        Some("id")
+    } else if case.request.tool.contains('\0') {
+        Some("tool")
+    } else if case.request.arguments.contains('\0') {
+        Some("arguments")
+    } else if case
+        .request
+        .commissioned_goal
+        .as_deref()
+        .is_some_and(|value| value.contains('\0'))
+    {
+        Some("commissioned_goal")
+    } else if case
+        .request
+        .session_template
+        .as_deref()
+        .is_some_and(|value| value.contains('\0'))
+    {
+        Some("session_template")
+    } else if case
+        .request
+        .frozen_system_prompt
+        .as_deref()
+        .is_some_and(|value| value.contains('\0'))
+    {
+        Some("frozen_system_prompt")
+    } else if case.label_provenance.contains('\0') {
+        Some("label_provenance")
+    } else {
+        None
+    }
 }
 
 /// A corpus file could not be read or admitted.
@@ -211,6 +289,18 @@ pub enum CorpusLoadError {
     },
     /// A case id is empty or whitespace-only and carries no stable identity.
     BlankCaseId,
+    /// A case id exceeds the shared byte ceiling or contains a control character.
+    InvalidCaseId {
+        /// Rejected case identity.
+        id: String,
+    },
+    /// A case string contains U+0000, which PostgreSQL JSONB cannot preserve.
+    NulCaseString {
+        /// Case carrying the unsupported string.
+        id: String,
+        /// Case field containing U+0000.
+        field: &'static str,
+    },
     /// A case does not identify the source of its expected label.
     MissingLabelProvenance {
         /// Case without meaningful label provenance.
@@ -246,6 +336,14 @@ impl fmt::Display for CorpusLoadError {
                 formatter,
                 "corpus contains a case whose id is empty or whitespace-only"
             ),
+            Self::InvalidCaseId { id } => write!(
+                formatter,
+                "corpus case id {id:?} exceeds 128 bytes or contains control characters"
+            ),
+            Self::NulCaseString { id, field } => write!(
+                formatter,
+                "corpus case {id:?} field {field} contains unsupported U+0000"
+            ),
             Self::MissingLabelProvenance { id } => {
                 write!(formatter, "corpus case {id} has no label provenance")
             }
@@ -263,6 +361,8 @@ impl Error for CorpusLoadError {
             | Self::EmptyCorpus
             | Self::DuplicateCaseId { .. }
             | Self::BlankCaseId
+            | Self::InvalidCaseId { .. }
+            | Self::NulCaseString { .. }
             | Self::MissingLabelProvenance { .. } => None,
         }
     }
@@ -284,8 +384,20 @@ pub async fn score_corpus(
     }
     let mut case_ids = HashSet::with_capacity(corpus.cases.len());
     for case in &corpus.cases {
-        if case.id.trim().is_empty() {
-            return Err(ScoreError::BlankCaseId);
+        if let Some(field) = nul_case_field(case) {
+            return Err(ScoreError::NulCaseString {
+                id: case.id.clone(),
+                field,
+            });
+        }
+        match validate_case_id(&case.id) {
+            Ok(()) => {}
+            Err(CaseIdError::Blank) => return Err(ScoreError::BlankCaseId),
+            Err(CaseIdError::Invalid) => {
+                return Err(ScoreError::InvalidCaseId {
+                    id: case.id.clone(),
+                });
+            }
         }
         if !case_ids.insert(case.id.as_str()) {
             return Err(ScoreError::DuplicateCaseId {
@@ -473,6 +585,18 @@ pub enum ScoreError {
     },
     /// A case id is empty or whitespace-only and carries no stable identity.
     BlankCaseId,
+    /// A case id exceeds the shared byte ceiling or contains a control character.
+    InvalidCaseId {
+        /// Rejected case identity.
+        id: String,
+    },
+    /// A case string contains U+0000, which no admitted store can preserve.
+    NulCaseString {
+        /// Case carrying the unsupported string.
+        id: String,
+        /// Case field containing U+0000.
+        field: &'static str,
+    },
     /// A case does not identify the source of its expected label.
     MissingLabelProvenance {
         /// Case without meaningful label provenance.
@@ -493,7 +617,10 @@ impl ScoreError {
     pub fn case_id(&self) -> Option<&str> {
         match self {
             Self::UnsupportedFormatVersion { .. } | Self::EmptyCorpus | Self::BlankCaseId => None,
-            Self::DuplicateCaseId { id } | Self::MissingLabelProvenance { id } => Some(id),
+            Self::DuplicateCaseId { id }
+            | Self::InvalidCaseId { id }
+            | Self::NulCaseString { id, .. }
+            | Self::MissingLabelProvenance { id } => Some(id),
             Self::Case { case_id, .. } => Some(case_id),
         }
     }
@@ -514,6 +641,14 @@ impl fmt::Display for ScoreError {
                 formatter,
                 "corpus contains a case whose id is empty or whitespace-only"
             ),
+            Self::InvalidCaseId { id } => write!(
+                formatter,
+                "corpus case id {id:?} exceeds 128 bytes or contains control characters"
+            ),
+            Self::NulCaseString { id, field } => write!(
+                formatter,
+                "corpus case {id:?} field {field} contains unsupported U+0000"
+            ),
             Self::MissingLabelProvenance { id } => {
                 write!(formatter, "corpus case {id} has no label provenance")
             }
@@ -532,6 +667,8 @@ impl Error for ScoreError {
             | Self::EmptyCorpus
             | Self::DuplicateCaseId { .. }
             | Self::BlankCaseId
+            | Self::InvalidCaseId { .. }
+            | Self::NulCaseString { .. }
             | Self::MissingLabelProvenance { .. } => None,
             Self::Case { source, .. } => Some(source.as_ref()),
         }
@@ -647,6 +784,35 @@ mod tests {
 
         expect![["corpus contains a case whose id is empty or whitespace-only"]]
             .assert_eq(&error.to_string());
+    }
+
+    #[test]
+    fn overlong_corpus_case_ids_fail_shared_admission() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        corpus.cases[0].id = "x".repeat(129);
+        let encoded = serde_json::to_vec(&corpus).expect("the overlong fixture serializes");
+
+        let error = decode_corpus(&encoded).expect_err("an overlong case id is rejected");
+
+        assert!(matches!(
+            error,
+            super::CorpusLoadError::InvalidCaseId { .. }
+        ));
+    }
+
+    #[test]
+    fn nul_bearing_case_strings_fail_shared_corpus_admission() {
+        let mut corpus =
+            decode_corpus(SEED_CORPUS).expect("the checked-in seed corpus is admitted");
+        corpus.cases[0].label_provenance = String::from("fixture provenance\0suffix");
+        let encoded = serde_json::to_vec(&corpus).expect("the NUL-bearing fixture serializes");
+
+        let error = decode_corpus(&encoded)
+            .expect_err("a case string that JSONB cannot preserve is rejected");
+
+        assert!(error.to_string().contains("label_provenance"));
+        assert!(error.to_string().contains("U+0000"));
     }
 
     #[tokio::test]

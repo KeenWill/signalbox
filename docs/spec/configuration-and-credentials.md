@@ -1,5 +1,8 @@
 # Configuration and credentials
 
+The model-call recovery telemetry vocabulary is re-verified against this PR
+(`agent/turn-lifecycle-hardening`).
+
 The browser HTTP listener, same-origin static assets, and generated contract
 bootstrap are verified against this PR (`agent/web-http-transport`). The
 composed bounded session descriptor and historical-window routes are verified
@@ -379,7 +382,7 @@ rate-limited and a transient failure does not stop later scrapes.
 SIGNALBOX_PROMETHEUS_BIND=127.0.0.1:9464
 ```
 
-The initial registry contains exactly three metric names:
+The registry contains exactly six metric names:
 
 - `signalbox_turns_started_total`, with no labels, counts durable turn
   activations. An operator graphs it as the workload-rate denominator and
@@ -392,18 +395,23 @@ The initial registry contains exactly three metric names:
   values are `completed`, `known_failed`, `refused`, `cancelled`, and
   `ambiguous`, counts durable terminal model calls. It separates provider-call
   health and refusal from ambiguity that requires recovery handling.
+- `signalbox_scheduler_passes_in_flight`, with no labels, reports current
+  authoritative scheduler-pass occupancy.
+- `signalbox_scheduler_oldest_in_flight_pass_age_seconds`, with no labels,
+  reports the oldest admitted pass's age at scrape time.
+- `signalbox_scheduler_oldest_in_flight_pass_info{session_id}` reports the
+  daemon-minted session UUID of that oldest pass. It has zero or one series and
+  removes the former label value when the oldest pass changes.
 
-All label children are allocated from those closed enums at registry
-construction. The metric API accepts no string, session id, turn id, model-call
-id, prompt, completion, or tool value. The source is the already-committed typed
-outbox transition, and content-bearing input events are ignored. The dispatcher
-retains only the last observed durable sequence, so a retry of that sequence is
-not counted twice and deduplication has constant memory. Metric help and type
-lines are fixed strings; sample values are counters. There are no tool,
-scheduler, queue-depth, or database-duration metrics in this initial surface:
-the daemon-owned durable transition path can state the three metrics above
-without inventing an inexact observation or instrumenting an adapter or another
-crate's boundary.
+All closed-enum label children are allocated at registry construction. The only
+identity label is the scheduler oldest-pass `session_id`; the metric API accepts
+no turn id, model-call id, prompt, completion, or tool value. The terminal
+metric source is the already-committed typed outbox transition, and
+content-bearing input events are ignored. The dispatcher retains only the last
+observed durable sequence, so a retry of that sequence is not counted twice and
+deduplication has constant memory. Metric help and type lines are fixed strings;
+sample values are counters or gauges. There are no tool, queue-depth, or
+database-duration metrics in this surface.
 
 The complete OTLP record inventory is:
 
@@ -425,7 +433,7 @@ The complete OTLP record inventory is:
   not added.
 - Event name `turn activated`, with `session_id` and `turn_id`;
   `turn terminalized`, with those ids and the closed `terminal_outcome`;
-  `turn parked awaiting user reconciliation`, with those ids;
+  `turn parked awaiting bounded reconciliation`, with those ids;
   `model call dispatched`, with `session_id`, `turn_id`, `model_call_id`, and
   `turn_attempt_id`; and the event names
   `model runtime reported a trustworthy capability-preparation failure`,

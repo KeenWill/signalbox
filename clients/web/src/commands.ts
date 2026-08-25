@@ -9,6 +9,8 @@ export interface CommandContext {
   focusTimeline: () => void
   selectTimeline?: (eventSequence: string) => void
   openTimelineWindow?: (anchor: 'first' | 'latest') => void
+  navigate?: (path: string) => void
+  navigateScenario?: () => void
 }
 
 const selectTimeline = (context: CommandContext, eventSequence: string | undefined): void => {
@@ -35,7 +37,100 @@ interface CommandDefinitionShape {
 }
 
 const always = () => true
+const productNavigation = (context: CommandContext) => context.navigate !== undefined
+const scenarioNavigation = (context: CommandContext) => context.navigateScenario !== undefined
+const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
 export const commandRegistry = [
+  {
+    id: 'navigate.attention',
+    title: 'Go to Attention',
+    description: 'Open the operator intervention queue.',
+    category: 'Navigate',
+    bindings: [{ label: 'g a', registration: { kind: 'sequence', sequence: ['G', 'A'] } }],
+    available: productNavigation,
+    run: (context) => context.navigate?.('/attention'),
+  },
+  {
+    id: 'navigate.sessions',
+    title: 'Go to Sessions',
+    description: 'Open the bounded session index.',
+    category: 'Navigate',
+    bindings: [{ label: 'g s', registration: { kind: 'sequence', sequence: ['G', 'S'] } }],
+    available: productNavigation,
+    run: (context) => context.navigate?.('/sessions'),
+  },
+  {
+    id: 'navigate.activity',
+    title: 'Go to Activity',
+    description: 'Open the system-wide event stream.',
+    category: 'Navigate',
+    bindings: [],
+    available: productNavigation,
+    run: (context) => context.navigate?.('/activity'),
+  },
+  {
+    id: 'navigate.imports',
+    title: 'Go to Imports',
+    description: 'Open conversation import operations.',
+    category: 'Navigate',
+    bindings: [],
+    available: productNavigation,
+    run: (context) => context.navigate?.('/imports'),
+  },
+  {
+    id: 'navigate.reviews',
+    title: 'Go to Reviews',
+    description: 'Open approval work and history.',
+    category: 'Navigate',
+    bindings: [],
+    available: productNavigation,
+    run: (context) => context.navigate?.('/reviews'),
+  },
+  {
+    id: 'navigate.runners',
+    title: 'Go to Runners',
+    description: 'Open runner capacity and health.',
+    category: 'Navigate',
+    bindings: [],
+    available: productNavigation,
+    run: (context) => context.navigate?.('/runners'),
+  },
+  {
+    id: 'navigate.search',
+    title: 'Go to Search',
+    description: 'Open cross-session search.',
+    category: 'Navigate',
+    bindings: [],
+    available: productNavigation,
+    run: (context) => context.navigate?.('/search'),
+  },
+  {
+    id: 'navigate.usage',
+    title: 'Go to Usage',
+    description: 'Open token and cost analysis.',
+    category: 'Navigate',
+    bindings: [],
+    available: productNavigation,
+    run: (context) => context.navigate?.('/usage'),
+  },
+  {
+    id: 'navigate.settings',
+    title: 'Go to Settings',
+    description: 'Open browser-local workstation preferences.',
+    category: 'Navigate',
+    bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
+    available: productNavigation,
+    run: (context) => context.navigate?.('/settings'),
+  },
+  {
+    id: 'navigate.scenario',
+    title: 'Open Scenario studio',
+    description: 'Open the deterministic scenario workspace.',
+    category: 'Navigate',
+    bindings: [],
+    available: scenarioNavigation,
+    run: (context) => context.navigateScenario?.(),
+  },
   {
     id: 'palette.open',
     title: 'Open command palette',
@@ -56,8 +151,8 @@ export const commandRegistry = [
   },
   {
     id: 'navigation.open',
-    title: 'Open scenario navigation',
-    description: 'Choose a deterministic development scenario.',
+    title: 'Open navigation',
+    description: 'Open navigation for the current application surface.',
     category: 'Surface',
     bindings: [],
     available: always,
@@ -84,7 +179,7 @@ export const commandRegistry = [
       { label: 'j', registration: { kind: 'hotkey', hotkey: 'J' } },
       { label: 'ArrowDown' },
     ],
-    available: (context) => context.timelineIds.length > 0,
+    available: scenarioTimeline,
     run: (context) => {
       const current = context.getState().app.selectedTimeline
       const currentIndex = context.timelineIds.indexOf(current ?? '')
@@ -99,7 +194,7 @@ export const commandRegistry = [
     description: 'Move the timeline selection toward the first item.',
     category: 'Navigate',
     bindings: [{ label: 'k', registration: { kind: 'hotkey', hotkey: 'K' } }, { label: 'ArrowUp' }],
-    available: (context) => context.timelineIds.length > 0,
+    available: scenarioTimeline,
     run: (context) => {
       const current = context.getState().app.selectedTimeline
       const currentIndex = Math.max(context.timelineIds.indexOf(current ?? ''), 0)
@@ -116,7 +211,7 @@ export const commandRegistry = [
       { label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } },
       { label: 'Home' },
     ],
-    available: (context) => context.timelineIds.length > 0,
+    available: scenarioTimeline,
     run: (context) => {
       if (context.openTimelineWindow) context.openTimelineWindow('first')
       else selectTimeline(context, context.timelineIds[0])
@@ -131,7 +226,7 @@ export const commandRegistry = [
       { label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } },
       { label: 'End' },
     ],
-    available: (context) => context.timelineIds.length > 0,
+    available: scenarioTimeline,
     run: (context) => {
       if (context.openTimelineWindow) context.openTimelineWindow('latest')
       else selectTimeline(context, context.timelineIds.at(-1))
@@ -146,6 +241,7 @@ export const commandRegistry = [
     available: always,
     run: (context) => {
       const current = context.getState().app.layout
+      if (current === 'workbench') context.focusTimeline()
       context.dispatch(actions.layoutSet(current === 'focus' ? 'workbench' : 'focus'))
     },
   },
@@ -179,7 +275,7 @@ export const commandRegistry = [
     description: 'Show every supported timeline record.',
     category: 'View',
     bindings: [],
-    available: always,
+    available: scenarioTimeline,
     run: (context) => context.dispatch(actions.detailSet('full')),
   },
   {
@@ -188,7 +284,7 @@ export const commandRegistry = [
     description: 'Keep origins, tools, progress, warnings, and results compact.',
     category: 'View',
     bindings: [],
-    available: always,
+    available: scenarioTimeline,
     run: (context) => context.dispatch(actions.detailSet('condensed')),
   },
   {
@@ -197,7 +293,7 @@ export const commandRegistry = [
     description: 'Emphasize origins and durable results.',
     category: 'View',
     bindings: [],
-    available: always,
+    available: scenarioTimeline,
     run: (context) => context.dispatch(actions.detailSet('results')),
   },
 ] as const satisfies readonly CommandDefinitionShape[]

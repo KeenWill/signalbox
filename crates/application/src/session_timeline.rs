@@ -52,6 +52,12 @@ pub const fn min_timeline_detail_bytes() -> u32 {
     256
 }
 
+/// Returns the fixed per-record envelope charge in projected detail accounting.
+#[must_use]
+pub const fn timeline_detail_envelope_bytes() -> u32 {
+    128
+}
+
 /// Stable logical location of one durable session event.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TimelineAddress(NonZeroU64);
@@ -470,6 +476,12 @@ pub struct TimelineToolAttempt {
     pub arguments: Option<TimelineTextExcerpt>,
     pub result: Option<TimelineTextExcerpt>,
     pub failure: Option<TimelineTextExcerpt>,
+    /// Whether the frozen transition snapshot recorded a result payload,
+    /// independent of which single field this read projected.
+    pub has_result: bool,
+    /// Whether the frozen transition snapshot recorded a failure payload,
+    /// independent of which single field this read projected.
+    pub has_failure: bool,
     pub approval_posture: TimelineToolApprovalPosture,
     pub approval_judge_escalated: bool,
     pub operator_required: bool,

@@ -3286,7 +3286,11 @@ async fn append_tool_batch_transition(
     sqlx::query(
         "INSERT INTO tool_batch_transition_detail_member
             (event_sequence, session_id, member_kind, member_index,
-             request_id, attempt_id, approval_judge_escalated)
+             request_id, attempt_id, approval_judge_escalated,
+             attempt_state_kind, attempt_terminal_disposition_kind,
+             attempt_error_kind, attempt_has_result, attempt_has_failure,
+             attempt_sandbox_posture, attempt_result_text,
+             attempt_error_detail)
          SELECT $1, $2, 'tool', row_number() OVER (
                     ORDER BY request.request_ordinal,
                              generation.generation NULLS FIRST,
@@ -3297,7 +3301,32 @@ async fn append_tool_batch_transition(
                       FROM tool_approval_judge_model_call AS judge
                      WHERE judge.request_id = request.request_id
                        AND judge.recommendation_kind = 'escalate_to_human'
-                )
+                ),
+                attempt.state_kind, attempt.terminal_disposition_kind,
+                attempt.error_kind,
+                CASE WHEN attempt.attempt_id IS NULL THEN NULL
+                     ELSE attempt.result_text IS NOT NULL END,
+                CASE WHEN attempt.attempt_id IS NULL THEN NULL
+                     ELSE attempt.error_detail IS NOT NULL END,
+                (
+                    SELECT CASE placement.requested_sandbox_profile
+                        WHEN 'ambient' THEN 'unsandboxed'
+                        WHEN 'workspace_restricted' THEN 'sandboxed'
+                    END
+                      FROM runner_physical_attempt_lease_binding
+                           AS sandbox_binding
+                      JOIN runner_lease_generation AS sandbox_lease
+                        ON sandbox_lease.lease_id = sandbox_binding.lease_id
+                       AND sandbox_lease.attempt_id = sandbox_binding.attempt_id
+                      JOIN runner_session_placement_record AS placement
+                        ON placement.session_id = sandbox_lease.session_id
+                       AND placement.event_ordinal =
+                           sandbox_lease.placement_event_ordinal
+                     WHERE sandbox_binding.attempt_id = attempt.attempt_id
+                     ORDER BY sandbox_lease.generation DESC
+                     LIMIT 1
+                ),
+                attempt.result_text, attempt.error_detail
            FROM tool_request AS request
            LEFT JOIN tool_attempt AS attempt
              ON attempt.request_id = request.request_id

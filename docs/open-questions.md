@@ -145,13 +145,15 @@ also require owner rulings:
   own proof and disposition rules. Later scope. (S07)
 - **Ambiguous provider-call recovery.** A restart-recovered unstopped in-flight
   call parks its turn in the awaiting-recovery wait
-  ([model-call-execution](spec/model-call-execution.md)). A user decision now
-  releases the slot by terminalizing the turn over that exact ambiguity
-  ([process-protocol](spec/process-protocol.md)), but nothing resolves what the
-  provider actually did. The retired design analysis identified adopting a
-  provider request-status API — with its polling posture and evidence classes —
-  as the resolution path; the full analysis is in git history. Later scope.
-  (S02)
+  ([model-call-execution](spec/model-call-execution.md)). The daemon now spends
+  a bounded durable reconciliation budget and automatically releases the slot by
+  terminalizing over that exact ambiguity; an operator decision may win the same
+  race and becomes required only when the budget exhausts
+  ([process-protocol](spec/process-protocol.md)). Neither treatment resolves
+  what the provider actually did. Whether a provider request-status API can
+  replace the conservative ambiguous outcome with trustworthy evidence,
+  including its polling posture and evidence classes, remains undecided. Later
+  scope. (S02)
 - **Operator control of scheduling and liveness cadence.** The scheduler's sweep
   interval, per-session scan gating, fairness between contending sessions, and
   the turn-liveness staleness bound and scan interval are all compiled constants

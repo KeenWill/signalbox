@@ -62,6 +62,7 @@ export interface SessionTimelineSource {
 const MAX_U64 = (1n << 64n) - 1n
 
 const decimalU64 = (value: string): bigint => {
+  if (value.length > 20) throw new TypeError('timeline fact exceeds 64 bits')
   if (!/^(0|[1-9]\d*)$/.test(value)) throw new TypeError('timeline fact must be unsigned decimal')
   const parsed = BigInt(value)
   if (parsed > MAX_U64) throw new TypeError('timeline fact exceeds 64 bits')
@@ -614,6 +615,19 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     ) {
       throw new TypeError('timeline window exceeds the requested byte ceiling')
     }
+    if (projectedStructuredBytes !== window.projected_structured_bytes) {
+      throw new TypeError('timeline window has contradictory byte accounting')
+    }
+    const addressed = 'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : undefined
+    for (const item of window.items) {
+      const address = decimalAddress(item.address.event_sequence)
+      if (anchor.kind === 'before' && addressed !== undefined && address >= addressed) {
+        throw new TypeError('timeline HTTP item is not strictly before its anchor')
+      }
+      if (anchor.kind === 'after' && addressed !== undefined && address <= addressed) {
+        throw new TypeError('timeline HTTP item is not strictly after its anchor')
+      }
+    }
     if (canonicalSessionId(window.session_id) !== requestedSessionId) {
       throw new TypeError('timeline window session mismatch')
     }
@@ -800,8 +814,11 @@ export class BoundedSessionHistory {
     }
     decimalU64(descriptor.sizes.referenced_blob_count)
     decimalU64(descriptor.sizes.referenced_blob_bytes)
-    decimalU64(descriptor.work.active_turn_count)
-    decimalU64(descriptor.work.queued_turn_count)
+    const activeTurnCount = decimalU64(descriptor.work.active_turn_count)
+    const queuedTurnCount = decimalU64(descriptor.work.queued_turn_count)
+    if (activeTurnCount > 1n) {
+      throw new TypeError('descriptor active work is contradictory')
+    }
     const cached = this.descriptorValue
     if (cached) {
       const cachedObservedThrough = decimalU64(cached.observed_through)
@@ -818,6 +835,8 @@ export class BoundedSessionHistory {
       const projectedTextBytes = decimalU64(descriptor.sizes.projected_text_bytes)
       const referencedBlobCount = decimalU64(descriptor.sizes.referenced_blob_count)
       const referencedBlobBytes = decimalU64(descriptor.sizes.referenced_blob_bytes)
+      const cachedActiveTurnCount = decimalU64(cached.work.active_turn_count)
+      const cachedQueuedTurnCount = decimalU64(cached.work.queued_turn_count)
       const durableFactsRegressed =
         firstAddress !== cachedFirstAddress ||
         latestAddress < cachedLatestAddress ||
@@ -831,6 +850,13 @@ export class BoundedSessionHistory {
       const appendGrowthContradiction =
         latestAddressAdvanced !== itemCountAdvanced ||
         (itemCountAdvanced && projectedStructuredBytes <= cachedProjectedStructuredBytes)
+      const appendedItemCount = itemCount - cachedItemCount
+      const advancedAddressSpan = latestAddress - cachedLatestAddress
+      const appendedStructuredBytes = projectedStructuredBytes - cachedProjectedStructuredBytes
+      const appendDeltaContradiction =
+        appendedItemCount > advancedAddressSpan ||
+        appendedStructuredBytes < appendedItemCount * BigInt(MIN_PROJECTED_ITEM_BYTES) ||
+        appendedStructuredBytes > appendedItemCount * BigInt(MAX_PROJECTED_ITEM_BYTES)
       const equalCursorFactsChanged =
         observedThrough === cachedObservedThrough &&
         (latestAddress !== cachedLatestAddress ||
@@ -838,8 +864,15 @@ export class BoundedSessionHistory {
           projectedTextBytes !== cachedProjectedTextBytes ||
           projectedStructuredBytes !== cachedProjectedStructuredBytes ||
           referencedBlobCount !== cachedReferencedBlobCount ||
-          referencedBlobBytes !== cachedReferencedBlobBytes)
-      if (durableFactsRegressed || appendGrowthContradiction || equalCursorFactsChanged) {
+          referencedBlobBytes !== cachedReferencedBlobBytes ||
+          activeTurnCount !== cachedActiveTurnCount ||
+          queuedTurnCount !== cachedQueuedTurnCount)
+      if (
+        durableFactsRegressed ||
+        appendGrowthContradiction ||
+        appendDeltaContradiction ||
+        equalCursorFactsChanged
+      ) {
         throw new TypeError('descriptor append-only facts are contradictory')
       }
     }
@@ -979,17 +1012,17 @@ export class BoundedSessionHistory {
       }
     }
     if (cachedDescriptor && firstItemAddress && lastItemAddress) {
+      const cachedFirstAddress = decimalAddress(cachedDescriptor.first_address.event_sequence)
       if (
-        decimalAddress(firstItemAddress) <
-        decimalAddress(cachedDescriptor.first_address.event_sequence)
+        window.continuation_before &&
+        decimalAddress(window.continuation_before.event_sequence) < cachedFirstAddress
       ) {
+        throw new TypeError('timeline continuation precedes the immutable first address')
+      }
+      if (decimalAddress(firstItemAddress) < cachedFirstAddress) {
         throw new TypeError('timeline window precedes the cached first address')
       }
-      if (
-        decimalAddress(firstItemAddress) >
-          decimalAddress(cachedDescriptor.first_address.event_sequence) &&
-        !window.continuation_before
-      ) {
+      if (decimalAddress(firstItemAddress) > cachedFirstAddress && !window.continuation_before) {
         throw new TypeError('cached descriptor requires a continuation before this window')
       }
       if (
@@ -1070,8 +1103,8 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
         item_count: String(SESSION_FOUNDATION_TOTAL),
         projected_text_bytes: '48000000',
         projected_structured_bytes: String(scenarioProjectedBytesThrough(SESSION_FOUNDATION_TOTAL)),
-        referenced_blob_count: '24000',
-        referenced_blob_bytes: '96000000000',
+        referenced_blob_count: '0',
+        referenced_blob_bytes: '0',
       },
       first_address: { event_sequence: '1' },
       latest_address: { event_sequence: String(SESSION_FOUNDATION_TOTAL) },
@@ -1156,7 +1189,10 @@ export const sessionFoundationScenario = async (after: string | undefined, limit
   const eventSequence = after?.match(/^timeline:([1-9]\d*)$/)?.[1]
   const window = await history.load(
     eventSequence ? { kind: 'after', eventSequence } : { kind: 'latest' },
-    { maxItems: limit, maxBytes: SCENARIO_TIMELINE_LIMITS.max_timeline_window_bytes },
+    {
+      maxItems: limit,
+      maxBytes: SCENARIO_TIMELINE_LIMITS.max_timeline_window_bytes,
+    },
   )
   return { descriptor, window, retained: history.retained.length }
 }

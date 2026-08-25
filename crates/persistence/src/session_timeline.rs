@@ -18,6 +18,7 @@ use signalbox_application::{
     TimelineRunnerState, TimelineTextExcerpt, TimelineToolApprovalPosture, TimelineToolAttempt,
     TimelineToolBatchState, TimelineToolEffectPosture, TimelineToolSandboxPosture,
     TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    timeline_detail_envelope_bytes,
 };
 use signalbox_domain::{
     ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId,
@@ -287,6 +288,11 @@ impl SessionTimelineRepository {
         {
             return Err(SessionTimelineCorruption::InvalidOrdinal("window totals").into());
         }
+        if item_count == descriptor.sizes.item_count
+            && (first != descriptor.bounds.first || latest != descriptor.bounds.latest)
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window bounds").into());
+        }
         let continuation_before = match first.zip(descriptor.bounds.first) {
             Some((loaded, bound)) if loaded > bound => TimelineContinuation::MoreAt(loaded),
             _ => TimelineContinuation::Exhausted,
@@ -483,7 +489,7 @@ impl SessionTimelineReader for SessionTimelineRepository {
     }
 }
 
-const DETAIL_ENVELOPE_BYTES: u32 = 128;
+const DETAIL_ENVELOPE_BYTES: u32 = timeline_detail_envelope_bytes();
 
 const TURN_DETAIL_ADDRESSES_SQL: &str = r#"
 WITH turn_events AS (
@@ -922,8 +928,12 @@ async fn project_detail_event(
                 DispatchedOutboxEventKind::ModelCallTransition { turn, call, state } => {
                     require_cursor_field(cursor, TimelineBodyField::ModelResponse, 0)?;
                     let response_offset = cursor.map_or(0, |cursor| cursor.offset_bytes);
-                    let include_terminal_evidence =
-                        matches!(state, DispatchedModelCallState::Terminal(_));
+                    let include_terminal_evidence = match state {
+                        DispatchedModelCallState::Prepared
+                        | DispatchedModelCallState::InFlight
+                        | DispatchedModelCallState::CancellationRequested => false,
+                        DispatchedModelCallState::Terminal(_) => true,
+                    };
                     let row = load_model_detail(
                         transaction,
                         *call,
@@ -1265,8 +1275,11 @@ async fn load_goal_turn_event(
             )
         })
         .transpose()?;
+    // A textless retiring event is a legitimate stored shape, so a
+    // caller-supplied `goal_text` cursor naming it is an inapplicable query,
+    // not stored corruption.
     if text.is_none() && cursor.is_some_and(|cursor| !is_item_start_cursor(cursor)) {
-        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
     }
     let generation = nonnegative(row.try_get("generation")?, "goal generation")?;
     let event_kind: String = row.try_get("event_kind")?;
@@ -1394,7 +1407,11 @@ async fn project_tool_batch(
     };
     let row = sqlx::query(
         "WITH selected_member AS (
-            SELECT request_id, attempt_id, approval_judge_escalated
+            SELECT request_id, attempt_id, approval_judge_escalated,
+                   attempt_state_kind, attempt_terminal_disposition_kind,
+                   attempt_error_kind, attempt_has_result, attempt_has_failure,
+                   attempt_sandbox_posture, attempt_result_text,
+                   attempt_error_detail
               FROM tool_batch_transition_detail_member
              WHERE event_sequence = $1
                AND member_kind = 'tool'
@@ -1403,14 +1420,17 @@ async fn project_tool_batch(
         SELECT request.request_id, request.tool_name,
                 CASE $3::text
                     WHEN 'tool_arguments' THEN request.arguments_text
-                    WHEN 'tool_result' THEN attempt.result_text
-                    WHEN 'tool_failure' THEN attempt.error_detail
+                    WHEN 'tool_result' THEN selected.attempt_result_text
+                    WHEN 'tool_failure' THEN selected.attempt_error_detail
                 END AS selected_body,
-                request.approval_posture, attempt.attempt_id,
-                attempt.effect_class, attempt.state_kind,
-                attempt.terminal_disposition_kind, attempt.error_kind,
-                attempt.result_text IS NOT NULL AS has_result,
-                attempt.error_detail IS NOT NULL AS has_failure,
+                request.approval_posture, selected.attempt_id,
+                attempt.effect_class,
+                selected.attempt_state_kind AS state_kind,
+                selected.attempt_terminal_disposition_kind
+                    AS terminal_disposition_kind,
+                selected.attempt_error_kind AS error_kind,
+                COALESCE(selected.attempt_has_result, FALSE) AS has_result,
+                COALESCE(selected.attempt_has_failure, FALSE) AS has_failure,
                 EXISTS (
                     SELECT 1
                       FROM tool_batch_transition_detail_member AS probe
@@ -1423,22 +1443,7 @@ async fn project_tool_batch(
                      WHERE goal.event_sequence = $1
                        AND goal.member_kind = 'goal'
                 ) AS has_goal_events,
-                (
-                    SELECT CASE placement.requested_sandbox_profile
-                        WHEN 'ambient' THEN 'unsandboxed'
-                        WHEN 'workspace_restricted' THEN 'sandboxed'
-                    END
-                      FROM runner_physical_attempt_lease_binding AS physical_binding
-                      JOIN runner_lease_generation AS lease
-                        ON lease.lease_id = physical_binding.lease_id
-                       AND lease.attempt_id = physical_binding.attempt_id
-                      JOIN runner_session_placement_record AS placement
-                        ON placement.session_id = lease.session_id
-                       AND placement.event_ordinal = lease.placement_event_ordinal
-                     WHERE physical_binding.attempt_id = attempt.attempt_id
-                     ORDER BY lease.generation DESC
-                     LIMIT 1
-                ) AS sandbox_posture,
+                selected.attempt_sandbox_posture AS sandbox_posture,
                 selected.approval_judge_escalated AS judge_escalated
            FROM selected_member AS selected
            JOIN tool_request AS request
@@ -1508,6 +1513,8 @@ async fn project_tool_batch(
                 .then_some(excerpt.clone()),
             result: (requested_field == TimelineBodyField::ToolResult).then_some(excerpt.clone()),
             failure: (requested_field == TimelineBodyField::ToolFailure).then_some(excerpt),
+            has_result,
+            has_failure,
             operator_required: approval_judge_escalated
                 || approval_posture == TimelineToolApprovalPosture::Human,
             approval_posture,
@@ -1681,10 +1688,13 @@ fn project_tool_goal(
     ),
     SessionTimelineRepositoryError,
 > {
+    // A textless goal event (`user_stopped`, or `resumed` without guidance) is
+    // a legitimate stored shape, so a `goal_text` cursor naming it is a
+    // caller-supplied inapplicable query, not stored corruption.
     let raw_text = row
         .text
         .as_deref()
-        .ok_or(SessionTimelineCorruption::InvalidDetailCursor)?;
+        .ok_or(SessionTimelineRepositoryError::InvalidDetailQuery)?;
     let text = excerpt_text(
         raw_text,
         address,
@@ -1799,10 +1809,23 @@ async fn project_tool_approval(
                 model_call_id: *call,
             }
         }
+        (ToolDecisionSource::UserOverride, ToolApprovalDecider::UserOverride { command, .. }) => {
+            TimelineApprovalActor::User {
+                command_id: *command,
+            }
+        }
         (ToolDecisionSource::PolicyAuto, _)
         | (ToolDecisionSource::SessionBlanket, _)
         | (ToolDecisionSource::SessionOverride, _) => TimelineApprovalActor::Policy,
-        (ToolDecisionSource::UserCommand, ToolApprovalDecider::Delegate { .. })
+        (
+            ToolDecisionSource::UserCommand | ToolDecisionSource::Delegate,
+            ToolApprovalDecider::UserOverride { .. },
+        )
+        | (
+            ToolDecisionSource::UserOverride,
+            ToolApprovalDecider::User { .. } | ToolApprovalDecider::Delegate { .. },
+        )
+        | (ToolDecisionSource::UserCommand, ToolApprovalDecider::Delegate { .. })
         | (ToolDecisionSource::Delegate, ToolApprovalDecider::User { .. }) => {
             return Err(
                 SessionTimelineCorruption::InvalidStoredValue("tool approval actor").into(),

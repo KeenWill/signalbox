@@ -1,29 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
-  MAX_BOOTSTRAP_HTTP_RESPONSE_BYTES,
+  BootstrapContractError,
+  MAX_BOOTSTRAP_RESPONSE_BYTES,
   productRoutes,
   productSurfaceStates,
   SameOriginProductTransport,
 } from './product'
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    bounded_session_timeline: true,
-    bounded_session_timeline_detail: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: {
-    max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 262_144,
-    max_timeline_detail_items: 128,
-    max_timeline_detail_bytes: 65_536,
-    max_timeline_window_items: 256,
-    max_timeline_window_bytes: 65_536,
-  },
-} as const
+import { webContractBootstrapFixture } from './product.fixture'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -31,12 +14,12 @@ describe('SameOriginProductTransport', () => {
   it('decodes the Rust-authored bootstrap contract', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(JSON.stringify(bootstrapFixture))),
+      vi.fn(async () => new Response(JSON.stringify(webContractBootstrapFixture))),
     )
 
     const bootstrap = await new SameOriginProductTransport().readBootstrap()
 
-    expect(bootstrap).toEqual(bootstrapFixture)
+    expect(bootstrap).toEqual(webContractBootstrapFixture)
   })
 
   it('fails closed when the daemon returns an unknown contract shape', async () => {
@@ -46,7 +29,29 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'bootstrap.contract',
+      BootstrapContractError,
+    )
+  })
+
+  it('rejects malformed JSON as a contract failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{')),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'violates the web contract',
+    )
+  })
+
+  it('rejects a bootstrap response above the fixed byte ceiling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('x'.repeat(MAX_BOOTSTRAP_RESPONSE_BYTES + 1))),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'exceeds the byte limit',
     )
   })
 
@@ -57,20 +62,6 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
-  })
-
-  it('bounds bootstrap bytes before JSON decoding', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(
-        async () =>
-          new Response(' '.repeat(MAX_BOOTSTRAP_HTTP_RESPONSE_BYTES + 1), { status: 200 }),
-      ),
-    )
-
-    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'encoded byte ceiling',
-    )
   })
 })
 
