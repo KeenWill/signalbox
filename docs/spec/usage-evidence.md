@@ -1,6 +1,6 @@
 # Usage evidence
 
-This contract is verified against this PR (`agent/web-usage-cost`).
+This contract is verified against PR #1137 (`agent/web-usage-cost`).
 
 ## Canonical evidence
 
