@@ -1495,7 +1495,12 @@ its commit leaves its delivery pending rather than terminal, so the page's
 remaining deliveries reissue it; and a hydration requested beside a head-guarded
 query is never recorded, because the merged request carries that guard and a
 superseded head discards the fetched state while the query still reports
-success. A delivery whose hydration the page already issued records no
+success. A refresh whose cursor commit loses its generation race is likewise
+never recorded: its delivery stays terminal, because its disposition and exact
+projections are already durable, but the fetch never became cursor state, so the
+page's remaining deliveries still owe that hydration. The same lost race clears
+the fetch's process-local freshness, which no later generation may then vouch
+for. A delivery whose hydration the page already issued records no
 targeted-query projection of its own, on the same rule that only a query the
 poller actually made is recorded. Coalescing therefore bounds bursts and not
 pacing: a delivery admitted after a hydration reports state that hydration could
