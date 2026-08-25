@@ -5,8 +5,9 @@
 corpus, expectations, trials, and stages are recorded, and how evaluation
 traffic stays unmistakably separate from production traffic. The entire surface
 below other than the explicitly implemented standalone approval-judge surfaces
-is committed ahead of code as Stage 0. Stage 0 and those temporary surfaces were
-verified through PR #577 (`agent/eval-db-recording`). Execution, registration,
+is committed ahead of code as Stage 0. Stage 0 was verified through PR #580
+(`agent/program-substrate-spec`), and those temporary surfaces are verified
+against PR #577 (`agent/eval-db-recording`). Execution, registration,
 journaling, and replay are owned by the substrate page and not restated here;
 model scoring is ordinary session traffic owned by
 [model-call execution](model-call-execution.md); the sandboxed process boundary
