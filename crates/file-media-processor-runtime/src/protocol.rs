@@ -439,6 +439,7 @@ pub(crate) struct WireReadRequest {
     detected_media_type: String,
     validation: ValidationEvidence,
     metadata_json: String,
+    maximum_source_bytes: u64,
     view: String,
     options: Option<serde_json::Value>,
     continuation: Option<String>,
@@ -459,6 +460,7 @@ impl From<&FileMediaProviderReadRequest> for WireReadRequest {
             detected_media_type: request.detected_media_type.as_str().to_owned(),
             validation: request.validation,
             metadata_json: request.metadata.as_str().to_owned(),
+            maximum_source_bytes: request.maximum_source_bytes,
             view: request.view.as_str().to_owned(),
             options,
             continuation,
@@ -485,6 +487,7 @@ impl TryFrom<WireReadRequest> for FileMediaProviderReadRequest {
                 .map_err(|_| ProtocolValueError)?,
             validation: value.validation,
             metadata: BoundedMetadata::try_new(&value.metadata_json).map_err(map_value_error)?,
+            maximum_source_bytes: value.maximum_source_bytes,
             view: ReadViewName::try_new(value.view).map_err(map_value_error)?,
             input,
         })

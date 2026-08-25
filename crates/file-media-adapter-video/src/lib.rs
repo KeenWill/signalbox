@@ -105,7 +105,16 @@ impl FileMediaProvider for VideoProvider {
             let mut bytes = read_range(source, 0, initial_length).await?;
             require_active(cancellation)?;
             if !kind.matches_probe(&bytes) {
-                return Ok(ProcessorProbeOutput::NoMatch);
+                if kind.could_match_extended_probe(&bytes)
+                    && u64::try_from(bytes.len()).map_err(|_| FileMediaProviderFailure::Failed)?
+                        < source_bytes.min(METADATA_BYTES)
+                {
+                    extend_probe_prefix(source, source_bytes, &mut bytes).await?;
+                    require_active(cancellation)?;
+                }
+                if !kind.matches_probe(&bytes) {
+                    return Ok(ProcessorProbeOutput::NoMatch);
+                }
             }
             if !matches!(
                 parse(kind, &bytes, source_bytes),
@@ -194,7 +203,8 @@ impl FileMediaProvider for VideoProvider {
             if request.view.as_str() != METADATA_VIEW {
                 return Ok(ProcessorReadOutput::UnsupportedView);
             }
-            let (bytes, source_bytes) = read_metadata_prefix(source, METADATA_BYTES).await?;
+            let (bytes, source_bytes) =
+                read_metadata_prefix(source, request.maximum_source_bytes).await?;
             require_active(cancellation)?;
             match parse(kind, &bytes, source_bytes) {
                 Ok(metadata) => metadata_output(kind, &metadata),
@@ -272,6 +282,13 @@ impl VideoKind {
         match self {
             Self::Mp4 => matches_mp4_probe(bytes),
             Self::Webm => matches_webm_probe(bytes),
+        }
+    }
+
+    fn could_match_extended_probe(self, bytes: &[u8]) -> bool {
+        match self {
+            Self::Mp4 => bytes.get(4..8) == Some(MP4_FTYP.as_slice()),
+            Self::Webm => bytes.starts_with(&EBML_HEADER_BYTES),
         }
     }
 }
@@ -1317,9 +1334,10 @@ fn validate_protection_information(payload: &[u8], state: &mut Mp4State) -> Resu
                 scheme_seen = true;
             }
             [b's', b'c', b'h', b'i'] => {
-                if scheme_information_seen || child.is_empty() {
+                if scheme_information_seen {
                     return Err(VideoIssue::Malformed);
                 }
+                validate_scheme_information(child, state)?;
                 scheme_information_seen = true;
             }
             _ => {}
@@ -1327,6 +1345,30 @@ fn validate_protection_information(payload: &[u8], state: &mut Mp4State) -> Resu
         cursor = cursor.checked_add(consumed).ok_or(VideoIssue::Structure)?;
     }
     if !original_format_seen || !scheme_seen || !scheme_information_seen {
+        return Err(VideoIssue::Malformed);
+    }
+    Ok(())
+}
+
+fn validate_scheme_information(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
+    let mut cursor = 0_usize;
+    let mut track_encryption_seen = false;
+    while cursor < payload.len() {
+        let (box_type, child, consumed) = mp4_box_at(payload, cursor, false)?;
+        state.nodes = state.nodes.checked_add(1).ok_or(VideoIssue::Structure)?;
+        if state.nodes > MAX_NODES {
+            return Err(VideoIssue::Structure);
+        }
+        if box_type == *b"tenc" {
+            if track_encryption_seen || child.len() < 23 || child[0] > 1 || child[1..4] != [0, 0, 0]
+            {
+                return Err(VideoIssue::Malformed);
+            }
+            track_encryption_seen = true;
+        }
+        cursor = cursor.checked_add(consumed).ok_or(VideoIssue::Structure)?;
+    }
+    if !track_encryption_seen {
         return Err(VideoIssue::Malformed);
     }
     Ok(())

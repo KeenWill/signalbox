@@ -402,6 +402,8 @@ pub struct FileMediaProviderReadRequest {
     pub validation: crate::ValidationEvidence,
     /// Registry-sanitized provider metadata.
     pub metadata: crate::BoundedMetadata,
+    /// Maximum source prefix covered by validation and available to this read.
+    pub maximum_source_bytes: u64,
     /// Exact provider-owned view.
     pub view: ReadViewName,
     /// Closed initial-options or continuation input.

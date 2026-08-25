@@ -206,6 +206,16 @@ async fn empty_mp4_protection_information_is_malformed() -> Result<(), Box<dyn E
 }
 
 #[tokio::test]
+async fn malformed_mp4_scheme_information_is_not_encryption_evidence() -> Result<(), Box<dyn Error>>
+{
+    assert_malformed(
+        VideoFixture::mp4_with_malformed_scheme_information(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn encrypted_webm_is_terminal_without_a_key_channel() -> Result<(), Box<dyn Error>> {
     assert_locked(VideoFixture::encrypted_webm()).await
 }
@@ -750,6 +760,25 @@ async fn webm_with_large_header_is_probed_and_validated() -> Result<(), Box<dyn 
 }
 
 #[tokio::test]
+async fn mp4_supported_brand_after_probe_prefix_is_probed_and_validated()
+-> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_supported_brand_after_probe_prefix().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn webm_doc_type_after_probe_prefix_is_probed_and_validated() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::webm_with_doc_type_after_probe_prefix().into_source()?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
 async fn webm_without_tracks_is_malformed() -> Result<(), Box<dyn Error>> {
     assert_malformed(VideoFixture::webm_without_tracks(), "malformed_video").await
 }
@@ -988,6 +1017,36 @@ async fn validation_read_honors_the_effective_source_byte_ceiling() -> Result<()
     .await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+    Ok(())
+}
+
+#[tokio::test]
+async fn metadata_read_uses_the_same_source_window_as_validation() -> Result<(), Box<dyn Error>> {
+    let source = VideoFixture::mp4_with_malformed_tail_after_validation_window().into_source()?;
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 4096;
+    let registry = FileMediaRegistry::try_new(
+        vec![declaration()?],
+        ceilings,
+        ProcessorIsolation::Available,
+    )?;
+    let request = FileReadRequest {
+        inspection: InspectionRequest {
+            source: source.file_use()?,
+            visible_part: None,
+        },
+        view: ReadViewName::try_new("metadata")?,
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
+    };
+    let result = registry
+        .read(&DirectProcessor::new(), request, &source, &NeverCancelled)
+        .await?;
+
+    let body = complete_structure(result)?;
+    assert_eq!(body["container"], "mp4");
+    assert_eq!(body["video_tracks"], 1);
     Ok(())
 }
 

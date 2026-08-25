@@ -121,6 +121,30 @@ impl VideoFixture {
         )
     }
 
+    pub fn mp4_with_malformed_scheme_information() -> Self {
+        let mut payload = vec![0_u8; 78];
+        payload[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        payload[24..26].copy_from_slice(&1920_u16.to_be_bytes());
+        payload[26..28].copy_from_slice(&1080_u16.to_be_bytes());
+        let original_format = mp4_box(*b"frma", b"avc1");
+        let mut scheme = vec![0_u8; 12];
+        scheme[4..8].copy_from_slice(b"cenc");
+        let scheme = mp4_box(*b"schm", &scheme);
+        let scheme_information = mp4_box(*b"schi", &[0]);
+        payload.extend_from_slice(&mp4_box(
+            *b"sinf",
+            &[original_format, scheme, scheme_information].concat(),
+        ));
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(
+                MP4_TIMESCALE,
+                MP4_DURATION_UNITS,
+                mp4_box(*b"encv", &payload),
+            ),
+        )
+    }
+
     pub fn encrypted_webm() -> Self {
         Self::new(
             FixtureKind::Webm,
@@ -401,6 +425,28 @@ impl VideoFixture {
         let movie = ordinary[ftyp().len()..].to_vec();
         let padding = mp4_box(*b"free", &vec![0_u8; 8 * 1024]);
         Self::new(FixtureKind::Mp4, [ftyp(), padding, movie].concat())
+    }
+
+    pub fn mp4_with_supported_brand_after_probe_prefix() -> Self {
+        let ordinary = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
+        let movie = ordinary[ftyp().len()..].to_vec();
+        let mut payload = b"avif\0\0\0\0".to_vec();
+        payload.extend_from_slice(&vec![b'a'; 4 * 1024]);
+        payload.extend_from_slice(b"isom");
+        Self::new(
+            FixtureKind::Mp4,
+            [mp4_box(*b"ftyp", &payload), movie].concat(),
+        )
+    }
+
+    pub fn mp4_with_malformed_tail_after_validation_window() -> Self {
+        let ordinary = mp4_bytes(MP4_TIMESCALE, MP4_DURATION_UNITS);
+        let filler_payload_bytes = 4096_usize.saturating_sub(ordinary.len() + 8);
+        let padding = mp4_box(*b"free", &vec![0_u8; filler_payload_bytes]);
+        Self::new(
+            FixtureKind::Mp4,
+            [ordinary, padding, mp4_box(*b"moov", &[])].concat(),
+        )
     }
 
     pub fn mp4_with_metadata_beyond_supported_window() -> Self {
@@ -871,6 +917,13 @@ impl VideoFixture {
     pub fn webm_with_large_ebml_header() -> Self {
         let padding = ebml_element(&[0xec], &vec![0_u8; 600]);
         let header = ebml_header_with_extra(&padding);
+        Self::new(FixtureKind::Webm, webm_bytes_with_header(header))
+    }
+
+    pub fn webm_with_doc_type_after_probe_prefix() -> Self {
+        let padding = ebml_element(&[0xec], &vec![0_u8; 8 * 1024]);
+        let doc_type = ebml_element(&[0x42, 0x82], b"webm");
+        let header = ebml_element(&[0x1a, 0x45, 0xdf, 0xa3], &[padding, doc_type].concat());
         Self::new(FixtureKind::Webm, webm_bytes_with_header(header))
     }
 

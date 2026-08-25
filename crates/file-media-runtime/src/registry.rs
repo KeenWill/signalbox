@@ -511,6 +511,7 @@ impl FileMediaRegistry {
                     detected_media_type: validated.detected_media_type().clone(),
                     validation: validated.validation(),
                     metadata: validated.metadata().clone(),
+                    maximum_source_bytes: self.ceilings.validation_source_bytes,
                     view: request.view,
                     input: request.input,
                 },
