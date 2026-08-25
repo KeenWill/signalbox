@@ -974,8 +974,7 @@ struct RepositoryWatchTask {
     webhook_shadow_supersession_epoch: u64,
     webhook_projected_terminal_in_flight: Option<RepoWatchWebhookDeliveryKey>,
     webhook_dispatch_in_flight: bool,
-    webhook_targeted_completion:
-        Option<JoinHandle<Result<TargetedWebhookCompletion, TargetedWebhookCompletionError>>>,
+    webhook_targeted_completion: Option<RetainedTargetedWebhookCompletion>,
     webhook_terminal_ambiguous: Option<RepoWatchWebhookDeliveryKey>,
     webhook_drain_first_failure: Option<RepositoryWatchAttemptError>,
     webhook_drain_projection_failure: Option<RepositoryWatchAttemptError>,
@@ -1087,8 +1086,7 @@ impl RepositoryWatchTask {
         .is_err()
         {
             if let Some(handle) = self.webhook_targeted_completion.take() {
-                handle.abort();
-                let _ = handle.await;
+                handle.abort_and_join().await;
             }
             tracing::error!(
                 repository = %self.repository.as_str(),
@@ -2400,34 +2398,36 @@ impl RepositoryWatchTask {
         )
         .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
         let supersession_epoch = self.webhook_shadow_supersession_epoch;
-        self.webhook_targeted_completion = Some(tokio::spawn(async move {
-            // Persist the terminal disposition and its exact projections first.
-            // This is the durable recovery handoff: if shutdown later aborts
-            // cursor advancement, restart excludes the delivery without losing
-            // its projections, and an ordinary poll can advance the old cursor.
-            record_webhook_terminal_request(&webhook_store, key, &terminal)
-                .await
-                .map_err(|error| TargetedWebhookCompletionError::Terminal(key, error))?;
-            let outcome = store
-                .commit(&repository, request)
-                .await
-                .map_err(|_| TargetedWebhookCompletionError::Cursor)?;
-            match outcome {
-                RepoWatchCommitOutcome::Committed(cursor)
-                | RepoWatchCommitOutcome::Replayed(cursor)
-                | RepoWatchCommitOutcome::Unchanged(cursor) => {
-                    poller.publish_freshness(cursor.generation());
+        self.webhook_targeted_completion = Some(RetainedTargetedWebhookCompletion::new(
+            tokio::spawn(async move {
+                // Persist the terminal disposition and its exact projections first.
+                // This is the durable recovery handoff: if shutdown later aborts
+                // cursor advancement, restart excludes the delivery without losing
+                // its projections, and an ordinary poll can advance the old cursor.
+                record_webhook_terminal_request(&webhook_store, key, &terminal)
+                    .await
+                    .map_err(|error| TargetedWebhookCompletionError::Terminal(key, error))?;
+                let outcome = store
+                    .commit(&repository, request)
+                    .await
+                    .map_err(|_| TargetedWebhookCompletionError::Cursor)?;
+                match outcome {
+                    RepoWatchCommitOutcome::Committed(cursor)
+                    | RepoWatchCommitOutcome::Replayed(cursor)
+                    | RepoWatchCommitOutcome::Unchanged(cursor) => {
+                        poller.publish_freshness(cursor.generation());
+                    }
+                    RepoWatchCommitOutcome::Conflict { current: _ } => {
+                        return Ok(TargetedWebhookCompletion::CursorSuperseded { key });
+                    }
                 }
-                RepoWatchCommitOutcome::Conflict { current: _ } => {
-                    return Ok(TargetedWebhookCompletion::CursorSuperseded { key });
-                }
-            }
-            Ok(TargetedWebhookCompletion::Applied {
-                key,
-                shadow,
-                supersession_epoch,
-            })
-        }));
+                Ok(TargetedWebhookCompletion::Applied {
+                    key,
+                    shadow,
+                    supersession_epoch,
+                })
+            }),
+        ));
         self.settle_webhook_targeted_completion()
             .await
             .ok_or(RepositoryWatchAttemptError::Persistence)?
@@ -2444,6 +2444,7 @@ impl RepositoryWatchTask {
         let result = {
             let handle = self.webhook_targeted_completion.as_mut()?;
             handle
+                .join()
                 .await
                 .map_err(|_| TargetedWebhookCompletionError::Persistence)
                 .and_then(|result| result)
@@ -2791,6 +2792,38 @@ enum TargetedWebhookCompletionError {
     Persistence,
     Cursor,
     Terminal(RepoWatchWebhookDeliveryKey, WebhookTerminalRecordError),
+}
+
+struct RetainedTargetedWebhookCompletion {
+    handle: JoinHandle<Result<TargetedWebhookCompletion, TargetedWebhookCompletionError>>,
+}
+
+impl RetainedTargetedWebhookCompletion {
+    fn new(
+        handle: JoinHandle<Result<TargetedWebhookCompletion, TargetedWebhookCompletionError>>,
+    ) -> Self {
+        Self { handle }
+    }
+
+    async fn join(
+        &mut self,
+    ) -> Result<
+        Result<TargetedWebhookCompletion, TargetedWebhookCompletionError>,
+        tokio::task::JoinError,
+    > {
+        (&mut self.handle).await
+    }
+
+    async fn abort_and_join(mut self) {
+        self.handle.abort();
+        let _ = (&mut self.handle).await;
+    }
+}
+
+impl Drop for RetainedTargetedWebhookCompletion {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
 }
 
 enum TargetedWebhookCompletion {
@@ -3780,6 +3813,10 @@ impl GitHubRepositoryPoller {
         // Settle them within the scheduler bound before issuing targeted
         // requests, so work from two attempts cannot interleave.
         self.drain_fetches_bounded().await?;
+        // A survivor can record freshness after the cancellation path's first
+        // invalidation and before this join completes. Clear that late state
+        // before targeted work can publish it against a new cursor.
+        self.invalidate_freshness();
         let mut state = RepoWatchRepositoryStateInput {
             pull_requests: previous.state().pull_requests().to_vec(),
             workflow_runs: previous.state().workflow_runs().to_vec(),
@@ -7921,6 +7958,12 @@ mod tests {
         let previous = complete_typed_observation().await;
         let server = ScriptedServer::start(complete_pull_request_responses()).await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        fixture.poller.record_fetched_pull_request(
+            CANCELLED_FETCH_PULL_NUMBER,
+            &listed_pull_request(&minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER)),
+            PullRequestSettlement::Settled,
+            Vec::new(),
+        );
         fixture
             .poller
             .fetches
@@ -7948,6 +7991,13 @@ mod tests {
         assert!(
             fixture.poller.fetches.lock().await.is_empty(),
             "targeted refresh drains complete-poll survivors before fetching"
+        );
+        assert!(
+            !fixture
+                .poller
+                .freshness()
+                .contains_key(&CANCELLED_FETCH_PULL_NUMBER),
+            "targeted refresh invalidates freshness recorded by a late survivor"
         );
         assert_eq!(
             refreshed,
@@ -9052,6 +9102,28 @@ mod tests {
             Arc::strong_count(&fixture.poller),
             1,
             "a failed supervisor leaves no child fetch holding the sibling poller"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_a_retained_targeted_completion_aborts_its_writer() {
+        let ownership = Arc::new(());
+        let child_ownership = Arc::clone(&ownership);
+        let retained = super::RetainedTargetedWebhookCompletion::new(tokio::spawn(async move {
+            let _child_ownership = child_ownership;
+            std::future::pending::<
+                Result<super::TargetedWebhookCompletion, super::TargetedWebhookCompletionError>,
+            >()
+            .await
+        }));
+
+        drop(retained);
+        tokio::task::yield_now().await;
+
+        assert_eq!(
+            Arc::strong_count(&ownership),
+            1,
+            "dropping the repository task cannot detach its retained writer"
         );
     }
 
