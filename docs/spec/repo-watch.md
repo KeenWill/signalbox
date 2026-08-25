@@ -1028,8 +1028,12 @@ projections; no synthetic approval is created and no fresh review is requested.
 
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
-pull request, rule, singleton key, sessions, and held-since time; states each
-release clause independently; and names every failing clause in `blockers`.
+the origin fact its dispatch was admitted from, rule, singleton key, sessions,
+and held-since time; states each release clause independently; and names every
+failing clause in `blockers`. That origin is a pull request or a workflow branch
+and never both: a batch admitted from a branch workflow-run fact carries
+`workflow_branch` and a null `pull_request_number`, and every other batch
+carries `pull_request_number` and a null `workflow_branch`.
 
 **Implemented behavior.** Outstanding obligations are directly observable in the
 `repo_watch_outstanding_dispatch_obligation` projection. Each row identifies the

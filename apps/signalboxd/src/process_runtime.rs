@@ -120,9 +120,9 @@ use signalbox_persistence::{
     operator_status::{
         ProcessOperatorStatusConvergenceSeal, ProcessOperatorStatusConvergenceVerdict,
         ProcessOperatorStatusError, ProcessOperatorStatusHeldSlotBlocker,
-        ProcessOperatorStatusItem, ProcessOperatorStatusMergeableState,
-        ProcessOperatorStatusRepository, ProcessOperatorStatusReviewDecision,
-        ProcessOperatorStatusSingletonScope,
+        ProcessOperatorStatusHeldSlotOrigin, ProcessOperatorStatusItem,
+        ProcessOperatorStatusMergeableState, ProcessOperatorStatusRepository,
+        ProcessOperatorStatusReviewDecision, ProcessOperatorStatusSingletonScope,
     },
     outbox::{
         DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
@@ -188,7 +188,7 @@ use signalbox_process_protocol::{
     OperatorStatusConvergenceSeal as WireOperatorStatusConvergenceSeal,
     OperatorStatusConvergenceVerdict as WireOperatorStatusConvergenceVerdict,
     OperatorStatusEndMessage, OperatorStatusHeldSlotBlocker as WireOperatorStatusHeldSlotBlocker,
-    OperatorStatusHeldSlotMessage,
+    OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
     OperatorStatusMergeableState as WireOperatorStatusMergeableState, OperatorStatusMessage,
     OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
     OperatorStatusQueuedObligationMessage,
@@ -9555,7 +9555,7 @@ fn wire_operator_status_item(item: ProcessOperatorStatusItem) -> ServerMessage {
                 OperatorStatusHeldSlotMessage {
                     dispatch_id: wire_uuid(item.dispatch_id()),
                     repository: item.repository().to_owned(),
-                    pull_request_number: CanonicalU64::new(item.pull_request_number()),
+                    origin: wire_operator_status_held_slot_origin(item.origin()),
                     rule_id: item.rule_id().to_owned(),
                     rule_version: CanonicalU64::new(item.rule_version()),
                     singleton_scope: wire_operator_status_singleton_scope(singleton.scope()),
@@ -9645,6 +9645,23 @@ fn wire_operator_status_item(item: ProcessOperatorStatusItem) -> ServerMessage {
                     },
                 )),
             ))
+        }
+    }
+}
+
+fn wire_operator_status_held_slot_origin(
+    origin: &ProcessOperatorStatusHeldSlotOrigin,
+) -> OperatorStatusHeldSlotOrigin {
+    match origin {
+        ProcessOperatorStatusHeldSlotOrigin::PullRequest { number } => {
+            OperatorStatusHeldSlotOrigin::PullRequest {
+                pull_request_number: CanonicalU64::new(*number),
+            }
+        }
+        ProcessOperatorStatusHeldSlotOrigin::Branch { branch } => {
+            OperatorStatusHeldSlotOrigin::Branch {
+                branch: branch.clone(),
+            }
         }
     }
 }

@@ -163,6 +163,60 @@ pub const MAX_REVIEW_ORCHESTRATION_CONCERNS: usize = 32;
 // numeric-bound: ceiling - protects review request memory and wire size
 pub const MAX_REVIEW_ORCHESTRATION_MEMBERS: usize = 1_024;
 
+/// Maximum UTF-8 bytes in one operator-status repository slug.
+///
+/// A slug is `owner/name`, and the provider admits 100 bytes on each side.
+// numeric-bound: ceiling - admits the widest provider repository slug
+pub const MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES: usize = 201;
+
+/// Maximum UTF-8 bytes in one operator-status repository-watch rule identity.
+// numeric-bound: ceiling - matches the durable rule-identity width
+pub const MAX_OPERATOR_STATUS_RULE_ID_UTF8_BYTES: usize = 128;
+
+/// Maximum UTF-8 bytes in one operator-status branch name.
+///
+/// Covers a held slot's branch origin and a convergence row's base branch.
+// numeric-bound: ceiling - admits the widest admitted git branch name
+pub const MAX_OPERATOR_STATUS_BRANCH_UTF8_BYTES: usize = 255;
+
+/// Maximum sessions named by one operator-status dispatch inventory.
+///
+/// Bounds both a held slot's own sessions and the sessions occupying a queued
+/// obligation, which name the same dispatch-action inventory.
+// numeric-bound: ceiling - protects frame size from a runaway dispatch fan-out
+pub const MAX_OPERATOR_STATUS_DISPATCH_SESSIONS: usize = 32;
+
+/// Maximum independently failing release clauses on one held slot.
+// numeric-bound: ceiling - one per admitted release clause, which cannot repeat
+pub const MAX_OPERATOR_STATUS_HELD_SLOT_BLOCKERS: usize = 4;
+
+/// Maximum unresolved review threads counted by one convergence assessment.
+// numeric-bound: ceiling - matches the inventory persistence admits per assessment
+pub const MAX_OPERATOR_STATUS_UNRESOLVED_THREADS: u64 = 10_000;
+
+/// Maximum gating checks counted by one convergence assessment.
+///
+/// Persistence admits the same inventory, so a divergence here would reject an
+/// otherwise valid projection and fail the whole snapshot.
+// numeric-bound: ceiling - matches the inventory persistence admits per assessment
+pub const MAX_OPERATOR_STATUS_GATING_CHECKS: u64 = 10_000;
+
+/// Maximum UTF-8 bytes in one operator-status gating-check name.
+// numeric-bound: ceiling - matches the durable check-run name width
+pub const MAX_OPERATOR_STATUS_CHECK_NAME_UTF8_BYTES: usize = 256;
+
+/// Maximum UTF-8 bytes in one operator-status review node identity.
+// numeric-bound: ceiling - matches the durable provider review node identity width
+pub const MAX_OPERATOR_STATUS_REVIEW_NODE_ID_UTF8_BYTES: usize = 256;
+
+/// Maximum UTF-8 bytes in one operator-status reviewer login.
+// numeric-bound: ceiling - admits the widest provider login
+pub const MAX_OPERATOR_STATUS_REVIEWER_UTF8_BYTES: usize = 44;
+
+/// Exact hexadecimal characters in one operator-status commit revision.
+// numeric-bound: not-a-bound - the fixed width of a git SHA-1 object name
+pub const OPERATOR_STATUS_COMMIT_SHA_LENGTH: usize = 40;
+
 /// A lowercase hyphenated UUID at the process boundary.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CanonicalUuid(Uuid);
@@ -7057,13 +7111,28 @@ fn validate_adjustments(adjustments: &[ModelChangeAdjustment]) -> Result<(), Fra
     Ok(())
 }
 
+/// Origin fact whose dispatch holds one repository-watch singleton slot.
+///
+/// A rule matching branch workflow-run completion under `Rule` or `Repo`
+/// singleton scope holds a slot from a branch fact, which names no pull
+/// request; every other admitted origin names one. The two are exclusive, so
+/// the shape is a tagged choice rather than a pair of nullable numbers.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum OperatorStatusHeldSlotOrigin {
+    /// A pull-request fact, named by its number.
+    PullRequest { pull_request_number: CanonicalU64 },
+    /// A branch workflow-run fact, named by its branch.
+    Branch { branch: String },
+}
+
 /// Payload for one active repository-watch dispatch slot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OperatorStatusHeldSlotMessage {
     pub dispatch_id: CanonicalUuid,
     pub repository: String,
-    pub pull_request_number: CanonicalU64,
+    pub origin: OperatorStatusHeldSlotOrigin,
     pub rule_id: String,
     pub rule_version: CanonicalU64,
     pub singleton_scope: OperatorStatusSingletonScope,
@@ -8112,9 +8181,14 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
     };
     let valid = match message.as_ref() {
         OperatorStatusMessage::HeldSlot(item) => {
-            operator_status_text_is_valid(&item.repository, 201)
-                && item.pull_request_number.value() > 0
-                && operator_status_text_is_valid(&item.rule_id, 128)
+            operator_status_text_is_valid(
+                &item.repository,
+                MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES,
+            ) && operator_status_held_slot_origin_is_valid(&item.origin)
+                && operator_status_text_is_valid(
+                    &item.rule_id,
+                    MAX_OPERATOR_STATUS_RULE_ID_UTF8_BYTES,
+                )
                 && item.rule_version.value() > 0
                 && operator_status_singleton_is_valid(
                     item.singleton_scope,
@@ -8122,17 +8196,30 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
                     item.singleton_pull_request_number,
                     item.singleton_stack_root_pull_request_number,
                 )
-                && (1..=32).contains(&item.session_ids.len())
+                && (1..=MAX_OPERATOR_STATUS_DISPATCH_SESSIONS).contains(&item.session_ids.len())
                 && values_are_distinct(&item.session_ids)
-                && item.blockers.len() <= 4
+                && item.blockers.len() <= MAX_OPERATOR_STATUS_HELD_SLOT_BLOCKERS
                 && item.blockers.windows(2).all(|pair| {
                     operator_status_blocker_rank(pair[0]) < operator_status_blocker_rank(pair[1])
                 })
         }
         OperatorStatusMessage::QueuedObligation(item) => {
-            operator_status_text_is_valid(&item.repository, 201)
-                && operator_status_text_is_valid(&item.rule_id, 128)
-                && item.rule_version.value() > 0
+            // A blocking occupant is either a watch dispatch, which names both
+            // its identity and its sessions, or an independently commissioned
+            // live session, which names sessions and no dispatch. Only the
+            // reverse pairing — a dispatch identity with no session inventory —
+            // contradicts the projection.
+            let occupancy_is_valid =
+                item.occupying_dispatch_id.is_none() || !item.occupying_session_ids.is_empty();
+            let is_occupied =
+                item.occupying_dispatch_id.is_some() || !item.occupying_session_ids.is_empty();
+            operator_status_text_is_valid(
+                &item.repository,
+                MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES,
+            ) && operator_status_text_is_valid(
+                &item.rule_id,
+                MAX_OPERATOR_STATUS_RULE_ID_UTF8_BYTES,
+            ) && item.rule_version.value() > 0
                 && operator_status_singleton_is_valid(
                     item.singleton_scope,
                     &item.singleton_repository,
@@ -8140,40 +8227,52 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
                     item.singleton_stack_root_pull_request_number,
                 )
                 && item.matched_event_count.value() > 0
-                && item.occupying_session_ids.len() <= 32
+                && item.occupying_session_ids.len() <= MAX_OPERATOR_STATUS_DISPATCH_SESSIONS
                 && values_are_distinct(&item.occupying_session_ids)
-                && item.occupying_dispatch_id.is_some() == !item.occupying_session_ids.is_empty()
+                && occupancy_is_valid
                 && !(item.cooldown_remaining_seconds.is_some() && item.cooldown_never_eligible)
                 && !(item.ready
-                    && (item.occupying_dispatch_id.is_some()
+                    && (is_occupied
                         || item.cooldown_remaining_seconds.is_some()
                         || item.cooldown_never_eligible))
         }
         OperatorStatusMessage::PullRequestConvergence(item) => {
-            operator_status_text_is_valid(&item.repository, 201)
-                && item.pull_request_number.value() > 0
+            operator_status_text_is_valid(
+                &item.repository,
+                MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES,
+            ) && item.pull_request_number.value() > 0
                 && operator_status_sha_is_valid(&item.head_sha)
-                && operator_status_text_is_valid(&item.base_branch, 255)
+                && operator_status_text_is_valid(
+                    &item.base_branch,
+                    MAX_OPERATOR_STATUS_BRANCH_UTF8_BYTES,
+                )
                 && operator_status_sha_is_valid(&item.base_revision)
-                && item.unresolved_thread_count.value() <= 10_000
-                && item.gating_check_count.value() <= 10_000
+                && item.unresolved_thread_count.value() <= MAX_OPERATOR_STATUS_UNRESOLVED_THREADS
+                && item.gating_check_count.value() <= MAX_OPERATOR_STATUS_GATING_CHECKS
                 && u64::try_from(item.non_green_gating_checks.len())
                     .is_ok_and(|count| count <= item.gating_check_count.value())
-                && item
-                    .non_green_gating_checks
-                    .iter()
-                    .all(|name| operator_status_text_is_valid(name, 256))
+                && item.non_green_gating_checks.iter().all(|name| {
+                    operator_status_text_is_valid(name, MAX_OPERATOR_STATUS_CHECK_NAME_UTF8_BYTES)
+                })
                 && item
                     .non_green_gating_checks
                     .windows(2)
                     .all(|pair| pair[0] <= pair[1])
         }
         OperatorStatusMessage::PendingStaleReviewClearance(item) => {
-            operator_status_text_is_valid(&item.repository, 201)
-                && item.pull_request_number.value() > 0
+            operator_status_text_is_valid(
+                &item.repository,
+                MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES,
+            ) && item.pull_request_number.value() > 0
                 && operator_status_sha_is_valid(&item.current_head_sha)
-                && operator_status_text_is_valid(&item.review_node_id, 256)
-                && operator_status_text_is_valid(&item.reviewer, 44)
+                && operator_status_text_is_valid(
+                    &item.review_node_id,
+                    MAX_OPERATOR_STATUS_REVIEW_NODE_ID_UTF8_BYTES,
+                )
+                && operator_status_text_is_valid(
+                    &item.reviewer,
+                    MAX_OPERATOR_STATUS_REVIEWER_UTF8_BYTES,
+                )
                 && operator_status_sha_is_valid(&item.reviewed_head_sha)
                 && item.current_head_sha != item.reviewed_head_sha
         }
@@ -8186,15 +8285,26 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
     }
 }
 
+fn operator_status_held_slot_origin_is_valid(origin: &OperatorStatusHeldSlotOrigin) -> bool {
+    match origin {
+        OperatorStatusHeldSlotOrigin::PullRequest {
+            pull_request_number,
+        } => pull_request_number.value() > 0,
+        OperatorStatusHeldSlotOrigin::Branch { branch } => {
+            operator_status_text_is_valid(branch, MAX_OPERATOR_STATUS_BRANCH_UTF8_BYTES)
+        }
+    }
+}
+
 fn operator_status_singleton_is_valid(
     scope: OperatorStatusSingletonScope,
     repository: &Option<String>,
     pull_request_number: Option<CanonicalU64>,
     stack_root_pull_request_number: Option<CanonicalU64>,
 ) -> bool {
-    let repository_is_valid = repository
-        .as_ref()
-        .is_none_or(|value| operator_status_text_is_valid(value, 201));
+    let repository_is_valid = repository.as_ref().is_none_or(|value| {
+        operator_status_text_is_valid(value, MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES)
+    });
     repository_is_valid
         && match scope {
             OperatorStatusSingletonScope::PullRequest => {
@@ -8262,7 +8372,7 @@ where
 }
 
 fn operator_status_sha_is_valid(value: &str) -> bool {
-    value.len() == 40
+    value.len() == OPERATOR_STATUS_COMMIT_SHA_LENGTH
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
@@ -9225,8 +9335,9 @@ mod tests {
         ModelCapabilities, ModelChangeAdjustment, ModelSelection, ModelSettingSource,
         ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
         OperatorStatusConvergenceSeal, OperatorStatusConvergenceVerdict, OperatorStatusEndMessage,
-        OperatorStatusHeldSlotBlocker, OperatorStatusHeldSlotMessage, OperatorStatusMergeableState,
-        OperatorStatusMessage, OperatorStatusPendingStaleReviewClearanceMessage,
+        OperatorStatusHeldSlotBlocker, OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
+        OperatorStatusMergeableState, OperatorStatusMessage,
+        OperatorStatusPendingStaleReviewClearanceMessage,
         OperatorStatusPullRequestConvergenceMessage, OperatorStatusQueuedObligationMessage,
         OperatorStatusReviewDecision, OperatorStatusSingletonScope, PROTOCOL_VERSION,
         PositiveCanonicalU64, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
@@ -9612,7 +9723,9 @@ mod tests {
                 OperatorStatusHeldSlotMessage {
                     dispatch_id: uuid(2),
                     repository: String::from("example/repo"),
-                    pull_request_number: CanonicalU64::new(41),
+                    origin: OperatorStatusHeldSlotOrigin::PullRequest {
+                        pull_request_number: CanonicalU64::new(41),
+                    },
                     rule_id: String::from("review"),
                     rule_version: CanonicalU64::new(1),
                     singleton_scope: OperatorStatusSingletonScope::PullRequest,
@@ -9627,7 +9740,29 @@ mod tests {
                     ],
                 },
             )))),
-            r#"{"type":"operator_status","kind":"held_slot","dispatch_id":"00000000-0000-0000-0000-000000000002","repository":"example/repo","pull_request_number":"41","rule_id":"review","rule_version":"1","singleton_scope":"pull_request","singleton_repository":"example/repo","singleton_pull_request_number":"41","singleton_stack_root_pull_request_number":null,"held_for_seconds":"90","session_ids":["00000000-0000-0000-0000-000000000003"],"blockers":["undelivered_action","pursuing_goal"]}"#,
+            r#"{"type":"operator_status","kind":"held_slot","dispatch_id":"00000000-0000-0000-0000-000000000002","repository":"example/repo","origin":{"kind":"pull_request","pull_request_number":"41"},"rule_id":"review","rule_version":"1","singleton_scope":"pull_request","singleton_repository":"example/repo","singleton_pull_request_number":"41","singleton_stack_root_pull_request_number":null,"held_for_seconds":"90","session_ids":["00000000-0000-0000-0000-000000000003"],"blockers":["undelivered_action","pursuing_goal"]}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(1)?,
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
+                OperatorStatusHeldSlotMessage {
+                    dispatch_id: uuid(2),
+                    repository: String::from("example/repo"),
+                    origin: OperatorStatusHeldSlotOrigin::Branch {
+                        branch: String::from("main"),
+                    },
+                    rule_id: String::from("review"),
+                    rule_version: CanonicalU64::new(1),
+                    singleton_scope: OperatorStatusSingletonScope::Rule,
+                    singleton_repository: None,
+                    singleton_pull_request_number: None,
+                    singleton_stack_root_pull_request_number: None,
+                    held_for_seconds: CanonicalU64::new(90),
+                    session_ids: vec![uuid(3)],
+                    blockers: Vec::new(),
+                },
+            )))),
+            r#"{"type":"operator_status","kind":"held_slot","dispatch_id":"00000000-0000-0000-0000-000000000002","repository":"example/repo","origin":{"kind":"branch","branch":"main"},"rule_id":"review","rule_version":"1","singleton_scope":"rule","singleton_repository":null,"singleton_pull_request_number":null,"singleton_stack_root_pull_request_number":null,"held_for_seconds":"90","session_ids":["00000000-0000-0000-0000-000000000003"],"blockers":[]}"#,
         )?;
         assert_server_message_round_trip(
             request(1)?,
@@ -9716,7 +9851,9 @@ mod tests {
                 OperatorStatusHeldSlotMessage {
                     dispatch_id: uuid(2),
                     repository: String::from("example/repo"),
-                    pull_request_number: CanonicalU64::new(41),
+                    origin: OperatorStatusHeldSlotOrigin::PullRequest {
+                        pull_request_number: CanonicalU64::new(41),
+                    },
                     rule_id: String::from("review"),
                     rule_version: CanonicalU64::new(1),
                     singleton_scope: OperatorStatusSingletonScope::Rule,
@@ -9760,6 +9897,100 @@ mod tests {
         );
         assert_eq!(
             invalid_ready,
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        Ok(())
+    }
+
+    /// An obligation blocked by an independently commissioned live session
+    /// names that session and no dispatch. Only the reverse pairing — a
+    /// dispatch identity owning no sessions — contradicts the projection.
+    #[test]
+    fn operator_status_admits_an_external_blocker_without_a_dispatch_identity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let externally_blocked = |dispatch, sessions, ready| {
+            ServerFrame::try_new(
+                request(1).expect("a valid request identity"),
+                ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
+                    Box::new(OperatorStatusQueuedObligationMessage {
+                        obligation_id: uuid(4),
+                        repository: String::from("example/repo"),
+                        rule_id: String::from("review"),
+                        rule_version: CanonicalU64::new(1),
+                        singleton_scope: OperatorStatusSingletonScope::Rule,
+                        singleton_repository: None,
+                        singleton_pull_request_number: None,
+                        singleton_stack_root_pull_request_number: None,
+                        first_event_id: uuid(5),
+                        latest_event_id: uuid(6),
+                        matched_event_count: CanonicalU64::new(1),
+                        waiting_for_seconds: CanonicalU64::new(1),
+                        occupying_dispatch_id: dispatch,
+                        occupying_session_ids: sessions,
+                        cooldown_remaining_seconds: None,
+                        cooldown_never_eligible: false,
+                        ready,
+                    }),
+                ))),
+            )
+        };
+
+        assert!(externally_blocked(None, vec![uuid(7)], false).is_ok());
+        assert_eq!(
+            externally_blocked(None, vec![uuid(7)], true),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        assert_eq!(
+            externally_blocked(Some(uuid(8)), Vec::new(), false),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        assert!(externally_blocked(Some(uuid(8)), vec![uuid(7)], false).is_ok());
+        Ok(())
+    }
+
+    /// A rule matching branch workflow-run completion holds its singleton slot
+    /// from a branch fact, which names a branch and never a pull request.
+    #[test]
+    fn operator_status_admits_a_branch_origin_held_slot() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let held = |origin| {
+            ServerFrame::try_new(
+                request(1).expect("a valid request identity"),
+                ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
+                    OperatorStatusHeldSlotMessage {
+                        dispatch_id: uuid(2),
+                        repository: String::from("example/repo"),
+                        origin,
+                        rule_id: String::from("review"),
+                        rule_version: CanonicalU64::new(1),
+                        singleton_scope: OperatorStatusSingletonScope::Rule,
+                        singleton_repository: None,
+                        singleton_pull_request_number: None,
+                        singleton_stack_root_pull_request_number: None,
+                        held_for_seconds: CanonicalU64::new(1),
+                        session_ids: vec![uuid(3)],
+                        blockers: Vec::new(),
+                    },
+                )))),
+            )
+        };
+
+        assert!(
+            held(OperatorStatusHeldSlotOrigin::Branch {
+                branch: String::from("main"),
+            })
+            .is_ok()
+        );
+        assert_eq!(
+            held(OperatorStatusHeldSlotOrigin::Branch {
+                branch: String::new(),
+            }),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        assert_eq!(
+            held(OperatorStatusHeldSlotOrigin::PullRequest {
+                pull_request_number: CanonicalU64::new(0),
+            }),
             Err(FrameValidationError::OperatorStatusShape)
         );
         Ok(())

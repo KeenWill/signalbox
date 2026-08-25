@@ -1309,23 +1309,32 @@ encoding failure produces no partial successful snapshot and the request retains
 neither an unbounded row inventory nor a database transaction while the client
 reads.
 
-A held-slot row carries dispatch, repository, pull request, rule, singleton,
+A held-slot row carries dispatch, repository, dispatch origin, rule, singleton,
 ordered session, whole-second held duration, and the independently failing
-release clauses. A queued-obligation row carries obligation, rule, singleton,
-first and latest event, collapsed match count, whole-second wait duration,
-occupying dispatch and sessions, positive remaining cooldown when any, and the
-view's ready decision. An infinite eligibility timestamp is represented as a
-never-eligible cooldown rather than a numeric duration. A convergence row
-carries repository and pull request, head and base revisions, base branch,
-mergeable state, review decision, unresolved-thread and gating-check counts,
-sorted non-green check names, verdict, optional matching durable seal, and
-whole-second assessment age. Each non-green check name is canonical padded
-base64 of its exact UTF-8 bytes on the wire, keeping the complete admitted
-10,000-name inventory below the frame cap even under worst-case JSON escaping. A
-pending-clearance row carries repository and pull request, current and reviewed
-heads, review identity, reviewer, and whole-second pending duration. Every
-duration is clamped nonnegative and sampled against the database transaction
-timestamp, not a client clock.
+release clauses. The origin is a tagged choice rather than a number that may be
+absent: a rule matching branch workflow-run completion holds its slot from a
+branch fact, which names a branch, and every other admitted origin names a pull
+request. A queued-obligation row carries obligation, rule, singleton, first and
+latest event, collapsed match count, whole-second wait duration, occupying
+dispatch and sessions, positive remaining cooldown when any, and the view's
+ready decision. The occupying dispatch is optional independently of the sessions
+it would name: an obligation blocked by an independently commissioned live
+session lists that session and no dispatch. Readiness is the view's whole
+decision — excluding a dispatch or external session holding the target, a parked
+obligation, and a spent attempt budget — narrowed only so that a cooldown
+expiring mid-read cannot report readiness alongside a positive remaining
+cooldown. An infinite eligibility timestamp is represented as a never-eligible
+cooldown rather than a numeric duration. A convergence row carries repository
+and pull request, head and base revisions, base branch, mergeable state, review
+decision, unresolved-thread and gating-check counts, sorted non-green check
+names, verdict, optional matching durable seal, and whole-second assessment age.
+Each non-green check name is canonical padded base64 of its exact UTF-8 bytes on
+the wire, keeping the complete admitted 10,000-name inventory below the frame
+cap even under worst-case JSON escaping. A pending-clearance row carries
+repository and pull request, current and reviewed heads, review identity,
+reviewer, and whole-second pending duration. Every duration is clamped
+nonnegative and sampled against the database transaction timestamp, not a client
+clock.
 
 Identifiers are canonical UUID strings. Request identities, ordinal versions,
 indices, counts, and outbox cursors are canonical decimal strings, preserving
@@ -2606,7 +2615,12 @@ owner-only daemon socket; it never opens the database itself. It validates the
 fixed section order and all four terminal counts before printing anything. The
 first output line names those counts, followed by one human-scannable line per
 row with `held`, `queued`, `convergence`, or `stale_review_clearance` as its
-kind. A convergence line prints `non_green_count` beside the comma-joined
+kind. A held line prints its dispatch origin as `origin=pull_request#<number>`
+or `origin=branch:<branch>`, naming the fact the slot was taken from under one
+field whichever shape it has. A queued line prints an occupant blocked by an
+independently commissioned live session as `occupying=external:<sessions>`,
+distinguishing it from a watch dispatch, which prints its identity ahead of its
+sessions. A convergence line prints `non_green_count` beside the comma-joined
 `non_green` field, so an empty inventory cannot collide with a check literally
 named `none`. Durations use compact day, hour, minute, and second units.
 Process-derived text uses terminal-safe field escaping unless `--raw-output` is

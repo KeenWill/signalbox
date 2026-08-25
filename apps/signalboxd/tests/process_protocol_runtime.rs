@@ -31,24 +31,26 @@ use signalbox_application::{
     ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallInputTokenCount,
     ModelCallInputTokenCounter, NoToolCatalog, OperatorFailureClass, PreparedModelOperation,
     ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
-    SchedulerLoop, SchedulerLoopExit, ScriptedModelCallProvider, ScriptedModelCallStep,
-    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
-    UuidV7ModelCallExecutionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
+    RepoWatchConvergenceVerdict, RepoWatchReviewDecision, SchedulerLoop, SchedulerLoopExit,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
+    StartEligibleTurnService, StartupScanService, UuidV7ModelCallExecutionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_domain::{
-    ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, BlobDigest, ContextCompactionId,
-    ContextCompactionTokenUsage, ContextFrontierId, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, ImportedConversationFormat, ImportedConversationId,
-    ImportedSessionRelationship, ImportedTranscriptEntryId, InitialToolApproval, ModelCallId,
+    ActiveTurnPhase, Actor, AssistantResponsePart, AssistantText, BlobDigest, BranchName,
+    CheckRunName, CommitSha, ContextCompactionId, ContextCompactionTokenUsage, ContextFrontierId,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities,
+    ImportedConversationFormat, ImportedConversationId, ImportedSessionRelationship,
+    ImportedTranscriptEntryId, InitialToolApproval, MergeableState, ModelCallId,
     ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
     ModelSelectionRequest, ModelTargetCatalog, NormalizedToolArguments, ProviderModelIdentity,
-    ReplaceSessionMetadataResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
-    SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionId,
-    SessionMetadataContent, ToolCallProposal, ToolName, ToolRequestId, ToolResponsePartIdentity,
-    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TurnId,
+    PullRequestNumber, ReplaceSessionMetadataResult, RepoWatchAuthorLogin, RepositorySlug,
+    ResolvedProviderTarget, SemanticTranscriptEntryId, SessionConfigurationDefaults,
+    SessionConfigurationDefaultsVersion, SessionId, SessionMetadataContent, ToolCallProposal,
+    ToolName, ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
+    ToolUsingAssistantResponse, TurnId,
 };
 use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeModelCallProvider};
 use signalbox_model_runtime::{
@@ -74,7 +76,10 @@ use signalbox_persistence::{
     session_metadata::SessionMetadataRepository,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
-    test_support::{FleetSoakCensus, FleetSoakCensusRepository},
+    test_support::{
+        FleetSoakCensus, FleetSoakCensusRepository, OperatorStatusConvergenceFixture,
+        OperatorStatusFixtureRepository, OperatorStatusStaleReviewClearanceFixture,
+    },
 };
 use signalbox_process_protocol::{
     BlobChunk, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame,
@@ -3969,88 +3974,36 @@ async fn process_runtime_reads_an_empty_operator_status_snapshot() -> Result<(),
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
-    let assessment_id = Uuid::from_u128(0x901);
-    sqlx::query(
-        "INSERT INTO repo_watch_cursor (
-            repository, generation, storage_version, cursor_payload,
-            recording_transaction_id
-         ) VALUES ('example/repo', 1, 2, $1, pg_current_xact_id())",
-    )
-    .bind(sqlx::types::Json(serde_json::json!({
-        "storage_version": 2,
-        "signal_reviewers": [],
-        "event_identity_frontier": [],
-        "state": {
-            "pull_requests": [{
-                "number": 41,
-                "head_sha": "1111111111111111111111111111111111111111",
-                "head_repository": "example/repo",
-                "base_branch": "main",
-                "head_branch": "topic",
-                "title": "Example",
-                "body": "",
-                "labels": [],
-                "draft": false,
-                "author": null,
-                "lifecycle": "open",
-                "mergeable_state": "mergeable",
-                "completed_check_suites": [],
-                "completed_check_runs": [],
-                "reviews": [],
-                "threads": [],
-                "reactions": []
+    OperatorStatusFixtureRepository::new(runtime.pool.clone())
+        .seed_pull_request_convergences(
+            &RepositorySlug::try_new(String::from("example/repo"))?,
+            &[OperatorStatusConvergenceFixture {
+                number: PullRequestNumber::new(41.try_into()?),
+                head_sha: CommitSha::try_new(String::from(
+                    "1111111111111111111111111111111111111111",
+                ))?,
+                base_branch: BranchName::try_new(String::from("main"))?,
+                base_revision: CommitSha::try_new(String::from(
+                    "2222222222222222222222222222222222222222",
+                ))?,
+                mergeable_state: MergeableState::Mergeable,
+                settled: true,
+                review_decision: RepoWatchReviewDecision::ChangesRequested,
+                unresolved_threads: Vec::new(),
+                gating_check_count: 1,
+                non_green_gating_checks: vec![CheckRunName::try_new(String::from("ci"))?],
+                verdict: RepoWatchConvergenceVerdict::NotConverged,
+                stale_review_clearance: Some(OperatorStatusStaleReviewClearanceFixture {
+                    review_node_id: String::from("PRR_node"),
+                    reviewer: RepoWatchAuthorLogin::try_new(String::from("reviewer"))?,
+                    reviewed_head_sha: CommitSha::try_new(String::from(
+                        "3333333333333333333333333333333333333333",
+                    ))?,
+                    dismissal_message: String::from("Superseded by the current head."),
+                }),
             }],
-            "workflow_runs": [],
-            "branch_heads": [{
-                "branch": "main",
-                "head": "2222222222222222222222222222222222222222"
-            }]
-        }
-    })))
-    .execute(&runtime.pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO repo_watch_pull_request_convergence_assessment (
-            assessment_id, repository, cursor_generation, pull_request_number,
-            head_sha, base_branch, base_revision, mergeable_state, settled,
-            review_decision, unresolved_threads, gating_check_count,
-            non_green_gating_checks, verdict_kind, recorded_at
-         ) VALUES ($1, 'example/repo', 1, 41,
-                   '1111111111111111111111111111111111111111', 'main',
-                   '2222222222222222222222222222222222222222', 'mergeable',
-                   true, 'changes_requested', ARRAY[]::text[], 1, ARRAY['ci'],
-                   'not_converged', transaction_timestamp())",
-    )
-    .bind(assessment_id)
-    .execute(&runtime.pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO repo_watch_pull_request_convergence_identity (
-            identity_id, repository, cursor_generation, pull_request_number,
-            assessment_id
-         ) VALUES ($1, 'example/repo', 1, 41, $2)",
-    )
-    .bind(Uuid::from_u128(0x903))
-    .bind(assessment_id)
-    .execute(&runtime.pool)
-    .await?;
-    sqlx::query(
-        "INSERT INTO repo_watch_stale_review_clearance (
-            clearance_id, assessment_id, repository, pull_request_number,
-            current_head_sha, base_revision, review_node_id, reviewer,
-            reviewed_head_sha, dismissal_message, planned_at
-         ) VALUES ($1, $2, 'example/repo', 41,
-                   '1111111111111111111111111111111111111111',
-                   '2222222222222222222222222222222222222222',
-                   'PRR_node', 'reviewer',
-                   '3333333333333333333333333333333333333333',
-                   'Superseded by the current head.',
-                   transaction_timestamp())",
-    )
-    .bind(Uuid::from_u128(0x902))
-    .bind(assessment_id)
-    .execute(&runtime.pool)
-    .await?;
+        )
+        .await?;
 
     let mut connection = Connection::connect(runtime.socket()).await?;
     connection

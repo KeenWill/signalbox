@@ -65,7 +65,8 @@ use signalbox_persistence::{
     local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     operator_status::{
-        ProcessOperatorStatusHeldSlot, ProcessOperatorStatusHeldSlotBlocker,
+        ProcessOperatorStatusCounts, ProcessOperatorStatusHeldSlot,
+        ProcessOperatorStatusHeldSlotBlocker, ProcessOperatorStatusHeldSlotOrigin,
         ProcessOperatorStatusItem, ProcessOperatorStatusQueuedObligation,
         ProcessOperatorStatusRepository,
     },
@@ -155,6 +156,9 @@ const BRANCH_WORKFLOW_ID: u64 = 9_002;
 const BRANCH_ACTIVATION_EVENT_ID: u128 = 0x58_000;
 const BRANCH_WORKFLOW_EVENT_ID: u128 = 0x58_100;
 const BRANCH_ACHIEVEMENT_REQUEST_ID: u128 = 0x58_200;
+const BRANCH_STATUS_ACTIVATION_EVENT_ID: u128 = 0x59_000;
+const BRANCH_STATUS_WORKFLOW_EVENT_ID: u128 = 0x59_001;
+const STATUS_READINESS_STOP_COMMAND_ID: u128 = 0x59_100;
 const SUPERSEDING_HEAD_EVENT_ID: u128 = 0x50_700;
 const SUPERSEDED_ACHIEVEMENT_REQUEST_ID: u128 = 0x50_701;
 const SUCCESSOR_ACHIEVEMENT_REQUEST_ID: u128 = 0x50_702;
@@ -6794,6 +6798,152 @@ fn queued_status_item(item: ProcessOperatorStatusItem) -> ProcessOperatorStatusQ
         ProcessOperatorStatusItem::QueuedObligation(item) => item,
         item => panic!("fixture expected queued status second, got {item:?}"),
     }
+}
+
+/// A rule matching branch workflow-run completion takes its singleton slot from
+/// a branch fact, whose event names no pull request. The whole status read must
+/// name the branch that stands in its place rather than fail to decode a
+/// missing number and leave the snapshot unavailable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_status_reader_names_a_branch_triggered_held_slot() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let rule = branch_workflow_rule()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    let dispatch_store = PostgresRepoWatchDispatchStore::new(pool.clone(), credential_pin());
+    let first_generation = generation(
+        event_store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    RepoWatchCursorCandidate::new(observation(context(INITIAL_HEAD)?)?),
+                    vec![identified_event(opened_event(
+                        BRANCH_STATUS_ACTIVATION_EVENT_ID,
+                        INITIAL_HEAD,
+                    )?)],
+                ),
+            )
+            .await?,
+    );
+    dispatch_store
+        .reconcile_rules(&repository, std::slice::from_ref(&rule))
+        .await?;
+    let branch = branch_observation()?;
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                RepoWatchCursorCandidate::new(branch.clone()),
+                vec![identified_event(branch_workflow_event(
+                    BRANCH_STATUS_WORKFLOW_EVENT_ID,
+                )?)],
+            ),
+        )
+        .await?;
+    let loaded = dispatch_store
+        .load_next_event(&repository, rule.id(), rule.version())
+        .await?
+        .expect("the branch rule sees its workflow event");
+    let (dispatch_id, _sessions) = dispatched(
+        RepoWatchDispatchService::new(UuidV7RepoWatchDispatchIdGenerator, dispatch_store.clone())
+            .evaluate(
+                loaded,
+                &rule,
+                &branch,
+                &TemplateResolver,
+                dispatch_context(),
+            )
+            .await?,
+    );
+
+    let mut reader = ProcessOperatorStatusRepository::new(pool.clone())
+        .open()
+        .await?;
+    let held = held_status_item(
+        reader
+            .next_item()
+            .await?
+            .expect("the branch dispatch holds one slot"),
+    );
+    while reader.next_item().await?.is_some() {}
+
+    assert_eq!(held.dispatch_id(), *dispatch_id.as_uuid());
+    assert_eq!(
+        held.origin(),
+        &ProcessOperatorStatusHeldSlotOrigin::Branch {
+            branch: String::from(WORKFLOW_BRANCH),
+        }
+    );
+    assert_eq!(
+        reader.counts().map(ProcessOperatorStatusCounts::held_slots),
+        Some(1)
+    );
+    Ok(())
+}
+
+/// The view withholds readiness from an obligation that is parked or has spent
+/// its attempt budget, and the dispatch loader skips exactly those. Reporting a
+/// subset of that predicate would show an operator work as ready that nothing
+/// will pick up.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_status_reader_withholds_readiness_the_view_withholds()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    withdraw_dispatched_goal(
+        &fixture.pool,
+        fixture.session(0),
+        STATUS_READINESS_STOP_COMMAND_ID,
+    )
+    .await?;
+
+    let unspent = read_queued_status(&fixture.pool).await?;
+    let obligation = spend_dispatch_attempt_budget(&fixture.pool).await?;
+    let exhausted = read_queued_status(&fixture.pool).await?;
+    sqlx::query("SELECT repo_watch_park_exhausted_dispatch_obligation($1)")
+        .bind(obligation)
+        .execute(&fixture.pool)
+        .await?;
+    let parked = read_queued_status(&fixture.pool).await?;
+
+    assert!(unspent.ready());
+    assert!(!exhausted.ready());
+    assert!(!parked.ready());
+    assert!(load_next_obligation(&fixture).await?.is_none());
+    Ok(())
+}
+
+/// Drains one whole status snapshot and returns its single queued obligation.
+async fn read_queued_status(
+    pool: &PgPool,
+) -> Result<ProcessOperatorStatusQueuedObligation, Box<dyn Error>> {
+    let mut reader = ProcessOperatorStatusRepository::new(pool.clone())
+        .open()
+        .await?;
+    let mut queued = None;
+    while let Some(item) = reader.next_item().await? {
+        if let ProcessOperatorStatusItem::QueuedObligation(item) = item {
+            queued = Some(item);
+        }
+    }
+    Ok(queued.expect("the withdrawn dispatch leaves one outstanding obligation"))
+}
+
+/// Spends the whole attempt budget on the outstanding obligation without
+/// parking it, so exhaustion and parking are observable apart.
+async fn spend_dispatch_attempt_budget(pool: &PgPool) -> Result<Uuid, Box<dyn Error>> {
+    Ok(sqlx::query_scalar(
+        "UPDATE repo_watch_dispatch_obligation
+            SET failed_attempts = repo_watch_dispatch_attempt_budget(),
+                last_failed_attempt_at = clock_timestamp()
+          WHERE settled_kind IS NULL
+        RETURNING obligation_id",
+    )
+    .fetch_one(pool)
+    .await?)
 }
 
 #[tokio::test(flavor = "multi_thread")]

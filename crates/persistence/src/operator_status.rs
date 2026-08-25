@@ -92,12 +92,23 @@ impl ProcessOperatorStatusSingleton {
     }
 }
 
+/// Origin fact whose dispatch took one repository-watch singleton slot.
+///
+/// A rule matching `branch_workflow_run_completed` under `Rule` or
+/// `Repository` singleton scope holds a slot from a branch fact, which names no
+/// pull request; every other admitted origin names one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProcessOperatorStatusHeldSlotOrigin {
+    PullRequest { number: u64 },
+    Branch { branch: String },
+}
+
 /// One active repository-watch dispatch slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProcessOperatorStatusHeldSlot {
     dispatch_id: Uuid,
     repository: String,
-    pull_request_number: u64,
+    origin: ProcessOperatorStatusHeldSlotOrigin,
     rule_id: String,
     rule_version: u64,
     singleton: ProcessOperatorStatusSingleton,
@@ -115,8 +126,8 @@ impl ProcessOperatorStatusHeldSlot {
         &self.repository
     }
 
-    pub const fn pull_request_number(&self) -> u64 {
-        self.pull_request_number
+    pub const fn origin(&self) -> &ProcessOperatorStatusHeldSlotOrigin {
+        &self.origin
     }
 
     pub fn rule_id(&self) -> &str {
@@ -513,9 +524,14 @@ impl ProcessOperatorStatusReader {
 async fn declare_status_cursors(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), sqlx::Error> {
+    // A branch-origin hold carries `workflow_branch` where a pull-request
+    // origin carries `pull_request_number`; exactly one is non-null per row,
+    // so both are read and the ordering states its null placement rather than
+    // leaning on a server default.
     sqlx::query(
         "DECLARE operator_status_held_slots NO SCROLL CURSOR FOR
-         SELECT dispatch_id, repository, pull_request_number, rule_id, rule_version,
+         SELECT dispatch_id, repository, pull_request_number, workflow_branch,
+                rule_id, rule_version,
                 singleton_scope, singleton_repository, singleton_pull_request_number,
                 singleton_stack_root_pull_request_number,
                 GREATEST(0, floor(extract(epoch FROM
@@ -523,10 +539,20 @@ async fn declare_status_cursors(
                     AS held_for_seconds,
                 session_ids, blockers
            FROM repo_watch_held_dispatch_slot
-          ORDER BY repository, pull_request_number, rule_id, dispatch_id",
+          ORDER BY repository, pull_request_number ASC NULLS LAST,
+                   workflow_branch ASC NULLS LAST, rule_id, dispatch_id",
     )
     .execute(&mut **transaction)
     .await?;
+    // Readiness is the view's own decision, which excludes an occupying
+    // dispatch, an external live session holding the target, a parked
+    // obligation, and an exhausted retry budget. The transaction-clock cooldown
+    // is conjoined rather than substituted: the view compares eligibility
+    // against `clock_timestamp()` while the reported remaining cooldown is
+    // measured from `transaction_timestamp()`, so a cooldown expiring mid-read
+    // would otherwise emit a ready row alongside a positive remaining cooldown.
+    // Narrowing keeps the snapshot self-consistent and never reports ready for
+    // an obligation the dispatch loader would skip.
     sqlx::query(
         "DECLARE operator_status_queued_obligations NO SCROLL CURSOR FOR
          SELECT obligation_id, repository, rule_id, rule_version, singleton_scope,
@@ -545,10 +571,10 @@ async fn declare_status_cursors(
                 END AS cooldown_remaining_seconds,
                 COALESCE(eligible_at = 'infinity'::timestamptz, false)
                     AS cooldown_never_eligible,
-                occupying_dispatch_id IS NULL
+                obligation.ready
                     AND (eligible_at IS NULL OR eligible_at <= transaction_timestamp())
                     AS ready
-           FROM repo_watch_outstanding_dispatch_obligation
+           FROM repo_watch_outstanding_dispatch_obligation AS obligation
           ORDER BY owed_since, obligation_id",
     )
     .execute(&mut **transaction)
@@ -605,10 +631,7 @@ fn decode_held_slot(
     Ok(ProcessOperatorStatusHeldSlot {
         dispatch_id: row.try_get("dispatch_id")?,
         repository: row.try_get("repository")?,
-        pull_request_number: positive_decimal(
-            row.try_get("pull_request_number")?,
-            "held pull request number",
-        )?,
+        origin: decode_held_slot_origin(row)?,
         rule_id: row.try_get("rule_id")?,
         rule_version: positive_i64(row.try_get("rule_version")?, "held rule version")?,
         singleton: decode_singleton(row)?,
@@ -616,6 +639,26 @@ fn decode_held_slot(
         session_ids: row.try_get("session_ids")?,
         blockers,
     })
+}
+
+/// Decodes the exclusive pull-request or branch origin of one held slot.
+///
+/// `repo_watch_event` admits a pull-request target with a number and no
+/// workflow branch, or a branch workflow-run target with a branch and no
+/// number; any other pairing contradicts that shape check.
+fn decode_held_slot_origin(
+    row: &PgRow,
+) -> Result<ProcessOperatorStatusHeldSlotOrigin, ProcessOperatorStatusError> {
+    let pull_request_number = row
+        .try_get::<Option<Decimal>, _>("pull_request_number")?
+        .map(|value| positive_decimal(value, "held pull request number"))
+        .transpose()?;
+    let workflow_branch = row.try_get::<Option<String>, _>("workflow_branch")?;
+    match (pull_request_number, workflow_branch) {
+        (Some(number), None) => Ok(ProcessOperatorStatusHeldSlotOrigin::PullRequest { number }),
+        (None, Some(branch)) => Ok(ProcessOperatorStatusHeldSlotOrigin::Branch { branch }),
+        _ => Err(ProcessOperatorStatusCorruption::Inconsistent("held dispatch origin").into()),
+    }
 }
 
 fn decode_queued_obligation(
