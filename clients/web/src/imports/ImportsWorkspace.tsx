@@ -172,12 +172,18 @@ export function ImportsWorkspace({
     },
     [queryScope],
   )
-  const releaseRetainedCommand = useCallback(() => {
-    setPendingCommand((command) => {
-      if (command !== null) clearRetainedCommand(queryScope, command.command_id)
-      return null
-    })
-  }, [queryScope])
+  // Settling one command drains the next unresolved slot instead of unlocking new
+  // continuations: a browser restart may have left several tabs' ambiguous commands in
+  // storage, and each hidden one may already have committed a session.
+  const releaseRetainedCommand = useCallback(
+    (settled: WebImportContinuationRequest) => {
+      clearRetainedCommand(queryScope, settled.command_id)
+      const remaining = readRetainedCommand(queryScope)
+      setPendingCommand(remaining)
+      setContinuationAmbiguous(remaining !== null)
+    },
+    [queryScope],
+  )
 
   const listRequest = useMemo(
     () => ({
@@ -249,16 +255,14 @@ export function ImportsWorkspace({
   const continuation = useMutation({
     mutationFn: (request: WebImportContinuationRequest) =>
       api.continueImport(request.frontier.imported_conversation_id, request),
-    onSuccess: () => {
-      releaseRetainedCommand()
-      setContinuationAmbiguous(false)
+    onSuccess: (_receipt, request) => {
+      releaseRetainedCommand(request)
     },
-    onError: (error) => {
+    onError: (error, request) => {
       const ambiguous = continuationAmbiguous || isAmbiguousContinuationError(error)
       if (ambiguous) setContinuationAmbiguous(true)
       if (!ambiguous && !isRetryableContinuationError(error)) {
-        releaseRetainedCommand()
-        setContinuationAmbiguous(false)
+        releaseRetainedCommand(request)
       }
     },
   })
@@ -711,8 +715,7 @@ export function ImportsWorkspace({
                           <button
                             type="button"
                             onClick={() => {
-                              releaseRetainedCommand()
-                              setContinuationAmbiguous(false)
+                              releaseRetainedCommand(pendingCommand)
                               continuation.reset()
                             }}
                           >
