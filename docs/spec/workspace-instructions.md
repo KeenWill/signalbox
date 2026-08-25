@@ -3,7 +3,9 @@
 The comparative evidence and foundation-proposal boundary on this page were
 verified against PR #796 (`agent/agent-docs-skills-spec`). Bounded filesystem
 discovery, typed registration construction, and explicit-root configuration were
-verified against PR #798 (`agent/agent-docs-skills-foundation`).
+verified against PR #798 (`agent/agent-docs-skills-foundation`). Durable
+registration, empty eligibility, turn-start evidence, and model-call correlation
+were verified against PR #810 (`agent/agent-docs-skills-model-call-followup`).
 
 This page is the foundation proposal at the bottom of the workspace-instruction
 implementation stack. It specifies daemon-owned discovery, registration,
@@ -100,9 +102,10 @@ limit-set version, every consumed count, and a typed `limit_reached` finding
 naming the first exhausted dimension; it then stops without presenting the
 partial inventory as complete. Registration may retain the candidates already
 found, but session creation or turn preparation that requires a complete scan
-fails closed. Product ignore rules and configurable depth policy remain
-deferred. The 4,096-finding bound reserves its final slot for this terminal
-limit finding.
+fails closed. An incomplete discovery may be retained as append-only diagnostic
+evidence, but no turn manifest names it; a later preparation retries with a new
+scan. Product ignore rules and configurable depth policy remain deferred. The
+4,096-finding bound reserves its final slot for this terminal limit finding.
 
 One scan emits a canonical source path only once even when workspace and
 configured roots overlap; the first read fixes its source hash for that scan.
@@ -1352,7 +1355,14 @@ provider call and authenticated whenever that call is prepared or reconstituted.
 A model-requested admission during a tool round appends admission evidence and
 the next preparation atomically produces a successor manifest with its model
 call; earlier call-boundary manifests remain addressable. The first
-implementation slice has no admission and stores only the turn-start manifest.
+implementation slice has no admission and stores only the turn-start manifest
+(INV-061). Ordinary activation records that empty manifest after activation and
+before model work. A counted activation retains its complete scan in memory
+after the fitting exact count. The scheduler-locked activation transaction then
+revalidates the queued candidate and atomically activates it, records the scan
+and empty manifest, and checkpoints the first call. Both activation paths
+serialize on the session scheduler; no present command can change the empty
+eligibility or admission sets.
 
 Each manifest records:
 

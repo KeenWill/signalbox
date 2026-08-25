@@ -56,6 +56,9 @@ implementing child stack.
 The configured workspace-instruction root grammar below is verified against PR
 #798 (`agent/agent-docs-skills-foundation`).
 
+The daemon-tool `workspace_root` canonical grammar below is re-verified against
+PR #810 (`agent/agent-docs-skills-model-call-followup`).
+
 The runtime-bridge invalid-schema diagnostic fields and redaction boundary are
 verified against this PR (`agent/tool-evals-mcp`).
 
@@ -851,8 +854,10 @@ four deployment-mapped tool families in the same closed-table style as
   credential-free job-log redirect remains the bounded public-HTTPS exception
   owned by [tool-loop](tool-loop.md);
 - `github` selects the same adapter, profile, and policy;
-- `workspace` selects adapter `local` and supplies one absolute
-  `workspace_root`; and
+- `workspace` selects adapter `local` and supplies one nonempty, absolute,
+  lexically canonical UTF-8 `workspace_root` of at most 4,096 bytes with no NUL;
+  it begins with `/`, has one or more nonempty components separated by single
+  `/` characters, and has no `.`, `..`, or trailing-separator component; and
 - `conversations` selects adapter `application` and has no credential, egress,
   or filesystem field.
 
@@ -862,8 +867,9 @@ preserves the base catalog, including the code-host suite, without constructing
 pull-request, workspace, conversation, local Git, or execution dependencies.
 When the array is present it must already be complete: an unknown, missing, or
 duplicate family; an unknown field; any fixed value with another spelling; a
-relative workspace root; or a dependency field on the wrong family is a
-sanitized configuration failure.
+relative, filesystem-root, noncanonical, overlong, or NUL-containing workspace
+root; or a dependency field on the wrong family is a sanitized configuration
+failure.
 
 The complete mapped composition also requires one `[git_identity]` table with
 exactly `author_name` and `author_email`. Both are nonempty, at most the Git

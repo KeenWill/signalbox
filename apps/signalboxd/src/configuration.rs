@@ -2931,9 +2931,11 @@ fn validate_github_tool_mapping(mapping: &Table) -> Result<(), HubModelConfigura
 }
 
 fn validate_workspace_tool_mapping(mapping: &Table) -> Result<(), HubModelConfigurationError> {
-    let root = Path::new(required_string(mapping, "workspace_root")?);
+    let root_value = required_string(mapping, "workspace_root")?;
+    let root = Path::new(root_value);
     if required_string(mapping, "adapter")? != "local"
         || !root.is_absolute()
+        || InstructionPath::try_new(root_value.to_owned()).is_err()
         || mapping.get("credential_profile").is_some()
         || mapping.get("egress_policy").is_some()
     {
@@ -6263,6 +6265,27 @@ context_window_tokens = 200000
 
         assert_eq!(
             HubModelConfiguration::parse(&relative).err(),
+            Some(HubModelConfigurationError::InvalidToolMappings)
+        );
+    }
+
+    #[test]
+    fn tool_mapping_registry_rejects_noncanonical_workspace_root_spellings() {
+        let trailing_separator = CONFIGURATION.replace(
+            "workspace_root = \"/srv/signalbox/workspace\"",
+            "workspace_root = \"/srv/signalbox/workspace/\"",
+        );
+        let dot_component = CONFIGURATION.replace(
+            "workspace_root = \"/srv/signalbox/workspace\"",
+            "workspace_root = \"/srv/signalbox/./workspace\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&trailing_separator).err(),
+            Some(HubModelConfigurationError::InvalidToolMappings)
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&dot_component).err(),
             Some(HubModelConfigurationError::InvalidToolMappings)
         );
     }
