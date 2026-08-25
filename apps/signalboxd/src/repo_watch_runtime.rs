@@ -4005,11 +4005,15 @@ impl GitHubRepositoryPoller {
         // A cancelled complete poll can leave child fetches in the shared set.
         // Settle them within the scheduler bound before issuing targeted
         // requests, so work from two attempts cannot interleave.
-        self.drain_fetches_bounded().await?;
+        let drained_survivors = self.drain_fetches_bounded().await?;
         // A survivor can record freshness after the cancellation path's first
         // invalidation and before this join completes. Clear that late state
-        // before targeted work can publish it against a new cursor.
-        self.invalidate_freshness();
+        // before targeted work can publish it against a new cursor, while an
+        // ordinary targeted refresh preserves published freshness for untouched
+        // pull requests.
+        if drained_survivors {
+            self.invalidate_freshness();
+        }
         let mut state = RepoWatchRepositoryStateInput {
             pull_requests: previous.state().pull_requests().to_vec(),
             workflow_runs: previous.state().workflow_runs().to_vec(),
@@ -4186,9 +4190,11 @@ impl GitHubRepositoryPoller {
     /// task calls this after cancelling an in-flight attempt, so a reported
     /// stop means no child is still resolving credentials, holding a
     /// connection, or touching shared state.
-    async fn drain_fetches_bounded(&self) -> Result<(), RepositoryWatchAttemptError> {
+    async fn drain_fetches_bounded(&self) -> Result<bool, RepositoryWatchAttemptError> {
         let mut fetches = self.fetches.lock().await;
-        drain_pull_request_fetches(&mut fetches).await
+        let had_fetches = !fetches.is_empty();
+        drain_pull_request_fetches(&mut fetches).await?;
+        Ok(had_fetches)
     }
 
     /// Strict shutdown settlement. A clean repository-task exit means no child
@@ -8913,20 +8919,7 @@ mod tests {
         let previous = complete_typed_observation().await;
         let server = ScriptedServer::start(complete_pull_request_responses()).await;
         let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
-        fixture.poller.record_fetched_pull_request(
-            CANCELLED_FETCH_PULL_NUMBER,
-            &listed_pull_request(&minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER)),
-            PullRequestSettlement::Settled,
-            Vec::new(),
-        );
-        fixture
-            .poller
-            .fetches
-            .lock()
-            .await
-            .spawn(std::future::pending::<
-                Result<super::FetchedPullRequest, RepositoryWatchAttemptError>,
-            >());
+        install_late_freshness_survivor(&fixture.poller).await;
         let target = TargetedPullRequest {
             number: PullRequestNumber::new(
                 NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
@@ -8961,6 +8954,76 @@ mod tests {
                 superseded_targets: Vec::new(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn targeted_refresh_without_survivors_preserves_untouched_freshness() {
+        const UNTOUCHED_PULL_NUMBER: u64 = 8;
+        let previous = complete_typed_observation().await;
+        let server = ScriptedServer::start(complete_pull_request_responses()).await;
+        let fixture = poller_fixture(server.base_url.clone()).expect("poller is constructed");
+        fixture.poller.record_fetched_pull_request(
+            UNTOUCHED_PULL_NUMBER,
+            &listed_pull_request(&minimal_pull_head_sha(UNTOUCHED_PULL_NUMBER)),
+            PullRequestSettlement::Settled,
+            Vec::new(),
+        );
+        let target = TargetedPullRequest {
+            number: PullRequestNumber::new(
+                NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+            ),
+            expected_head: Some(
+                CommitSha::try_new(HEAD_SHA.to_owned()).expect("fixture head SHA is canonical"),
+            ),
+        };
+
+        fixture
+            .poller
+            .poll_targeted_pull_requests_against_cursor(&previous, &[target])
+            .await
+            .expect("targeted refresh succeeds");
+
+        server.finish().await;
+        assert!(
+            fixture
+                .poller
+                .freshness()
+                .contains_key(&UNTOUCHED_PULL_NUMBER),
+            "targeted refresh without survivors preserves untouched freshness"
+        );
+    }
+
+    struct FreshnessOnDrop {
+        poller: Arc<GitHubRepositoryPoller>,
+    }
+
+    impl Drop for FreshnessOnDrop {
+        fn drop(&mut self) {
+            self.poller.record_fetched_pull_request(
+                CANCELLED_FETCH_PULL_NUMBER,
+                &listed_pull_request(&minimal_pull_head_sha(CANCELLED_FETCH_PULL_NUMBER)),
+                PullRequestSettlement::Settled,
+                Vec::new(),
+            );
+        }
+    }
+
+    async fn install_late_freshness_survivor(poller: &Arc<GitHubRepositoryPoller>) {
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let survivor_poller = Arc::clone(poller);
+        poller.fetches.lock().await.spawn(async move {
+            let _freshness_on_cancellation = FreshnessOnDrop {
+                poller: survivor_poller,
+            };
+            started
+                .send(())
+                .expect("targeted-refresh fixture still waits for its survivor");
+            std::future::pending::<Result<super::FetchedPullRequest, RepositoryWatchAttemptError>>()
+                .await
+        });
+        ready
+            .await
+            .expect("the cancelled-fetch survivor starts before targeted refresh");
     }
 
     #[tokio::test]
@@ -9651,7 +9714,7 @@ mod tests {
         Ok(())
     }
 
-    /// INV-072: deadline cancellation preserves durable webhook work for retry.
+    /// INV-074: deadline cancellation preserves durable webhook work for retry.
     #[tokio::test(start_paused = true)]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn a_webhook_drain_deadline_cancels_and_retries_durable_work()
