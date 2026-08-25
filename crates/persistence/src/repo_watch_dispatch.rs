@@ -191,6 +191,42 @@ impl From<sqlx::Error> for RepoWatchDispatchRepositoryError {
     }
 }
 
+/// Tracks the identity of the most recent expired-start-lease candidate an
+/// unlocked drain pass observed vanish under its locked recheck.
+///
+/// A vanished candidate is ordinarily a benign race with concurrent
+/// retirement (see `process_pending_expired_start_leases`), and concurrent
+/// draining can legitimately make two *different* candidates vanish back to
+/// back. Every durable disposition the drain's predicate excludes on is
+/// monotonic, so a candidate the drain has already retired for can never be
+/// reselected; only the exact same candidate vanishing twice in a row is a
+/// real predicate disagreement between the drain's unlocked selection and
+/// the locked recheck.
+#[derive(Default)]
+struct VanishedCandidateTracker {
+    last: Option<(Uuid, i32)>,
+}
+
+impl VanishedCandidateTracker {
+    /// Records that the locked recheck found no candidate for the selection
+    /// identified by `dispatch_id` and `action_ordinal`. Returns `true` when
+    /// this repeats the exact identity most recently vanished, the drain's
+    /// fail-closed signal.
+    fn observe_vanished(&mut self, dispatch_id: Uuid, action_ordinal: i32) -> bool {
+        let identity = (dispatch_id, action_ordinal);
+        let repeat = self.last == Some(identity);
+        self.last = Some(identity);
+        repeat
+    }
+
+    /// Clears the tracked identity after real progress: a retirement, or a
+    /// candidate-specific quarantine that already recorded its own durable
+    /// disposition.
+    fn observe_progress(&mut self) {
+        self.last = None;
+    }
+}
+
 /// PostgreSQL implementation of atomic repository-watch dispatch admission.
 #[derive(Clone, Debug)]
 pub struct PostgresRepoWatchDispatchStore {
@@ -840,19 +876,29 @@ impl PostgresRepoWatchDispatchStore {
     where
         NextCommandId: FnMut() -> DurableCommandId,
     {
-        // This selection runs unlocked, so the configured repository task can
-        // retire the candidate before `process_next_expired_start_lease` takes
-        // the repository lock and repeats the identical predicate. That race is
-        // benign — the work happened — so a vanished candidate resumes the
-        // drain. Only a repository that vanishes twice without any intervening
-        // progress is a real predicate disagreement between the two queries,
-        // which still fails closed. Progress clears the set, and each pass
-        // either retires a lease or retires a repository from this drain, so
-        // the loop still terminates.
-        let mut vanished: BTreeSet<String> = BTreeSet::new();
+        // This selection runs unlocked, so a concurrent repository-watch task
+        // (racing its own `process_next_expired_start_lease` calls against
+        // this drain, per `repo_watch_runtime::process_cutoffs`) or this same
+        // drain's next pass can retire the candidate before
+        // `process_next_expired_start_lease` takes the repository lock and
+        // repeats the identical predicate. That race is benign — the work
+        // happened — so a vanished candidate resumes the drain. Concurrent
+        // draining can legitimately make two *different* candidates from the
+        // same repository each vanish this way in a row, so tracking by
+        // repository alone would misreport that as corruption. Every
+        // durable disposition this loop's predicate excludes on (model call
+        // recorded, expiration, quarantine, release, or the goal leaving
+        // `commissioned`/`resumed`/`superseded`) is monotonic, so a candidate
+        // this selection has already retired for can never be reselected.
+        // Only the exact same (dispatch_id, action_ordinal) vanishing twice
+        // in a row is therefore a real predicate disagreement between the two
+        // queries, which still fails closed. Progress on any candidate clears
+        // the tracked identity, and each pass either retires a lease or
+        // retires a candidate from this drain, so the loop still terminates.
+        let mut vanished = VanishedCandidateTracker::default();
         loop {
-            let repository: Option<String> = sqlx::query_scalar(
-                "SELECT origin.repository
+            let candidate = sqlx::query(
+                "SELECT origin.repository, lease.dispatch_id, lease.action_ordinal
                    FROM repo_watch_dispatch_start_lease AS lease
                    JOIN repo_watch_dispatch_batch AS batch
                      ON batch.dispatch_id = lease.dispatch_id
@@ -896,9 +942,12 @@ impl PostgresRepoWatchDispatchStore {
             )
             .fetch_optional(&self.pool)
             .await?;
-            let Some(repository) = repository else {
+            let Some(candidate) = candidate else {
                 return Ok(());
             };
+            let repository: String = candidate.try_get("repository")?;
+            let dispatch_id: Uuid = candidate.try_get("dispatch_id")?;
+            let action_ordinal: i32 = candidate.try_get("action_ordinal")?;
             let repository = RepositorySlug::try_new(repository).map_err(|_| {
                 RepoWatchDispatchRepositoryError::Corruption(
                     "pending dispatch start lease has an invalid repository",
@@ -909,10 +958,10 @@ impl PostgresRepoWatchDispatchStore {
                 .await
             {
                 Ok(true) => {
-                    vanished.clear();
+                    vanished.observe_progress();
                 }
                 Ok(false) => {
-                    if !vanished.insert(repository.as_str().to_owned()) {
+                    if vanished.observe_vanished(dispatch_id, action_ordinal) {
                         return Err(RepoWatchDispatchRepositoryError::Corruption(
                             "selected pending dispatch start lease disappeared",
                         ));
@@ -924,7 +973,7 @@ impl PostgresRepoWatchDispatchStore {
                 | Err(RepoWatchDispatchRepositoryError::Corruption(
                     "expired dispatch start lease references a missing session",
                 )) => {
-                    vanished.clear();
+                    vanished.observe_progress();
                 }
                 Err(error) => return Err(error),
             }
@@ -2590,4 +2639,48 @@ fn stored_rule_id(rule_id: &str) -> Result<RepoWatchRuleId, RepoWatchDispatchRep
     RepoWatchRuleId::try_new(rule_id.to_owned()).map_err(|_| {
         RepoWatchDispatchRepositoryError::Corruption("stored rule identifier is invalid")
     })
+}
+
+#[cfg(test)]
+mod vanished_candidate_tracker_tests {
+    use super::VanishedCandidateTracker;
+    use sqlx::types::Uuid;
+
+    #[test]
+    fn distinct_candidates_vanishing_in_a_row_are_not_a_repeat() {
+        let mut tracker = VanishedCandidateTracker::default();
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+
+        assert!(!tracker.observe_vanished(first, 0));
+        assert!(!tracker.observe_vanished(second, 0));
+    }
+
+    #[test]
+    fn the_same_candidate_vanishing_twice_in_a_row_is_a_repeat() {
+        let mut tracker = VanishedCandidateTracker::default();
+        let candidate = Uuid::from_u128(1);
+
+        assert!(!tracker.observe_vanished(candidate, 0));
+        assert!(tracker.observe_vanished(candidate, 0));
+    }
+
+    #[test]
+    fn the_same_dispatch_with_a_different_action_ordinal_is_not_a_repeat() {
+        let mut tracker = VanishedCandidateTracker::default();
+        let dispatch_id = Uuid::from_u128(1);
+
+        assert!(!tracker.observe_vanished(dispatch_id, 0));
+        assert!(!tracker.observe_vanished(dispatch_id, 1));
+    }
+
+    #[test]
+    fn progress_clears_the_tracked_identity() {
+        let mut tracker = VanishedCandidateTracker::default();
+        let candidate = Uuid::from_u128(1);
+
+        assert!(!tracker.observe_vanished(candidate, 0));
+        tracker.observe_progress();
+        assert!(!tracker.observe_vanished(candidate, 0));
+    }
 }

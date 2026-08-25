@@ -6151,6 +6151,73 @@ async fn startup_drain_exhausts_more_than_sixteen_removed_repository_leases()
     Ok(())
 }
 
+/// A repository-watch task's own drain (`process_cutoffs`) calls
+/// `process_next_expired_start_lease` directly and concurrently with the
+/// global periodic drain (`process_pending_expired_start_leases`) for the
+/// same configured repository. Racing them against a repository with many
+/// expired leases makes the global drain's unlocked selection repeatedly
+/// observe a candidate that the racing task retires first, so more than one
+/// *different* candidate from the same repository legitimately vanishes in a
+/// row. That must resume the drain rather than fail it closed: only the
+/// exact same candidate vanishing twice in a row is a real predicate
+/// disagreement.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn concurrent_repository_watch_drain_does_not_fail_the_global_drain_closed()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for_with_lease(
+        rule_with_dispatch_action_count(24)?,
+        Some(Duration::from_millis(1)),
+    )
+    .await?;
+    tokio::time::sleep(Duration::from_millis(10)).await;
+
+    // Each racer keeps contending for the repository lock past its first
+    // empty result: the production analogue (`repo_watch_runtime::
+    // process_cutoffs`) stops after one empty attempt, but is invoked again
+    // on the next attempt cycle while the global drain is still running, so a
+    // single racer that gave up permanently here would understate real
+    // contention against the drain's whole run.
+    let racers: Vec<_> = (0..3)
+        .map(|_| {
+            let store = fixture.store.clone();
+            let repository = fixture.repository.clone();
+            tokio::spawn(async move {
+                for _ in 0..64 {
+                    if let Err(error) = store
+                        .process_next_expired_start_lease(&repository, || {
+                            DurableCommandId::from_uuid(Uuid::now_v7())
+                        })
+                        .await
+                    {
+                        panic!("racing repository-watch drain failed: {error}");
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let drain_result = fixture
+        .store
+        .process_pending_expired_start_leases(|| DurableCommandId::from_uuid(Uuid::now_v7()))
+        .await;
+    for racer in racers {
+        racer.await?;
+    }
+    assert!(
+        drain_result.is_ok(),
+        "a concurrent repository-watch drain must not be reported as corruption: {:?}",
+        drain_result.err()
+    );
+
+    let expiration_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_start_lease_expiration")
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(usize::try_from(expiration_count)?, fixture.sessions.len());
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn dispatch_batch_creates_every_session_and_audit_row_atomically()
