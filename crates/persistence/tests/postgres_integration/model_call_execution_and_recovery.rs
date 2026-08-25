@@ -501,7 +501,8 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         prepared
             .origin_content(accepted_input)
             .expect("the frontier origin must carry its checked receipt content")
-            .text()
+            .single_text()
+            .expect("the fixture has exactly one text part")
             .as_str(),
         "exact user request"
     );
@@ -1116,7 +1117,13 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         panic!("the first provider message is the turn-origin user input");
     };
     assert_eq!(*message_input, accepted_input);
-    assert_eq!(content.text().as_str(), initial_content);
+    assert_eq!(
+        content
+            .single_text()
+            .expect("the turn-origin user input carries exactly one text part")
+            .as_str(),
+        initial_content
+    );
     let ModelConversationMessage::User {
         accepted_input: message_input,
         content,
@@ -1126,7 +1133,13 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         panic!("the second provider message is the first steering input");
     };
     assert_eq!(*message_input, steering_inputs[0]);
-    assert_eq!(content.text().as_str(), first_steering_content);
+    assert_eq!(
+        content
+            .single_text()
+            .expect("the first steering input carries exactly one text part")
+            .as_str(),
+        first_steering_content
+    );
     let ModelConversationMessage::User {
         accepted_input: message_input,
         content,
@@ -1136,7 +1149,13 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         panic!("the third provider message is the second steering input");
     };
     assert_eq!(*message_input, steering_inputs[1]);
-    assert_eq!(content.text().as_str(), second_steering_content);
+    assert_eq!(
+        content
+            .single_text()
+            .expect("the second steering input carries exactly one text part")
+            .as_str(),
+        second_steering_content
+    );
 
     let durable_terminal: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -2779,7 +2798,7 @@ async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pend
     };
     assert_eq!(pending.accepted_input(), steering_input);
     assert_eq!(pending.binding().source_turn(), source_turn);
-    let (eligible, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (eligible, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
