@@ -977,6 +977,11 @@ const schemas = {
         "pattern": "^sha256:[0-9a-f]{64}$",
         "type": "string"
       },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
       "WebProviderModelCallFailureCause": {
         "description": "Closed provider-neutral failure cause exposed at the browser boundary.",
         "enum": [
@@ -991,6 +996,13 @@ const schemas = {
           "provider_internal",
           "unrecognized"
         ],
+        "type": "string"
+      },
+      "WebRunnerWorkingDirectory": {
+        "description": "Checked browser-visible runner working directory using the domain's\nexact admission rules: nonempty, NUL-free, at most 4,096 UTF-8 bytes.",
+        "maxLength": 4096,
+        "minLength": 1,
+        "pattern": "^[^\\u0000]+$",
         "type": "string"
       },
       "WebSessionId": {
@@ -1028,6 +1040,46 @@ const schemas = {
       "WebSessionTimelineDetailBody": {
         "description": "Typed browser body, distinct from application and persistence projections.",
         "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "imported_evidence": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineImportedEvidence"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "session_created",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "detail": {
+                "$ref": "#/$defs/WebTimelineModelSettingsDetail"
+              },
+              "type": {
+                "const": "model_settings",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "detail"
+            ],
+            "type": "object"
+          },
           {
             "additionalProperties": false,
             "properties": {
@@ -1117,6 +1169,160 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
+              "goal_events": {
+                "items": {
+                  "$ref": "#/$defs/WebTimelineGoalEvent"
+                },
+                "maxItems": 1,
+                "type": "array"
+              },
+              "producing_model_call_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "projected_member_index": {
+                "format": "uint32",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/WebTimelineToolBatchState"
+              },
+              "tools": {
+                "items": {
+                  "$ref": "#/$defs/WebTimelineToolAttempt"
+                },
+                "maxItems": 1,
+                "type": "array"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "tool_batch",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "producing_model_call_id",
+              "state",
+              "tools",
+              "goal_events"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "actor": {
+                "$ref": "#/$defs/WebTimelineApprovalActor"
+              },
+              "approval_judge_escalated": {
+                "type": "boolean"
+              },
+              "decision": {
+                "$ref": "#/$defs/WebTimelineApprovalDecision"
+              },
+              "rationale": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "request_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "tool_name": {
+                "$ref": "#/$defs/WebToolName"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "tool_approval_decision",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "request_id",
+              "tool_name",
+              "decision",
+              "actor",
+              "approval_judge_escalated"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "event": {
+                "$ref": "#/$defs/WebTimelineGoalEvent"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "goal_event",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "turn_id",
+              "event"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "compaction_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "model_call_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "result_frontier_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "summary": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "summary_entry_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "through_position": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "type": {
+                "const": "context_compaction",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "compaction_id",
+              "model_call_id",
+              "through_position",
+              "summary_entry_id",
+              "result_frontier_id",
+              "summary"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
               "cause_code": {
                 "type": "string"
               },
@@ -1142,17 +1348,97 @@ const schemas = {
           {
             "additionalProperties": false,
             "properties": {
-              "kind": {
-                "$ref": "#/$defs/WebSessionTimelineEventKind"
+              "attempt_count": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "cause_code": {
+                "type": "string"
+              },
+              "exhausted": {
+                "type": "boolean"
+              },
+              "operation": {
+                "$ref": "#/$defs/WebTimelineReconciliationOperation"
+              },
+              "operator_required": {
+                "type": "boolean"
+              },
+              "terminal_frontier_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
-                "const": "event_fact",
+                "const": "reconciliation",
                 "type": "string"
               }
             },
             "required": [
               "type",
-              "kind"
+              "turn_id",
+              "operation",
+              "terminal_frontier_id",
+              "attempt_count",
+              "exhausted",
+              "operator_required",
+              "cause_code"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "placement_revision": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "runner_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "sandbox_posture": {
+                "$ref": "#/$defs/WebTimelineRunnerSandboxPosture"
+              },
+              "state": {
+                "$ref": "#/$defs/WebTimelineRunnerState"
+              },
+              "type": {
+                "const": "runner",
+                "type": "string"
+              },
+              "working_directory": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebRunnerWorkingDirectory"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "type",
+              "runner_id",
+              "placement_revision",
+              "sandbox_posture",
+              "state"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "detail": {
+                "$ref": "#/$defs/WebTimelineDelegationDetail"
+              },
+              "type": {
+                "const": "delegation",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "detail"
             ],
             "type": "object"
           }
@@ -1195,6 +1481,75 @@ const schemas = {
           "event_sequence"
         ],
         "type": "object"
+      },
+      "WebTimelineAnthropicServiceTier": {
+        "enum": [
+          "auto",
+          "standard_only"
+        ],
+        "type": "string"
+      },
+      "WebTimelineApprovalActor": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "policy",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "command_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "user",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "command_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "model_call_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "model_selection_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "delegate",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "model_selection_id",
+              "model_call_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineApprovalDecision": {
+        "enum": [
+          "approve",
+          "deny"
+        ],
+        "type": "string"
       },
       "WebTimelineBlobReference": {
         "additionalProperties": false,
@@ -1253,7 +1608,399 @@ const schemas = {
         "description": "Text-bearing field within one typed timeline body.",
         "enum": [
           "input_text",
-          "model_response"
+          "model_response",
+          "tool_arguments",
+          "tool_result",
+          "tool_failure",
+          "approval_rationale",
+          "goal_text",
+          "compaction_summary",
+          "delegation_content"
+        ],
+        "type": "string"
+      },
+      "WebTimelineBoundChildAction": {
+        "enum": [
+          "keep_running",
+          "stop",
+          "cancel"
+        ],
+        "type": "string"
+      },
+      "WebTimelineCodexCliServiceTier": {
+        "enum": [
+          "default",
+          "priority",
+          "flex"
+        ],
+        "type": "string"
+      },
+      "WebTimelineDelegationDetail": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "child_session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "policy": {
+                "$ref": "#/$defs/WebTimelineDelegationPolicy"
+              },
+              "relationship_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "child_spawned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id",
+              "child_session_id",
+              "policy"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "awaiting_request_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "child_session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "mode": {
+                "$ref": "#/$defs/WebTimelineDelegationWaitMode"
+              },
+              "relationship_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "child_waiting",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id",
+              "child_session_id",
+              "awaiting_request_id",
+              "mode"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "child_session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "event_ordinal": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "outcome": {
+                "$ref": "#/$defs/WebTimelineDelegationOutcome"
+              },
+              "provenance": {
+                "$ref": "#/$defs/WebTimelineDelegationProvenance"
+              },
+              "reason": {
+                "$ref": "#/$defs/WebTimelineDelegationReason"
+              },
+              "relationship_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "child_lifecycle_disposition",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id",
+              "child_session_id",
+              "event_ordinal",
+              "outcome",
+              "reason",
+              "provenance"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "child_session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "content": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "outcome": {
+                "$ref": "#/$defs/WebTimelineDelegationOutcome"
+              },
+              "provenance": {
+                "$ref": "#/$defs/WebTimelineDelegationProvenance"
+              },
+              "reason": {
+                "$ref": "#/$defs/WebTimelineDelegationReason"
+              },
+              "relationship_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "child_result",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id",
+              "child_session_id",
+              "outcome",
+              "reason",
+              "provenance"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "delivery_sequence": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "message_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "message_ordinal": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "recipient_session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "relationship_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "sender_session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "session_message",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id",
+              "message_id",
+              "sender_session_id",
+              "recipient_session_id",
+              "message_ordinal",
+              "delivery_sequence",
+              "content"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "awaiting_request_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebSessionId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "relationship_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "result_wake",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "message_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "relationship_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "message_wake",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "relationship_id",
+              "message_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineDelegationOutcome": {
+        "enum": [
+          "result_returned",
+          "child_failed",
+          "child_stopped",
+          "child_cancelled",
+          "continue_running",
+          "already_terminal"
+        ],
+        "type": "string"
+      },
+      "WebTimelineDelegationPolicy": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "background",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "on_parent_cancelled": {
+                "$ref": "#/$defs/WebTimelineBoundChildAction"
+              },
+              "on_parent_stopped": {
+                "$ref": "#/$defs/WebTimelineBoundChildAction"
+              },
+              "type": {
+                "const": "bound",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "on_parent_stopped",
+              "on_parent_cancelled"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineDelegationProvenance": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "child_turn",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "command_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "parent_turn_command",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "turn_id",
+              "command_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "command_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "goal_generation": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "parent_goal_command",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "session_id",
+              "goal_generation",
+              "command_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineDelegationReason": {
+        "enum": [
+          "child_completed",
+          "child_execution_failed",
+          "child_result_unavailable",
+          "child_cancelled",
+          "parent_stopped_with_descendants",
+          "parent_cancelled_with_descendants"
+        ],
+        "type": "string"
+      },
+      "WebTimelineDelegationWaitMode": {
+        "enum": [
+          "foreground",
+          "background"
         ],
         "type": "string"
       },
@@ -1296,9 +2043,258 @@ const schemas = {
           }
         ]
       },
+      "WebTimelineEffectiveModelSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "fast_mode": {
+            "$ref": "#/$defs/WebTimelineFastMode"
+          },
+          "reasoning_level": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineReasoningLevel"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "service_tier": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineServiceTier"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "fast_mode"
+        ],
+        "type": "object"
+      },
       "WebTimelineEventSequence": {
         "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
         "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebTimelineFastMode": {
+        "enum": [
+          "disabled",
+          "enabled"
+        ],
+        "type": "string"
+      },
+      "WebTimelineFastModeOverlay": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "value",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WebTimelineFastMode"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineGoalBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebTimelineGoalEvent": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "text": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "type": {
+                "const": "commissioned",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "generation",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "reason": {
+                "$ref": "#/$defs/WebTimelineGoalBlockedReason"
+              },
+              "text": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "type": {
+                "const": "blocked",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "generation",
+              "reason",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "text": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": {
+                "const": "resumed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "text": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "type": {
+                "const": "achieved",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "generation",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "type": {
+                "const": "user_stopped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "generation"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "generation": {
+                "$ref": "#/$defs/WebPositiveU64"
+              },
+              "text": {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              "type": {
+                "const": "superseded",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "generation",
+              "text"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineImportedEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "imported_conversation_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "imported_entry_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "imported_position": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "relationship": {
+            "$ref": "#/$defs/WebTimelineImportedRelationship"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "imported_position",
+          "relationship"
+        ],
+        "type": "object"
+      },
+      "WebTimelineImportedRelationship": {
+        "enum": [
+          "resume",
+          "fork"
+        ],
         "type": "string"
       },
       "WebTimelineModelCallDisposition": {
@@ -1373,6 +2369,341 @@ const schemas = {
           }
         ]
       },
+      "WebTimelineModelChangeAdjustment": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "$ref": "#/$defs/WebTimelineReasoningLevel"
+              },
+              "to": {
+                "$ref": "#/$defs/WebTimelineReasoningLevel"
+              },
+              "type": {
+                "const": "reasoning_level_clamped",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "from",
+              "to"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "$ref": "#/$defs/WebTimelineReasoningLevel"
+              },
+              "type": {
+                "const": "reasoning_level_cleared",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "from"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "fast_mode_disabled",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "from": {
+                "$ref": "#/$defs/WebTimelineServiceTier"
+              },
+              "type": {
+                "const": "service_tier_cleared",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "from"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineModelSelection": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "direct",
+                "type": "string"
+              },
+              "selection_id": {
+                "$ref": "#/$defs/WebSessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "selection_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "alias_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "kind": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "alias_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineModelSettingSource": {
+        "enum": [
+          "per_call",
+          "session",
+          "profile",
+          "global_default"
+        ],
+        "type": "string"
+      },
+      "WebTimelineModelSettingsDetail": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "adjustments": {
+                "items": {
+                  "$ref": "#/$defs/WebTimelineModelChangeAdjustment"
+                },
+                "maxItems": 3,
+                "type": "array"
+              },
+              "caller_override": {
+                "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
+              },
+              "command_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "installed_defaults_version": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "installed_model": {
+                "$ref": "#/$defs/WebTimelineModelSelection"
+              },
+              "installed_settings": {
+                "$ref": "#/$defs/WebTimelineModelSettingsSnapshot"
+              },
+              "prior_defaults_version": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "prior_model": {
+                "$ref": "#/$defs/WebTimelineModelSelection"
+              },
+              "prior_settings": {
+                "$ref": "#/$defs/WebTimelineModelSettingsSnapshot"
+              },
+              "type": {
+                "const": "session_defaults_changed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "command_id",
+              "prior_defaults_version",
+              "installed_defaults_version",
+              "prior_model",
+              "installed_model",
+              "prior_settings",
+              "installed_settings",
+              "caller_override",
+              "adjustments"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "accepted_input_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "adjusted_from_selection_id": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebSessionId"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "adjustments": {
+                "items": {
+                  "$ref": "#/$defs/WebTimelineModelChangeAdjustment"
+                },
+                "maxItems": 3,
+                "type": "array"
+              },
+              "defaults_version": {
+                "$ref": "#/$defs/WebU64"
+              },
+              "per_call_override": {
+                "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
+              },
+              "requested_model": {
+                "$ref": "#/$defs/WebTimelineModelSelection"
+              },
+              "selected_direct_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "settings": {
+                "$ref": "#/$defs/WebTimelineModelSettingsSnapshot"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "turn_resolved",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "accepted_input_id",
+              "turn_id",
+              "defaults_version",
+              "requested_model",
+              "selected_direct_id",
+              "per_call_override",
+              "settings",
+              "adjustments"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineModelSettingsOverlay": {
+        "additionalProperties": false,
+        "properties": {
+          "fast_mode": {
+            "$ref": "#/$defs/WebTimelineFastModeOverlay"
+          },
+          "reasoning_level": {
+            "$ref": "#/$defs/WebTimelineSettingOverlay"
+          },
+          "service_tier": {
+            "$ref": "#/$defs/WebTimelineSettingOverlay2"
+          }
+        },
+        "required": [
+          "reasoning_level",
+          "fast_mode",
+          "service_tier"
+        ],
+        "type": "object"
+      },
+      "WebTimelineModelSettingsPrecedence": {
+        "additionalProperties": false,
+        "properties": {
+          "global_default": {
+            "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
+          },
+          "per_call": {
+            "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
+          },
+          "profile": {
+            "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
+          },
+          "session": {
+            "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
+          }
+        },
+        "required": [
+          "per_call",
+          "session",
+          "profile",
+          "global_default"
+        ],
+        "type": "object"
+      },
+      "WebTimelineModelSettingsSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "effective": {
+            "$ref": "#/$defs/WebTimelineEffectiveModelSettings"
+          },
+          "fast_mode_source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineModelSettingSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "precedence": {
+            "$ref": "#/$defs/WebTimelineModelSettingsPrecedence"
+          },
+          "reasoning_source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineModelSettingSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "service_tier_source": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineModelSettingSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "validated_for_selection_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "precedence",
+          "effective"
+        ],
+        "type": "object"
+      },
       "WebTimelineModelUsage": {
         "additionalProperties": false,
         "description": "Independently optional provider-reported usage counts.",
@@ -1420,6 +2751,237 @@ const schemas = {
         },
         "type": "object"
       },
+      "WebTimelineOpenAiServiceTier": {
+        "enum": [
+          "auto",
+          "default",
+          "flex",
+          "scale",
+          "priority",
+          "fast"
+        ],
+        "type": "string"
+      },
+      "WebTimelineReasoningLevel": {
+        "enum": [
+          "none",
+          "minimal",
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+          "max",
+          "ultra"
+        ],
+        "type": "string"
+      },
+      "WebTimelineReconciliationOperation": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "model_call_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "model_call",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "model_call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "tool_attempt_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "tool_attempt",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "tool_attempt_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineRunnerSandboxPosture": {
+        "enum": [
+          "unsandboxed",
+          "sandboxed"
+        ],
+        "type": "string"
+      },
+      "WebTimelineRunnerState": {
+        "enum": [
+          "pinned",
+          "suspect",
+          "connected",
+          "runner_lost_before_pin",
+          "runner_lost",
+          "replaced",
+          "working_directory_changed",
+          "abandoned"
+        ],
+        "type": "string"
+      },
+      "WebTimelineServiceTier": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "provider": {
+                "const": "anthropic",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WebTimelineAnthropicServiceTier"
+              }
+            },
+            "required": [
+              "provider",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "provider": {
+                "const": "open_ai",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WebTimelineOpenAiServiceTier"
+              }
+            },
+            "required": [
+              "provider",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "provider": {
+                "const": "codex_cli",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WebTimelineCodexCliServiceTier"
+              }
+            },
+            "required": [
+              "provider",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineSettingOverlay": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "provider_default",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "value",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WebTimelineReasoningLevel"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineSettingOverlay2": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "inherit",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "provider_default",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "value",
+                "type": "string"
+              },
+              "value": {
+                "$ref": "#/$defs/WebTimelineServiceTier"
+              }
+            },
+            "required": [
+              "kind",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
       "WebTimelineTextExcerpt": {
         "additionalProperties": false,
         "description": "Bounded UTF-8 excerpt with explicit completeness evidence.",
@@ -1453,12 +3015,251 @@ const schemas = {
         ],
         "type": "object"
       },
+      "WebTimelineToolApprovalPosture": {
+        "enum": [
+          "auto",
+          "delegated",
+          "human"
+        ],
+        "type": "string"
+      },
+      "WebTimelineToolAttempt": {
+        "additionalProperties": false,
+        "properties": {
+          "approval_judge_escalated": {
+            "type": "boolean"
+          },
+          "approval_posture": {
+            "$ref": "#/$defs/WebTimelineToolApprovalPosture"
+          },
+          "arguments": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebTimelineTextExcerpt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence": {
+            "$ref": "#/$defs/WebTimelineToolAttemptEvidence"
+          },
+          "operator_required": {
+            "type": "boolean"
+          },
+          "request_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "tool_name": {
+            "$ref": "#/$defs/WebToolName"
+          }
+        },
+        "required": [
+          "request_id",
+          "tool_name",
+          "approval_posture",
+          "approval_judge_escalated",
+          "operator_required",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "WebTimelineToolAttemptEvidence": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "type": {
+                "const": "request_only",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "attempt_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "cause": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineToolFailureCause"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "effect_posture": {
+                "$ref": "#/$defs/WebTimelineToolEffectPosture"
+              },
+              "failure": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "failure_present": {
+                "description": "Whether the frozen transition snapshot recorded a failure payload,\nindependent of which single field this page projected.",
+                "type": "boolean"
+              },
+              "result": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineTextExcerpt"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "result_present": {
+                "description": "Whether the frozen transition snapshot recorded a result payload,\nindependent of which single field this page projected.",
+                "type": "boolean"
+              },
+              "sandbox_posture": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebTimelineToolSandboxPosture"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "state": {
+                "$ref": "#/$defs/WebTimelineToolState"
+              },
+              "type": {
+                "const": "physical_attempt",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "attempt_id",
+              "result_present",
+              "failure_present",
+              "effect_posture",
+              "state"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineToolBatchState": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "frontier_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "proposed",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "frontier_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "frontier_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "results_projected",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "frontier_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "tool_attempt_id": {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              "type": {
+                "const": "recovery_required",
+                "type": "string"
+              }
+            },
+            "required": [
+              "type",
+              "tool_attempt_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebTimelineToolEffectPosture": {
+        "enum": [
+          "effect_free",
+          "external_effect"
+        ],
+        "type": "string"
+      },
+      "WebTimelineToolFailureCause": {
+        "enum": [
+          "unknown_tool",
+          "invalid_arguments",
+          "execution_failed",
+          "result_too_large",
+          "crash_lost"
+        ],
+        "type": "string"
+      },
+      "WebTimelineToolSandboxPosture": {
+        "enum": [
+          "unsandboxed",
+          "sandboxed"
+        ],
+        "type": "string"
+      },
+      "WebTimelineToolState": {
+        "enum": [
+          "prepared",
+          "in_flight",
+          "awaiting_child",
+          "completed",
+          "known_failed",
+          "ambiguous"
+        ],
+        "type": "string"
+      },
       "WebTimelineTurnLifecycleKind": {
         "description": "Closed turn lifecycle boundary.",
         "enum": [
           "activated",
           "terminalized"
         ],
+        "type": "string"
+      },
+      "WebToolName": {
+        "description": "Checked browser-visible tool name using the domain's exact spelling rules.",
+        "maxLength": 64,
+        "minLength": 1,
+        "pattern": "^[A-Za-z0-9_-]+$",
         "type": "string"
       },
       "WebU64": {
@@ -1767,11 +3568,19 @@ function assertSchema(root, schema, value, path) {
       return;
     }
     const concrete = schema.type.filter((candidate) => candidate !== "null");
+    // JSON Schema names the integral type "integer" while `typeof` reports
+    // every JavaScript number as "number", so an ["integer", "null"] property
+    // matches only through that spelling.
     const actual = Array.isArray(value) ? "array" : typeof value;
-    if (!concrete.includes(actual)) {
+    const selected = concrete.includes(actual)
+      ? actual
+      : actual === "number" && concrete.includes("integer")
+        ? "integer"
+        : undefined;
+    if (selected === undefined) {
       fail(path, concrete.join(" or "));
     }
-    assertSchema(root, { ...schema, type: actual }, value, path);
+    assertSchema(root, { ...schema, type: selected }, value, path);
     return;
   }
   if (schema.type === "object") {
@@ -1891,9 +3700,25 @@ function sameBodyContinuation(left, right) {
   );
 }
 
-function assertTimelineExcerpt(excerpt, address, field, path) {
+function assertTimelineExcerpt(excerpt, address, field, path, memberIndex) {
+  // Durable ceilings for continued source fields; fields without a durable
+  // byte constraint carry no entry.
+  const totalBytesCeiling = {
+    input_text: 1048576n,
+    tool_arguments: 1048576n,
+    tool_result: 1048576n,
+    tool_failure: 4096n,
+    approval_rationale: 4096n,
+    goal_text: 1048576n,
+    delegation_content: 1048576n,
+  };
+  const expectedMemberIndex = memberIndex ?? 0;
   const offset = BigInt(excerpt.offset_bytes);
   const total = BigInt(excerpt.total_bytes);
+  const ceiling = totalBytesCeiling[field];
+  if (ceiling !== undefined && total > ceiling) {
+    fail(path, `a declared total within the ${ceiling}-byte durable bound`);
+  }
   const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
   if (offset > total || end > total) {
     fail(path, "an excerpt within its declared byte range");
@@ -1905,8 +3730,11 @@ function assertTimelineExcerpt(excerpt, address, field, path) {
     return null;
   }
   const continuation = excerpt.continuation;
-  if (continuation.member_index !== 0) {
-    fail(`${path}.continuation.member_index`, "zero for a singular body field");
+  if (continuation.member_index !== expectedMemberIndex) {
+    fail(
+      `${path}.continuation.member_index`,
+      "the projected member the excerpt belongs to",
+    );
   }
   if (end >= total) {
     fail(`${path}.continuation`, "present only before the declared body end");
@@ -1920,6 +3748,186 @@ function assertTimelineExcerpt(excerpt, address, field, path) {
   return continuation;
 }
 
+function pageToolContinuation(value, address, field, memberIndex, tool) {
+  if (
+    value.continuation === undefined ||
+    value.continuation === null ||
+    value.continuation.type !== "more_body"
+  ) {
+    return null;
+  }
+  const continuation = value.continuation.body;
+  if (
+    !sameTimelineAddress(continuation.address, address) ||
+    BigInt(continuation.offset_bytes) !== 0n
+  ) {
+    return null;
+  }
+  const physical =
+    tool !== undefined && tool !== null && tool.evidence.type === "physical_attempt"
+      ? tool.evidence
+      : null;
+  const sameMemberField =
+    physical === null
+      ? null
+      : physical.state === "completed" && physical.result_present
+        ? "tool_result"
+        : physical.state === "known_failed" && physical.failure_present
+          ? "tool_failure"
+          : null;
+  const sameMember = continuation.member_index === memberIndex;
+  const nextMember = continuation.member_index === memberIndex + 1;
+  const valid = field === "tool_arguments"
+    ? (
+        (sameMemberField !== null && continuation.field === sameMemberField && sameMember) ||
+        (continuation.field === "tool_arguments" && nextMember) ||
+        (continuation.field === "goal_text" && continuation.member_index === 0)
+      )
+    : field === "tool_result" || field === "tool_failure"
+      ? (
+          (continuation.field === "tool_arguments" && nextMember) ||
+          (continuation.field === "goal_text" && continuation.member_index === 0)
+        )
+      : field === "goal_text"
+        ? continuation.field === "goal_text" && nextMember
+        : false;
+  return valid ? continuation : null;
+}
+
+function sameSettingValue(left, right) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
+function resolveModelSetting(layers, field, providerDefault) {
+  for (const [source, layer] of layers) {
+    const overlay = layer[field];
+    if (overlay.kind === "inherit") continue;
+    if (overlay.kind === "provider_default") return [providerDefault, source];
+    return [overlay.value, source];
+  }
+  return [providerDefault, null];
+}
+
+function assertModelSettingsSnapshot(snapshot, path) {
+  const layers = [
+    ["per_call", snapshot.precedence.per_call],
+    ["session", snapshot.precedence.session],
+    ["profile", snapshot.precedence.profile],
+    ["global_default", snapshot.precedence.global_default],
+  ];
+  const [reasoning, reasoningSource] = resolveModelSetting(layers, "reasoning_level", null);
+  const [fastMode, fastModeSource] = resolveModelSetting(layers, "fast_mode", "disabled");
+  const [serviceTier, serviceTierSource] = resolveModelSetting(layers, "service_tier", null);
+  const valid =
+    sameSettingValue(snapshot.effective.reasoning_level, reasoning) &&
+    snapshot.effective.fast_mode === fastMode &&
+    sameSettingValue(snapshot.effective.service_tier, serviceTier) &&
+    (snapshot.reasoning_source ?? null) === reasoningSource &&
+    (snapshot.fast_mode_source ?? null) === fastModeSource &&
+    (snapshot.service_tier_source ?? null) === serviceTierSource;
+  if (!valid) {
+    fail(path, "a precedence-resolved model-settings snapshot");
+  }
+  const providerDefaults =
+    reasoning === null && reasoningSource === null &&
+    fastMode === "disabled" && fastModeSource === null &&
+    serviceTier === null && serviceTierSource === null;
+  const validationAbsent =
+    snapshot.validated_for_selection_id === undefined ||
+    snapshot.validated_for_selection_id === null;
+  if (validationAbsent !== providerDefaults) {
+    fail(`${path}.validated_for_selection_id`, "absent exactly for provider defaults");
+  }
+}
+
+function assertAdjustedEffective(settings, adjustments, path) {
+  const knobByType = {
+    reasoning_level_clamped: 1,
+    reasoning_level_cleared: 1,
+    fast_mode_disabled: 2,
+    service_tier_cleared: 3,
+  };
+  let lastKnob = 0;
+  adjustments.forEach((adjustment, index) => {
+    const adjustmentPath = `${path}[${index}]`;
+    const knob = knobByType[adjustment.type];
+    if (knob === undefined || knob <= lastKnob) {
+      fail(adjustmentPath, "one ordered adjustment per settings knob");
+    }
+    lastKnob = knob;
+    if (
+      knob === 1 &&
+      (settings.reasoning_source ?? null) === "per_call"
+    ) {
+      fail(adjustmentPath, "a non-per-call reasoning target");
+    }
+    if (
+      knob === 2 &&
+      (settings.fast_mode_source ?? null) === "per_call"
+    ) {
+      fail(adjustmentPath, "a non-per-call fast-mode target");
+    }
+    if (
+      knob === 3 &&
+      (settings.service_tier_source ?? null) === "per_call"
+    ) {
+      fail(adjustmentPath, "a non-per-call service-tier target");
+    }
+    if (
+      adjustment.type === "fast_mode_disabled" &&
+      settings.effective.fast_mode !== "disabled"
+    ) {
+      fail(adjustmentPath, "a disabled effective fast mode after the adjustment");
+    }
+    if (
+      adjustment.type === "reasoning_level_clamped" &&
+      (settings.effective.reasoning_level !== adjustment.to ||
+        adjustment.from === adjustment.to)
+    ) {
+      fail(adjustmentPath, "the clamped effective reasoning level");
+    }
+    if (
+      adjustment.type === "reasoning_level_cleared" &&
+      settings.effective.reasoning_level !== undefined &&
+      settings.effective.reasoning_level !== null
+    ) {
+      fail(adjustmentPath, "a cleared effective reasoning level");
+    }
+    if (
+      adjustment.type === "service_tier_cleared" &&
+      settings.effective.service_tier !== undefined &&
+      settings.effective.service_tier !== null
+    ) {
+      fail(adjustmentPath, "a cleared effective service tier");
+    }
+  });
+}
+
+function assertAllInheritLayer(layer, path) {
+  if (
+    layer.reasoning_level.kind !== "inherit" ||
+    layer.fast_mode.kind !== "inherit" ||
+    layer.service_tier.kind !== "inherit"
+  ) {
+    fail(path, "an all-inherit per-call layer in a defaults snapshot");
+  }
+}
+
+function assertModelSnapshotIdentity(model, snapshot, path) {
+  const validated = snapshot.validated_for_selection_id;
+  if (
+    model.kind === "direct" &&
+    validated !== undefined &&
+    validated !== null &&
+    validated !== model.selection_id
+  ) {
+    fail(
+      `${path}.validated_for_selection_id`,
+      "the direct model that validated the snapshot",
+    );
+  }
+}
+
 function assertTimelineDetailPage(value) {
   const maxProjectedBodyBytes = 65536;
   const detailEnvelopeBytes = 128;
@@ -1928,13 +3936,6 @@ function assertTimelineDetailPage(value) {
     "turn_completed",
     "turn_refused",
     "turn_cancelled",
-    "turn_reconciliation_required",
-  ]);
-  const bodyOwnedKinds = new Set([
-    "input_accepted",
-    "model_call_transition",
-    "turn_activated",
-    ...terminalKinds,
   ]);
   let expectedBodyContinuation = null;
   let computedProjectedBodyBytes = 0;
@@ -2023,6 +4024,490 @@ function assertTimelineDetailPage(value) {
           }
         }
         break;
+      case "tool_batch": {
+        if (item.kind !== "tool_batch_transition") {
+          fail(`${path}.kind`, "tool_batch_transition for a tool_batch body");
+        }
+        const tool = item.body.tools[0];
+        const goal = item.body.goal_events[0];
+        const memberIndex = item.body.projected_member_index;
+        if ((tool !== undefined || goal !== undefined) && (memberIndex === undefined || memberIndex === null)) {
+          fail(
+            `${path}.body.projected_member_index`,
+            "present for a projected tool-batch member",
+          );
+        }
+        if (tool !== undefined && goal !== undefined) {
+          fail(`${path}.body`, "one projected tool or goal member");
+        }
+        if (tool !== undefined) {
+          const operatorRequired =
+            tool.approval_judge_escalated || tool.approval_posture === "human";
+          if (tool.operator_required !== operatorRequired) {
+            fail(
+              `${path}.body.tools[0].operator_required`,
+              "equal to approval_judge_escalated || approval_posture === human",
+            );
+          }
+          const physical = tool.evidence.type === "physical_attempt" ? tool.evidence : null;
+          if (
+            physical !== null &&
+            item.body.state.type === "recovery_required" &&
+            physical.attempt_id === item.body.state.tool_attempt_id &&
+            physical.state !== "ambiguous"
+          ) {
+            fail(
+              `${path}.body.tools[0].evidence.state`,
+              "ambiguous for the recovery target attempt",
+            );
+          }
+          if (physical !== null) {
+            const terminalFailure = physical.state === "known_failed";
+            if (physical.result_present && physical.state !== "completed") {
+              fail(
+                `${path}.body.tools[0].evidence.result_present`,
+                "set only for a completed attempt",
+              );
+            }
+            if (physical.failure_present && !terminalFailure) {
+              fail(
+                `${path}.body.tools[0].evidence.failure_present`,
+                "set only for a known_failed attempt",
+              );
+            }
+            if (
+              physical.result !== undefined &&
+              physical.result !== null &&
+              !physical.result_present
+            ) {
+              fail(
+                `${path}.body.tools[0].evidence.result_present`,
+                "set when the result payload is projected",
+              );
+            }
+            if (
+              physical.failure !== undefined &&
+              physical.failure !== null &&
+              !physical.failure_present
+            ) {
+              fail(
+                `${path}.body.tools[0].evidence.failure_present`,
+                "set when the failure payload is projected",
+              );
+            }
+            if ((physical.cause !== undefined && physical.cause !== null) !== terminalFailure) {
+              fail(
+                `${path}.body.tools[0].evidence.cause`,
+                "present exactly for a known_failed attempt",
+              );
+            }
+            if (
+              physical.result !== undefined &&
+              physical.result !== null &&
+              physical.state !== "completed"
+            ) {
+              fail(
+                `${path}.body.tools[0].evidence.result`,
+                "present only for a completed attempt",
+              );
+            }
+            if (
+              physical.failure !== undefined &&
+              physical.failure !== null &&
+              !terminalFailure
+            ) {
+              fail(
+                `${path}.body.tools[0].evidence.failure`,
+                "present only for a known_failed attempt",
+              );
+            }
+            if (physical.state === "ambiguous" && physical.effect_posture !== "external_effect") {
+              fail(
+                `${path}.body.tools[0].evidence.effect_posture`,
+                "external_effect for an ambiguous attempt",
+              );
+            }
+          }
+          const excerpts = [
+            [tool.arguments, "tool_arguments", `${path}.body.tools[0].arguments`],
+            [physical?.result, "tool_result", `${path}.body.tools[0].evidence.result`],
+            [physical?.failure, "tool_failure", `${path}.body.tools[0].evidence.failure`],
+          ].filter(([excerpt]) => excerpt !== undefined && excerpt !== null);
+          if (excerpts.length !== 1) {
+            fail(`${path}.body.tools[0]`, "exactly one projected text field");
+          }
+          const [excerpt, field, excerptPath] = excerpts[0];
+          continuation = assertTimelineExcerpt(
+            excerpt,
+            item.address,
+            field,
+            excerptPath,
+            item.body.projected_member_index,
+          );
+          if (continuation === null) {
+            continuation = pageToolContinuation(
+              value,
+              item.address,
+              field,
+              item.body.projected_member_index,
+              tool,
+            );
+          }
+          textBytes = new TextEncoder().encode(excerpt.text).byteLength;
+        }
+        if (goal !== undefined && goal.text !== undefined && goal.text !== null) {
+          continuation = assertTimelineExcerpt(
+            goal.text,
+            item.address,
+            "goal_text",
+            `${path}.body.goal_events[0].text`,
+            item.body.projected_member_index,
+          );
+          if (continuation === null) {
+            continuation = pageToolContinuation(
+              value,
+              item.address,
+              "goal_text",
+              item.body.projected_member_index,
+              null,
+            );
+          }
+          textBytes = new TextEncoder().encode(goal.text.text).byteLength;
+        }
+        break;
+      }
+      case "tool_approval_decision":
+        if (item.kind !== "tool_approval_decided") {
+          fail(`${path}.kind`, "tool_approval_decided for a tool_approval_decision body");
+        }
+        if (item.body.approval_judge_escalated && item.body.actor.type !== "user") {
+          fail(
+            `${path}.body.actor`,
+            "a user actor when the approval judge escalated",
+          );
+        }
+        if (
+          item.body.actor.type === "delegate" &&
+          (item.body.rationale === undefined || item.body.rationale === null)
+        ) {
+          fail(
+            `${path}.body.rationale`,
+            "the checked rationale a delegate decision always carries",
+          );
+        }
+        if (
+          item.body.actor.type === "policy" &&
+          (item.body.decision !== "approve" ||
+            (item.body.rationale !== undefined && item.body.rationale !== null))
+        ) {
+          fail(
+            `${path}.body.actor`,
+            "an automatic approval without a rationale for a policy actor",
+          );
+        }
+        if (item.body.rationale !== undefined && item.body.rationale !== null) {
+          continuation = assertTimelineExcerpt(
+            item.body.rationale,
+            item.address,
+            "approval_rationale",
+            `${path}.body.rationale`,
+          );
+          textBytes = new TextEncoder().encode(item.body.rationale.text).byteLength;
+        }
+        break;
+      case "goal_event":
+        if (item.kind !== "goal_turn_retired") {
+          fail(`${path}.kind`, "goal_turn_retired for a goal_event body");
+        }
+        if (
+          item.body.event.type !== "user_stopped" &&
+          item.body.event.type !== "superseded"
+        ) {
+          fail(`${path}.body.event.type`, "a retiring goal event");
+        }
+        if (item.body.event.text !== undefined && item.body.event.text !== null) {
+          continuation = assertTimelineExcerpt(
+            item.body.event.text,
+            item.address,
+            "goal_text",
+            `${path}.body.event.text`,
+          );
+          textBytes = new TextEncoder().encode(item.body.event.text).byteLength;
+        }
+        break;
+      case "context_compaction":
+        if (item.kind !== "context_compacted") {
+          fail(`${path}.kind`, "context_compacted for a context_compaction body");
+        }
+        continuation = assertTimelineExcerpt(
+          item.body.summary,
+          item.address,
+          "compaction_summary",
+          `${path}.body.summary`,
+        );
+        textBytes = new TextEncoder().encode(item.body.summary.text).byteLength;
+        break;
+      case "reconciliation":
+        if (item.kind !== "turn_reconciliation_required") {
+          fail(`${path}.kind`, "turn_reconciliation_required for a reconciliation body");
+        }
+        if (
+          item.body.exhausted !== true ||
+          item.body.operator_required !== true ||
+          item.body.cause_code !== "ambiguous_operation"
+        ) {
+          fail(
+            `${path}.body`,
+            "an exhausted operator-required ambiguous_operation reconciliation",
+          );
+        }
+        break;
+      case "runner":
+        if (item.kind !== "runner_state_transition") {
+          fail(`${path}.kind`, "runner_state_transition for a runner body");
+        }
+        if (
+          item.body.working_directory !== undefined &&
+          item.body.working_directory !== null &&
+          new TextEncoder().encode(item.body.working_directory).byteLength > 4096
+        ) {
+          fail(
+            `${path}.body.working_directory`,
+            "at most 4096 UTF-8 bytes",
+          );
+        }
+        break;
+      case "delegation": {
+        const wake =
+          item.body.detail.type === "result_wake" ||
+          item.body.detail.type === "message_wake";
+        if (wake && item.kind !== "delegation_wake") {
+          fail(`${path}.kind`, "delegation_wake for a delegation wake body");
+        }
+        if (!wake && item.kind !== "delegation_update") {
+          fail(`${path}.kind`, "delegation_update for a delegation update body");
+        }
+        if (
+          item.body.detail.type === "session_message" &&
+          item.body.detail.recipient_session_id !== value.session_id
+        ) {
+          fail(
+            `${path}.body.detail.recipient_session_id`,
+            "the enclosing page session",
+          );
+        }
+        if (
+          (item.body.detail.type === "child_spawned" ||
+            item.body.detail.type === "child_waiting" ||
+            item.body.detail.type === "child_result") &&
+          item.body.detail.child_session_id === value.session_id
+        ) {
+          fail(
+            `${path}.body.detail.child_session_id`,
+            "a session other than the relationship parent",
+          );
+        }
+        if (item.body.detail.type === "child_lifecycle_disposition") {
+          const detail = item.body.detail;
+          const lifecycleValid =
+            (detail.provenance.type === "parent_turn_command" ||
+              detail.provenance.type === "parent_goal_command") &&
+            (detail.reason === "parent_stopped_with_descendants" ||
+              detail.reason === "parent_cancelled_with_descendants") &&
+            (detail.outcome === "already_terminal" ||
+              detail.outcome === "continue_running" ||
+              detail.outcome === "child_stopped" ||
+              detail.outcome === "child_cancelled");
+          if (!lifecycleValid) {
+            fail(`${path}.body.detail`, "a durable lifecycle disposition shape");
+          }
+        }
+        if (item.body.detail.type === "child_result") {
+          const detail = item.body.detail;
+          if (
+            detail.provenance.type === "child_turn" &&
+            detail.provenance.session_id !== detail.child_session_id
+          ) {
+            fail(
+              `${path}.body.detail.provenance.session_id`,
+              "the relationship's child session",
+            );
+          }
+          const childTurnValid =
+            detail.provenance.type === "child_turn" &&
+            ((detail.outcome === "result_returned" && detail.reason === "child_completed") ||
+              (detail.outcome === "child_failed" &&
+                (detail.reason === "child_execution_failed" ||
+                  detail.reason === "child_result_unavailable")) ||
+              (detail.outcome === "child_cancelled" && detail.reason === "child_cancelled"));
+          const parentCommandValid =
+            (detail.provenance.type === "parent_turn_command" ||
+              detail.provenance.type === "parent_goal_command") &&
+            (detail.reason === "parent_stopped_with_descendants" ||
+              detail.reason === "parent_cancelled_with_descendants") &&
+            (detail.outcome === "child_stopped" ||
+              detail.outcome === "child_cancelled");
+          if (!childTurnValid && !parentCommandValid) {
+            fail(`${path}.body.detail`, "a durable delegation outcome shape");
+          }
+          const contentPresent = detail.content !== undefined && detail.content !== null;
+          if (contentPresent !== (detail.outcome === "result_returned")) {
+            fail(
+              `${path}.body.detail.content`,
+              "present exactly for a returned child result",
+            );
+          }
+        }
+        const content =
+          item.body.detail.type === "child_result"
+            ? item.body.detail.content
+            : item.body.detail.type === "session_message"
+              ? item.body.detail.content
+              : null;
+        if (content !== undefined && content !== null) {
+          continuation = assertTimelineExcerpt(
+            content,
+            item.address,
+            "delegation_content",
+            `${path}.body.detail.content`,
+          );
+          textBytes = new TextEncoder().encode(content.text).byteLength;
+        }
+        break;
+      }
+      case "session_created":
+        if (item.kind !== "session_created") {
+          fail(`${path}.kind`, "session_created for a session_created body");
+        }
+        break;
+      case "model_settings":
+        if (
+          item.body.detail.type === "session_defaults_changed" &&
+          item.kind !== "session_model_settings_changed"
+        ) {
+          fail(
+            `${path}.kind`,
+            "session_model_settings_changed for session defaults detail",
+          );
+        }
+        if (
+          item.body.detail.type === "turn_resolved" &&
+          item.kind !== "turn_model_settings_resolved"
+        ) {
+          fail(
+            `${path}.kind`,
+            "turn_model_settings_resolved for resolved turn detail",
+          );
+        }
+        if (item.body.detail.type === "session_defaults_changed") {
+          assertModelSettingsSnapshot(
+            item.body.detail.prior_settings,
+            `${path}.body.detail.prior_settings`,
+          );
+          assertModelSettingsSnapshot(
+            item.body.detail.installed_settings,
+            `${path}.body.detail.installed_settings`,
+          );
+          if (
+            BigInt(item.body.detail.installed_defaults_version) !==
+            BigInt(item.body.detail.prior_defaults_version) + 1n
+          ) {
+            fail(
+              `${path}.body.detail.installed_defaults_version`,
+              "the checked successor of the prior defaults version",
+            );
+          }
+          const defaults = item.body.detail;
+          assertAllInheritLayer(
+            defaults.prior_settings.precedence.per_call,
+            `${path}.body.detail.prior_settings.precedence.per_call`,
+          );
+          assertAllInheritLayer(
+            defaults.installed_settings.precedence.per_call,
+            `${path}.body.detail.installed_settings.precedence.per_call`,
+          );
+          assertModelSnapshotIdentity(
+            defaults.prior_model,
+            defaults.prior_settings,
+            `${path}.body.detail.prior_settings`,
+          );
+          assertModelSnapshotIdentity(
+            defaults.installed_model,
+            defaults.installed_settings,
+            `${path}.body.detail.installed_settings`,
+          );
+          if (
+            JSON.stringify(defaults.prior_model) ===
+              JSON.stringify(defaults.installed_model) &&
+            JSON.stringify(defaults.prior_settings) ===
+              JSON.stringify(defaults.installed_settings)
+          ) {
+            fail(
+              `${path}.body.detail`,
+              "a defaults change that changes the model or settings",
+            );
+          }
+          assertAdjustedEffective(
+            defaults.installed_settings,
+            defaults.adjustments,
+            `${path}.body.detail.adjustments`,
+          );
+        } else {
+          assertModelSettingsSnapshot(
+            item.body.detail.settings,
+            `${path}.body.detail.settings`,
+          );
+          const resolved = item.body.detail;
+          if (
+            JSON.stringify(resolved.per_call_override) !==
+            JSON.stringify(resolved.settings.precedence.per_call)
+          ) {
+            fail(
+              `${path}.body.detail.per_call_override`,
+              "the frozen per-call settings layer",
+            );
+          }
+          assertAdjustedEffective(
+            resolved.settings,
+            resolved.adjustments,
+            `${path}.body.detail.adjustments`,
+          );
+          if (
+            resolved.requested_model.kind === "direct" &&
+            resolved.requested_model.selection_id !== resolved.selected_direct_id
+          ) {
+            fail(
+              `${path}.body.detail.selected_direct_id`,
+              "the requested direct selection identity",
+            );
+          }
+          const validatedFor = resolved.settings.validated_for_selection_id;
+          if (
+            validatedFor !== undefined &&
+            validatedFor !== null &&
+            validatedFor !== resolved.selected_direct_id
+          ) {
+            fail(
+              `${path}.body.detail.settings.validated_for_selection_id`,
+              "the selected direct identity",
+            );
+          }
+          const adjustedFrom = resolved.adjusted_from_selection_id;
+          const adjustedPresent = adjustedFrom !== undefined && adjustedFrom !== null;
+          if (adjustedPresent !== (resolved.adjustments.length > 0)) {
+            fail(
+              `${path}.body.detail.adjusted_from_selection_id`,
+              "present exactly with recorded adjustments",
+            );
+          }
+          if (adjustedPresent && adjustedFrom === resolved.selected_direct_id) {
+            fail(
+              `${path}.body.detail.adjusted_from_selection_id`,
+              "a prior direct selection different from the selected identity",
+            );
+          }
+        }
+        break;
       case "turn_lifecycle":
         if (item.body.lifecycle === "activated" && item.kind !== "turn_activated") {
           fail(`${path}.kind`, "turn_activated for an activated lifecycle");
@@ -2036,15 +4521,9 @@ function assertTimelineDetailPage(value) {
           turn_completed: "completed",
           turn_refused: "refused",
           turn_cancelled: "cancelled",
-          turn_reconciliation_required: "reconciliation_required",
         };
         if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {
           fail(`${path}.body.cause_code`, `the cause for ${item.kind}`);
-        }
-        break;
-      case "event_fact":
-        if (item.body.kind !== item.kind || bodyOwnedKinds.has(item.kind)) {
-          fail(`${path}.body.kind`, "the matching header-only event kind");
         }
         break;
       default:

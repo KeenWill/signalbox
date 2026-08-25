@@ -385,6 +385,7 @@ impl GoalRepository {
                         OutboxEvent::GoalTurnRetired {
                             session: command.session(),
                             turn: retired,
+                            goal_event_ordinal: event.ordinal().get(),
                         },
                     )
                     .await?;
@@ -934,6 +935,7 @@ pub(crate) async fn insert_repo_watch_composed_stop(
             OutboxEvent::GoalTurnRetired {
                 session: command.session(),
                 turn: retired,
+                goal_event_ordinal: event.ordinal().get(),
             },
         )
         .await?;

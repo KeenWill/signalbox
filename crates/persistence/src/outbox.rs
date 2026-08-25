@@ -133,6 +133,8 @@ pub enum DispatchedOutboxEventKind {
     GoalTurnRetired {
         /// Exact immutable queued turn retired by a goal transition.
         turn: TurnId,
+        /// Exact goal event that made the queued turn ineligible.
+        goal_event_ordinal: u64,
     },
     /// A queued turn atomically became active.
     TurnActivated {
@@ -1131,8 +1133,8 @@ pub(crate) async fn load_event(
             }
         }
         OutboxEventDiscriminator::GoalTurnRetired => {
-            let turn = sqlx::query_scalar::<_, Uuid>(
-                "SELECT event.turn_id
+            let row = sqlx::query_as::<_, (Uuid, Decimal)>(
+                "SELECT event.turn_id, event.goal_event_ordinal
                    FROM goal_turn_retired_outbox_event AS event
                    JOIN goal_turn AS goal
                      ON goal.session_id = event.session_id
@@ -1154,7 +1156,8 @@ pub(crate) async fn load_event(
             .await?
             .ok_or(OutboxCorruption::MissingTypedRecord)?;
             DispatchedOutboxEventKind::GoalTurnRetired {
-                turn: TurnId::from_uuid(turn),
+                turn: TurnId::from_uuid(row.0),
+                goal_event_ordinal: decode_positive_sequence(row.1)?,
             }
         }
         OutboxEventDiscriminator::TurnActivated => {
@@ -2851,6 +2854,7 @@ pub(crate) enum OutboxEvent {
     GoalTurnRetired {
         session: SessionId,
         turn: TurnId,
+        goal_event_ordinal: u64,
     },
     TurnActivated {
         session: SessionId,
@@ -2973,9 +2977,11 @@ pub(crate) async fn append(
             )
             .await
         }
-        OutboxEvent::GoalTurnRetired { session, turn } => {
-            append_goal_turn_retired(connection, session, turn).await
-        }
+        OutboxEvent::GoalTurnRetired {
+            session,
+            turn,
+            goal_event_ordinal,
+        } => append_goal_turn_retired(connection, session, turn, goal_event_ordinal).await,
         OutboxEvent::TurnActivated {
             session,
             turn,
@@ -3251,7 +3257,7 @@ async fn append_tool_batch_transition(
             ("recovery_required", None, Some(attempt))
         }
     };
-    sqlx::query(
+    let event_sequence: Decimal = sqlx::query_scalar(
         "WITH header AS (
             INSERT INTO outbox_event
                 (event_kind, storage_version, session_id)
@@ -3264,7 +3270,8 @@ async fn append_tool_batch_transition(
              tool_attempt_id)
          SELECT event_sequence, event_kind, storage_version, session_id,
                 $4, $5, $6, $7, $8
-           FROM header",
+           FROM header
+         RETURNING event_sequence",
     )
     .bind(TOOL_BATCH_TRANSITION)
     .bind(STORAGE_VERSION)
@@ -3274,7 +3281,88 @@ async fn append_tool_batch_transition(
     .bind(transition)
     .bind(frontier.map(ContextFrontierId::into_uuid))
     .bind(attempt.map(ToolAttemptId::into_uuid))
-    .execute(connection)
+    .fetch_one(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_batch_transition_detail_member
+            (event_sequence, session_id, member_kind, member_index,
+             request_id, attempt_id, approval_judge_escalated,
+             attempt_state_kind, attempt_terminal_disposition_kind,
+             attempt_error_kind, attempt_has_result, attempt_has_failure,
+             attempt_sandbox_posture, attempt_result_text,
+             attempt_error_detail)
+         SELECT $1, $2, 'tool', row_number() OVER (
+                    ORDER BY request.request_ordinal,
+                             generation.generation NULLS FIRST,
+                             attempt.attempt_id NULLS FIRST
+                ) - 1,
+                request.request_id, attempt.attempt_id, EXISTS (
+                    SELECT 1
+                      FROM tool_approval_judge_model_call AS judge
+                     WHERE judge.request_id = request.request_id
+                       AND judge.recommendation_kind = 'escalate_to_human'
+                ),
+                attempt.state_kind, attempt.terminal_disposition_kind,
+                attempt.error_kind,
+                CASE WHEN attempt.attempt_id IS NULL THEN NULL
+                     ELSE attempt.result_text IS NOT NULL END,
+                CASE WHEN attempt.attempt_id IS NULL THEN NULL
+                     ELSE attempt.error_detail IS NOT NULL END,
+                (
+                    SELECT CASE placement.requested_sandbox_profile
+                        WHEN 'ambient' THEN 'unsandboxed'
+                        WHEN 'workspace_restricted' THEN 'sandboxed'
+                    END
+                      FROM runner_physical_attempt_lease_binding
+                           AS sandbox_binding
+                      JOIN runner_lease_generation AS sandbox_lease
+                        ON sandbox_lease.lease_id = sandbox_binding.lease_id
+                       AND sandbox_lease.attempt_id = sandbox_binding.attempt_id
+                      JOIN runner_session_placement_record AS placement
+                        ON placement.session_id = sandbox_lease.session_id
+                       AND placement.event_ordinal =
+                           sandbox_lease.placement_event_ordinal
+                     WHERE sandbox_binding.attempt_id = attempt.attempt_id
+                     ORDER BY sandbox_lease.generation DESC
+                     LIMIT 1
+                ),
+                attempt.result_text, attempt.error_detail
+           FROM tool_request AS request
+           LEFT JOIN tool_attempt AS attempt
+             ON attempt.request_id = request.request_id
+           LEFT JOIN LATERAL (
+                SELECT lease.generation
+                  FROM runner_physical_attempt_lease_binding AS binding
+                  JOIN runner_lease_generation AS lease
+                    ON lease.lease_id = binding.lease_id
+                   AND lease.attempt_id = binding.attempt_id
+                 WHERE binding.attempt_id = attempt.attempt_id
+                 ORDER BY lease.generation DESC
+                 LIMIT 1
+           ) AS generation ON TRUE
+          WHERE request.producing_model_call_id = $3",
+    )
+    .bind(event_sequence)
+    .bind(session_id_to_uuid(session))
+    .bind(producing_call.into_uuid())
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_batch_transition_detail_member
+            (event_sequence, session_id, member_kind, member_index,
+             goal_event_ordinal)
+         SELECT $1, $2, 'goal', row_number() OVER (
+                    ORDER BY request.request_ordinal, event.event_ordinal
+                ) - 1, event.event_ordinal
+           FROM goal_event AS event
+           JOIN tool_request AS request
+             ON request.request_id = event.model_tool_request_id
+          WHERE request.producing_model_call_id = $3",
+    )
+    .bind(event_sequence)
+    .bind(session_id_to_uuid(session))
+    .bind(producing_call.into_uuid())
+    .execute(&mut *connection)
     .await?;
     Ok(())
 }
@@ -3394,6 +3482,7 @@ async fn append_goal_turn_retired(
     connection: &mut PgConnection,
     session: SessionId,
     turn: TurnId,
+    goal_event_ordinal: u64,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
         "WITH header AS (
@@ -3403,14 +3492,16 @@ async fn append_goal_turn_retired(
             RETURNING event_sequence, event_kind, storage_version, session_id
          )
          INSERT INTO goal_turn_retired_outbox_event
-            (event_sequence, event_kind, storage_version, session_id, turn_id)
-         SELECT event_sequence, event_kind, storage_version, session_id, $4
+            (event_sequence, event_kind, storage_version, session_id, turn_id,
+             goal_event_ordinal)
+         SELECT event_sequence, event_kind, storage_version, session_id, $4, $5
            FROM header",
     )
     .bind(GOAL_TURN_RETIRED)
     .bind(STORAGE_VERSION)
     .bind(session_id_to_uuid(session))
     .bind(turn_id_to_uuid(turn))
+    .bind(Decimal::from(goal_event_ordinal))
     .execute(connection)
     .await?;
     Ok(())

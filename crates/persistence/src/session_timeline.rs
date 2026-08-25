@@ -7,13 +7,25 @@ use signalbox_application::{
     SessionTimelineBounds, SessionTimelineDescriptor, SessionTimelineDetail,
     SessionTimelineDetailBody, SessionTimelineDetailPage, SessionTimelineEventKind,
     SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts, SessionTimelineWindow,
-    SessionWorkFacts, TimelineAddress, TimelineBodyContinuation, TimelineBodyField,
-    TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits,
-    TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage, TimelineTextExcerpt,
-    TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    SessionWorkFacts, TimelineAddress, TimelineApprovalActor, TimelineApprovalDecision,
+    TimelineBodyContinuation, TimelineBodyField, TimelineBoundChildAction, TimelineContinuation,
+    TimelineDelegationDetail, TimelineDelegationOutcome, TimelineDelegationPolicy,
+    TimelineDelegationProvenance, TimelineDelegationReason, TimelineDelegationWaitMode,
+    TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits,
+    TimelineGoalBlockedReason, TimelineGoalEvent, TimelineImportedEvidence,
+    TimelineModelCallDisposition, TimelineModelCallState, TimelineModelSettingsDetail,
+    TimelineModelUsage, TimelineReconciliationOperation, TimelineRunnerSandboxPosture,
+    TimelineRunnerState, TimelineTextExcerpt, TimelineToolApprovalPosture, TimelineToolAttempt,
+    TimelineToolBatchState, TimelineToolEffectPosture, TimelineToolSandboxPosture,
+    TimelineToolState, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
     timeline_detail_envelope_bytes,
 };
-use signalbox_domain::{ProviderModelCallFailureCause, ProviderModelIdentity, SessionId, TurnId};
+use signalbox_domain::{
+    ImportedConversationId, ImportedSessionRelationship, ImportedTranscriptEntryId, ModelCallId,
+    ProviderModelCallFailureCause, ProviderModelIdentity, RunnerSandboxProfile, SessionId,
+    ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution, ToolAttemptId,
+    ToolDecisionSource, ToolName, ToolRequestId, TurnId,
+};
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
 use crate::{
@@ -22,8 +34,12 @@ use crate::{
         outbox_event_discriminator_from_str,
     },
     outbox::{
-        DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
-        DispatchedOutboxEventKind, OutboxDispatchError,
+        DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
+        DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
+        DispatchedDelegationWaitMode, DispatchedDelegationWake, DispatchedModelCallDisposition,
+        DispatchedModelCallState, DispatchedOutboxEvent, DispatchedOutboxEventKind,
+        DispatchedReconciliationOperation, DispatchedRunnerState, DispatchedToolBatchState,
+        OutboxDispatchError,
     },
 };
 
@@ -36,8 +52,10 @@ pub enum SessionTimelineCorruption {
     InvalidOrdinal(&'static str),
     UnsupportedEventKind(String),
     ItemProjectionOverflow,
+    InvalidDetailCursor,
     DetailProjectionOverflow,
     MissingDetailRecord,
+    InvalidStoredValue(&'static str),
 }
 
 impl fmt::Display for SessionTimelineCorruption {
@@ -51,11 +69,17 @@ impl fmt::Display for SessionTimelineCorruption {
             Self::ItemProjectionOverflow => {
                 formatter.write_str("session timeline item projection overflowed")
             }
+            Self::InvalidDetailCursor => {
+                formatter.write_str("invalid session timeline detail cursor")
+            }
             Self::DetailProjectionOverflow => {
                 formatter.write_str("session timeline detail projection overflowed")
             }
             Self::MissingDetailRecord => {
                 formatter.write_str("missing session timeline detail record")
+            }
+            Self::InvalidStoredValue(field) => {
+                write!(formatter, "invalid stored session timeline {field}")
             }
         }
     }
@@ -686,17 +710,13 @@ enum DetailEvent {
         turn: TurnId,
         content: ModelResponseSlice,
     },
-    EventFact {
-        sequence: u64,
-        kind: SessionTimelineEventKind,
-    },
 }
 
 impl DetailEvent {
     const fn sequence(&self) -> u64 {
         match self {
             Self::Decoded(event) => event.sequence(),
-            Self::InputAccepted { sequence, .. } | Self::EventFact { sequence, .. } => *sequence,
+            Self::InputAccepted { sequence, .. } => *sequence,
         }
     }
 }
@@ -817,10 +837,6 @@ SELECT event.turn_id,
     }
     if header.discriminator == OutboxEventDiscriminator::DelegationUpdate {
         crate::outbox::validate_delegation_update_fact(transaction, sequence, session).await?;
-        return Ok(Some(DetailEvent::EventFact {
-            sequence,
-            kind: SessionTimelineEventKind::DelegationUpdate,
-        }));
     }
     let (_, event_beyond_allocated, event) =
         crate::outbox::load_event(transaction, sequence).await?;
@@ -871,19 +887,57 @@ async fn project_detail_event(
                 continuation,
             )
         }
-        DetailEvent::EventFact { kind, .. } => {
-            require_no_body_cursor(cursor)?;
-            (
-                *kind,
-                SessionTimelineDetailBody::EventFact { kind: *kind },
-                None,
-            )
-        }
         DetailEvent::Decoded(event) => {
             let kind = dispatched_event_kind(event.kind());
             let (body, body_continuation) = match event.kind() {
                 DispatchedOutboxEventKind::InputAccepted { .. } => {
                     return Err(SessionTimelineCorruption::MissingDetailRecord.into());
+                }
+                DispatchedOutboxEventKind::SessionCreated => {
+                    require_no_body_cursor(cursor)?;
+                    let imported_evidence =
+                        load_imported_evidence(transaction, event.session()).await?;
+                    (
+                        SessionTimelineDetailBody::SessionCreated { imported_evidence },
+                        None,
+                    )
+                }
+                DispatchedOutboxEventKind::SessionModelSettingsChanged(settings) => {
+                    require_no_body_cursor(cursor)?;
+                    (
+                        SessionTimelineDetailBody::ModelSettings {
+                            detail: TimelineModelSettingsDetail::SessionDefaultsChanged {
+                                command_id: settings.command_id(),
+                                prior_defaults_version: settings.prior_defaults_version(),
+                                installed_defaults_version: settings.installed_defaults_version(),
+                                prior_model: settings.prior_model(),
+                                installed_model: settings.installed_model(),
+                                prior_settings: settings.prior_settings(),
+                                installed_settings: settings.installed_settings(),
+                                caller_override: settings.caller_override(),
+                                adjustments: settings.adjustments().to_vec(),
+                            },
+                        },
+                        None,
+                    )
+                }
+                DispatchedOutboxEventKind::TurnModelSettingsResolved(settings) => {
+                    require_no_body_cursor(cursor)?;
+                    (
+                        SessionTimelineDetailBody::ModelSettings {
+                            detail: TimelineModelSettingsDetail::TurnResolved {
+                                accepted_input_id: settings.accepted_input(),
+                                turn_id: settings.turn(),
+                                defaults_version: settings.defaults_version(),
+                                selection: *settings.selection(),
+                                per_call_override: settings.per_call_override(),
+                                settings: settings.settings(),
+                                adjusted_from_selection_id: settings.adjusted_from_selection(),
+                                adjustments: settings.adjustments().to_vec(),
+                            },
+                        },
+                        None,
+                    )
                 }
                 DispatchedOutboxEventKind::ModelCallTransition { turn, call, state } => {
                     require_cursor_field(cursor, TimelineBodyField::ModelResponse, 0)?;
@@ -929,6 +983,124 @@ async fn project_detail_event(
                         continuation,
                     )
                 }
+                DispatchedOutboxEventKind::GoalTurnRetired {
+                    turn,
+                    goal_event_ordinal,
+                } => {
+                    let event = load_goal_turn_event(
+                        transaction,
+                        *turn,
+                        *goal_event_ordinal,
+                        address,
+                        cursor,
+                        &mut remaining,
+                    )
+                    .await?;
+                    let continuation =
+                        goal_event_continuation(&event).map(TimelineDetailContinuation::MoreBody);
+                    (
+                        SessionTimelineDetailBody::GoalEvent {
+                            turn_id: *turn,
+                            event,
+                        },
+                        continuation,
+                    )
+                }
+                DispatchedOutboxEventKind::ToolBatchTransition {
+                    turn,
+                    producing_call,
+                    state,
+                } => {
+                    project_tool_batch(
+                        transaction,
+                        address,
+                        *turn,
+                        *producing_call,
+                        *state,
+                        cursor,
+                        &mut remaining,
+                    )
+                    .await?
+                }
+                DispatchedOutboxEventKind::ToolApprovalDecided {
+                    turn,
+                    approval,
+                    decider,
+                } => {
+                    project_tool_approval(
+                        transaction,
+                        address,
+                        *turn,
+                        approval,
+                        decider,
+                        cursor,
+                        &mut remaining,
+                    )
+                    .await?
+                }
+                DispatchedOutboxEventKind::ContextCompacted {
+                    compaction,
+                    call,
+                    through_position,
+                    summary_entry,
+                    result_frontier,
+                } => {
+                    require_cursor_field(cursor, TimelineBodyField::CompactionSummary, 0)?;
+                    let offset_bytes = cursor.map_or(0, |cursor| cursor.offset_bytes);
+                    let requested_bytes = u64::from(remaining).saturating_add(3);
+                    let requested_bytes = i64::try_from(requested_bytes)
+                        .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?;
+                    let row = sqlx::query(
+                        r#"
+SELECT octet_length(context_summary_value)::numeric AS total_bytes,
+       substring(
+           convert_to(context_summary_value, 'UTF8')
+           FROM (least(
+               $2::numeric,
+               octet_length(context_summary_value)::numeric
+           ) + 1)::integer
+           FOR $3::integer
+       ) AS content_bytes
+  FROM semantic_transcript_entry
+ WHERE semantic_entry_id = $1
+   AND payload_kind = 'context_summary'
+"#,
+                    )
+                    .bind(summary_entry.into_uuid())
+                    .bind(Decimal::from(offset_bytes))
+                    .bind(requested_bytes)
+                    .fetch_one(&mut **transaction)
+                    .await?;
+                    let total_bytes =
+                        nonnegative(row.try_get("total_bytes")?, "context summary byte length")?;
+                    if offset_bytes > total_bytes {
+                        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
+                    }
+                    let summary = bounded_text_excerpt(
+                        &ModelResponseSlice {
+                            bytes: row.try_get("content_bytes")?,
+                            offset_bytes,
+                            total_bytes,
+                        },
+                        address,
+                        TimelineBodyField::CompactionSummary,
+                        &mut remaining,
+                    )?;
+                    let continuation = summary
+                        .continuation
+                        .map(TimelineDetailContinuation::MoreBody);
+                    (
+                        SessionTimelineDetailBody::ContextCompaction {
+                            compaction_id: *compaction,
+                            model_call_id: *call,
+                            through_position: *through_position,
+                            summary_entry_id: *summary_entry,
+                            result_frontier_id: *result_frontier,
+                            summary,
+                        },
+                        continuation,
+                    )
+                }
                 DispatchedOutboxEventKind::TurnActivated { turn, .. } => {
                     require_no_body_cursor(cursor)?;
                     (
@@ -952,21 +1124,54 @@ async fn project_detail_event(
                 DispatchedOutboxEventKind::TurnCancelled { turn, .. } => {
                     terminal_turn_body(*turn, "cancelled", cursor)?
                 }
-                DispatchedOutboxEventKind::TurnReconciliationRequired { turn, .. } => {
-                    terminal_turn_body(*turn, "reconciliation_required", cursor)?
-                }
-                DispatchedOutboxEventKind::SessionCreated
-                | DispatchedOutboxEventKind::SessionModelSettingsChanged(_)
-                | DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
-                | DispatchedOutboxEventKind::GoalTurnRetired { .. }
-                | DispatchedOutboxEventKind::ToolBatchTransition { .. }
-                | DispatchedOutboxEventKind::ToolApprovalDecided { .. }
-                | DispatchedOutboxEventKind::ContextCompacted { .. }
-                | DispatchedOutboxEventKind::RunnerStateTransition { .. }
-                | DispatchedOutboxEventKind::DelegationUpdate(_)
-                | DispatchedOutboxEventKind::DelegationWake(_) => {
+                DispatchedOutboxEventKind::TurnReconciliationRequired {
+                    turn,
+                    operation,
+                    terminal_frontier,
+                } => {
                     require_no_body_cursor(cursor)?;
-                    (SessionTimelineDetailBody::EventFact { kind }, None)
+                    let operation = reconciliation_operation(*operation);
+                    let attempt_count = load_turn_attempt_count(transaction, *turn).await?;
+                    (
+                        SessionTimelineDetailBody::Reconciliation {
+                            turn_id: *turn,
+                            operation,
+                            terminal_frontier_id: *terminal_frontier,
+                            attempt_count,
+                            exhausted: true,
+                            operator_required: true,
+                            cause_code: String::from("ambiguous_operation"),
+                        },
+                        None,
+                    )
+                }
+                DispatchedOutboxEventKind::RunnerStateTransition {
+                    runner,
+                    placement_revision,
+                    sandbox,
+                    working_directory,
+                    state,
+                } => {
+                    require_no_body_cursor(cursor)?;
+                    (
+                        SessionTimelineDetailBody::Runner {
+                            runner_id: *runner,
+                            placement_revision: placement_revision.get(),
+                            sandbox_posture: runner_sandbox(*sandbox),
+                            working_directory: working_directory
+                                .as_ref()
+                                .map(|directory| directory.as_str().to_owned()),
+                            state: runner_state(*state),
+                        },
+                        None,
+                    )
+                }
+                DispatchedOutboxEventKind::DelegationUpdate(update) => {
+                    project_delegation_update(address, update, cursor, &mut remaining)?
+                }
+                DispatchedOutboxEventKind::DelegationWake(wake) => {
+                    require_no_body_cursor(cursor)?;
+                    (delegation_wake_body(*wake), None)
                 }
             };
             (kind, body, body_continuation)
@@ -1008,6 +1213,1026 @@ fn terminal_turn_body(
     ))
 }
 
+async fn load_imported_evidence(
+    transaction: &mut Transaction<'_, Postgres>,
+    session: SessionId,
+) -> Result<Option<TimelineImportedEvidence>, SessionTimelineRepositoryError> {
+    let row = sqlx::query(
+        "SELECT imported_conversation_id, imported_frontier_entry_id,
+                imported_frontier_position, imported_relationship_kind
+           FROM session WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let conversation = row.try_get::<Option<uuid::Uuid>, _>("imported_conversation_id")?;
+    let entry = row.try_get::<Option<uuid::Uuid>, _>("imported_frontier_entry_id")?;
+    let position = row.try_get::<Option<Decimal>, _>("imported_frontier_position")?;
+    let relationship = row.try_get::<Option<String>, _>("imported_relationship_kind")?;
+    match (conversation, entry, position, relationship.as_deref()) {
+        (None, None, None, None) => Ok(None),
+        (Some(conversation), Some(entry), Some(position), Some(relationship)) => {
+            let relationship = match relationship {
+                "resume" => ImportedSessionRelationship::Resume,
+                "fork" => ImportedSessionRelationship::Fork,
+                _ => {
+                    return Err(SessionTimelineCorruption::InvalidStoredValue(
+                        "imported relationship",
+                    )
+                    .into());
+                }
+            };
+            Ok(Some(TimelineImportedEvidence {
+                imported_conversation_id: ImportedConversationId::from_uuid(conversation),
+                imported_entry_id: ImportedTranscriptEntryId::from_uuid(entry),
+                imported_position: nonnegative(position, "imported frontier position")?,
+                relationship,
+            }))
+        }
+        _ => Err(SessionTimelineCorruption::Missing("imported frontier evidence").into()),
+    }
+}
+
+async fn load_goal_turn_event(
+    transaction: &mut Transaction<'_, Postgres>,
+    turn: TurnId,
+    goal_event_ordinal: u64,
+    address: TimelineAddress,
+    cursor: Option<TimelineDetailCursor>,
+    remaining: &mut u32,
+) -> Result<TimelineGoalEvent, SessionTimelineRepositoryError> {
+    require_cursor_field(cursor, TimelineBodyField::GoalText, 0)?;
+    let row = sqlx::query(
+        "SELECT event.generation, event.event_kind, event.blocked_reason,
+                COALESCE(event.statement, event.need, event.guidance, event.report) AS body
+           FROM goal_turn AS goal
+           JOIN goal_event AS event
+             ON event.session_id = goal.session_id
+            AND event.generation = goal.goal_generation
+          WHERE goal.turn_id = $1
+            AND event.event_ordinal = $2",
+    )
+    .bind(turn.into_uuid())
+    .bind(Decimal::from(goal_event_ordinal))
+    .fetch_one(&mut **transaction)
+    .await?;
+    let text = row
+        .try_get::<Option<String>, _>("body")?
+        .map(|text| {
+            excerpt_text(
+                &text,
+                address,
+                TimelineBodyField::GoalText,
+                0,
+                cursor.map_or(0, |cursor| cursor.offset_bytes),
+                remaining,
+            )
+        })
+        .transpose()?;
+    // A textless retiring event is a legitimate stored shape, so a
+    // caller-supplied `goal_text` cursor naming it is an inapplicable query,
+    // not stored corruption.
+    if text.is_none() && cursor.is_some_and(|cursor| !is_item_start_cursor(cursor)) {
+        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
+    }
+    let generation = nonnegative(row.try_get("generation")?, "goal generation")?;
+    let event_kind: String = row.try_get("event_kind")?;
+    let reason: Option<String> = row.try_get("blocked_reason")?;
+    timeline_goal_event(generation, &event_kind, reason.as_deref(), text).map_err(Into::into)
+}
+
+fn timeline_goal_event(
+    generation: u64,
+    event_kind: &str,
+    reason: Option<&str>,
+    text: Option<TimelineTextExcerpt>,
+) -> Result<TimelineGoalEvent, SessionTimelineCorruption> {
+    match goal_event_kind(event_kind)? {
+        StoredGoalEventKind::Commissioned => Ok(TimelineGoalEvent::Commissioned {
+            generation,
+            text: text.ok_or(SessionTimelineCorruption::InvalidStoredValue(
+                "commissioned goal text",
+            ))?,
+        }),
+        StoredGoalEventKind::Blocked => Ok(TimelineGoalEvent::Blocked {
+            generation,
+            reason: reason.map(goal_blocked_reason).transpose()?.ok_or(
+                SessionTimelineCorruption::InvalidStoredValue("blocked goal reason"),
+            )?,
+            text: text.ok_or(SessionTimelineCorruption::InvalidStoredValue(
+                "blocked goal text",
+            ))?,
+        }),
+        StoredGoalEventKind::Resumed if reason.is_none() => {
+            Ok(TimelineGoalEvent::Resumed { generation, text })
+        }
+        StoredGoalEventKind::Achieved if reason.is_none() => Ok(TimelineGoalEvent::Achieved {
+            generation,
+            text: text.ok_or(SessionTimelineCorruption::InvalidStoredValue(
+                "achieved goal text",
+            ))?,
+        }),
+        StoredGoalEventKind::UserStopped if reason.is_none() && text.is_none() => {
+            Ok(TimelineGoalEvent::UserStopped { generation })
+        }
+        StoredGoalEventKind::Superseded if reason.is_none() => Ok(TimelineGoalEvent::Superseded {
+            generation,
+            text: text.ok_or(SessionTimelineCorruption::InvalidStoredValue(
+                "superseded goal text",
+            ))?,
+        }),
+        StoredGoalEventKind::Resumed
+        | StoredGoalEventKind::Achieved
+        | StoredGoalEventKind::UserStopped
+        | StoredGoalEventKind::Superseded => Err(SessionTimelineCorruption::InvalidStoredValue(
+            "goal event shape",
+        )),
+    }
+}
+
+const fn goal_event_continuation(event: &TimelineGoalEvent) -> Option<TimelineBodyContinuation> {
+    match event {
+        TimelineGoalEvent::Commissioned { text, .. }
+        | TimelineGoalEvent::Blocked { text, .. }
+        | TimelineGoalEvent::Achieved { text, .. }
+        | TimelineGoalEvent::Superseded { text, .. } => text.continuation,
+        TimelineGoalEvent::Resumed { text, .. } => match text {
+            Some(text) => text.continuation,
+            None => None,
+        },
+        TimelineGoalEvent::UserStopped { .. } => None,
+    }
+}
+
+async fn project_tool_batch(
+    transaction: &mut Transaction<'_, Postgres>,
+    address: TimelineAddress,
+    turn: TurnId,
+    producing_call: ModelCallId,
+    state: DispatchedToolBatchState,
+    cursor: Option<TimelineDetailCursor>,
+    remaining: &mut u32,
+) -> Result<
+    (
+        SessionTimelineDetailBody,
+        Option<TimelineDetailContinuation>,
+    ),
+    SessionTimelineRepositoryError,
+> {
+    if let Some(cursor) = cursor
+        && cursor.field.is_none()
+        && (cursor.member_index != 0 || cursor.offset_bytes != 0)
+    {
+        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+    }
+    if let Some(goal_cursor) =
+        cursor.filter(|cursor| cursor.field == Some(TimelineBodyField::GoalText))
+    {
+        let goal_row = load_goal_event_row(transaction, address, goal_cursor.member_index)
+            .await?
+            .ok_or(SessionTimelineCorruption::InvalidDetailCursor)?;
+        return project_tool_goal(
+            address,
+            turn,
+            producing_call,
+            state,
+            goal_cursor,
+            goal_row,
+            remaining,
+        );
+    }
+    let requested_field = cursor
+        .and_then(|cursor| cursor.field)
+        .unwrap_or(TimelineBodyField::ToolArguments);
+    if !matches!(
+        requested_field,
+        TimelineBodyField::ToolArguments
+            | TimelineBodyField::ToolResult
+            | TimelineBodyField::ToolFailure
+    ) {
+        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
+    }
+    let member_index = cursor.map_or(0, |cursor| cursor.member_index);
+    let selected_field = match requested_field {
+        TimelineBodyField::ToolArguments => "tool_arguments",
+        TimelineBodyField::ToolResult => "tool_result",
+        TimelineBodyField::ToolFailure => "tool_failure",
+        _ => return Err(SessionTimelineRepositoryError::InvalidDetailQuery),
+    };
+    let row = sqlx::query(
+        "WITH selected_member AS (
+            SELECT request_id, attempt_id, approval_judge_escalated,
+                   attempt_state_kind, attempt_terminal_disposition_kind,
+                   attempt_error_kind, attempt_has_result, attempt_has_failure,
+                   attempt_sandbox_posture, attempt_result_text,
+                   attempt_error_detail
+              FROM tool_batch_transition_detail_member
+             WHERE event_sequence = $1
+               AND member_kind = 'tool'
+               AND member_index = $2
+        )
+        SELECT request.request_id, request.tool_name,
+                CASE $3::text
+                    WHEN 'tool_arguments' THEN request.arguments_text
+                    WHEN 'tool_result' THEN selected.attempt_result_text
+                    WHEN 'tool_failure' THEN selected.attempt_error_detail
+                END AS selected_body,
+                request.approval_posture, selected.attempt_id,
+                attempt.effect_class,
+                selected.attempt_state_kind AS state_kind,
+                selected.attempt_terminal_disposition_kind
+                    AS terminal_disposition_kind,
+                selected.attempt_error_kind AS error_kind,
+                COALESCE(selected.attempt_has_result, FALSE) AS has_result,
+                COALESCE(selected.attempt_has_failure, FALSE) AS has_failure,
+                EXISTS (
+                    SELECT 1
+                      FROM tool_batch_transition_detail_member AS probe
+                     WHERE probe.event_sequence = $1
+                       AND probe.member_kind = 'tool'
+                       AND probe.member_index = $2 + 1
+                ) AS has_next,
+                EXISTS (
+                    SELECT 1 FROM tool_batch_transition_detail_member AS goal
+                     WHERE goal.event_sequence = $1
+                       AND goal.member_kind = 'goal'
+                ) AS has_goal_events,
+                selected.attempt_sandbox_posture AS sandbox_posture,
+                selected.approval_judge_escalated AS judge_escalated
+           FROM selected_member AS selected
+           JOIN tool_request AS request
+             ON request.request_id = selected.request_id
+           LEFT JOIN tool_attempt AS attempt
+             ON attempt.attempt_id = selected.attempt_id",
+    )
+    .bind(Decimal::from(address.sequence().get()))
+    .bind(i64::from(member_index))
+    .bind(selected_field)
+    .fetch_optional(&mut **transaction)
+    .await?;
+    let mut tools = Vec::new();
+    let mut continuation = None;
+    if let Some(row) = row {
+        let selected_body: Option<String> = row.try_get("selected_body")?;
+        let selected = selected_body
+            .as_deref()
+            .ok_or(SessionTimelineRepositoryError::InvalidDetailQuery)?;
+        let excerpt = excerpt_text(
+            selected,
+            address,
+            requested_field,
+            member_index,
+            cursor.map_or(0, |cursor| cursor.offset_bytes),
+            remaining,
+        )?;
+        let has_result: bool = row.try_get("has_result")?;
+        let has_failure: bool = row.try_get("has_failure")?;
+        let has_next: bool = row.try_get("has_next")?;
+        continuation = excerpt
+            .continuation
+            .map(TimelineDetailContinuation::MoreBody)
+            .or_else(|| {
+                next_tool_field(
+                    address,
+                    requested_field,
+                    member_index,
+                    has_result,
+                    has_failure,
+                    has_next,
+                )
+            });
+        let has_goal_events: bool = row.try_get("has_goal_events")?;
+        if continuation.is_none() && has_goal_events {
+            continuation = Some(TimelineDetailContinuation::MoreBody(
+                TimelineBodyContinuation {
+                    address,
+                    field: TimelineBodyField::GoalText,
+                    member_index: 0,
+                    offset_bytes: 0,
+                },
+            ));
+        }
+        let state_kind: Option<String> = row.try_get("state_kind")?;
+        let disposition: Option<String> = row.try_get("terminal_disposition_kind")?;
+        let approval_posture: String = row.try_get("approval_posture")?;
+        let approval_posture = tool_approval_posture(&approval_posture)?;
+        let approval_judge_escalated: bool = row.try_get("judge_escalated")?;
+        let attempt_id: Option<uuid::Uuid> = row.try_get("attempt_id")?;
+        tools.push(TimelineToolAttempt {
+            request_id: ToolRequestId::from_uuid(row.try_get("request_id")?),
+            attempt_id: attempt_id.map(ToolAttemptId::from_uuid),
+            tool_name: ToolName::try_new(row.try_get("tool_name")?)
+                .map_err(|_| SessionTimelineCorruption::InvalidStoredValue("tool name"))?,
+            arguments: (requested_field == TimelineBodyField::ToolArguments)
+                .then_some(excerpt.clone()),
+            result: (requested_field == TimelineBodyField::ToolResult).then_some(excerpt.clone()),
+            failure: (requested_field == TimelineBodyField::ToolFailure).then_some(excerpt),
+            has_result,
+            has_failure,
+            operator_required: approval_judge_escalated
+                || approval_posture == TimelineToolApprovalPosture::Human,
+            approval_posture,
+            approval_judge_escalated,
+            effect_posture: row
+                .try_get::<Option<String>, _>("effect_class")?
+                .as_deref()
+                .map(tool_effect_posture)
+                .transpose()?,
+            sandbox_posture: row
+                .try_get::<Option<String>, _>("sandbox_posture")?
+                .as_deref()
+                .map(tool_sandbox_posture)
+                .transpose()?,
+            state: tool_state(
+                attempt_id.is_some(),
+                state_kind.as_deref(),
+                disposition.as_deref(),
+            )?,
+            cause_code: row.try_get("error_kind")?,
+        });
+    } else if cursor.is_some() {
+        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+    }
+    Ok((
+        SessionTimelineDetailBody::ToolBatch {
+            turn_id: turn,
+            producing_model_call_id: producing_call,
+            state: tool_batch_state(state),
+            projected_member_index: (!tools.is_empty()).then_some(member_index),
+            tools,
+            goal_events: Vec::new(),
+        },
+        continuation,
+    ))
+}
+
+fn next_tool_field(
+    address: TimelineAddress,
+    field: TimelineBodyField,
+    member_index: u32,
+    has_result: bool,
+    has_failure: bool,
+    has_next: bool,
+) -> Option<TimelineDetailContinuation> {
+    let (field, member_index) = match field {
+        TimelineBodyField::ToolArguments if has_result => {
+            (TimelineBodyField::ToolResult, member_index)
+        }
+        TimelineBodyField::ToolArguments if has_failure => {
+            (TimelineBodyField::ToolFailure, member_index)
+        }
+        TimelineBodyField::ToolArguments
+        | TimelineBodyField::ToolResult
+        | TimelineBodyField::ToolFailure
+            if has_next =>
+        {
+            (TimelineBodyField::ToolArguments, member_index + 1)
+        }
+        _ => return None,
+    };
+    Some(TimelineDetailContinuation::MoreBody(
+        TimelineBodyContinuation {
+            address,
+            field,
+            member_index,
+            offset_bytes: 0,
+        },
+    ))
+}
+
+fn tool_state(
+    attempt_present: bool,
+    state: Option<&str>,
+    disposition: Option<&str>,
+) -> Result<Option<TimelineToolState>, SessionTimelineCorruption> {
+    match (attempt_present, state, disposition) {
+        (false, None, None) => Ok(None),
+        (true, Some("prepared"), None) => Ok(Some(TimelineToolState::Prepared)),
+        (true, Some("in_flight"), None) => Ok(Some(TimelineToolState::InFlight)),
+        (true, Some("terminal"), Some("awaiting_child")) => {
+            Ok(Some(TimelineToolState::AwaitingChild))
+        }
+        (true, Some("terminal"), Some("completed")) => Ok(Some(TimelineToolState::Completed)),
+        (true, Some("terminal"), Some("known_failed")) => Ok(Some(TimelineToolState::KnownFailed)),
+        (true, Some("terminal"), Some("ambiguous")) => Ok(Some(TimelineToolState::Ambiguous)),
+        _ => Err(SessionTimelineCorruption::InvalidStoredValue(
+            "tool attempt state",
+        )),
+    }
+}
+
+const fn tool_batch_state(state: DispatchedToolBatchState) -> TimelineToolBatchState {
+    match state {
+        DispatchedToolBatchState::Proposed { frontier } => TimelineToolBatchState::Proposed {
+            frontier_id: frontier,
+        },
+        DispatchedToolBatchState::ResultsProjected { frontier } => {
+            TimelineToolBatchState::ResultsProjected {
+                frontier_id: frontier,
+            }
+        }
+        DispatchedToolBatchState::RecoveryRequired { attempt } => {
+            TimelineToolBatchState::RecoveryRequired {
+                attempt_id: attempt,
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct StoredGoalEvent {
+    generation: u64,
+    event_kind: String,
+    reason: Option<String>,
+    text: Option<String>,
+    has_next: bool,
+}
+
+async fn load_goal_event_row(
+    transaction: &mut Transaction<'_, Postgres>,
+    address: TimelineAddress,
+    member_index: u32,
+) -> Result<Option<StoredGoalEvent>, SessionTimelineRepositoryError> {
+    let row = sqlx::query(
+        "SELECT event.generation, event.event_kind, event.blocked_reason,
+               COALESCE(event.statement, event.need, event.guidance, event.report) AS body,
+               EXISTS (
+                   SELECT 1
+                     FROM tool_batch_transition_detail_member AS probe
+                    WHERE probe.event_sequence = $1
+                      AND probe.member_kind = 'goal'
+                      AND probe.member_index = $2 + 1
+               ) AS has_next
+          FROM tool_batch_transition_detail_member AS selected
+          JOIN goal_event AS event
+            ON event.session_id = selected.session_id
+           AND event.event_ordinal = selected.goal_event_ordinal
+         WHERE selected.event_sequence = $1
+           AND selected.member_kind = 'goal'
+           AND selected.member_index = $2",
+    )
+    .bind(Decimal::from(address.sequence().get()))
+    .bind(i64::from(member_index))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    row.map(|row| {
+        Ok(StoredGoalEvent {
+            generation: nonnegative(row.try_get("generation")?, "goal generation")?,
+            event_kind: row.try_get("event_kind")?,
+            reason: row.try_get("blocked_reason")?,
+            text: row.try_get("body")?,
+            has_next: row.try_get("has_next")?,
+        })
+    })
+    .transpose()
+}
+
+fn project_tool_goal(
+    address: TimelineAddress,
+    turn: TurnId,
+    producing_call: ModelCallId,
+    state: DispatchedToolBatchState,
+    cursor: TimelineDetailCursor,
+    row: StoredGoalEvent,
+    remaining: &mut u32,
+) -> Result<
+    (
+        SessionTimelineDetailBody,
+        Option<TimelineDetailContinuation>,
+    ),
+    SessionTimelineRepositoryError,
+> {
+    // A textless goal event (`user_stopped`, or `resumed` without guidance) is
+    // a legitimate stored shape, so a `goal_text` cursor naming it is a
+    // caller-supplied inapplicable query, not stored corruption.
+    let raw_text = row
+        .text
+        .as_deref()
+        .ok_or(SessionTimelineRepositoryError::InvalidDetailQuery)?;
+    let text = excerpt_text(
+        raw_text,
+        address,
+        TimelineBodyField::GoalText,
+        cursor.member_index,
+        cursor.offset_bytes,
+        remaining,
+    )?;
+    let continuation = text
+        .continuation
+        .map(TimelineDetailContinuation::MoreBody)
+        .or_else(|| {
+            row.has_next.then_some(TimelineDetailContinuation::MoreBody(
+                TimelineBodyContinuation {
+                    address,
+                    field: TimelineBodyField::GoalText,
+                    member_index: cursor.member_index + 1,
+                    offset_bytes: 0,
+                },
+            ))
+        });
+    Ok((
+        SessionTimelineDetailBody::ToolBatch {
+            turn_id: turn,
+            producing_model_call_id: producing_call,
+            state: tool_batch_state(state),
+            projected_member_index: Some(cursor.member_index),
+            tools: Vec::new(),
+            goal_events: vec![timeline_goal_event(
+                row.generation,
+                &row.event_kind,
+                row.reason.as_deref(),
+                Some(text),
+            )?],
+        },
+        continuation,
+    ))
+}
+
+async fn project_tool_approval(
+    transaction: &mut Transaction<'_, Postgres>,
+    address: TimelineAddress,
+    turn: TurnId,
+    approval: &ToolApprovalResolution,
+    decider: &ToolApprovalDecider,
+    cursor: Option<TimelineDetailCursor>,
+    remaining: &mut u32,
+) -> Result<
+    (
+        SessionTimelineDetailBody,
+        Option<TimelineDetailContinuation>,
+    ),
+    SessionTimelineRepositoryError,
+> {
+    let row = sqlx::query(
+        "SELECT request.tool_name, EXISTS (
+             SELECT 1 FROM tool_approval_judge_model_call AS judge
+              WHERE judge.request_id = request.request_id
+                AND judge.recommendation_kind = 'escalate_to_human'
+         ) AS judge_escalated
+           FROM tool_request AS request
+          WHERE request.request_id = $1",
+    )
+    .bind(approval.request().into_uuid())
+    .fetch_one(&mut **transaction)
+    .await?;
+    let tool_name = ToolName::try_new(row.try_get("tool_name")?)
+        .map_err(|_| SessionTimelineCorruption::InvalidStoredValue("tool name"))?;
+    let approval_judge_escalated: bool = row.try_get("judge_escalated")?;
+    let rationale = approval
+        .rationale()
+        .map(|rationale| rationale.as_str())
+        .or_else(|| match approval.decision() {
+            ToolApprovalDecision::Deny {
+                reason: Some(reason),
+            } => Some(reason.as_str()),
+            ToolApprovalDecision::Approve | ToolApprovalDecision::Deny { reason: None } => None,
+        });
+    match rationale {
+        Some(_) => require_cursor_field(cursor, TimelineBodyField::ApprovalRationale, 0)?,
+        None => require_no_body_cursor(cursor)?,
+    }
+    let rationale = rationale
+        .map(|rationale| {
+            excerpt_text(
+                rationale,
+                address,
+                TimelineBodyField::ApprovalRationale,
+                0,
+                cursor.map_or(0, |cursor| cursor.offset_bytes),
+                remaining,
+            )
+        })
+        .transpose()?;
+    let continuation = rationale
+        .as_ref()
+        .and_then(|rationale| rationale.continuation)
+        .map(TimelineDetailContinuation::MoreBody);
+    let decision = match approval.decision() {
+        ToolApprovalDecision::Approve => TimelineApprovalDecision::Approve,
+        ToolApprovalDecision::Deny { .. } => TimelineApprovalDecision::Deny,
+    };
+    let actor = match (approval.source(), decider) {
+        (ToolDecisionSource::UserCommand, ToolApprovalDecider::User { command }) => {
+            TimelineApprovalActor::User {
+                command_id: *command,
+            }
+        }
+        (ToolDecisionSource::Delegate, ToolApprovalDecider::Delegate { model, call }) => {
+            TimelineApprovalActor::Delegate {
+                model_selection_id: *model,
+                model_call_id: *call,
+            }
+        }
+        (ToolDecisionSource::UserOverride, ToolApprovalDecider::UserOverride { command, .. }) => {
+            TimelineApprovalActor::User {
+                command_id: *command,
+            }
+        }
+        (ToolDecisionSource::PolicyAuto, _)
+        | (ToolDecisionSource::SessionBlanket, _)
+        | (ToolDecisionSource::SessionOverride, _) => TimelineApprovalActor::Policy,
+        (
+            ToolDecisionSource::UserCommand | ToolDecisionSource::Delegate,
+            ToolApprovalDecider::UserOverride { .. },
+        )
+        | (
+            ToolDecisionSource::UserOverride,
+            ToolApprovalDecider::User { .. } | ToolApprovalDecider::Delegate { .. },
+        )
+        | (ToolDecisionSource::UserCommand, ToolApprovalDecider::Delegate { .. })
+        | (ToolDecisionSource::Delegate, ToolApprovalDecider::User { .. }) => {
+            return Err(
+                SessionTimelineCorruption::InvalidStoredValue("tool approval actor").into(),
+            );
+        }
+    };
+    Ok((
+        SessionTimelineDetailBody::ToolApprovalDecision {
+            turn_id: turn,
+            request_id: approval.request(),
+            tool_name,
+            decision,
+            actor,
+            rationale,
+            approval_judge_escalated,
+        },
+        continuation,
+    ))
+}
+
+async fn load_turn_attempt_count(
+    transaction: &mut Transaction<'_, Postgres>,
+    turn: TurnId,
+) -> Result<u64, SessionTimelineRepositoryError> {
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM turn_attempt WHERE turn_id = $1")
+        .bind(turn.into_uuid())
+        .fetch_one(&mut **transaction)
+        .await?;
+    u64::try_from(count)
+        .map_err(|_| SessionTimelineCorruption::InvalidOrdinal("turn attempt count").into())
+}
+
+const fn reconciliation_operation(
+    operation: DispatchedReconciliationOperation,
+) -> TimelineReconciliationOperation {
+    match operation {
+        DispatchedReconciliationOperation::ModelCall(call) => {
+            TimelineReconciliationOperation::ModelCall(call)
+        }
+        DispatchedReconciliationOperation::ToolAttempt(attempt) => {
+            TimelineReconciliationOperation::ToolAttempt(attempt)
+        }
+    }
+}
+
+fn tool_approval_posture(
+    value: &str,
+) -> Result<TimelineToolApprovalPosture, SessionTimelineCorruption> {
+    match value {
+        "auto" => Ok(TimelineToolApprovalPosture::Auto),
+        "delegated" => Ok(TimelineToolApprovalPosture::Delegated),
+        "human" => Ok(TimelineToolApprovalPosture::Human),
+        _ => Err(SessionTimelineCorruption::InvalidStoredValue(
+            "tool approval posture",
+        )),
+    }
+}
+
+fn tool_effect_posture(
+    value: &str,
+) -> Result<TimelineToolEffectPosture, SessionTimelineCorruption> {
+    match value {
+        "effect_free" => Ok(TimelineToolEffectPosture::EffectFree),
+        "external_effect" => Ok(TimelineToolEffectPosture::ExternalEffect),
+        _ => Err(SessionTimelineCorruption::InvalidStoredValue(
+            "tool effect posture",
+        )),
+    }
+}
+
+fn tool_sandbox_posture(
+    value: &str,
+) -> Result<TimelineToolSandboxPosture, SessionTimelineCorruption> {
+    match value {
+        "unsandboxed" => Ok(TimelineToolSandboxPosture::Unsandboxed),
+        "sandboxed" => Ok(TimelineToolSandboxPosture::Sandboxed),
+        _ => Err(SessionTimelineCorruption::InvalidStoredValue(
+            "tool sandbox posture",
+        )),
+    }
+}
+
+fn runner_sandbox(sandbox: RunnerSandboxProfile) -> TimelineRunnerSandboxPosture {
+    match sandbox {
+        RunnerSandboxProfile::Ambient => TimelineRunnerSandboxPosture::Unsandboxed,
+        RunnerSandboxProfile::WorkspaceRestricted => TimelineRunnerSandboxPosture::Sandboxed,
+    }
+}
+
+fn runner_state(state: DispatchedRunnerState) -> TimelineRunnerState {
+    match state {
+        DispatchedRunnerState::Pinned => TimelineRunnerState::Pinned,
+        DispatchedRunnerState::Suspect => TimelineRunnerState::Suspect,
+        DispatchedRunnerState::Connected => TimelineRunnerState::Connected,
+        DispatchedRunnerState::RunnerLostBeforePin => TimelineRunnerState::RunnerLostBeforePin,
+        DispatchedRunnerState::RunnerLost => TimelineRunnerState::RunnerLost,
+        DispatchedRunnerState::Replaced => TimelineRunnerState::Replaced,
+        DispatchedRunnerState::WorkingDirectoryChanged => {
+            TimelineRunnerState::WorkingDirectoryChanged
+        }
+        DispatchedRunnerState::Abandoned => TimelineRunnerState::Abandoned,
+    }
+}
+
+fn project_delegation_update(
+    address: TimelineAddress,
+    update: &DispatchedDelegationUpdate,
+    cursor: Option<TimelineDetailCursor>,
+    remaining: &mut u32,
+) -> Result<
+    (
+        SessionTimelineDetailBody,
+        Option<TimelineDetailContinuation>,
+    ),
+    SessionTimelineRepositoryError,
+> {
+    let (detail, continuation) = match update {
+        DispatchedDelegationUpdate::ChildSpawned {
+            spawning_request,
+            child,
+            policy,
+        } => {
+            require_no_body_cursor(cursor)?;
+            (
+                TimelineDelegationDetail::ChildSpawned {
+                    relationship_id: *spawning_request,
+                    child: *child,
+                    policy: delegation_policy(*policy),
+                },
+                None,
+            )
+        }
+        DispatchedDelegationUpdate::ChildWaiting {
+            spawning_request,
+            child,
+            awaiting_request,
+            mode,
+        } => {
+            require_no_body_cursor(cursor)?;
+            (
+                TimelineDelegationDetail::ChildWaiting {
+                    relationship_id: *spawning_request,
+                    child: *child,
+                    awaiting_request: *awaiting_request,
+                    mode: delegation_wait_mode(*mode),
+                },
+                None,
+            )
+        }
+        DispatchedDelegationUpdate::ChildLifecycleDisposition {
+            spawning_request,
+            child,
+            event_ordinal,
+            outcome,
+            reason,
+            provenance,
+        } => {
+            require_no_body_cursor(cursor)?;
+            (
+                TimelineDelegationDetail::ChildLifecycleDisposition {
+                    relationship_id: *spawning_request,
+                    child: *child,
+                    event_ordinal: *event_ordinal,
+                    outcome: delegation_outcome(*outcome),
+                    reason: delegation_reason(*reason),
+                    provenance: delegation_provenance(*provenance),
+                },
+                None,
+            )
+        }
+        DispatchedDelegationUpdate::ChildResult {
+            spawning_request,
+            child,
+            outcome,
+            reason,
+            provenance,
+            content,
+        } => {
+            let content = match content.as_deref() {
+                Some(content) => {
+                    require_cursor_field(cursor, TimelineBodyField::DelegationContent, 0)?;
+                    Some(excerpt_text(
+                        content,
+                        address,
+                        TimelineBodyField::DelegationContent,
+                        0,
+                        cursor.map_or(0, |cursor| cursor.offset_bytes),
+                        remaining,
+                    )?)
+                }
+                None => {
+                    require_no_body_cursor(cursor)?;
+                    None
+                }
+            };
+            let continuation = content
+                .as_ref()
+                .and_then(|content| content.continuation)
+                .map(TimelineDetailContinuation::MoreBody);
+            (
+                TimelineDelegationDetail::ChildResult {
+                    relationship_id: *spawning_request,
+                    child: *child,
+                    outcome: delegation_outcome(*outcome),
+                    reason: delegation_reason(*reason),
+                    provenance: delegation_provenance(*provenance),
+                    content,
+                },
+                continuation,
+            )
+        }
+        DispatchedDelegationUpdate::SessionMessage {
+            spawning_request,
+            message,
+            sender,
+            recipient,
+            message_ordinal,
+            delivery_sequence,
+            content,
+        } => {
+            require_cursor_field(cursor, TimelineBodyField::DelegationContent, 0)?;
+            let content = excerpt_text(
+                content,
+                address,
+                TimelineBodyField::DelegationContent,
+                0,
+                cursor.map_or(0, |cursor| cursor.offset_bytes),
+                remaining,
+            )?;
+            let continuation = content
+                .continuation
+                .map(TimelineDetailContinuation::MoreBody);
+            (
+                TimelineDelegationDetail::SessionMessage {
+                    relationship_id: *spawning_request,
+                    message: *message,
+                    sender: *sender,
+                    recipient: *recipient,
+                    message_ordinal: *message_ordinal,
+                    delivery_sequence: *delivery_sequence,
+                    content,
+                },
+                continuation,
+            )
+        }
+    };
+    Ok((SessionTimelineDetailBody::Delegation(detail), continuation))
+}
+
+fn delegation_wake_body(wake: DispatchedDelegationWake) -> SessionTimelineDetailBody {
+    let detail = match wake {
+        DispatchedDelegationWake::Result {
+            spawning_request,
+            awaiting_request,
+        } => TimelineDelegationDetail::ResultWake {
+            relationship_id: spawning_request,
+            awaiting_request,
+        },
+        DispatchedDelegationWake::Message {
+            spawning_request,
+            message,
+        } => TimelineDelegationDetail::MessageWake {
+            relationship_id: spawning_request,
+            message,
+        },
+    };
+    SessionTimelineDetailBody::Delegation(detail)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StoredGoalEventKind {
+    Commissioned,
+    Blocked,
+    Resumed,
+    Achieved,
+    UserStopped,
+    Superseded,
+}
+
+fn goal_event_kind(value: &str) -> Result<StoredGoalEventKind, SessionTimelineCorruption> {
+    match value {
+        "commissioned" => Ok(StoredGoalEventKind::Commissioned),
+        "blocked" => Ok(StoredGoalEventKind::Blocked),
+        "resumed" => Ok(StoredGoalEventKind::Resumed),
+        "achieved" => Ok(StoredGoalEventKind::Achieved),
+        "user_stopped" => Ok(StoredGoalEventKind::UserStopped),
+        "superseded" => Ok(StoredGoalEventKind::Superseded),
+        _ => Err(SessionTimelineCorruption::InvalidStoredValue(
+            "goal event kind",
+        )),
+    }
+}
+
+fn goal_blocked_reason(
+    value: &str,
+) -> Result<TimelineGoalBlockedReason, SessionTimelineCorruption> {
+    match value {
+        "user_input_required" => Ok(TimelineGoalBlockedReason::UserInputRequired),
+        "external_change_required" => Ok(TimelineGoalBlockedReason::ExternalChangeRequired),
+        "authorization_required" => Ok(TimelineGoalBlockedReason::AuthorizationRequired),
+        "execution_failure" => Ok(TimelineGoalBlockedReason::ExecutionFailure),
+        _ => Err(SessionTimelineCorruption::InvalidStoredValue(
+            "goal blocked reason",
+        )),
+    }
+}
+
+const fn delegation_policy(policy: DispatchedDelegationPolicy) -> TimelineDelegationPolicy {
+    match policy {
+        DispatchedDelegationPolicy::Background => TimelineDelegationPolicy::Background,
+        DispatchedDelegationPolicy::Bound {
+            on_parent_stopped,
+            on_parent_cancelled,
+        } => TimelineDelegationPolicy::Bound {
+            on_parent_stopped: bound_child_action(on_parent_stopped),
+            on_parent_cancelled: bound_child_action(on_parent_cancelled),
+        },
+    }
+}
+
+const fn bound_child_action(action: DispatchedBoundChildAction) -> TimelineBoundChildAction {
+    match action {
+        DispatchedBoundChildAction::KeepRunning => TimelineBoundChildAction::KeepRunning,
+        DispatchedBoundChildAction::Stop => TimelineBoundChildAction::Stop,
+        DispatchedBoundChildAction::Cancel => TimelineBoundChildAction::Cancel,
+    }
+}
+
+const fn delegation_wait_mode(mode: DispatchedDelegationWaitMode) -> TimelineDelegationWaitMode {
+    match mode {
+        DispatchedDelegationWaitMode::Foreground => TimelineDelegationWaitMode::Foreground,
+        DispatchedDelegationWaitMode::Background => TimelineDelegationWaitMode::Background,
+    }
+}
+
+const fn delegation_outcome(outcome: DispatchedDelegationOutcome) -> TimelineDelegationOutcome {
+    match outcome {
+        DispatchedDelegationOutcome::ResultReturned => TimelineDelegationOutcome::ResultReturned,
+        DispatchedDelegationOutcome::ChildFailed => TimelineDelegationOutcome::ChildFailed,
+        DispatchedDelegationOutcome::ChildStopped => TimelineDelegationOutcome::ChildStopped,
+        DispatchedDelegationOutcome::ChildCancelled => TimelineDelegationOutcome::ChildCancelled,
+        DispatchedDelegationOutcome::ContinueRunning => TimelineDelegationOutcome::ContinueRunning,
+        DispatchedDelegationOutcome::AlreadyTerminal => TimelineDelegationOutcome::AlreadyTerminal,
+    }
+}
+
+const fn delegation_reason(reason: DispatchedDelegationReason) -> TimelineDelegationReason {
+    match reason {
+        DispatchedDelegationReason::ChildCompleted => TimelineDelegationReason::ChildCompleted,
+        DispatchedDelegationReason::ChildExecutionFailed => {
+            TimelineDelegationReason::ChildExecutionFailed
+        }
+        DispatchedDelegationReason::ChildResultUnavailable => {
+            TimelineDelegationReason::ChildResultUnavailable
+        }
+        DispatchedDelegationReason::ChildCancelled => TimelineDelegationReason::ChildCancelled,
+        DispatchedDelegationReason::ParentStoppedWithDescendants => {
+            TimelineDelegationReason::ParentStoppedWithDescendants
+        }
+        DispatchedDelegationReason::ParentCancelledWithDescendants => {
+            TimelineDelegationReason::ParentCancelledWithDescendants
+        }
+    }
+}
+
+const fn delegation_provenance(
+    provenance: DispatchedDelegationProvenance,
+) -> TimelineDelegationProvenance {
+    match provenance {
+        DispatchedDelegationProvenance::ChildTurn { session, turn } => {
+            TimelineDelegationProvenance::ChildTurn { session, turn }
+        }
+        DispatchedDelegationProvenance::ParentTurnCommand {
+            session,
+            turn,
+            command,
+        } => TimelineDelegationProvenance::ParentTurnCommand {
+            session,
+            turn,
+            command,
+        },
+        DispatchedDelegationProvenance::ParentGoalCommand {
+            session,
+            goal_generation,
+            command,
+        } => TimelineDelegationProvenance::ParentGoalCommand {
+            session,
+            goal_generation,
+            command,
+        },
+    }
+}
+
 fn require_no_body_cursor(
     cursor: Option<TimelineDetailCursor>,
 ) -> Result<(), SessionTimelineRepositoryError> {
@@ -1037,7 +2262,6 @@ const fn is_item_start_cursor(cursor: TimelineDetailCursor) -> bool {
     cursor.field.is_none() && cursor.member_index == 0 && cursor.offset_bytes == 0
 }
 
-#[cfg(test)]
 fn excerpt_text(
     value: &str,
     address: TimelineAddress,
@@ -1821,5 +3045,145 @@ mod tests {
             response_excerpt(response, address, &mut budget),
             Err(SessionTimelineRepositoryError::InvalidDetailQuery)
         ));
+    }
+
+    #[test]
+    fn tool_detail_advances_from_arguments_to_result() {
+        let address =
+            TimelineAddress::new(NonZeroU64::new(9).expect("fixture address is positive"));
+        let continuation = next_tool_field(
+            address,
+            TimelineBodyField::ToolArguments,
+            3,
+            true,
+            false,
+            true,
+        );
+        let expected = Some(TimelineDetailContinuation::MoreBody(
+            TimelineBodyContinuation {
+                address,
+                field: TimelineBodyField::ToolResult,
+                member_index: 3,
+                offset_bytes: 0,
+            },
+        ));
+
+        assert_eq!(continuation, expected);
+    }
+
+    #[test]
+    fn tool_detail_advances_to_the_next_member_after_failure() {
+        let address =
+            TimelineAddress::new(NonZeroU64::new(10).expect("fixture address is positive"));
+        let continuation = next_tool_field(
+            address,
+            TimelineBodyField::ToolFailure,
+            4,
+            false,
+            true,
+            true,
+        );
+        let expected = Some(TimelineDetailContinuation::MoreBody(
+            TimelineBodyContinuation {
+                address,
+                field: TimelineBodyField::ToolArguments,
+                member_index: 5,
+                offset_bytes: 0,
+            },
+        ));
+
+        assert_eq!(continuation, expected);
+    }
+
+    #[test]
+    fn absent_tool_attempt_has_no_state() {
+        assert_eq!(tool_state(false, None, None), Ok(None));
+    }
+
+    #[test]
+    fn awaiting_child_tool_attempt_has_a_closed_state() {
+        assert_eq!(
+            tool_state(true, Some("terminal"), Some("awaiting_child")),
+            Ok(Some(TimelineToolState::AwaitingChild))
+        );
+    }
+
+    #[test]
+    fn goal_vocabulary_maps_known_values_and_rejects_unknown_values() {
+        assert_eq!(
+            goal_event_kind("commissioned"),
+            Ok(StoredGoalEventKind::Commissioned)
+        );
+        assert_eq!(
+            goal_event_kind("superseded"),
+            Ok(StoredGoalEventKind::Superseded)
+        );
+        assert_eq!(
+            goal_blocked_reason("user_input_required"),
+            Ok(TimelineGoalBlockedReason::UserInputRequired)
+        );
+        assert_eq!(
+            goal_blocked_reason("execution_failure"),
+            Ok(TimelineGoalBlockedReason::ExecutionFailure)
+        );
+        assert_eq!(
+            goal_event_kind("future_event"),
+            Err(SessionTimelineCorruption::InvalidStoredValue(
+                "goal event kind"
+            ))
+        );
+        assert_eq!(
+            goal_blocked_reason("future_reason"),
+            Err(SessionTimelineCorruption::InvalidStoredValue(
+                "goal blocked reason"
+            ))
+        );
+    }
+
+    #[test]
+    fn item_start_cursor_is_valid_without_a_body_field() {
+        let address =
+            TimelineAddress::new(NonZeroU64::new(11).expect("fixture address is positive"));
+
+        assert!(is_item_start_cursor(TimelineDetailCursor {
+            address,
+            field: None,
+            member_index: 0,
+            offset_bytes: 0,
+        }));
+        assert!(!is_item_start_cursor(TimelineDetailCursor {
+            address,
+            field: Some(TimelineBodyField::GoalText),
+            member_index: 0,
+            offset_bytes: 1,
+        }));
+    }
+
+    #[test]
+    fn delegation_policy_preserves_background_and_bound_actions() {
+        assert_eq!(
+            delegation_policy(DispatchedDelegationPolicy::Background),
+            TimelineDelegationPolicy::Background
+        );
+        assert_eq!(
+            delegation_policy(DispatchedDelegationPolicy::Bound {
+                on_parent_stopped: DispatchedBoundChildAction::Stop,
+                on_parent_cancelled: DispatchedBoundChildAction::Cancel,
+            }),
+            TimelineDelegationPolicy::Bound {
+                on_parent_stopped: TimelineBoundChildAction::Stop,
+                on_parent_cancelled: TimelineBoundChildAction::Cancel,
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_present_tool_attempt_state_fails_closed() {
+        assert_eq!(
+            tool_state(true, Some("future_state"), None),
+            Err(SessionTimelineCorruption::InvalidStoredValue(
+                "tool attempt state"
+            ))
+        );
     }
 }

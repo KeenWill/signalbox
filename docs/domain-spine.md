@@ -6860,6 +6860,13 @@ impl TimelineDetailLimits {
 pub enum TimelineBodyField {
     InputText,
     ModelResponse,
+    ToolArguments,
+    ToolResult,
+    ToolFailure,
+    ApprovalRationale,
+    GoalText,
+    CompactionSummary,
+    DelegationContent,
 }
 pub struct TimelineBodyContinuation {
     pub address: TimelineAddress,
@@ -6908,16 +6915,112 @@ pub struct TimelineModelUsage {
     pub cache_read_input_tokens: Option<u64>,
 }
 pub enum TimelineTurnLifecycleKind { Activated, Terminalized }
-pub enum SessionTimelineDetailBody {
-    UserInput { turn_id: TurnId, /* excerpt and references */ },
-    ModelCall {
-        turn_id: TurnId,
+pub enum TimelineToolState {
+    Prepared, InFlight, AwaitingChild, Completed, KnownFailed, Ambiguous,
+}
+pub enum TimelineToolApprovalPosture { Auto, Delegated, Human }
+pub enum TimelineToolEffectPosture { EffectFree, ExternalEffect }
+pub enum TimelineToolSandboxPosture { Unsandboxed, Sandboxed }
+pub enum TimelineToolBatchState {
+    Proposed { frontier_id: ContextFrontierId },
+    ResultsProjected { frontier_id: ContextFrontierId },
+    RecoveryRequired { attempt_id: ToolAttemptId },
+}
+pub struct TimelineToolAttempt { /* fields */ }
+// Tool-batch detail also carries the selected immutable snapshot member index
+// so browser continuation validation can enforce exact ordinal transitions.
+pub enum TimelineApprovalDecision { Approve, Deny }
+pub enum TimelineApprovalActor {
+    Policy,
+    User { command_id: DurableCommandId },
+    Delegate {
+        model_selection_id: DirectModelSelection,
         model_call_id: ModelCallId,
-        model_identity_id: ProviderModelIdentity,
-        /* state, bounded response, usage, and cause */
     },
-    TurnLifecycle { turn_id: TurnId, /* lifecycle and cause */ },
-    EventFact { kind: SessionTimelineEventKind },
+}
+pub enum TimelineRunnerSandboxPosture { Unsandboxed, Sandboxed }
+pub enum TimelineRunnerState {
+    Pinned, Suspect, Connected, RunnerLostBeforePin, RunnerLost, Replaced,
+    WorkingDirectoryChanged, Abandoned,
+}
+pub enum TimelineGoalBlockedReason {
+    UserInputRequired, ExternalChangeRequired, AuthorizationRequired,
+    ExecutionFailure,
+}
+pub enum TimelineGoalEvent {
+    Commissioned { /* fields */ },
+    Blocked { /* fields */ },
+    Resumed { /* fields */ },
+    Achieved { /* fields */ },
+    UserStopped { /* fields */ },
+    Superseded { /* fields */ },
+}
+pub enum TimelineModelSettingsDetail {
+    SessionDefaultsChanged { /* complete prior and installed settings evidence */ },
+    TurnResolved { /* complete frozen turn settings evidence */ },
+}
+pub enum TimelineBoundChildAction { KeepRunning, Stop, Cancel }
+pub enum TimelineDelegationPolicy {
+    Background,
+    Bound {
+        on_parent_stopped: TimelineBoundChildAction,
+        on_parent_cancelled: TimelineBoundChildAction,
+    },
+}
+pub enum TimelineDelegationWaitMode { Foreground, Background }
+pub enum TimelineDelegationOutcome {
+    ResultReturned, ChildFailed, ChildStopped, ChildCancelled, ContinueRunning,
+    AlreadyTerminal,
+}
+pub enum TimelineDelegationReason {
+    ChildCompleted, ChildExecutionFailed, ChildResultUnavailable, ChildCancelled,
+    ParentStoppedWithDescendants, ParentCancelledWithDescendants,
+}
+pub enum TimelineDelegationProvenance {
+    ChildTurn { session: SessionId, turn: TurnId },
+    ParentTurnCommand {
+        session: SessionId,
+        turn: TurnId,
+        command: DurableCommandId,
+    },
+    ParentGoalCommand {
+        session: SessionId,
+        goal_generation: u64,
+        command: DurableCommandId,
+    },
+}
+pub enum TimelineDelegationDetail {
+    ChildSpawned { /* fields */ },
+    ChildWaiting { /* fields */ },
+    ChildLifecycleDisposition { /* fields */ },
+    ChildResult { /* fields */ },
+    SessionMessage { /* fields */ },
+    ResultWake { /* fields */ },
+    MessageWake { /* fields */ },
+}
+pub struct TimelineImportedEvidence {
+    pub imported_conversation_id: ImportedConversationId,
+    pub imported_entry_id: ImportedTranscriptEntryId,
+    pub imported_position: u64,
+    pub relationship: ImportedSessionRelationship,
+}
+pub enum TimelineReconciliationOperation {
+    ModelCall(ModelCallId),
+    ToolAttempt(ToolAttemptId),
+}
+pub enum SessionTimelineDetailBody {
+    SessionCreated { /* fields */ },
+    ModelSettings { /* fields */ },
+    UserInput { /* fields */ },
+    ModelCall { /* fields */ },
+    ToolBatch { /* fields */ },
+    ToolApprovalDecision { /* fields */ },
+    GoalEvent { /* fields */ },
+    ContextCompaction { /* fields */ },
+    TurnLifecycle { /* fields */ },
+    Reconciliation { /* fields */ },
+    Runner { /* fields */ },
+    Delegation(TimelineDelegationDetail),
 }
 pub struct SessionTimelineDetail {
     pub address: TimelineAddress,
@@ -11982,7 +12085,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
-| application: session_timeline                      | 29 (+7 free fn) (incl. 1 trait)  |
+| application: session_timeline                      | 51 (+7 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 36 (incl. 8 traits)              |
 | application: tool_loop                             | 27 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
@@ -12003,4 +12106,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 13                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **372 (+21 free fn)**            |
+| **signalbox-application total**                    | **394 (+21 free fn)**            |

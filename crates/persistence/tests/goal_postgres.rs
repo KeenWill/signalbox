@@ -1307,6 +1307,7 @@ async fn inv048_supersede_retires_the_obsolete_queued_turn() -> Result<(), Box<d
         retired.kind(),
         &DispatchedOutboxEventKind::GoalTurnRetired {
             turn: obsolete.turn(),
+            goal_event_ordinal: 2,
         }
     );
 
