@@ -5,7 +5,7 @@ use signalbox_file_media_runtime::{
 };
 
 use crate::{
-    CSV_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME,
+    CSV_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, PROBE_PREFIX_BYTES, STRUCTURED_VIEW_NAME,
     json_adapter::{self, ProbeExtent},
     read_input_is_empty, source,
 };
@@ -25,12 +25,19 @@ pub(crate) async fn probe(
     };
     let json_suppresses_csv = matches!(extent, ProbeExtent::CompleteSource)
         && json_adapter::is_complete_json_document(&prefix);
-    let candidate = !json_suppresses_csv
-        && source::probe_utf8(&prefix).is_some_and(|text| has_record_structure(text, extent));
+    let probe_text = match extent {
+        ProbeExtent::CompleteSource => std::str::from_utf8(&prefix).ok(),
+        ProbeExtent::TruncatedPrefix => source::probe_utf8(&prefix),
+    };
+    let candidate =
+        !json_suppresses_csv && probe_text.is_some_and(|text| has_record_structure(text, extent));
     if candidate {
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(CSV_MEDIA_TYPE),
-            strength: ProbeStrength::StructuralCandidate,
+            strength: match extent {
+                ProbeExtent::CompleteSource => ProbeStrength::StructuralCandidate,
+                ProbeExtent::TruncatedPrefix => ProbeStrength::ProvisionalStructuralCandidate,
+            },
         })
     } else {
         Ok(ProcessorProbeOutput::NoMatch)
@@ -68,6 +75,11 @@ pub(crate) async fn inspect(
     let table = match parse_table(&text, MAX_OBSERVED_CONTAINER_ENTRIES) {
         Ok(table) => table,
         Err(reason) => {
+            if matches!(request.evidence, ValidationEvidence::StructuralValidation)
+                && initial_probe_was_provisional(text.as_bytes())
+            {
+                return Ok(ProcessorValidationOutput::NoMatch);
+            }
             let declared_csv_shape = matches!(
                 request.evidence,
                 ValidationEvidence::DeclaredCandidateStructurallyValidated
@@ -204,6 +216,14 @@ pub(crate) fn has_record_structure(text: &str, extent: ProbeExtent) -> bool {
     };
     second.len() == first.len()
         && records.all(|record| record.is_ok_and(|record| record.len() == first.len()))
+}
+
+fn initial_probe_was_provisional(bytes: &[u8]) -> bool {
+    usize::try_from(PROBE_PREFIX_BYTES)
+        .ok()
+        .and_then(|length| bytes.get(..length))
+        .and_then(source::probe_utf8)
+        .is_some_and(|text| has_record_structure(text, ProbeExtent::TruncatedPrefix))
 }
 
 fn has_declared_record_structure(text: &str) -> bool {

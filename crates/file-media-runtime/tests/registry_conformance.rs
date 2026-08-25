@@ -415,6 +415,49 @@ impl FileMediaProcessor for SelectionProcessor {
     }
 }
 
+struct ProvisionalCollisionProcessor;
+
+impl FileMediaProcessor for ProvisionalCollisionProcessor {
+    fn probe<'a>(
+        &'a self,
+        reader: &'a ReaderIdentity,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
+        Box::pin(async move {
+            let media_type = match reader.provider().as_str() {
+                "first" => SYNTHETIC_MEDIA_TYPE,
+                "second" => OTHER_SYNTHETIC_MEDIA_TYPE,
+                _ => return Err(ProcessorFailure::Failed.into()),
+            };
+            Ok(ProcessorProbeOutput::Candidate {
+                media_type: String::from(media_type),
+                strength: ProbeStrength::ProvisionalStructuralCandidate,
+            })
+        })
+    }
+
+    fn validate<'a>(
+        &'a self,
+        _reader: &'a ReaderIdentity,
+        _request: FileMediaProviderValidationRequest,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
+        Box::pin(async { Ok(ProcessorValidationOutput::NoMatch) })
+    }
+
+    fn read<'a>(
+        &'a self,
+        _reader: &'a ReaderIdentity,
+        _request: FileMediaProviderReadRequest,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
+        Box::pin(async { Err(ProcessorFailure::Failed.into()) })
+    }
+}
+
 fn selection_registry(
     owned_media_type: &str,
     streaming_text_fallback: StreamingTextFallback,
@@ -677,6 +720,32 @@ fn provisional_structural_validation_no_match_resumes_fallback() {
 
     let FileInspection::Unknown { .. } = outcome else {
         panic!("provisional structural validation miss must become unknown");
+    };
+}
+
+#[test]
+fn all_provisional_collision_misses_resume_fallback() {
+    let source = MemorySource::synthetic();
+    let registry = FileMediaRegistry::try_new(
+        vec![
+            provider_declaration("first", SYNTHETIC_MEDIA_TYPE),
+            provider_declaration("second", OTHER_SYNTHETIC_MEDIA_TYPE),
+        ],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    )
+    .expect("distinct provisional claims are registrable");
+
+    let outcome = inspect(
+        &registry,
+        &ProvisionalCollisionProcessor,
+        &source,
+        "unknown",
+    )
+    .expect("all provisional collision misses resume fallback");
+
+    let FileInspection::Unknown { .. } = outcome else {
+        panic!("all provisional collision misses must become unknown");
     };
 }
 

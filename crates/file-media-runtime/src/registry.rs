@@ -364,6 +364,9 @@ impl FileMediaRegistry {
                 });
             }
 
+            let all_candidates_provisional = candidates.iter().all(|candidate| {
+                candidate.strength == ProbeStrength::ProvisionalStructuralCandidate
+            });
             let validations = async {
                 let mut successful = Vec::new();
                 let mut malformed = Vec::new();
@@ -413,6 +416,15 @@ impl FileMediaRegistry {
             }
             if successful.is_empty() && malformed.is_empty() && encrypted.len() == 1 {
                 return encrypted.pop().ok_or(FileMediaFailure::ProcessorFailed);
+            }
+            if all_candidates_provisional
+                && successful.is_empty()
+                && malformed.is_empty()
+                && encrypted.is_empty()
+            {
+                return Ok(FileInspection::Unknown {
+                    source: request.source,
+                });
             }
             return Ok(FileInspection::Ambiguous {
                 source: request.source,

@@ -37,6 +37,16 @@ async fn utf8_text_rejects_a_truncated_scalar_as_typed_malformed() -> Result<(),
 }
 
 #[tokio::test]
+async fn complete_source_json_probe_does_not_drop_invalid_utf8_suffix() -> Result<(), Box<dyn Error>>
+{
+    let source = MemorySource::new(vec![b'{', b'}', 0xc3]);
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_malformed_reason(inspection, "invalid_utf8");
+    Ok(())
+}
+
+#[tokio::test]
 async fn utf8_text_rejects_oversized_input_with_registered_reason() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::oversized(b'a'));
 
@@ -769,6 +779,21 @@ async fn csv_probe_ignores_a_partial_trailing_record() -> Result<(), Box<dyn Err
             detected: "text/csv",
         },
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn truncated_csv_probe_with_later_prose_resumes_text_fallback() -> Result<(), Box<dyn Error>>
+{
+    let mut bytes = b"name,value\nalpha,1\n".to_vec();
+    while bytes.len() < 4_096 {
+        bytes.extend_from_slice(b"beta,2\n");
+    }
+    bytes.extend_from_slice(b"plain prose\n");
+    let source = MemorySource::new(bytes);
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_validated_media(inspection, "text/plain");
     Ok(())
 }
 
