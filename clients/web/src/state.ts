@@ -3,10 +3,10 @@ import { useDispatch, useSelector } from 'react-redux'
 import type { AttentionSyncPhase } from './attention'
 import {
   type BrowserPreferences,
+  createDefaultBrowserPreferences,
   isBoundedLogicalPosition,
   loadBrowserPreferences,
   MAX_SAVED_LOGICAL_POSITIONS,
-  type RemoteMediaPolicy,
   saveBrowserPreferences,
   serializeBrowserPreferences,
 } from './preferences'
@@ -74,8 +74,8 @@ const appSlice = createSlice({
       state.paneSizes = action.payload
       state.activitySequence += 1
     },
-    remoteMediaSet(state, action: { payload: RemoteMediaPolicy }) {
-      state.remoteMedia = action.payload
+    preferencesReset(state) {
+      Object.assign(state, createDefaultBrowserPreferences())
       state.activitySequence += 1
     },
     logicalPositionRecorded(state, action: { payload: { sessionId: string; position: string } }) {
@@ -93,9 +93,7 @@ const appSlice = createSlice({
           detail: state.detail,
           theme: state.theme,
           paneSizes: state.paneSizes,
-          remoteMedia: state.remoteMedia,
           lastLogicalPositions,
-          keyOverrides: state.keyOverrides,
         }) === null
       ) {
         return
@@ -145,7 +143,7 @@ const preferenceActionTypes = new Set<string>([
   appSlice.actions.detailSet.type,
   appSlice.actions.themeSet.type,
   appSlice.actions.paneSizesSet.type,
-  appSlice.actions.remoteMediaSet.type,
+  appSlice.actions.preferencesReset.type,
   appSlice.actions.logicalPositionRecorded.type,
 ])
 const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
@@ -163,9 +161,7 @@ const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
       detail: app.detail,
       theme: app.theme,
       paneSizes: app.paneSizes,
-      remoteMedia: app.remoteMedia,
       lastLogicalPositions: app.lastLogicalPositions,
-      keyOverrides: app.keyOverrides,
     })
   }
   return result
@@ -176,7 +172,7 @@ export const createAppStore = () =>
     reducer: { app: appSlice.reducer },
     middleware: (getDefaultMiddleware) =>
       getDefaultMiddleware().concat(traceMiddleware, preferenceMiddleware),
-    devTools: { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false },
+    devTools: import.meta.env.DEV ? { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false } : false,
   })
 
 export const store = createAppStore()

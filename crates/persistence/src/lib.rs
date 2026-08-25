@@ -13,6 +13,7 @@ pub mod attention;
 pub mod blob;
 pub mod commissioned_dispatch;
 pub mod context_compaction;
+pub mod convergence_sweep;
 pub mod conversation_import;
 pub mod conversation_listing;
 pub mod create_session;
@@ -21,7 +22,9 @@ pub mod goal;
 pub mod goal_turn;
 pub mod hub_fence;
 pub mod mapping;
+pub mod model_call_reconciliation;
 pub mod model_execution;
+pub mod operator_status;
 pub mod outbox;
 pub mod plan;
 pub mod process_read;
@@ -41,11 +44,15 @@ pub mod session_credentials;
 pub mod session_delegation;
 pub mod session_metadata;
 pub mod session_placement;
+pub mod session_timeline;
 pub mod start_eligible_turn;
 pub mod startup;
 pub mod submit_input;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod tool_loop;
 pub mod turn_liveness;
+pub mod workspace_instructions;
 
 pub use session_credentials::{
     ModelCredentialFamilyCatalog, ModelCredentialFamilyCatalogError, SessionCredentialPin,
