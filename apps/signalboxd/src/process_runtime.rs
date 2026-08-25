@@ -118,6 +118,13 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError},
     goal_turn::GoalTurnCandidates,
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
+    operator_status::{
+        ProcessOperatorStatusConvergenceSeal, ProcessOperatorStatusConvergenceVerdict,
+        ProcessOperatorStatusError, ProcessOperatorStatusHeldSlotBlocker,
+        ProcessOperatorStatusHeldSlotOrigin, ProcessOperatorStatusItem,
+        ProcessOperatorStatusMergeableState, ProcessOperatorStatusRepository,
+        ProcessOperatorStatusReviewDecision, ProcessOperatorStatusSingletonScope,
+    },
     outbox::{
         DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
         DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
@@ -178,8 +185,17 @@ use signalbox_process_protocol::{
     ModelChangeAdjustment as WireModelChangeAdjustment, ModelSelection as WireModelSelection,
     ModelSettingSource as WireModelSettingSource, ModelSettingsOverlay as WireModelSettingsOverlay,
     ModelSettingsPrecedence as WireModelSettingsPrecedence,
-    ModelSettingsSnapshot as WireModelSettingsSnapshot, PositiveCanonicalU64, ProtocolVersion,
-    ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
+    ModelSettingsSnapshot as WireModelSettingsSnapshot,
+    OperatorStatusConvergenceSeal as WireOperatorStatusConvergenceSeal,
+    OperatorStatusConvergenceVerdict as WireOperatorStatusConvergenceVerdict,
+    OperatorStatusEndMessage, OperatorStatusHeldSlotBlocker as WireOperatorStatusHeldSlotBlocker,
+    OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
+    OperatorStatusMergeableState as WireOperatorStatusMergeableState, OperatorStatusMessage,
+    OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
+    OperatorStatusQueuedObligationMessage,
+    OperatorStatusReviewDecision as WireOperatorStatusReviewDecision,
+    OperatorStatusSingletonScope as WireOperatorStatusSingletonScope, PositiveCanonicalU64,
+    ProtocolVersion, ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
     ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingEvent as WireReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
     ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle, ReviewPassSnapshot,
@@ -1017,7 +1033,7 @@ async fn serve_connection(
             !active_lifecycle_request,
         )
         .or_else(|| acquired_bulk_ingest_at.map(|started| started + BULK_INGEST_SESSION_TIMEOUT));
-        let request_result = handle_request(
+        let request_result = Box::pin(handle_request(
             &mut reader,
             &mut writer,
             version,
@@ -1032,7 +1048,7 @@ async fn serve_connection(
             },
             &services,
             shutdown.clone(),
-        );
+        ));
         tokio::select! {
             biased;
             () = wait_for_deadline(operation_deadline) => return Ok(()),
@@ -1188,6 +1204,7 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
         | ClientRequest::ListSessions {}
+        | ClientRequest::ReadOperatorStatus {}
         | ClientRequest::UpdateSessionPlacement { .. }
         | ClientRequest::AttachGoal { .. }
         | ClientRequest::ReadGoal { .. }
@@ -1372,6 +1389,7 @@ impl SnapshotReaderAdmission {
     const fn for_request(request: &ClientRequest) -> Self {
         match request {
             ClientRequest::ListSessions {}
+            | ClientRequest::ReadOperatorStatus {}
             | ClientRequest::ReadGoal { .. }
             | ClientRequest::ReadTranscript { .. }
             | ClientRequest::FollowSession { .. }
@@ -1740,6 +1758,19 @@ where
                 return Ok(());
             };
             handle_list_sessions(writer, version, request_id, &services.pool, snapshot_permit).await
+        }
+        ClientRequest::ReadOperatorStatus {} => {
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            Box::pin(handle_operator_status(
+                writer,
+                version,
+                request_id,
+                &services.pool,
+                snapshot_permit,
+            ))
+            .await
         }
         ClientRequest::UpdateSessionPlacement {
             command_id,
@@ -9316,6 +9347,50 @@ where
     write_spooled_file(writer, &mut spool.file).await
 }
 
+async fn handle_operator_status<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let spool_result = spool_operator_status(
+        ProcessOperatorStatusRepository::new(pool.clone()),
+        version,
+        request_id,
+    )
+    .await;
+    drop(snapshot_permit);
+    let mut spool = match spool_result {
+        Ok(spool) => spool,
+        Err(OperatorStatusSpoolError::Read(ProcessOperatorStatusError::Database(_))) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await;
+        }
+        Err(OperatorStatusSpoolError::Read(ProcessOperatorStatusError::Corruption(_))) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(None, InternalDiagnostic::OperatorStatusCorruption),
+            )
+            .await;
+        }
+        Err(OperatorStatusSpoolError::Spool(error)) => {
+            return write_snapshot_spool_error(writer, version, request_id, error).await;
+        }
+    };
+    write_spooled_file(writer, &mut spool.file).await
+}
+
 async fn handle_list_model_aliases<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -9427,6 +9502,11 @@ struct SessionListSpool {
 
 enum SessionListSpoolError {
     Read(ProcessReadError),
+    Spool(SnapshotSpoolError),
+}
+
+enum OperatorStatusSpoolError {
+    Read(ProcessOperatorStatusError),
     Spool(SnapshotSpoolError),
 }
 
@@ -9547,6 +9627,284 @@ async fn spool_session_summaries(
         .map_err(SnapshotSpoolError::Io)
         .map_err(SessionListSpoolError::Spool)?;
     Ok(SessionListSpool { file })
+}
+
+async fn spool_operator_status(
+    repository: ProcessOperatorStatusRepository,
+    version: ProtocolVersion,
+    request_id: RequestId,
+) -> Result<SessionListSpool, OperatorStatusSpoolError> {
+    let mut reader = repository
+        .open()
+        .await
+        .map_err(OperatorStatusSpoolError::Read)?;
+    let standard_file = tempfile::tempfile()
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::Start {})),
+    )
+    .await
+    .map_err(OperatorStatusSpoolError::Spool)?;
+    while let Some(item) = reader
+        .next_item()
+        .await
+        .map_err(OperatorStatusSpoolError::Read)?
+    {
+        write_spool_message(
+            &mut file,
+            version,
+            request_id,
+            wire_operator_status_item(item),
+        )
+        .await
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    }
+    let counts = reader
+        .counts()
+        .ok_or(SnapshotSpoolError::EncodeInvariant)
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
+            OperatorStatusEndMessage {
+                held_slot_count: CanonicalU64::new(counts.held_slots()),
+                queued_obligation_count: CanonicalU64::new(counts.queued_obligations()),
+                pull_request_convergence_count: CanonicalU64::new(
+                    counts.pull_request_convergences(),
+                ),
+                pending_stale_review_clearance_count: CanonicalU64::new(
+                    counts.pending_stale_review_clearances(),
+                ),
+            },
+        )))),
+    )
+    .await
+    .map_err(OperatorStatusSpoolError::Spool)?;
+    file.flush()
+        .await
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    Ok(SessionListSpool { file })
+}
+
+fn wire_operator_status_item(item: ProcessOperatorStatusItem) -> ServerMessage {
+    match item {
+        ProcessOperatorStatusItem::HeldSlot(item) => {
+            let singleton = item.singleton();
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
+                OperatorStatusHeldSlotMessage {
+                    dispatch_id: wire_uuid(item.dispatch_id()),
+                    repository: item.repository().to_owned(),
+                    origin: wire_operator_status_held_slot_origin(item.origin()),
+                    rule_id: item.rule_id().to_owned(),
+                    rule_version: CanonicalU64::new(item.rule_version()),
+                    singleton_scope: wire_operator_status_singleton_scope(singleton.scope()),
+                    singleton_repository: singleton.repository().map(str::to_owned),
+                    singleton_pull_request_number: singleton
+                        .pull_request_number()
+                        .map(CanonicalU64::new),
+                    singleton_stack_root_pull_request_number: singleton
+                        .stack_root_pull_request_number()
+                        .map(CanonicalU64::new),
+                    held_for_seconds: CanonicalU64::new(item.held_for_seconds()),
+                    session_ids: item.session_ids().iter().copied().map(wire_uuid).collect(),
+                    blockers: item
+                        .blockers()
+                        .iter()
+                        .copied()
+                        .map(wire_operator_status_blocker)
+                        .collect(),
+                },
+            ))))
+        }
+        ProcessOperatorStatusItem::QueuedObligation(item) => {
+            let singleton = item.singleton();
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
+                Box::new(OperatorStatusQueuedObligationMessage {
+                    obligation_id: wire_uuid(item.obligation_id()),
+                    repository: item.repository().to_owned(),
+                    rule_id: item.rule_id().to_owned(),
+                    rule_version: CanonicalU64::new(item.rule_version()),
+                    singleton_scope: wire_operator_status_singleton_scope(singleton.scope()),
+                    singleton_repository: singleton.repository().map(str::to_owned),
+                    singleton_pull_request_number: singleton
+                        .pull_request_number()
+                        .map(CanonicalU64::new),
+                    singleton_stack_root_pull_request_number: singleton
+                        .stack_root_pull_request_number()
+                        .map(CanonicalU64::new),
+                    first_event_id: wire_uuid(item.first_event_id()),
+                    latest_event_id: wire_uuid(item.latest_event_id()),
+                    matched_event_count: CanonicalU64::new(item.matched_event_count()),
+                    waiting_for_seconds: CanonicalU64::new(item.waiting_for_seconds()),
+                    occupying_dispatch_id: item.occupying_dispatch_id().map(wire_uuid),
+                    occupying_session_ids: item
+                        .occupying_session_ids()
+                        .iter()
+                        .copied()
+                        .map(wire_uuid)
+                        .collect(),
+                    cooldown_remaining_seconds: item
+                        .cooldown_remaining_seconds()
+                        .map(CanonicalU64::new),
+                    cooldown_never_eligible: item.cooldown_never_eligible(),
+                    ready: item.ready(),
+                }),
+            )))
+        }
+        ProcessOperatorStatusItem::PullRequestConvergence(item) => {
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+                Box::new(OperatorStatusPullRequestConvergenceMessage {
+                    repository: item.repository().to_owned(),
+                    pull_request_number: CanonicalU64::new(item.pull_request_number()),
+                    head_sha: item.head_sha().to_owned(),
+                    base_branch: item.base_branch().to_owned(),
+                    base_revision: item.base_revision().to_owned(),
+                    mergeable_state: wire_operator_status_mergeable_state(item.mergeable_state()),
+                    review_decision: wire_operator_status_review_decision(item.review_decision()),
+                    unresolved_thread_count: CanonicalU64::new(item.unresolved_thread_count()),
+                    gating_check_count: CanonicalU64::new(item.gating_check_count()),
+                    non_green_gating_checks: item.non_green_gating_checks().to_vec(),
+                    verdict: wire_operator_status_verdict(item.verdict()),
+                    seal: item.seal().map(wire_operator_status_seal),
+                    assessed_seconds_ago: CanonicalU64::new(item.assessed_seconds_ago()),
+                }),
+            )))
+        }
+        ProcessOperatorStatusItem::PendingStaleReviewClearance(item) => {
+            ServerMessage::OperatorStatus(Box::new(
+                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
+                    OperatorStatusPendingStaleReviewClearanceMessage {
+                        repository: item.repository().to_owned(),
+                        pull_request_number: CanonicalU64::new(item.pull_request_number()),
+                        current_head_sha: item.current_head_sha().to_owned(),
+                        review_node_id: item.review_node_id().to_owned(),
+                        reviewer: item.reviewer().to_owned(),
+                        reviewed_head_sha: item.reviewed_head_sha().to_owned(),
+                        pending_for_seconds: CanonicalU64::new(item.pending_for_seconds()),
+                    },
+                )),
+            ))
+        }
+    }
+}
+
+fn wire_operator_status_held_slot_origin(
+    origin: &ProcessOperatorStatusHeldSlotOrigin,
+) -> OperatorStatusHeldSlotOrigin {
+    match origin {
+        ProcessOperatorStatusHeldSlotOrigin::PullRequest { number } => {
+            OperatorStatusHeldSlotOrigin::PullRequest {
+                pull_request_number: CanonicalU64::new(*number),
+            }
+        }
+        ProcessOperatorStatusHeldSlotOrigin::Branch { branch } => {
+            OperatorStatusHeldSlotOrigin::Branch {
+                branch: branch.clone(),
+            }
+        }
+    }
+}
+
+fn wire_operator_status_singleton_scope(
+    scope: ProcessOperatorStatusSingletonScope,
+) -> WireOperatorStatusSingletonScope {
+    match scope {
+        ProcessOperatorStatusSingletonScope::PullRequest => {
+            WireOperatorStatusSingletonScope::PullRequest
+        }
+        ProcessOperatorStatusSingletonScope::Stack => WireOperatorStatusSingletonScope::Stack,
+        ProcessOperatorStatusSingletonScope::Rule => WireOperatorStatusSingletonScope::Rule,
+        ProcessOperatorStatusSingletonScope::Repo => WireOperatorStatusSingletonScope::Repo,
+    }
+}
+
+fn wire_operator_status_blocker(
+    blocker: ProcessOperatorStatusHeldSlotBlocker,
+) -> WireOperatorStatusHeldSlotBlocker {
+    match blocker {
+        ProcessOperatorStatusHeldSlotBlocker::UndeliveredAction => {
+            WireOperatorStatusHeldSlotBlocker::UndeliveredAction
+        }
+        ProcessOperatorStatusHeldSlotBlocker::DeliveryTurnRuntimeRelevant => {
+            WireOperatorStatusHeldSlotBlocker::DeliveryTurnRuntimeRelevant
+        }
+        ProcessOperatorStatusHeldSlotBlocker::LiveRuntimeTurn => {
+            WireOperatorStatusHeldSlotBlocker::LiveRuntimeTurn
+        }
+        ProcessOperatorStatusHeldSlotBlocker::PursuingGoal => {
+            WireOperatorStatusHeldSlotBlocker::PursuingGoal
+        }
+    }
+}
+
+fn wire_operator_status_mergeable_state(
+    state: ProcessOperatorStatusMergeableState,
+) -> WireOperatorStatusMergeableState {
+    match state {
+        ProcessOperatorStatusMergeableState::Mergeable => {
+            WireOperatorStatusMergeableState::Mergeable
+        }
+        ProcessOperatorStatusMergeableState::Conflicting => {
+            WireOperatorStatusMergeableState::Conflicting
+        }
+        ProcessOperatorStatusMergeableState::Unknown => WireOperatorStatusMergeableState::Unknown,
+    }
+}
+
+fn wire_operator_status_review_decision(
+    decision: ProcessOperatorStatusReviewDecision,
+) -> WireOperatorStatusReviewDecision {
+    match decision {
+        ProcessOperatorStatusReviewDecision::None => WireOperatorStatusReviewDecision::None,
+        ProcessOperatorStatusReviewDecision::Approved => WireOperatorStatusReviewDecision::Approved,
+        ProcessOperatorStatusReviewDecision::ReviewRequired => {
+            WireOperatorStatusReviewDecision::ReviewRequired
+        }
+        ProcessOperatorStatusReviewDecision::ChangesRequested => {
+            WireOperatorStatusReviewDecision::ChangesRequested
+        }
+    }
+}
+
+fn wire_operator_status_verdict(
+    verdict: ProcessOperatorStatusConvergenceVerdict,
+) -> WireOperatorStatusConvergenceVerdict {
+    match verdict {
+        ProcessOperatorStatusConvergenceVerdict::NotConverged => {
+            WireOperatorStatusConvergenceVerdict::NotConverged
+        }
+        ProcessOperatorStatusConvergenceVerdict::InternallyConverged => {
+            WireOperatorStatusConvergenceVerdict::InternallyConverged
+        }
+        ProcessOperatorStatusConvergenceVerdict::MergeReady => {
+            WireOperatorStatusConvergenceVerdict::MergeReady
+        }
+    }
+}
+
+fn wire_operator_status_seal(
+    seal: ProcessOperatorStatusConvergenceSeal,
+) -> WireOperatorStatusConvergenceSeal {
+    match seal {
+        ProcessOperatorStatusConvergenceSeal::InternallyConverged => {
+            WireOperatorStatusConvergenceSeal::InternallyConverged
+        }
+        ProcessOperatorStatusConvergenceSeal::MergeReady => {
+            WireOperatorStatusConvergenceSeal::MergeReady
+        }
+    }
 }
 
 struct WireMetadataPageRequest {
@@ -13708,6 +14066,7 @@ enum InternalDiagnostic {
     ToolLoopCorruption,
     ToolLoopInvalidTransition,
     ProcessReadCorruption,
+    OperatorStatusCorruption,
     GoalRepositoryCorruption,
 }
 
@@ -13777,6 +14136,7 @@ impl InternalDiagnostic {
             | Self::SubmitInputModelExecutionCorruption
             | Self::ToolLoopCorruption
             | Self::ProcessReadCorruption
+            | Self::OperatorStatusCorruption
             | Self::GoalRepositoryCorruption => OperatorFailureClass::FailClosedCorruption,
         }
     }
@@ -13854,6 +14214,7 @@ impl InternalDiagnostic {
             Self::ToolLoopCorruption => "tool_loop_corruption",
             Self::ToolLoopInvalidTransition => "tool_loop_invalid_transition",
             Self::ProcessReadCorruption => "process_read_corruption",
+            Self::OperatorStatusCorruption => "operator_status_corruption",
             Self::GoalRepositoryCorruption => "goal_repository_corruption",
         }
     }

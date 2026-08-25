@@ -333,6 +333,7 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         panic!("the model-call fixture turn must activate");
     };
     assert_eq!(activated.turn(), turn);
+    record_empty_instruction_manifest(&pool, session).await?;
 
     let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe1));
     let resolved_target = ResolvedProviderTarget::naming(provider_identity);
@@ -370,6 +371,84 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
         panic!("a fresh call must stop at its Prepared checkpoint");
     };
     assert_eq!(checkpointed_call, call);
+
+    sqlx::query(
+        "ALTER TABLE turn_instruction_manifest
+         DISABLE TRIGGER turn_instruction_manifest_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_instruction_manifest
+            SET manifest_hash = $1
+          WHERE session_id = $2
+            AND turn_id = $3",
+    )
+    .bind([0_u8; 32].as_slice())
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_instruction_manifest
+          ENABLE TRIGGER turn_instruction_manifest_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    let corrupted_manifest = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(0xce3)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde9)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xee9)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xfe9)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf9)),
+                    TurnId::from_uuid(Uuid::from_u128(0xdfa)),
+                )
+            },
+        )
+        .await
+        .expect_err("reconstitution must authenticate the exact turn instruction manifest");
+    assert!(matches!(
+        corrupted_manifest,
+        ModelCallRepositoryError::Corruption(_)
+    ));
+    sqlx::query(
+        "ALTER TABLE turn_instruction_manifest
+         DISABLE TRIGGER turn_instruction_manifest_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "UPDATE turn_instruction_manifest
+            SET manifest_hash = $1
+          WHERE session_id = $2
+            AND turn_id = $3",
+    )
+    .bind(
+        signalbox_domain::TurnInstructionManifest::empty_turn_start(
+            signalbox_domain::TurnInstructionManifestId::from_uuid(turn.into_uuid()),
+            session,
+            turn,
+        )
+        .manifest_hash()
+        .as_bytes()
+        .as_slice(),
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "ALTER TABLE turn_instruction_manifest
+          ENABLE TRIGGER turn_instruction_manifest_is_append_only",
+    )
+    .execute(&pool)
+    .await?;
 
     let repository = PostgresModelCallRepository::new(
         pool.clone(),
@@ -712,12 +791,13 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
 
     let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x19e1));
     let turn = TurnId::from_uuid(Uuid::from_u128(0x1ae1));
+    let initial_content = "service user request";
     SubmitInputRepository::new(pool.clone())
         .handle(
             start_input(
                 0x14e2,
                 0x18e1,
-                "service user request",
+                initial_content,
                 1,
                 ModelSelectionOverride::UseSessionDefault,
             ),
@@ -740,15 +820,17 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         activation.execute(session).await?,
         StartEligibleTurnOutcome::Activated(_)
     ));
+    record_empty_instruction_manifest(&pool, session).await?;
     let steering_inputs = [
         AcceptedInputId::from_uuid(Uuid::from_u128(0x19e2)),
         AcceptedInputId::from_uuid(Uuid::from_u128(0x19e3)),
     ];
     let submit_repository = SubmitInputRepository::new(pool.clone());
+    let first_steering_content = "first steering";
     let first_steering_command = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0x14e3)),
         session,
-        UserContent::try_text(String::from("first steering"))
+        UserContent::try_text(String::from(first_steering_content))
             .expect("fixture steering content is admitted"),
         DeliveryRequest::NextSafePoint {
             expected_active_turn: turn,
@@ -763,10 +845,11 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             SubmitInputAppliedResult::PendingSteering(_)
         ))
     ));
+    let second_steering_content = "second steering";
     let second_steering_command = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0x14e4)),
         session,
-        UserContent::try_text(String::from("second steering"))
+        UserContent::try_text(String::from(second_steering_content))
             .expect("fixture steering content is admitted"),
         DeliveryRequest::NextSafePoint {
             expected_active_turn: turn,
@@ -944,13 +1027,13 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         &prepared_snapshot.entries()[1],
         steering_inputs[0],
         turn,
-        "first steering",
+        first_steering_content,
     );
     assert_projected_steering_entry(
         &prepared_snapshot.entries()[2],
         steering_inputs[1],
         turn,
-        "second steering",
+        second_steering_content,
     );
     sqlx::query("ALTER TABLE context_frontier_delta DISABLE TRIGGER USER")
         .execute(&pool)
@@ -1024,33 +1107,36 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
         .last_prepared_messages()
         .expect("the scripted provider observed the prepared messages");
     assert_eq!(messages.len(), 3);
-    assert!(matches!(
-        &messages[0],
-        ModelConversationMessage::User {
-            accepted_input: message_input,
-            content,
-            ..
-        } if *message_input == accepted_input
-            && content.text().as_str() == "service user request"
-    ));
-    assert!(matches!(
-        &messages[1],
-        ModelConversationMessage::User {
-            accepted_input: message_input,
-            content,
-            ..
-        } if *message_input == steering_inputs[0]
-            && content.text().as_str() == "first steering"
-    ));
-    assert!(matches!(
-        &messages[2],
-        ModelConversationMessage::User {
-            accepted_input: message_input,
-            content,
-            ..
-        } if *message_input == steering_inputs[1]
-            && content.text().as_str() == "second steering"
-    ));
+    let ModelConversationMessage::User {
+        accepted_input: message_input,
+        content,
+        ..
+    } = &messages[0]
+    else {
+        panic!("the first provider message is the turn-origin user input");
+    };
+    assert_eq!(*message_input, accepted_input);
+    assert_eq!(content.text().as_str(), initial_content);
+    let ModelConversationMessage::User {
+        accepted_input: message_input,
+        content,
+        ..
+    } = &messages[1]
+    else {
+        panic!("the second provider message is the first steering input");
+    };
+    assert_eq!(*message_input, steering_inputs[0]);
+    assert_eq!(content.text().as_str(), first_steering_content);
+    let ModelConversationMessage::User {
+        accepted_input: message_input,
+        content,
+        ..
+    } = &messages[2]
+    else {
+        panic!("the third provider message is the second steering input");
+    };
+    assert_eq!(*message_input, steering_inputs[1]);
+    assert_eq!(content.text().as_str(), second_steering_content);
 
     let durable_terminal: (i64, i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -2278,6 +2364,7 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
         activated_interrupt.turn(),
         TurnId::from_uuid(Uuid::from_u128(0x6203))
     );
+    record_empty_instruction_manifest(&restarted_pool, stopped.session).await?;
     let empty_targets =
         ModelTargetCatalog::try_from_definitions([]).expect("an empty target catalog is valid");
     let target_miss = PostgresModelCallRepository::new(
@@ -2474,6 +2561,7 @@ async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pend
         source_activation.execute(session).await?,
         StartEligibleTurnOutcome::Activated(_)
     ));
+    record_empty_instruction_manifest(&pool, session).await?;
 
     let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe4));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
@@ -3002,6 +3090,7 @@ async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_ste
         panic!("the target-miss fixture turn must activate");
     };
     assert_eq!(activated.turn(), turn);
+    record_empty_instruction_manifest(&pool, session).await?;
 
     let pending_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9f2));
     let reclassified_turn = TurnId::from_uuid(Uuid::from_u128(0xaf2));

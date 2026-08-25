@@ -17,8 +17,8 @@ use signalbox_application::{
     RepoWatchEventIdGenerator, RepoWatchEventOccurrenceV1, RepoWatchObservation,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewDecision,
-    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
-    derive_repo_watch_events,
+    RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWorkflowRunObservation, derive_repo_watch_events,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, GitHubObjectId, LabelName,
@@ -72,6 +72,7 @@ const REACTION_CONTENT: &str = "+1";
 // — or `head_sha` where it should read `review_commit` — still satisfy the
 // round trip, so a cross-wired durable column would be invisible here.
 const REVIEW_REVIEWER: &str = "fixture-reviewer";
+const REVIEW_NODE: &str = "PRR_fixture_review_node";
 const REVIEW_COMMIT: &str = "3333333333333333333333333333333333333333";
 const REACTOR: &str = "fixture-reactor";
 const PULL_REQUEST: u64 = 41;
@@ -196,6 +197,14 @@ fn pull_request_with_threads(
     head: &str,
     threads: Vec<RepoWatchThreadObservation>,
 ) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
+    pull_request_state(head, threads, MergeableState::Mergeable)
+}
+
+fn pull_request_state(
+    head: &str,
+    threads: Vec<RepoWatchThreadObservation>,
+    mergeable_state: MergeableState,
+) -> Result<RepoWatchPullRequestState, Box<dyn Error>> {
     Ok(RepoWatchPullRequestState::try_new(
         RepoWatchPullRequestStateInput {
             context: PullRequestEventContext::new(PullRequestEventContextInput {
@@ -211,7 +220,7 @@ fn pull_request_with_threads(
                 author: Some(RepoWatchAuthorLogin::try_new(AUTHOR.to_owned())?),
             }),
             lifecycle: RepoWatchPullRequestLifecycle::Open,
-            mergeable_state: MergeableState::Mergeable,
+            mergeable_state,
             completed_check_suites: vec![RepoWatchCheckSuiteObservation::new(
                 GitHubObjectId::new(CHECK_SUITE_ID.try_into()?),
                 RepoWatchCheckCompletionGeneration::try_new(String::from(
@@ -273,6 +282,129 @@ fn merge_ready_assessment(
             review_decision: RepoWatchReviewDecision::None,
             unresolved_threads: Vec::new(),
             gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+/// The same stale-review evidence with the gating check the candidate rule
+/// requires, so the head's only remaining blocker really is the review.
+fn clearable_stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+fn stale_review_clearance_candidate(
+    assessment: &RepoWatchConvergenceAssessment,
+) -> Result<RepoWatchStaleReviewClearanceCandidate, Box<dyn Error>> {
+    Ok(RepoWatchStaleReviewClearanceCandidate::try_new(
+        assessment,
+        String::from(REVIEW_NODE),
+        RepoWatchAuthorLogin::try_new(REVIEW_REVIEWER.to_owned())?,
+        CommitSha::try_new(REVIEW_COMMIT.to_owned())?,
+    )?)
+}
+
+/// The same stale-review evidence for a head that has not finished registering
+/// and completing its exact-head checks, so its empty non-green list is the
+/// absence of evidence rather than evidence of a green head.
+fn unsettled_stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            settled: false,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+/// The same stale-review evidence recorded while GitHub had not decided the
+/// head's mergeability. `unknown` is that pending state, never affirmative
+/// evidence that the head merges.
+fn undecided_mergeability_stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Unknown,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        },
+    )?)
+}
+
+/// The cursor an assessment carrying `unknown` mergeability is recorded
+/// against: recorded evidence must restate the observed mergeable state.
+fn undecided_mergeability_candidate(
+    head: &str,
+) -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
+    Ok(RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+        Vec::new(),
+        RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+            pull_requests: vec![pull_request_state(
+                head,
+                Vec::new(),
+                MergeableState::Unknown,
+            )?],
+            workflow_runs: Vec::new(),
+            branch_heads: vec![RepoWatchBranchHead::new(
+                BranchName::try_new(BASE_BRANCH.to_owned())?,
+                CommitSha::try_new(BASE_REVISION.to_owned())?,
+            )],
+        })?,
+    )))
+}
+
+/// Stale-review evidence for a head that ran no gating check at all. Its empty
+/// non-green list is indistinguishable from a fully green head's.
+fn stale_review_assessment(
+    head: &str,
+    base_revision: &str,
+) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+    Ok(RepoWatchConvergenceAssessment::try_new(
+        RepoWatchConvergenceAssessmentInput {
+            number: PullRequestNumber::new(PULL_REQUEST.try_into()?),
+            head_sha: CommitSha::try_new(head.to_owned())?,
+            base_branch: BranchName::try_new(BASE_BRANCH.to_owned())?,
+            base_revision: CommitSha::try_new(base_revision.to_owned())?,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
             non_green_gating_checks: Vec::new(),
         },
     )?)
@@ -936,8 +1068,8 @@ async fn evidence_replay_after_a_head_round_trip_uses_the_candidate_head()
             .fetch_one(&pool)
             .await?;
 
-    assert_eq!(assessment_count, 2);
-    assert_eq!(first_head_assessment_count, 1);
+    assert_eq!(assessment_count, 3);
+    assert_eq!(first_head_assessment_count, 2);
     assert_eq!(current_head, INITIAL_HEAD);
     assert_eq!(identity_count, 3);
     Ok(())
@@ -1024,8 +1156,8 @@ async fn evidence_replay_after_a_base_round_trip_uses_the_candidate_base()
             .fetch_one(&pool)
             .await?;
 
-    assert_eq!(assessment_count, 2);
-    assert_eq!(first_base_assessment_count, 1);
+    assert_eq!(assessment_count, 3);
+    assert_eq!(first_base_assessment_count, 2);
     assert_eq!(current_base, BASE_REVISION);
     assert_eq!(identity_count, 3);
     Ok(())
@@ -1247,6 +1379,272 @@ async fn append_only_guards_reject_update_delete_and_truncate() -> Result<(), Bo
     assert!(update.is_err());
     assert!(delete.is_err());
     assert!(truncate.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv073_stale_review_clearance_journals_are_append_only() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+            &[stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let assessment_id: Uuid = sqlx::query_scalar(
+        "SELECT assessment_id
+           FROM repo_watch_pull_request_convergence_assessment
+          WHERE repository = $1 AND head_sha = $2",
+    )
+    .bind(repository.as_str())
+    .bind(INITIAL_HEAD)
+    .fetch_one(&pool)
+    .await?;
+    let clearance_id = Uuid::from_u128(0x70_001);
+    sqlx::query(
+        "INSERT INTO repo_watch_stale_review_clearance
+            (clearance_id, assessment_id, repository, pull_request_number,
+             current_head_sha, base_revision, review_node_id, reviewer,
+             reviewed_head_sha, dismissal_message)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+    )
+    .bind(clearance_id)
+    .bind(assessment_id)
+    .bind(repository.as_str())
+    .bind(i64::try_from(PULL_REQUEST)?)
+    .bind(INITIAL_HEAD)
+    .bind(BASE_REVISION)
+    .bind("review-node-70")
+    .bind(REVIEW_REVIEWER)
+    .bind(REVIEW_COMMIT)
+    .bind("fixture stale-review dismissal")
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_stale_review_clearance_result
+            (clearance_id, outcome_kind, provider_review_state)
+         VALUES ($1, 'dismissed', 'dismissed')",
+    )
+    .bind(clearance_id)
+    .execute(&pool)
+    .await?;
+
+    let intent_update = sqlx::query(
+        "UPDATE repo_watch_stale_review_clearance SET reviewer = $1 WHERE clearance_id = $2",
+    )
+    .bind(AUTHOR)
+    .bind(clearance_id)
+    .execute(&pool)
+    .await;
+    let intent_delete =
+        sqlx::query("DELETE FROM repo_watch_stale_review_clearance WHERE clearance_id = $1")
+            .bind(clearance_id)
+            .execute(&pool)
+            .await;
+    let intent_truncate = sqlx::query("TRUNCATE repo_watch_stale_review_clearance CASCADE")
+        .execute(&pool)
+        .await;
+    let result_update = sqlx::query(
+        "UPDATE repo_watch_stale_review_clearance_result SET observed_at = clock_timestamp() WHERE clearance_id = $1",
+    )
+    .bind(clearance_id)
+    .execute(&pool)
+    .await;
+    let result_delete =
+        sqlx::query("DELETE FROM repo_watch_stale_review_clearance_result WHERE clearance_id = $1")
+            .bind(clearance_id)
+            .execute(&pool)
+            .await;
+    let result_truncate = sqlx::query("TRUNCATE repo_watch_stale_review_clearance_result CASCADE")
+        .execute(&pool)
+        .await;
+
+    assert!(intent_update.is_err());
+    assert!(intent_delete.is_err());
+    assert!(intent_truncate.is_err());
+    assert!(result_update.is_err());
+    assert!(result_delete.is_err());
+    assert!(result_truncate.is_err());
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_stale_review_clearance_plans_against_its_recorded_assessment()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let assessment = clearable_stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?;
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+                std::slice::from_ref(&assessment),
+            )
+            .await?,
+    );
+
+    let planned = store
+        .plan_stale_review_clearances(
+            &repository,
+            generation,
+            &[stale_review_clearance_candidate(&assessment)?],
+        )
+        .await?;
+
+    assert_eq!(planned.len(), 1);
+    assert_eq!(planned[0].review_node_id(), REVIEW_NODE);
+    assert_eq!(planned[0].reviewer().as_str(), REVIEW_REVIEWER);
+    assert_eq!(planned[0].reviewed_head_sha().as_str(), REVIEW_COMMIT);
+    assert_eq!(planned[0].current_head_sha().as_str(), INITIAL_HEAD);
+    assert_eq!(planned[0].base_revision().as_str(), BASE_REVISION);
+    Ok(())
+}
+
+/// The durable gate reads the recorded assessment, not the candidate's own
+/// evidence, so it refuses a head whose committed convergence row counted no
+/// gating check even when the in-memory candidate was admissible. Without that
+/// term the daemon would dismiss a blocking review on a pull request whose only
+/// gate was the review itself.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_recorded_assessment_without_a_gating_check_plans_no_clearance()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+                &[stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let candidate = stale_review_clearance_candidate(&clearable_stale_review_assessment(
+        INITIAL_HEAD,
+        BASE_REVISION,
+    )?)?;
+
+    let planned = store
+        .plan_stale_review_clearances(&repository, generation, &[candidate])
+        .await;
+
+    assert!(matches!(
+        planned,
+        Err(RepoWatchStoreError::StaleReviewClearanceMismatch)
+    ));
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_stale_review_clearance")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(intents, 0);
+    Ok(())
+}
+
+/// Another watcher can append a newer assessment for the unchanged cursor while
+/// this watcher reconciles the candidate it raised, and the durable gate reads
+/// that newest row. An unsettled head has not finished registering and
+/// completing its exact-head checks, so planning against it would link a
+/// dismissal intent claiming `only_stale_review_blocks` to evidence recording a
+/// second blocker.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_unsettled_newer_assessment_plans_no_clearance() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let assessment = clearable_stale_review_assessment(INITIAL_HEAD, BASE_REVISION)?;
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+                std::slice::from_ref(&assessment),
+            )
+            .await?,
+    );
+    store
+        .record_convergence_assessments(
+            &repository,
+            generation,
+            &[unsettled_stale_review_assessment(
+                INITIAL_HEAD,
+                BASE_REVISION,
+            )?],
+        )
+        .await?;
+
+    let planned = store
+        .plan_stale_review_clearances(
+            &repository,
+            generation,
+            &[stale_review_clearance_candidate(&assessment)?],
+        )
+        .await;
+
+    assert!(matches!(
+        planned,
+        Err(RepoWatchStoreError::StaleReviewClearanceMismatch)
+    ));
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_stale_review_clearance")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(intents, 0);
+    Ok(())
+}
+
+/// The durable gate proves mergeability against the recorded row rather than
+/// inferring it from the settlement recorded beside it, so evidence GitHub had
+/// not decided plans nothing even when its writer called the head settled.
+/// `unknown` is that pending state, and dismissing against it would claim the
+/// review was the head's only blocker while the recorded evidence names
+/// mergeability as another.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_undecided_mergeability_assessment_plans_no_clearance() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(
+                    None,
+                    undecided_mergeability_candidate(INITIAL_HEAD)?,
+                    Vec::new(),
+                ),
+                &[undecided_mergeability_stale_review_assessment(
+                    INITIAL_HEAD,
+                    BASE_REVISION,
+                )?],
+            )
+            .await?,
+    );
+    let candidate = stale_review_clearance_candidate(&clearable_stale_review_assessment(
+        INITIAL_HEAD,
+        BASE_REVISION,
+    )?)?;
+
+    let planned = store
+        .plan_stale_review_clearances(&repository, generation, &[candidate])
+        .await;
+
+    assert!(matches!(
+        planned,
+        Err(RepoWatchStoreError::StaleReviewClearanceMismatch)
+    ));
+    let intents: i64 = sqlx::query_scalar("SELECT count(*) FROM repo_watch_stale_review_clearance")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(intents, 0);
     Ok(())
 }
 

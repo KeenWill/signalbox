@@ -34,6 +34,7 @@ mod tool_loop;
 mod tool_loop_ports;
 mod turn_liveness;
 mod update_session_placement;
+mod workspace_instructions;
 
 pub use approval_judge::{
     ApprovalJudgeAuthorization, ApprovalJudgeBranchAuthority, ApprovalJudgeBranchAuthorityInput,
@@ -118,9 +119,10 @@ pub use repo_watch::{
     RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
     RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
     RepoWatchReviewObservation, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchSingletonKey, RepoWatchTemplateResolver, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    RepoWatchSingletonKey, RepoWatchStaleReviewClearanceCandidate,
+    RepoWatchStaleReviewClearanceCandidateError, RepoWatchTemplateResolver,
+    RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
     repo_watch_events_have_equal_identified_content,
 };
 pub use repo_watch_webhook::{
@@ -226,4 +228,8 @@ pub use turn_liveness::{
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
     UpdateSessionPlacementTransaction,
+};
+pub use workspace_instructions::{
+    InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
+    InstructionDiscoveryRoot, InstructionDiscoverySnapshot, discover_workspace_instructions,
 };

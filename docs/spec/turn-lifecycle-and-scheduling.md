@@ -12,7 +12,7 @@ transition into runner recovery was verified against this PR
 resumption of that transition were verified against this PR
 (`agent/runner-loss-daemon-propagation`).
 
-The active-tail predecessor-steering correction was verified against this PR
+The active-tail predecessor-steering correction was verified against PR #826
 (`agent/daemon-ops-overnight`).
 
 The cancelled-turn outbox projection for stopped tool responses with completed
@@ -386,6 +386,30 @@ remain shared.
 The committed turn-start entries, snapshot, start, active slot, and attempt are
 one transaction: no durable state exists in which a start references a missing
 or partial snapshot (INV-040).
+
+**Committed unimplemented functionality — instruction eligibility freeze.** When
+session instruction eligibility is implemented, step 4 also copies the session's
+exact ordered eligibility entries under the same `session_scheduler` lock — the
+authority-qualified pairs whose shape
+[workspace instructions](workspace-instructions.md#eligibility) owns, each
+naming a bundle identity together with the authorizing root the session reaches
+it through, not identities alone — and, after locking the admitted-set head at
+the position and in the mode fixed by the
+[persistence lock protocol](persistence-protocol.md#lock-protocol), snapshots
+the exact retained admitted-set head and every retained admission's
+rendered-bundle row. It inserts the turn-start instruction manifest carrying the
+eligibility hash, admitted-set hash, and those rows in projection order in this
+transaction. The replacement command takes that same scheduler lock and the
+admitted-set lock after it, so a replacement either precedes activation and
+enters the snapshot or follows activation and affects only a later turn. No
+present replacement or nonempty eligibility surface exists; nevertheless, the
+first workspace-instruction slice inserts the one canonical empty manifest in
+this same activation transaction. No post-activation insert is permitted: an
+interrupt or other terminalization may win immediately after activation, and
+every started or terminal turn must already own exactly one turn-start manifest.
+Later nonempty eligibility changes only the copied values and rendered rows, not
+this atomic boundary. A later turn therefore cannot render retained admissions
+that its initial manifest omitted.
 
 Both authoritative repositories — activation and startup recovery — classify
 commit failures (`commit_failure_is_ambiguous`, tested in each): SQLSTATE
