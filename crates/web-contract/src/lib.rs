@@ -261,6 +261,41 @@ impl<'de> Deserialize<'de> for WebU64 {
     }
 }
 
+/// Checked positive unsigned 64-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebPositiveU64(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
+
+impl WebPositiveU64 {
+    /// Encodes one already-validated positive value in canonical decimal form.
+    #[must_use]
+    pub fn from_nonzero(value: std::num::NonZeroU64) -> Self {
+        Self(value.get().to_string())
+    }
+
+    /// Returns the canonical positive decimal wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebPositiveU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let positive = canonical_u64(&value).and_then(std::num::NonZeroU64::new);
+        if positive.is_none() {
+            return Err(de::Error::custom(
+                "wire value must be a canonical positive u64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
 /// Checked browser-visible tool name using the domain's exact spelling rules.
 #[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(transparent)]
@@ -565,9 +600,9 @@ pub enum WebTimelineToolState {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebTimelineToolBatchState {
-    Proposed { frontier_id: String },
-    ResultsProjected { frontier_id: String },
-    RecoveryRequired { tool_attempt_id: String },
+    Proposed { frontier_id: WebSessionId },
+    ResultsProjected { frontier_id: WebSessionId },
+    RecoveryRequired { tool_attempt_id: WebSessionId },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -611,7 +646,7 @@ pub enum WebTimelineToolFailureCause {
 pub enum WebTimelineToolAttemptEvidence {
     RequestOnly {},
     PhysicalAttempt {
-        attempt_id: String,
+        attempt_id: WebSessionId,
         result: Option<WebTimelineTextExcerpt>,
         failure: Option<WebTimelineTextExcerpt>,
         effect_posture: WebTimelineToolEffectPosture,
@@ -624,7 +659,7 @@ pub enum WebTimelineToolAttemptEvidence {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineToolAttempt {
-    pub request_id: String,
+    pub request_id: WebSessionId,
     pub tool_name: WebToolName,
     pub arguments: Option<WebTimelineTextExcerpt>,
     pub approval_posture: WebTimelineToolApprovalPosture,
@@ -652,11 +687,11 @@ pub enum WebTimelineApprovalDecision {
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebTimelineApprovalDecider {
     User {
-        command_id: String,
+        command_id: WebSessionId,
     },
     Delegate {
-        model_selection_id: String,
-        model_call_id: String,
+        model_selection_id: WebSessionId,
+        model_call_id: WebSessionId,
     },
 }
 
@@ -665,11 +700,11 @@ pub enum WebTimelineApprovalDecider {
 pub enum WebTimelineApprovalActor {
     Policy {},
     User {
-        command_id: String,
+        command_id: WebSessionId,
     },
     Delegate {
-        model_selection_id: String,
-        model_call_id: String,
+        model_selection_id: WebSessionId,
+        model_call_id: WebSessionId,
     },
 }
 
@@ -717,27 +752,27 @@ pub enum WebTimelineGoalBlockedReason {
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebTimelineGoalEvent {
     Commissioned {
-        generation: WebU64,
+        generation: WebPositiveU64,
         text: WebTimelineTextExcerpt,
     },
     Blocked {
-        generation: WebU64,
+        generation: WebPositiveU64,
         reason: WebTimelineGoalBlockedReason,
         text: WebTimelineTextExcerpt,
     },
     Resumed {
-        generation: WebU64,
+        generation: WebPositiveU64,
         text: Option<WebTimelineTextExcerpt>,
     },
     Achieved {
-        generation: WebU64,
+        generation: WebPositiveU64,
         text: WebTimelineTextExcerpt,
     },
     UserStopped {
-        generation: WebU64,
+        generation: WebPositiveU64,
     },
     Superseded {
-        generation: WebU64,
+        generation: WebPositiveU64,
         text: WebTimelineTextExcerpt,
     },
 }
@@ -794,17 +829,17 @@ pub enum WebTimelineDelegationReason {
 pub enum WebTimelineDelegationProvenance {
     ChildTurn {
         session_id: WebSessionId,
-        turn_id: String,
+        turn_id: WebSessionId,
     },
     ParentTurnCommand {
         session_id: WebSessionId,
-        turn_id: String,
-        command_id: String,
+        turn_id: WebSessionId,
+        command_id: WebSessionId,
     },
     ParentGoalCommand {
         session_id: WebSessionId,
-        goal_generation: WebU64,
-        command_id: String,
+        goal_generation: WebPositiveU64,
+        command_id: WebSessionId,
     },
 }
 
@@ -812,18 +847,18 @@ pub enum WebTimelineDelegationProvenance {
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebTimelineDelegationDetail {
     ChildSpawned {
-        relationship_id: String,
+        relationship_id: WebSessionId,
         child_session_id: WebSessionId,
         policy: WebTimelineDelegationPolicy,
     },
     ChildWaiting {
-        relationship_id: String,
+        relationship_id: WebSessionId,
         child_session_id: WebSessionId,
-        awaiting_request_id: String,
+        awaiting_request_id: WebSessionId,
         mode: WebTimelineDelegationWaitMode,
     },
     ChildLifecycleDisposition {
-        relationship_id: String,
+        relationship_id: WebSessionId,
         child_session_id: WebSessionId,
         event_ordinal: WebU64,
         outcome: WebTimelineDelegationOutcome,
@@ -831,7 +866,7 @@ pub enum WebTimelineDelegationDetail {
         provenance: WebTimelineDelegationProvenance,
     },
     ChildResult {
-        relationship_id: String,
+        relationship_id: WebSessionId,
         child_session_id: WebSessionId,
         outcome: WebTimelineDelegationOutcome,
         reason: WebTimelineDelegationReason,
@@ -839,8 +874,8 @@ pub enum WebTimelineDelegationDetail {
         content: Option<WebTimelineTextExcerpt>,
     },
     SessionMessage {
-        relationship_id: String,
-        message_id: String,
+        relationship_id: WebSessionId,
+        message_id: WebSessionId,
         sender_session_id: WebSessionId,
         recipient_session_id: WebSessionId,
         message_ordinal: WebU64,
@@ -848,20 +883,20 @@ pub enum WebTimelineDelegationDetail {
         content: WebTimelineTextExcerpt,
     },
     ResultWake {
-        relationship_id: String,
-        awaiting_request_id: Option<String>,
+        relationship_id: WebSessionId,
+        awaiting_request_id: Option<WebSessionId>,
     },
     MessageWake {
-        relationship_id: String,
-        message_id: String,
+        relationship_id: WebSessionId,
+        message_id: WebSessionId,
     },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebTimelineImportedEvidence {
-    pub imported_conversation_id: String,
-    pub imported_entry_id: String,
+    pub imported_conversation_id: WebSessionId,
+    pub imported_entry_id: WebSessionId,
     pub imported_position: WebU64,
     pub relationship: WebTimelineImportedRelationship,
 }
@@ -876,8 +911,8 @@ pub enum WebTimelineImportedRelationship {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebTimelineReconciliationOperation {
-    ModelCall { model_call_id: String },
-    ToolAttempt { tool_attempt_id: String },
+    ModelCall { model_call_id: WebSessionId },
+    ToolAttempt { tool_attempt_id: WebSessionId },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1006,14 +1041,14 @@ pub struct WebTimelineModelSettingsSnapshot {
     pub reasoning_source: Option<WebTimelineModelSettingSource>,
     pub fast_mode_source: Option<WebTimelineModelSettingSource>,
     pub service_tier_source: Option<WebTimelineModelSettingSource>,
-    pub validated_for_selection_id: Option<String>,
+    pub validated_for_selection_id: Option<WebSessionId>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "kind")]
 pub enum WebTimelineModelSelection {
-    Direct { selection_id: String },
-    Alias { alias_id: String },
+    Direct { selection_id: WebSessionId },
+    Alias { alias_id: WebSessionId },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
@@ -1036,7 +1071,7 @@ pub enum WebTimelineModelChangeAdjustment {
 #[serde(deny_unknown_fields, rename_all = "snake_case", tag = "type")]
 pub enum WebTimelineModelSettingsDetail {
     SessionDefaultsChanged {
-        command_id: String,
+        command_id: WebSessionId,
         prior_defaults_version: WebU64,
         installed_defaults_version: WebU64,
         prior_model: WebTimelineModelSelection,
@@ -1048,14 +1083,14 @@ pub enum WebTimelineModelSettingsDetail {
         adjustments: Vec<WebTimelineModelChangeAdjustment>,
     },
     TurnResolved {
-        accepted_input_id: String,
-        turn_id: String,
+        accepted_input_id: WebSessionId,
+        turn_id: WebSessionId,
         defaults_version: WebU64,
         requested_model: WebTimelineModelSelection,
-        selected_direct_id: String,
+        selected_direct_id: WebSessionId,
         per_call_override: WebTimelineModelSettingsOverlay,
         settings: WebTimelineModelSettingsSnapshot,
-        adjusted_from_selection_id: Option<String>,
+        adjusted_from_selection_id: Option<WebSessionId>,
         #[schemars(length(max = 3))]
         adjustments: Vec<WebTimelineModelChangeAdjustment>,
     },
@@ -1088,8 +1123,8 @@ pub enum WebSessionTimelineDetailBody {
         provider_failure_cause: Option<WebProviderModelCallFailureCause>,
     },
     ToolBatch {
-        turn_id: String,
-        producing_model_call_id: String,
+        turn_id: WebSessionId,
+        producing_model_call_id: WebSessionId,
         state: WebTimelineToolBatchState,
         projected_member_index: Option<u32>,
         #[schemars(length(max = 1))]
@@ -1098,8 +1133,8 @@ pub enum WebSessionTimelineDetailBody {
         goal_events: Vec<WebTimelineGoalEvent>,
     },
     ToolApprovalDecision {
-        turn_id: String,
-        request_id: String,
+        turn_id: WebSessionId,
+        request_id: WebSessionId,
         tool_name: WebToolName,
         decision: WebTimelineApprovalDecision,
         actor: WebTimelineApprovalActor,
@@ -1107,15 +1142,15 @@ pub enum WebSessionTimelineDetailBody {
         approval_judge_escalated: bool,
     },
     GoalEvent {
-        turn_id: String,
+        turn_id: WebSessionId,
         event: WebTimelineGoalEvent,
     },
     ContextCompaction {
-        compaction_id: String,
-        model_call_id: String,
+        compaction_id: WebSessionId,
+        model_call_id: WebSessionId,
         through_position: WebU64,
-        summary_entry_id: String,
-        result_frontier_id: String,
+        summary_entry_id: WebSessionId,
+        result_frontier_id: WebSessionId,
         summary: WebTimelineTextExcerpt,
     },
     TurnLifecycle {
@@ -1124,17 +1159,17 @@ pub enum WebSessionTimelineDetailBody {
         cause_code: String,
     },
     Reconciliation {
-        turn_id: String,
+        turn_id: WebSessionId,
         operation: WebTimelineReconciliationOperation,
-        terminal_frontier_id: String,
+        terminal_frontier_id: WebSessionId,
         attempt_count: WebU64,
         exhausted: bool,
         operator_required: bool,
         cause_code: String,
     },
     Runner {
-        runner_id: String,
-        placement_revision: WebU64,
+        runner_id: WebSessionId,
+        placement_revision: WebPositiveU64,
         sandbox_posture: WebTimelineRunnerSandboxPosture,
         working_directory: Option<WebRunnerWorkingDirectory>,
         state: WebTimelineRunnerState,
@@ -1548,7 +1583,8 @@ function sameBodyContinuation(left, right) {{
   );
 }}
 
-function assertTimelineExcerpt(excerpt, address, field, path) {{
+function assertTimelineExcerpt(excerpt, address, field, path, memberIndex) {{
+  const expectedMemberIndex = memberIndex ?? 0;
   const offset = BigInt(excerpt.offset_bytes);
   const total = BigInt(excerpt.total_bytes);
   const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
@@ -1562,8 +1598,11 @@ function assertTimelineExcerpt(excerpt, address, field, path) {{
     return null;
   }}
   const continuation = excerpt.continuation;
-  if (continuation.member_index !== 0) {{
-    fail(`${{path}}.continuation.member_index`, "zero for a singular body field");
+  if (continuation.member_index !== expectedMemberIndex) {{
+    fail(
+      `${{path}}.continuation.member_index`,
+      "the projected member the excerpt belongs to",
+    );
   }}
   if (end >= total) {{
     fail(`${{path}}.continuation`, "present only before the declared body end");
@@ -1669,6 +1708,54 @@ function assertModelSettingsSnapshot(snapshot, path) {{
   }}
 }}
 
+function assertAdjustedEffective(settings, adjustments, path) {{
+  adjustments.forEach((adjustment, index) => {{
+    const adjustmentPath = `${{path}}[${{index}}]`;
+    if (
+      adjustment.type === "fast_mode_disabled" &&
+      settings.effective.fast_mode !== "disabled"
+    ) {{
+      fail(adjustmentPath, "a disabled effective fast mode after the adjustment");
+    }}
+    if (
+      adjustment.type === "reasoning_level_clamped" &&
+      (settings.effective.reasoning_level !== adjustment.to ||
+        adjustment.from === adjustment.to)
+    ) {{
+      fail(adjustmentPath, "the clamped effective reasoning level");
+    }}
+    if (
+      adjustment.type === "reasoning_level_cleared" &&
+      settings.effective.reasoning_level !== undefined &&
+      settings.effective.reasoning_level !== null
+    ) {{
+      fail(adjustmentPath, "a cleared effective reasoning level");
+    }}
+    if (
+      adjustment.type === "service_tier_cleared" &&
+      settings.effective.service_tier !== undefined &&
+      settings.effective.service_tier !== null
+    ) {{
+      fail(adjustmentPath, "a cleared effective service tier");
+    }}
+  }});
+}}
+
+function assertModelSnapshotIdentity(model, snapshot, path) {{
+  const validated = snapshot.validated_for_selection_id;
+  if (
+    model.kind === "direct" &&
+    validated !== undefined &&
+    validated !== null &&
+    validated !== model.selection_id
+  ) {{
+    fail(
+      `${{path}}.validated_for_selection_id`,
+      "the direct model that validated the snapshot",
+    );
+  }}
+}}
+
 function assertTimelineDetailPage(value) {{
   const maxProjectedBodyBytes = {max_detail_bytes};
   const detailEnvelopeBytes = {detail_envelope_bytes};
@@ -1677,7 +1764,6 @@ function assertTimelineDetailPage(value) {{
     "turn_completed",
     "turn_refused",
     "turn_cancelled",
-    "turn_reconciliation_required",
   ]);
   let expectedBodyContinuation = null;
   let computedProjectedBodyBytes = 0;
@@ -1832,23 +1918,27 @@ function assertTimelineDetailPage(value) {{
             [physical?.result, "tool_result", `${{path}}.body.tools[0].evidence.result`],
             [physical?.failure, "tool_failure", `${{path}}.body.tools[0].evidence.failure`],
           ].filter(([excerpt]) => excerpt !== undefined && excerpt !== null);
-          if (excerpts.length > 1) {{
-            fail(`${{path}}.body.tools[0]`, "at most one projected text field");
+          if (excerpts.length !== 1) {{
+            fail(`${{path}}.body.tools[0]`, "exactly one projected text field");
           }}
-          if (excerpts.length === 1) {{
-            const [excerpt, field, excerptPath] = excerpts[0];
-            continuation = assertTimelineExcerpt(excerpt, item.address, field, excerptPath);
-            if (continuation === null) {{
-              continuation = pageToolContinuation(
-                value,
-                item.address,
-                field,
-                item.body.projected_member_index,
-                tool,
-              );
-            }}
-            textBytes = new TextEncoder().encode(excerpt.text).byteLength;
+          const [excerpt, field, excerptPath] = excerpts[0];
+          continuation = assertTimelineExcerpt(
+            excerpt,
+            item.address,
+            field,
+            excerptPath,
+            item.body.projected_member_index,
+          );
+          if (continuation === null) {{
+            continuation = pageToolContinuation(
+              value,
+              item.address,
+              field,
+              item.body.projected_member_index,
+              tool,
+            );
           }}
+          textBytes = new TextEncoder().encode(excerpt.text).byteLength;
         }}
         if (goal !== undefined && goal.text !== undefined && goal.text !== null) {{
           continuation = assertTimelineExcerpt(
@@ -1856,6 +1946,7 @@ function assertTimelineDetailPage(value) {{
             item.address,
             "goal_text",
             `${{path}}.body.goal_events[0].text`,
+            item.body.projected_member_index,
           );
           if (continuation === null) {{
             continuation = pageToolContinuation(
@@ -1880,6 +1971,15 @@ function assertTimelineDetailPage(value) {{
             "a user actor when the approval judge escalated",
           );
         }}
+        if (
+          item.body.actor.type === "delegate" &&
+          (item.body.rationale === undefined || item.body.rationale === null)
+        ) {{
+          fail(
+            `${{path}}.body.rationale`,
+            "the checked rationale a delegate decision always carries",
+          );
+        }}
         if (item.body.rationale !== undefined && item.body.rationale !== null) {{
           continuation = assertTimelineExcerpt(
             item.body.rationale,
@@ -1893,6 +1993,12 @@ function assertTimelineDetailPage(value) {{
       case "goal_event":
         if (item.kind !== "goal_turn_retired") {{
           fail(`${{path}}.kind`, "goal_turn_retired for a goal_event body");
+        }}
+        if (
+          item.body.event.type !== "user_stopped" &&
+          item.body.event.type !== "superseded"
+        ) {{
+          fail(`${{path}}.body.event.type`, "a retiring goal event");
         }}
         if (item.body.event.text !== undefined && item.body.event.text !== null) {{
           continuation = assertTimelineExcerpt(
@@ -1935,6 +2041,16 @@ function assertTimelineDetailPage(value) {{
         if (item.kind !== "runner_state_transition") {{
           fail(`${{path}}.kind`, "runner_state_transition for a runner body");
         }}
+        if (
+          item.body.working_directory !== undefined &&
+          item.body.working_directory !== null &&
+          new TextEncoder().encode(item.body.working_directory).byteLength > 4096
+        ) {{
+          fail(
+            `${{path}}.body.working_directory`,
+            "at most 4096 UTF-8 bytes",
+          );
+        }}
         break;
       case "delegation": {{
         const wake =
@@ -1956,10 +2072,28 @@ function assertTimelineDetailPage(value) {{
           );
         }}
         if (
+          item.body.detail.child_session_id !== undefined &&
+          item.body.detail.child_session_id === value.session_id
+        ) {{
+          fail(
+            `${{path}}.body.detail.child_session_id`,
+            "a session other than the relationship parent",
+          );
+        }}
+        if (
           item.body.detail.type === "child_result" ||
           item.body.detail.type === "child_lifecycle_disposition"
         ) {{
           const detail = item.body.detail;
+          if (
+            detail.provenance.type === "child_turn" &&
+            detail.provenance.session_id !== detail.child_session_id
+          ) {{
+            fail(
+              `${{path}}.body.detail.provenance.session_id`,
+              "the relationship's child session",
+            );
+          }}
           const childTurnValid =
             detail.provenance.type === "child_turn" &&
             ((detail.outcome === "result_returned" && detail.reason === "child_completed") ||
@@ -2048,12 +2182,53 @@ function assertTimelineDetailPage(value) {{
               "the checked successor of the prior defaults version",
             );
           }}
+          const defaults = item.body.detail;
+          assertModelSnapshotIdentity(
+            defaults.prior_model,
+            defaults.prior_settings,
+            `${{path}}.body.detail.prior_settings`,
+          );
+          assertModelSnapshotIdentity(
+            defaults.installed_model,
+            defaults.installed_settings,
+            `${{path}}.body.detail.installed_settings`,
+          );
+          if (
+            JSON.stringify(defaults.prior_model) ===
+              JSON.stringify(defaults.installed_model) &&
+            JSON.stringify(defaults.prior_settings) ===
+              JSON.stringify(defaults.installed_settings)
+          ) {{
+            fail(
+              `${{path}}.body.detail`,
+              "a defaults change that changes the model or settings",
+            );
+          }}
+          assertAdjustedEffective(
+            defaults.installed_settings,
+            defaults.adjustments,
+            `${{path}}.body.detail.adjustments`,
+          );
         }} else {{
           assertModelSettingsSnapshot(
             item.body.detail.settings,
             `${{path}}.body.detail.settings`,
           );
           const resolved = item.body.detail;
+          if (
+            JSON.stringify(resolved.per_call_override) !==
+            JSON.stringify(resolved.settings.precedence.per_call)
+          ) {{
+            fail(
+              `${{path}}.body.detail.per_call_override`,
+              "the frozen per-call settings layer",
+            );
+          }}
+          assertAdjustedEffective(
+            resolved.settings,
+            resolved.adjustments,
+            `${{path}}.body.detail.adjustments`,
+          );
           if (
             resolved.requested_model.kind === "direct" &&
             resolved.requested_model.selection_id !== resolved.selected_direct_id
@@ -2103,7 +2278,6 @@ function assertTimelineDetailPage(value) {{
           turn_completed: "completed",
           turn_refused: "refused",
           turn_cancelled: "cancelled",
-          turn_reconciliation_required: "reconciliation_required",
         }};
         if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {{
           fail(`${{path}}.body.cause_code`, `the cause for ${{item.kind}}`);

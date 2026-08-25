@@ -387,7 +387,7 @@ test("generated detail decoder rejects a nonzero input member index", () => {
   };
   assert.throws(
     () => decodeWebSessionTimelineDetailPage(page),
-    /zero for a singular body field/,
+    /the projected member the excerpt belongs to/,
   );
 });
 
@@ -413,7 +413,7 @@ test("generated detail decoder rejects a nonzero response member index", () => {
   };
   assert.throws(
     () => decodeWebSessionTimelineDetailPage(page),
-    /zero for a singular body field/,
+    /the projected member the excerpt belongs to/,
   );
 });
 

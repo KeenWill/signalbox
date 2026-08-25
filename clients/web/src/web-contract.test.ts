@@ -177,12 +177,18 @@ describe('generated timeline detail decoder', () => {
               model_selection_id: '00000000-0000-0000-0000-000000000005',
               model_call_id: '00000000-0000-0000-0000-000000000006',
             },
+            rationale: {
+              text: 'safe read',
+              offset_bytes: '0',
+              total_bytes: '9',
+              continuation: null,
+            },
             approval_judge_escalated: false,
           },
-          projected_body_bytes: 128,
+          projected_body_bytes: 137,
         },
       ],
-      projected_body_bytes: 128,
+      projected_body_bytes: 137,
     }
 
     expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
@@ -285,6 +291,12 @@ describe('generated timeline detail decoder', () => {
               {
                 request_id: '00000000-0000-0000-0000-000000000004',
                 tool_name: 'spawn_session',
+                arguments: {
+                  text: '{}',
+                  offset_bytes: '0',
+                  total_bytes: '2',
+                  continuation: null,
+                },
                 approval_posture: 'auto',
                 approval_judge_escalated: false,
                 operator_required: false,
@@ -298,10 +310,10 @@ describe('generated timeline detail decoder', () => {
             ],
             goal_events: [],
           },
-          projected_body_bytes: 128,
+          projected_body_bytes: 130,
         },
       ],
-      projected_body_bytes: 128,
+      projected_body_bytes: 130,
     }
 
     expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
@@ -318,9 +330,8 @@ describe('generated timeline detail decoder', () => {
             type: 'goal_event',
             turn_id: '00000000-0000-0000-0000-000000000002',
             event: {
-              type: 'blocked',
+              type: 'superseded',
               generation: '7',
-              reason: 'authorization_required',
               text: { text: 'approval needed', offset_bytes: '0', total_bytes: '15' },
             },
           },
@@ -1504,6 +1515,312 @@ describe('generated timeline detail decoder', () => {
         },
       ],
       projected_body_bytes: 130,
+    }
+
+    expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
+  })
+
+  it('rejects a lifecycle body for a reconciliation-required event', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '28' },
+          kind: 'turn_reconciliation_required',
+          body: {
+            type: 'turn_lifecycle',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            lifecycle: 'terminalized',
+            cause_code: 'reconciliation_required',
+          },
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 128,
+    }
+
+    expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(
+      'a terminal turn event for a terminalized lifecycle',
+    )
+  })
+
+  it('rejects child-turn provenance naming another session', () => {
+    expectTimelineBodyRejected(
+      'delegation_update',
+      childResultBody(
+        'result_returned',
+        'child_completed',
+        {
+          type: 'child_turn',
+          session_id: '00000000-0000-0000-0000-000000000009',
+          turn_id: '00000000-0000-0000-0000-000000000006',
+        },
+        returnedContent,
+      ),
+      "the relationship's child session",
+    )
+  })
+
+  it('rejects a self-child delegation detail', () => {
+    expectTimelineBodyRejected(
+      'delegation_update',
+      {
+        type: 'delegation',
+        detail: {
+          type: 'child_spawned',
+          relationship_id: '00000000-0000-0000-0000-000000000004',
+          child_session_id: ambiguousModelCallPage.session_id,
+          policy: { type: 'background' },
+        },
+      },
+      'a session other than the relationship parent',
+    )
+  })
+
+  it('rejects a per-call override differing from the frozen layer', () => {
+    expectTimelineBodyRejected(
+      'turn_model_settings_resolved',
+      turnResolvedBody({
+        per_call_override: {
+          ...inheritedSettingsOverlay,
+          fast_mode: { kind: 'value', value: 'disabled' },
+        },
+      }),
+      'the frozen per-call settings layer',
+    )
+  })
+
+  it('rejects a retirement detail for a non-retiring goal event', () => {
+    expectTimelineBodyRejected(
+      'goal_turn_retired',
+      {
+        type: 'goal_event',
+        turn_id: '00000000-0000-0000-0000-000000000002',
+        event: {
+          type: 'commissioned',
+          generation: '7',
+          text: { text: 'goal', offset_bytes: '0', total_bytes: '4' },
+        },
+      },
+      'a retiring goal event',
+    )
+  })
+
+  it('rejects a no-op session-defaults change', () => {
+    expectTimelineBodyRejected(
+      'session_model_settings_changed',
+      {
+        ...sessionDefaultsSettingsBody,
+        detail: {
+          ...sessionDefaultsSettingsBody.detail,
+          installed_model: sessionDefaultsSettingsBody.detail.prior_model,
+        },
+      },
+      'a defaults change that changes the model or settings',
+    )
+  })
+
+  it('rejects a defaults snapshot validated for another direct model', () => {
+    expectTimelineBodyRejected(
+      'session_model_settings_changed',
+      {
+        ...sessionDefaultsSettingsBody,
+        detail: {
+          ...sessionDefaultsSettingsBody.detail,
+          installed_settings: {
+            ...settingsSnapshot,
+            precedence: {
+              ...settingsSnapshot.precedence,
+              session: {
+                ...inheritedSettingsOverlay,
+                fast_mode: { kind: 'value', value: 'enabled' },
+              },
+            },
+            effective: { fast_mode: 'enabled' },
+            fast_mode_source: 'session',
+            validated_for_selection_id: '00000000-0000-0000-0000-00000000000b',
+          },
+        },
+      },
+      'the direct model that validated the snapshot',
+    )
+  })
+
+  it('rejects an adjustment contradicted by the effective settings', () => {
+    expectTimelineBodyRejected(
+      'turn_model_settings_resolved',
+      turnResolvedBody({
+        adjusted_from_selection_id: '00000000-0000-0000-0000-00000000000b',
+        adjustments: [{ type: 'fast_mode_disabled' }],
+        settings: {
+          ...settingsSnapshot,
+          precedence: {
+            ...settingsSnapshot.precedence,
+            session: {
+              ...inheritedSettingsOverlay,
+              fast_mode: { kind: 'value', value: 'enabled' },
+            },
+          },
+          effective: { fast_mode: 'enabled' },
+          fast_mode_source: 'session',
+          validated_for_selection_id: '00000000-0000-0000-0000-00000000000a',
+        },
+      }),
+      'a disabled effective fast mode after the adjustment',
+    )
+  })
+
+  it('rejects a tool member without any projected text field', () => {
+    expectTimelineBodyRejected(
+      'tool_batch_transition',
+      {
+        type: 'tool_batch',
+        turn_id: '00000000-0000-0000-0000-000000000002',
+        producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+        projected_member_index: 0,
+        state: {
+          type: 'proposed',
+          frontier_id: '00000000-0000-0000-0000-000000000008',
+        },
+        tools: [
+          {
+            request_id: '00000000-0000-0000-0000-000000000004',
+            tool_name: 'exec',
+            approval_posture: 'auto',
+            approval_judge_escalated: false,
+            operator_required: false,
+            evidence: { type: 'request_only' },
+          },
+        ],
+        goal_events: [],
+      },
+      'exactly one projected text field',
+    )
+  })
+
+  it('rejects a delegate approval without its rationale', () => {
+    expectTimelineBodyRejected(
+      'tool_approval_decided',
+      {
+        type: 'tool_approval_decision',
+        turn_id: '00000000-0000-0000-0000-000000000002',
+        request_id: '00000000-0000-0000-0000-000000000004',
+        tool_name: 'exec',
+        decision: 'approve',
+        actor: {
+          type: 'delegate',
+          model_selection_id: '00000000-0000-0000-0000-000000000005',
+          model_call_id: '00000000-0000-0000-0000-000000000006',
+        },
+        approval_judge_escalated: false,
+      },
+      'the checked rationale a delegate decision always carries',
+    )
+  })
+
+  it('rejects a zero runner placement revision', () => {
+    expectTimelineBodyRejected('runner_state_transition', {
+      type: 'runner',
+      runner_id: '00000000-0000-0000-0000-000000000007',
+      placement_revision: '0',
+      sandbox_posture: 'sandboxed',
+      state: 'pinned',
+    })
+  })
+
+  it('rejects a zero goal generation', () => {
+    expectTimelineBodyRejected('goal_turn_retired', {
+      type: 'goal_event',
+      turn_id: '00000000-0000-0000-0000-000000000002',
+      event: { type: 'user_stopped', generation: '0' },
+    })
+  })
+
+  it('rejects a non-UUID tool-batch turn identity', () => {
+    expectTimelineBodyRejected('tool_batch_transition', {
+      type: 'tool_batch',
+      turn_id: 'not-a-uuid',
+      producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+      projected_member_index: null,
+      state: {
+        type: 'proposed',
+        frontier_id: '00000000-0000-0000-0000-000000000008',
+      },
+      tools: [],
+      goal_events: [],
+    })
+  })
+
+  it('rejects an oversized multibyte runner working directory', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '29' },
+          kind: 'runner_state_transition',
+          body: {
+            type: 'runner',
+            runner_id: '00000000-0000-0000-0000-000000000007',
+            placement_revision: '1',
+            sandbox_posture: 'sandboxed',
+            working_directory: '\u00e9'.repeat(3000),
+            state: 'pinned',
+          },
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 128,
+    }
+
+    expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow('at most 4096 UTF-8 bytes')
+  })
+
+  it('accepts a repeated-member excerpt continuing at its own index', () => {
+    const address = { event_sequence: '30' }
+    const continuation = {
+      address,
+      field: 'tool_arguments',
+      member_index: 1,
+      offset_bytes: '4',
+    }
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address,
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            projected_member_index: 1,
+            state: {
+              type: 'proposed',
+              frontier_id: '00000000-0000-0000-0000-000000000008',
+            },
+            tools: [
+              {
+                request_id: '00000000-0000-0000-0000-000000000005',
+                tool_name: 'exec',
+                arguments: {
+                  text: 'abcd',
+                  offset_bytes: '0',
+                  total_bytes: '8',
+                  continuation,
+                },
+                approval_posture: 'auto',
+                approval_judge_escalated: false,
+                operator_required: false,
+                evidence: { type: 'request_only' },
+              },
+            ],
+            goal_events: [],
+          },
+          projected_body_bytes: 132,
+        },
+      ],
+      projected_body_bytes: 132,
+      continuation: { type: 'more_body', body: continuation },
     }
 
     expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)

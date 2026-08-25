@@ -331,6 +331,11 @@ const schemas = {
         "pattern": "^sha256:[0-9a-f]{64}$",
         "type": "string"
       },
+      "WebPositiveU64": {
+        "description": "Checked positive unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
       "WebProviderModelCallFailureCause": {
         "description": "Closed provider-neutral failure cause exposed at the browser boundary.",
         "enum": [
@@ -526,7 +531,7 @@ const schemas = {
                 "type": "array"
               },
               "producing_model_call_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "projected_member_index": {
                 "format": "uint32",
@@ -547,7 +552,7 @@ const schemas = {
                 "type": "array"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "tool_batch",
@@ -587,13 +592,13 @@ const schemas = {
                 ]
               },
               "request_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "tool_name": {
                 "$ref": "#/$defs/WebToolName"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "tool_approval_decision",
@@ -618,7 +623,7 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineGoalEvent"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "goal_event",
@@ -636,19 +641,19 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "compaction_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "model_call_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "result_frontier_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "summary": {
                 "$ref": "#/$defs/WebTimelineTextExcerpt"
               },
               "summary_entry_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "through_position": {
                 "$ref": "#/$defs/WebU64"
@@ -713,10 +718,10 @@ const schemas = {
                 "type": "boolean"
               },
               "terminal_frontier_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "reconciliation",
@@ -739,10 +744,10 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "placement_revision": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "runner_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "sandbox_posture": {
                 "$ref": "#/$defs/WebTimelineRunnerSandboxPosture"
@@ -857,7 +862,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "command_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "user",
@@ -874,10 +879,10 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "model_call_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "model_selection_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "delegate",
@@ -996,7 +1001,7 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineDelegationPolicy"
               },
               "relationship_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "child_spawned",
@@ -1015,7 +1020,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "awaiting_request_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "child_session_id": {
                 "$ref": "#/$defs/WebSessionId"
@@ -1024,7 +1029,7 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineDelegationWaitMode"
               },
               "relationship_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "child_waiting",
@@ -1059,7 +1064,7 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineDelegationReason"
               },
               "relationship_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "child_lifecycle_disposition",
@@ -1103,7 +1108,7 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineDelegationReason"
               },
               "relationship_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "child_result",
@@ -1130,7 +1135,7 @@ const schemas = {
                 "$ref": "#/$defs/WebU64"
               },
               "message_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "message_ordinal": {
                 "$ref": "#/$defs/WebU64"
@@ -1139,7 +1144,7 @@ const schemas = {
                 "$ref": "#/$defs/WebSessionId"
               },
               "relationship_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "sender_session_id": {
                 "$ref": "#/$defs/WebSessionId"
@@ -1165,13 +1170,17 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "awaiting_request_id": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebSessionId"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "relationship_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "result_wake",
@@ -1188,10 +1197,10 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "message_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "relationship_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "message_wake",
@@ -1265,7 +1274,7 @@ const schemas = {
                 "$ref": "#/$defs/WebSessionId"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "child_turn",
@@ -1283,13 +1292,13 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "command_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "session_id": {
                 "$ref": "#/$defs/WebSessionId"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "parent_turn_command",
@@ -1308,10 +1317,10 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "command_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "goal_generation": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "session_id": {
                 "$ref": "#/$defs/WebSessionId"
@@ -1481,7 +1490,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "generation": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "text": {
                 "$ref": "#/$defs/WebTimelineTextExcerpt"
@@ -1502,7 +1511,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "generation": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "reason": {
                 "$ref": "#/$defs/WebTimelineGoalBlockedReason"
@@ -1527,7 +1536,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "generation": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "text": {
                 "anyOf": [
@@ -1554,7 +1563,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "generation": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "text": {
                 "$ref": "#/$defs/WebTimelineTextExcerpt"
@@ -1575,7 +1584,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "generation": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "type": {
                 "const": "user_stopped",
@@ -1592,7 +1601,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "generation": {
-                "$ref": "#/$defs/WebU64"
+                "$ref": "#/$defs/WebPositiveU64"
               },
               "text": {
                 "$ref": "#/$defs/WebTimelineTextExcerpt"
@@ -1615,10 +1624,10 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "imported_conversation_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebSessionId"
           },
           "imported_entry_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebSessionId"
           },
           "imported_position": {
             "$ref": "#/$defs/WebU64"
@@ -1796,7 +1805,7 @@ const schemas = {
                 "type": "string"
               },
               "selection_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               }
             },
             "required": [
@@ -1809,7 +1818,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "alias_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "kind": {
                 "const": "alias",
@@ -1849,7 +1858,7 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineModelSettingsOverlay"
               },
               "command_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "installed_defaults_version": {
                 "$ref": "#/$defs/WebU64"
@@ -1892,12 +1901,16 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "accepted_input_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "adjusted_from_selection_id": {
-                "type": [
-                  "string",
-                  "null"
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/WebSessionId"
+                  },
+                  {
+                    "type": "null"
+                  }
                 ]
               },
               "adjustments": {
@@ -1917,13 +1930,13 @@ const schemas = {
                 "$ref": "#/$defs/WebTimelineModelSelection"
               },
               "selected_direct_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "settings": {
                 "$ref": "#/$defs/WebTimelineModelSettingsSnapshot"
               },
               "turn_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "turn_resolved",
@@ -2029,9 +2042,13 @@ const schemas = {
             ]
           },
           "validated_for_selection_id": {
-            "type": [
-              "string",
-              "null"
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebSessionId"
+              },
+              {
+                "type": "null"
+              }
             ]
           }
         },
@@ -2118,7 +2135,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "model_call_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "model_call",
@@ -2135,7 +2152,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "tool_attempt_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "tool_attempt",
@@ -2386,7 +2403,7 @@ const schemas = {
             "type": "boolean"
           },
           "request_id": {
-            "type": "string"
+            "$ref": "#/$defs/WebSessionId"
           },
           "tool_name": {
             "$ref": "#/$defs/WebToolName"
@@ -2421,7 +2438,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "attempt_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "cause": {
                 "anyOf": [
@@ -2490,7 +2507,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "frontier_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "proposed",
@@ -2507,7 +2524,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "frontier_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "results_projected",
@@ -2524,7 +2541,7 @@ const schemas = {
             "additionalProperties": false,
             "properties": {
               "tool_attempt_id": {
-                "type": "string"
+                "$ref": "#/$defs/WebSessionId"
               },
               "type": {
                 "const": "recovery_required",
@@ -2956,7 +2973,8 @@ function sameBodyContinuation(left, right) {
   );
 }
 
-function assertTimelineExcerpt(excerpt, address, field, path) {
+function assertTimelineExcerpt(excerpt, address, field, path, memberIndex) {
+  const expectedMemberIndex = memberIndex ?? 0;
   const offset = BigInt(excerpt.offset_bytes);
   const total = BigInt(excerpt.total_bytes);
   const end = offset + BigInt(new TextEncoder().encode(excerpt.text).byteLength);
@@ -2970,8 +2988,11 @@ function assertTimelineExcerpt(excerpt, address, field, path) {
     return null;
   }
   const continuation = excerpt.continuation;
-  if (continuation.member_index !== 0) {
-    fail(`${path}.continuation.member_index`, "zero for a singular body field");
+  if (continuation.member_index !== expectedMemberIndex) {
+    fail(
+      `${path}.continuation.member_index`,
+      "the projected member the excerpt belongs to",
+    );
   }
   if (end >= total) {
     fail(`${path}.continuation`, "present only before the declared body end");
@@ -3077,6 +3098,54 @@ function assertModelSettingsSnapshot(snapshot, path) {
   }
 }
 
+function assertAdjustedEffective(settings, adjustments, path) {
+  adjustments.forEach((adjustment, index) => {
+    const adjustmentPath = `${path}[${index}]`;
+    if (
+      adjustment.type === "fast_mode_disabled" &&
+      settings.effective.fast_mode !== "disabled"
+    ) {
+      fail(adjustmentPath, "a disabled effective fast mode after the adjustment");
+    }
+    if (
+      adjustment.type === "reasoning_level_clamped" &&
+      (settings.effective.reasoning_level !== adjustment.to ||
+        adjustment.from === adjustment.to)
+    ) {
+      fail(adjustmentPath, "the clamped effective reasoning level");
+    }
+    if (
+      adjustment.type === "reasoning_level_cleared" &&
+      settings.effective.reasoning_level !== undefined &&
+      settings.effective.reasoning_level !== null
+    ) {
+      fail(adjustmentPath, "a cleared effective reasoning level");
+    }
+    if (
+      adjustment.type === "service_tier_cleared" &&
+      settings.effective.service_tier !== undefined &&
+      settings.effective.service_tier !== null
+    ) {
+      fail(adjustmentPath, "a cleared effective service tier");
+    }
+  });
+}
+
+function assertModelSnapshotIdentity(model, snapshot, path) {
+  const validated = snapshot.validated_for_selection_id;
+  if (
+    model.kind === "direct" &&
+    validated !== undefined &&
+    validated !== null &&
+    validated !== model.selection_id
+  ) {
+    fail(
+      `${path}.validated_for_selection_id`,
+      "the direct model that validated the snapshot",
+    );
+  }
+}
+
 function assertTimelineDetailPage(value) {
   const maxProjectedBodyBytes = 65536;
   const detailEnvelopeBytes = 128;
@@ -3085,7 +3154,6 @@ function assertTimelineDetailPage(value) {
     "turn_completed",
     "turn_refused",
     "turn_cancelled",
-    "turn_reconciliation_required",
   ]);
   let expectedBodyContinuation = null;
   let computedProjectedBodyBytes = 0;
@@ -3240,23 +3308,27 @@ function assertTimelineDetailPage(value) {
             [physical?.result, "tool_result", `${path}.body.tools[0].evidence.result`],
             [physical?.failure, "tool_failure", `${path}.body.tools[0].evidence.failure`],
           ].filter(([excerpt]) => excerpt !== undefined && excerpt !== null);
-          if (excerpts.length > 1) {
-            fail(`${path}.body.tools[0]`, "at most one projected text field");
+          if (excerpts.length !== 1) {
+            fail(`${path}.body.tools[0]`, "exactly one projected text field");
           }
-          if (excerpts.length === 1) {
-            const [excerpt, field, excerptPath] = excerpts[0];
-            continuation = assertTimelineExcerpt(excerpt, item.address, field, excerptPath);
-            if (continuation === null) {
-              continuation = pageToolContinuation(
-                value,
-                item.address,
-                field,
-                item.body.projected_member_index,
-                tool,
-              );
-            }
-            textBytes = new TextEncoder().encode(excerpt.text).byteLength;
+          const [excerpt, field, excerptPath] = excerpts[0];
+          continuation = assertTimelineExcerpt(
+            excerpt,
+            item.address,
+            field,
+            excerptPath,
+            item.body.projected_member_index,
+          );
+          if (continuation === null) {
+            continuation = pageToolContinuation(
+              value,
+              item.address,
+              field,
+              item.body.projected_member_index,
+              tool,
+            );
           }
+          textBytes = new TextEncoder().encode(excerpt.text).byteLength;
         }
         if (goal !== undefined && goal.text !== undefined && goal.text !== null) {
           continuation = assertTimelineExcerpt(
@@ -3264,6 +3336,7 @@ function assertTimelineDetailPage(value) {
             item.address,
             "goal_text",
             `${path}.body.goal_events[0].text`,
+            item.body.projected_member_index,
           );
           if (continuation === null) {
             continuation = pageToolContinuation(
@@ -3288,6 +3361,15 @@ function assertTimelineDetailPage(value) {
             "a user actor when the approval judge escalated",
           );
         }
+        if (
+          item.body.actor.type === "delegate" &&
+          (item.body.rationale === undefined || item.body.rationale === null)
+        ) {
+          fail(
+            `${path}.body.rationale`,
+            "the checked rationale a delegate decision always carries",
+          );
+        }
         if (item.body.rationale !== undefined && item.body.rationale !== null) {
           continuation = assertTimelineExcerpt(
             item.body.rationale,
@@ -3301,6 +3383,12 @@ function assertTimelineDetailPage(value) {
       case "goal_event":
         if (item.kind !== "goal_turn_retired") {
           fail(`${path}.kind`, "goal_turn_retired for a goal_event body");
+        }
+        if (
+          item.body.event.type !== "user_stopped" &&
+          item.body.event.type !== "superseded"
+        ) {
+          fail(`${path}.body.event.type`, "a retiring goal event");
         }
         if (item.body.event.text !== undefined && item.body.event.text !== null) {
           continuation = assertTimelineExcerpt(
@@ -3343,6 +3431,16 @@ function assertTimelineDetailPage(value) {
         if (item.kind !== "runner_state_transition") {
           fail(`${path}.kind`, "runner_state_transition for a runner body");
         }
+        if (
+          item.body.working_directory !== undefined &&
+          item.body.working_directory !== null &&
+          new TextEncoder().encode(item.body.working_directory).byteLength > 4096
+        ) {
+          fail(
+            `${path}.body.working_directory`,
+            "at most 4096 UTF-8 bytes",
+          );
+        }
         break;
       case "delegation": {
         const wake =
@@ -3364,10 +3462,28 @@ function assertTimelineDetailPage(value) {
           );
         }
         if (
+          item.body.detail.child_session_id !== undefined &&
+          item.body.detail.child_session_id === value.session_id
+        ) {
+          fail(
+            `${path}.body.detail.child_session_id`,
+            "a session other than the relationship parent",
+          );
+        }
+        if (
           item.body.detail.type === "child_result" ||
           item.body.detail.type === "child_lifecycle_disposition"
         ) {
           const detail = item.body.detail;
+          if (
+            detail.provenance.type === "child_turn" &&
+            detail.provenance.session_id !== detail.child_session_id
+          ) {
+            fail(
+              `${path}.body.detail.provenance.session_id`,
+              "the relationship's child session",
+            );
+          }
           const childTurnValid =
             detail.provenance.type === "child_turn" &&
             ((detail.outcome === "result_returned" && detail.reason === "child_completed") ||
@@ -3456,12 +3572,53 @@ function assertTimelineDetailPage(value) {
               "the checked successor of the prior defaults version",
             );
           }
+          const defaults = item.body.detail;
+          assertModelSnapshotIdentity(
+            defaults.prior_model,
+            defaults.prior_settings,
+            `${path}.body.detail.prior_settings`,
+          );
+          assertModelSnapshotIdentity(
+            defaults.installed_model,
+            defaults.installed_settings,
+            `${path}.body.detail.installed_settings`,
+          );
+          if (
+            JSON.stringify(defaults.prior_model) ===
+              JSON.stringify(defaults.installed_model) &&
+            JSON.stringify(defaults.prior_settings) ===
+              JSON.stringify(defaults.installed_settings)
+          ) {
+            fail(
+              `${path}.body.detail`,
+              "a defaults change that changes the model or settings",
+            );
+          }
+          assertAdjustedEffective(
+            defaults.installed_settings,
+            defaults.adjustments,
+            `${path}.body.detail.adjustments`,
+          );
         } else {
           assertModelSettingsSnapshot(
             item.body.detail.settings,
             `${path}.body.detail.settings`,
           );
           const resolved = item.body.detail;
+          if (
+            JSON.stringify(resolved.per_call_override) !==
+            JSON.stringify(resolved.settings.precedence.per_call)
+          ) {
+            fail(
+              `${path}.body.detail.per_call_override`,
+              "the frozen per-call settings layer",
+            );
+          }
+          assertAdjustedEffective(
+            resolved.settings,
+            resolved.adjustments,
+            `${path}.body.detail.adjustments`,
+          );
           if (
             resolved.requested_model.kind === "direct" &&
             resolved.requested_model.selection_id !== resolved.selected_direct_id
@@ -3511,7 +3668,6 @@ function assertTimelineDetailPage(value) {
           turn_completed: "completed",
           turn_refused: "refused",
           turn_cancelled: "cancelled",
-          turn_reconciliation_required: "reconciliation_required",
         };
         if (item.body.cause_code !== lifecycleCauseByKind[item.kind]) {
           fail(`${path}.body.cause_code`, `the cause for ${item.kind}`);
