@@ -61,8 +61,8 @@ use signalbox_application::{
     SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputRequestError, SubmitInputService, ToolAttemptAuthorizationStatus, ToolCatalog,
-    ToolDefinition, ToolInputSchema,
+    SubmitInputService, ToolAttemptAuthorizationStatus, ToolCatalog, ToolDefinition,
+    ToolInputSchema,
 };
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities,
@@ -1541,7 +1541,13 @@ fn application_user_message(message: &ModelConversationMessage) -> (AcceptedInpu
             accepted_input,
             content,
             ..
-        } => (*accepted_input, content.text().as_str()),
+        } => (
+            *accepted_input,
+            content
+                .single_text()
+                .expect("the fixture has exactly one text part")
+                .as_str(),
+        ),
         _ => panic!("fixture message must be an application user-role message"),
     }
 }
