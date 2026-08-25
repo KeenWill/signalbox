@@ -324,17 +324,11 @@ async fn excessive_element_count_is_a_typed_bounded_failure() -> Result<(), Box<
 
 #[tokio::test]
 async fn self_closing_element_counts_against_depth_limit() -> Result<(), Box<dyn Error>> {
-    let mut document = String::from("<svg xmlns=\"http://www.w3.org/2000/svg\">");
-    for _ in 1..128 {
-        document.push_str("<g>");
-    }
-    document.push_str("<path/>");
-    for _ in 1..128 {
-        document.push_str("</g>");
-    }
-    document.push_str("</svg>");
-
-    assert_malformed!(SvgFixture::raw(document.as_bytes()), "structure_limit").await
+    assert_malformed!(
+        SvgFixture::empty_child_beyond_depth_limit(),
+        "structure_limit",
+    )
+    .await
 }
 
 #[tokio::test]
@@ -850,6 +844,34 @@ async fn negative_constant_calculation_result_is_rejected() -> Result<(), Box<dy
 }
 
 #[tokio::test]
+async fn negative_constant_non_pixel_calculations_are_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(-1cm)"/>"#),
+        "malformed_svg",
+    )
+    .await?;
+    assert_malformed!(
+        SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(-1%)"/>"#),
+        "malformed_svg",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn clamp_minimum_precedes_inverted_maximum() -> Result<(), Box<dyn Error>> {
+    let source = SvgFixture::raw(
+        br#"<svg xmlns="http://www.w3.org/2000/svg" width="clamp(1px, 2px, -1px)"/>"#,
+    )
+    .into_source()?;
+
+    assert_eq!(
+        inspect(&DirectProcessor::new(), &source).await?.status(),
+        FileInspectionStatus::Validated
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn division_by_zero_calculation_is_rejected() -> Result<(), Box<dyn Error>> {
     assert_malformed!(
         SvgFixture::raw(br#"<svg xmlns="http://www.w3.org/2000/svg" width="calc(1px / 0)"/>"#,),
@@ -913,10 +935,10 @@ async fn empty_calculation_arguments_are_rejected() -> Result<(), Box<dyn Error>
 
 #[tokio::test]
 async fn dimensions_admit_surrounding_xml_whitespace() -> Result<(), Box<dyn Error>> {
-    let source = SvgFixture::raw(
-        b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\" 10px \" height=\"\n20\t\"/>",
-    )
-    .into_source()?;
+    let fixture = SvgFixture::dimensions_with_surrounding_xml_whitespace();
+    let expected_width = fixture.expected_whitespace_width();
+    let expected_height = fixture.expected_whitespace_height();
+    let source = fixture.into_source()?;
     let result = read(
         &DirectProcessor::new(),
         &source,
@@ -926,8 +948,8 @@ async fn dimensions_admit_surrounding_xml_whitespace() -> Result<(), Box<dyn Err
     .await?;
     let body = complete_structure(result)?;
 
-    assert_eq!(body["width"], 10.0);
-    assert_eq!(body["height"], 20.0);
+    assert_eq!(body["width"], expected_width);
+    assert_eq!(body["height"], expected_height);
     Ok(())
 }
 

@@ -1049,10 +1049,11 @@ enum CalculationKind {
     Dimension,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct CalculationValue {
     kind: CalculationKind,
     value: Option<f64>,
+    unit: Option<String>,
 }
 
 struct CalculationParser<'a> {
@@ -1083,7 +1084,7 @@ impl<'a> CalculationParser<'a> {
             return None;
         }
         let first = self.parse_sum()?;
-        let mut arguments = vec![first];
+        let mut arguments = vec![first.clone()];
         while self.consume(b',') {
             let argument = self.parse_sum()?;
             if argument.kind != first.kind {
@@ -1103,7 +1104,10 @@ impl<'a> CalculationParser<'a> {
         }
         let value = if name.eq_ignore_ascii_case(b"calc") {
             first.value
-        } else if arguments.iter().all(|argument| argument.value.is_some()) {
+        } else if arguments
+            .iter()
+            .all(|argument| argument.value.is_some() && argument.unit == first.unit)
+        {
             let values: Vec<f64> = arguments
                 .iter()
                 .filter_map(|argument| argument.value)
@@ -1113,7 +1117,7 @@ impl<'a> CalculationParser<'a> {
             } else if name.eq_ignore_ascii_case(b"max") {
                 values.into_iter().reduce(f64::max)
             } else {
-                Some(values[1].max(values[0]).min(values[2]))
+                Some(values[0].max(values[1].min(values[2])))
             }
         } else {
             None
@@ -1121,6 +1125,7 @@ impl<'a> CalculationParser<'a> {
         Some(CalculationValue {
             kind: first.kind,
             value,
+            unit: first.unit,
         })
     }
 
@@ -1146,11 +1151,14 @@ impl<'a> CalculationParser<'a> {
             if right.kind != left.kind {
                 return None;
             }
-            left.value = match (left.value, right.value, operator) {
-                (Some(left), Some(right), b'+') => Some(left + right),
-                (Some(left), Some(right), b'-') => Some(left - right),
+            left.value = match (left.value, right.value, operator, left.unit == right.unit) {
+                (Some(left), Some(right), b'+', true) => Some(left + right),
+                (Some(left), Some(right), b'-', true) => Some(left - right),
                 _ => None,
             };
+            if left.unit != right.unit {
+                left.unit = None;
+            }
         }
     }
 
@@ -1171,10 +1179,10 @@ impl<'a> CalculationParser<'a> {
             if operator == b'/' && right.value == Some(0.0) {
                 return None;
             }
-            let kind = match (operator, left.kind, right.kind) {
-                (b'*', CalculationKind::Number, right) => right,
-                (b'*', left, CalculationKind::Number) => left,
-                (b'/', left, CalculationKind::Number) => left,
+            let (kind, unit) = match (operator, left.kind, right.kind) {
+                (b'*', CalculationKind::Number, right_kind) => (right_kind, right.unit.clone()),
+                (b'*', left_kind, CalculationKind::Number)
+                | (b'/', left_kind, CalculationKind::Number) => (left_kind, left.unit.clone()),
                 _ => return None,
             };
             let value = match (operator, left.value, right.value) {
@@ -1182,7 +1190,7 @@ impl<'a> CalculationParser<'a> {
                 (b'/', Some(left), Some(right)) => Some(left / right),
                 _ => None,
             };
-            left = CalculationValue { kind, value };
+            left = CalculationValue { kind, value, unit };
         }
     }
 
@@ -1276,14 +1284,16 @@ impl<'a> CalculationParser<'a> {
         } else {
             CalculationKind::Dimension
         };
-        let value = if kind == CalculationKind::Number {
-            parse_finite(token).ok()
-        } else if let Some(number) = strip_ascii_case_suffix(token, "px") {
-            parse_finite(number).ok()
-        } else {
-            None
-        };
-        Some(CalculationValue { kind, value })
+        let number = core::str::from_utf8(self.input.get(start..unit_start)?)
+            .ok()
+            .and_then(|number| parse_finite(number).ok());
+        let unit = (kind == CalculationKind::Dimension)
+            .then(|| token[unit_start - start..].to_ascii_lowercase());
+        Some(CalculationValue {
+            kind,
+            value: number,
+            unit,
+        })
     }
 
     fn parse_identifier(&mut self) -> Option<&'a [u8]> {

@@ -12,6 +12,8 @@ const FIXTURE_TEXT: &str = "generated SVG text";
 const FIXTURE_WIDTH: f64 = 320.0;
 const FIXTURE_HEIGHT: f64 = 200.0;
 const FIXTURE_VIEW_BOX: [f64; 4] = [0.0, 0.0, 320.0, 200.0];
+const WHITESPACE_WIDTH: f64 = 10.0;
+const WHITESPACE_HEIGHT: f64 = 20.0;
 
 pub struct SvgFixture {
     bytes: Vec<u8>,
@@ -69,6 +71,22 @@ impl SvgFixture {
         Self::from_body(&body)
     }
 
+    pub fn empty_child_beyond_depth_limit() -> Self {
+        let mut body = String::new();
+        for _ in 1..128 {
+            body.push_str("<g>");
+        }
+        body.push_str("<path/>");
+        for _ in 1..128 {
+            body.push_str("</g>");
+        }
+        Self::from_body(&body)
+    }
+
+    pub fn dimensions_with_surrounding_xml_whitespace() -> Self {
+        Self::raw(b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\" 10px \" height=\"\n20\t\"/>")
+    }
+
     pub fn output_bomb() -> Self {
         Self::from_body(&format!("<text>{}</text>", "x".repeat(128 * 1024 + 1)))
     }
@@ -104,6 +122,14 @@ impl SvgFixture {
 
     pub const fn expected_view_box(&self) -> [f64; 4] {
         FIXTURE_VIEW_BOX
+    }
+
+    pub const fn expected_whitespace_width(&self) -> f64 {
+        WHITESPACE_WIDTH
+    }
+
+    pub const fn expected_whitespace_height(&self) -> f64 {
+        WHITESPACE_HEIGHT
     }
 
     pub fn into_source(self) -> Result<MemorySource, Box<dyn Error>> {
