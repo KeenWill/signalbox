@@ -89,6 +89,10 @@ use testcontainers_modules::{
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
 
+mod support;
+
+use support::record_empty_instruction_manifest;
+
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_repo_watch_dispatch";
 const DATABASE_USER: &str = "signalbox";
@@ -1448,6 +1452,7 @@ async fn checkpoint_delegated_approval_at(
     };
     let turn = activated.turn();
     drop(activated);
+    record_empty_instruction_manifest(pool, session).await?;
 
     let repository = PostgresModelCallRepository::new(
         pool.clone(),
