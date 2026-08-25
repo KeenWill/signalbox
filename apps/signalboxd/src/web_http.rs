@@ -210,14 +210,21 @@ pub struct WebHttpRuntime {
 
 impl WebHttpRuntime {
     /// Binds the production same-origin router.
+    ///
+    /// Fails construction when the pool cannot fund the shared snapshot
+    /// reader budget, mirroring the daemon entry point's own startup
+    /// rejection (`main.rs`'s `insufficient_snapshot_reader_pool_capacity`
+    /// failure) instead of returning a runtime whose session-read routes
+    /// can never obtain a reader permit.
     pub async fn bind(
         configuration: WebHttpConfiguration,
         pool: PgPool,
     ) -> Result<Self, WebHttpRuntimeError> {
         let snapshot_reader_budget = super::process_runtime::shared_snapshot_reader_budget(
             pool.options().get_max_connections(),
-        );
-        Self::bind_production(configuration, pool, snapshot_reader_budget).await
+        )
+        .ok_or(WebHttpRuntimeError::Bind)?;
+        Self::bind_with_snapshot_reader_budget(configuration, pool, snapshot_reader_budget).await
     }
 
     /// Binds production HTTP reads to the daemon-wide snapshot-reader budget.
@@ -1323,7 +1330,8 @@ mod tests {
 
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime,
-        attention_snapshot_dto, deterministic_test_router, ndjson_response, production_router,
+        WebHttpRuntimeError, attention_snapshot_dto, deterministic_test_router, ndjson_response,
+        production_router,
     };
 
     fn loopback_ephemeral() -> SocketAddr {
@@ -1457,6 +1465,33 @@ mod tests {
         );
         assert_eq!(decoded, WebContractBootstrap::current());
         assert_eq!(runtime_outcome, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn bind_rejects_a_pool_too_small_to_fund_the_reader_budget() {
+        // Two connections is exactly `RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS`
+        // (`process_runtime::snapshot_reader_capacity`), leaving zero for the
+        // shared snapshot reader budget. The daemon entry point in `main.rs`
+        // refuses to start in this configuration; the standalone production
+        // binder must refuse construction the same way instead of returning a
+        // runtime whose session-read routes can never obtain a reader permit.
+        let assets = tempfile::tempdir().expect("the static asset directory exists");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_lazy("postgres://signalbox:signalbox@localhost/signalbox")
+            .expect("the unused fixture pool URL is valid");
+
+        let outcome = WebHttpRuntime::bind(
+            WebHttpConfiguration::new(loopback_ephemeral(), Some(assets.path().to_path_buf()))
+                .expect("the loopback fixture configuration is valid"),
+            pool,
+        )
+        .await;
+        let error = outcome
+            .err()
+            .expect("a pool that cannot fund any reader permit must fail construction");
+
+        assert_eq!(error, WebHttpRuntimeError::Bind);
     }
 
     #[tokio::test]
@@ -1879,33 +1914,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn attention_reads_reject_non_loopback_host_authorities() {
+    async fn attention_snapshot_reads_reject_non_loopback_host_authorities() {
         // The attention projection returns session identities, goal-need text,
         // and operator state across the whole fleet, so a rebound origin must
         // not reach it any more than it may reach the per-session reads beside
-        // it. Both routes are asserted because they were registered outside
-        // the guarded router and had to be moved into it.
-        for path in ["/api/attention", "/api/attention/follow"] {
-            let request = Request::get(path)
-                .header(header::HOST, "attacker.example")
-                .body(Body::empty())
-                .expect("the request is valid");
-            let response = production_router(None, None)
-                .oneshot(request)
-                .await
-                .expect("the production router responds");
-            let status = response.status();
-            let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
-                .expect("the rejection is structured JSON");
+        // it. This route is asserted because it was registered outside the
+        // guarded router and had to be moved into it.
+        let request = Request::get("/api/attention")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
 
-            assert_eq!(
-                status,
-                StatusCode::FORBIDDEN,
-                "`{path}` must reject a non-loopback authority",
-            );
-            assert_eq!(body["error"]["kind"], "transport");
-            assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
-        }
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "`/api/attention` must reject a non-loopback authority",
+        );
+        assert_eq!(body["error"]["kind"], "transport");
+        assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    #[tokio::test]
+    async fn attention_follow_reads_reject_non_loopback_host_authorities() {
+        // Mirrors `attention_snapshot_reads_reject_non_loopback_host_authorities`
+        // for the follow route: it was registered outside the guarded router
+        // beside the snapshot route and had to be moved into it too.
+        let request = Request::get("/api/attention/follow")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "`/api/attention/follow` must reject a non-loopback authority",
+        );
+        assert_eq!(body["error"]["kind"], "transport");
+        assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
     }
 
     #[tokio::test]
