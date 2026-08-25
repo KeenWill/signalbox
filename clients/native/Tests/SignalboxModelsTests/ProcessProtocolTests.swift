@@ -1807,7 +1807,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
 
     XCTAssertEqual(
-      try ProcessProtocolFixture.failedProviderCause(in: frame.message),
+      try ProcessProtocolFixture.failedModelCallCause(in: frame.message),
       .unknown(ProcessProtocolFixture.futureProviderFailureCause)
     )
   }
