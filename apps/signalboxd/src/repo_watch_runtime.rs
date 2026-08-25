@@ -137,8 +137,9 @@ const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
 // work for the existing bounded backoff path to retry.
 const WEBHOOK_DRAIN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 // Reconciliation before or after the drain is durable and replayable, but it
-// shares the same serialized owner. Give the drain deadline and its bounded
-// child cleanup room to report before the enclosing attempt is cancelled.
+// runs on the same serialized repository task. Give the drain deadline and its
+// bounded child cleanup room to report before the enclosing attempt is
+// cancelled.
 const WEBHOOK_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(70);
 // Every shared child-set join uses this bound. A later attempt may retry the
 // join, but it never spawns alongside survivors or wedges the scheduler while
