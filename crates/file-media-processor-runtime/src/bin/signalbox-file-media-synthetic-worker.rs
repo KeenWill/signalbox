@@ -175,6 +175,7 @@ fn synthetic_declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error
             range_count: 1,
             cumulative_bytes: 1,
         }),
+        validation: signalbox_file_media_runtime::ValidationDeclaration::new(64, 1),
         views: vec![view],
         reason_codes: vec![ReasonCode::try_new("synthetic_failure")?],
         streaming_text_fallback: StreamingTextFallback::Disabled,

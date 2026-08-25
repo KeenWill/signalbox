@@ -10,7 +10,7 @@ use signalbox_file_media_runtime::{
     ProbeDeclarationInput, ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput,
     ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
     ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
-    StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    StreamingTextFallback, ValidationDeclaration, ValidationEvidence, VerifiedBlobSource,
 };
 
 const PROVIDER_NAME: &str = "video";
@@ -253,6 +253,9 @@ fn reader_declaration(
             range_count: PROBE_RANGE_COUNT,
             cumulative_bytes: METADATA_BYTES,
         }),
+        // Validation reads exactly one bounded metadata-prefix range, clamped to
+        // the same whole-source metadata ceiling the probe cumulates to.
+        validation: ValidationDeclaration::new(METADATA_BYTES, 1),
         views: vec![metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,

@@ -1,3 +1,6 @@
+//! Deterministic file-media registration, candidate selection, and output admission governed by
+//! `docs/spec/file-and-media.md`.
+
 use std::{collections::BTreeMap, error::Error, fmt, str::FromStr};
 
 use crate::{
@@ -104,6 +107,14 @@ impl FileMediaRegistry {
         let mut media_readers = BTreeMap::new();
         let mut streaming_text_reader = None;
         for provider in &providers {
+            if provider
+                .observed_container_entries()
+                .is_some_and(|entries| {
+                    entries == 0 || entries > ceilings.observed_container_entries
+                })
+            {
+                return Err(FileMediaRegistryConstructionError::ContainerBounds);
+            }
             for reader in provider.readers() {
                 validate_reader(reader, ceilings)?;
                 let identity = reader.identity().clone();
@@ -474,8 +485,16 @@ impl FileMediaRegistry {
                     source: request.source.clone(),
                     media_type: candidate.media_type.clone(),
                     evidence,
-                    maximum_source_bytes: self.ceilings.validation_source_bytes,
-                    maximum_ranges: self.ceilings.validation_ranges,
+                    maximum_source_bytes: self
+                        .ceilings
+                        .validation_source_bytes
+                        .min(reader.validation().source_bytes()),
+                    maximum_ranges: self
+                        .ceilings
+                        .validation_ranges
+                        .min(reader.validation().range_count()),
+                    maximum_image_axis: self.ceilings.image_axis,
+                    maximum_decoded_image_pixels: self.ceilings.decoded_image_pixels,
                 },
                 source,
                 cancellation,
@@ -587,6 +606,12 @@ impl FileMediaRegistry {
             .readers
             .get(validated.reader())
             .ok_or(FileMediaFailure::ProcessorFailed)?;
+        let provider_container_entries = self
+            .providers
+            .iter()
+            .find(|provider| provider.provider() == validated.reader().provider())
+            .ok_or(FileMediaFailure::ProcessorFailed)?
+            .observed_container_entries();
         let raw = processor
             .read(
                 validated.reader(),
@@ -598,13 +623,22 @@ impl FileMediaRegistry {
                     maximum_source_bytes: self.ceilings.validation_source_bytes,
                     view: request.view,
                     input: request.input,
+                    maximum_image_axis: self.ceilings.image_axis,
+                    maximum_decoded_image_pixels: self.ceilings.decoded_image_pixels,
                     maximum_container_entries: self.ceilings.observed_container_entries,
                 },
                 source,
                 cancellation,
             )
             .await?;
-        sanitize_read(reader, view, self.ceilings, initial_request, raw)
+        sanitize_read(
+            reader,
+            view,
+            self.ceilings,
+            provider_container_entries,
+            initial_request,
+            raw,
+        )
     }
 }
 
@@ -831,6 +865,7 @@ fn sanitize_read(
     reader: &ReaderDeclaration,
     view: &crate::ReadViewDeclaration,
     ceilings: FileMediaCeilings,
+    provider_container_entries: Option<u64>,
     initial_request: bool,
     raw: ProcessorReadOutput,
 ) -> Result<FileReadResult, FileMediaFailure> {
@@ -876,11 +911,14 @@ fn sanitize_read(
             }
             let continuation = sanitize_continuation(truncated, cursor)?;
             let maximum_nodes = nodes.min(ceilings.structured_nodes);
+            let maximum_container_entries = provider_container_entries
+                .unwrap_or(ceilings.observed_container_entries)
+                .min(ceilings.observed_container_entries);
             let body = crate::value::parse_json_without_duplicate_members_bounded(
                 &body_json,
                 crate::value::JsonParseLimits {
                     maximum_nodes,
-                    maximum_container_entries: ceilings.observed_container_entries,
+                    maximum_container_entries,
                 },
             )
             .map_err(|_| FileMediaFailure::ProcessorFailed)?;
@@ -896,7 +934,7 @@ fn sanitize_read(
                 || observed.depth > ceilings.structured_depth
                 || observed.nodes > nodes
                 || observed.nodes > ceilings.structured_nodes
-                || observed.max_container_entries > ceilings.observed_container_entries
+                || observed.max_container_entries > maximum_container_entries
                 || observed.string_bytes > string_bytes
             {
                 return Err(FileMediaFailure::ProcessorFailed);
@@ -1043,6 +1081,14 @@ fn validate_reader(
             .is_none_or(|minimum| minimum > probe.cumulative_bytes())
     {
         return Err(FileMediaRegistryConstructionError::ProbeBounds);
+    }
+    let validation = reader.validation();
+    if validation.source_bytes() == 0
+        || validation.source_bytes() > crate::MAX_VALIDATION_SOURCE_BYTES
+        || validation.range_count() == 0
+        || validation.range_count() > crate::MAX_VALIDATION_RANGES
+    {
+        return Err(FileMediaRegistryConstructionError::ViewBounds);
     }
     for view in reader.views() {
         validate_view(view.access(), view.bounds(), ceilings)?;
@@ -1274,6 +1320,8 @@ pub enum FileMediaRegistryConstructionError {
     ProbeBounds,
     /// View bounds were absent, contradictory, or excessive.
     ViewBounds,
+    /// A provider container-entry bound was zero or excessive.
+    ContainerBounds,
     /// Text fallback registration was absent or ambiguous.
     TextFallback,
 }
@@ -1290,6 +1338,7 @@ impl fmt::Display for FileMediaRegistryConstructionError {
             Self::DuplicateReaderMember => "file media reader member is duplicated",
             Self::ProbeBounds => "file media probe bounds are invalid",
             Self::ViewBounds => "file media view bounds are invalid",
+            Self::ContainerBounds => "file media container bounds are invalid",
             Self::TextFallback => "file media text fallback is invalid",
         })
     }
