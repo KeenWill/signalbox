@@ -53,7 +53,11 @@ an authority.
 The implemented daemon does not yet expose the typed structured-result adapter
 required to turn a concern session into `submit_review_findings` evidence. The
 driver commissions and binds those passes but exits at that boundary; it never
-treats free-form transcript prose as findings. Every operational failure is one
+treats free-form transcript prose as findings. A concern pass whose turn
+succeeded is therefore left unsealed on purpose: generic `complete-pass`
+completion refuses read-only-review success, whose only admission is
+`record-findings` with a canonical inventory. An unsuccessful member is still
+completed and claimed. Every operational failure is one
 greppable stderr line beginning with `REVIEW_DRIVER_FAILURE`.
 
 Run its tests without a daemon or GitHub connection:

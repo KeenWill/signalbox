@@ -501,20 +501,38 @@ class ReviewDriverTests(unittest.TestCase):
         with self.assertRaises(DriverFailure) as caught:
             driver.run(REPOSITORY, PULL_REQUEST)
 
-        # Every durable concern slot must carry a recorded claim; the daemon
-        # holds the attempt at `awaiting_concerns` until all of them do, so a
-        # member skipped here could never be recorded by a replay.
+        # Every durable concern slot is still commissioned before any terminal
+        # outcome is collected; aborting the loop on the first unsuccessful
+        # member would strand the remaining durable slots forever.
         self.assertEqual(len(sessions.commissioned), len(CONCERNS))
-        self.assertEqual(
-            [concern for concern, _ in cli.recorded_concerns],
-            [concern for concern, _ in CONCERNS],
-        )
-        self.assertEqual(cli.recorded_concerns[0][1], "failed")
-        self.assertEqual(
-            [outcome for _, outcome in cli.recorded_concerns[1:]],
-            ["succeeded"] * (len(CONCERNS) - 1),
-        )
+        # Only the unsuccessful member carries a recorded claim.  A `succeeded`
+        # concern claim is rebuilt by the daemon from the sealed pass and the
+        # fan-out barrier admits it only when that pass carries a
+        # `ProducedFindings` inventory, which no generic completion can supply.
+        self.assertEqual(cli.recorded_concerns, [(CONCERNS[0][0], "failed")])
         self.assertEqual(caught.exception.code, "stage-terminal-unsuccessful")
+
+    def test_successful_concerns_stop_before_generic_completion(self) -> None:
+        facts = pull_request_facts(HEAD_ONE)
+        cli = ConcernFanoutCli()
+        # No member fails: every commissioned concern turn reaches `completed`.
+        sessions = ConcernFanoutSessions(failing_index=-1)
+        driver = ReviewDriver(FakeGitHub(facts), cli, sessions, 1.0, 0.001)
+
+        with self.assertRaises(DriverFailure) as caught:
+            driver.run(REPOSITORY, PULL_REQUEST)
+
+        # `handle_complete_review_pass` refuses `--outcome succeeded` for a
+        # read-only-review pass, whose sole success admission is the typed
+        # findings inventory, and a `succeeded` concern claim is rebuilt from
+        # that sealed pass.  Sending either seal here would classify every
+        # successful concern as a command error and make the declared typed
+        # boundary unreachable, so the fan-out stops short of both.
+        self.assertEqual(len(sessions.commissioned), len(CONCERNS))
+        self.assertEqual(cli.completed_passes, set())
+        self.assertEqual(cli.recorded_concerns, [])
+        self.assertEqual(caught.exception.code, "typed-stage-output-unavailable")
+        self.assertEqual(caught.exception.stage, "concerns")
 
     def test_import_without_context_is_not_a_successful_operation(self) -> None:
         facts = pull_request_facts(HEAD_ONE)

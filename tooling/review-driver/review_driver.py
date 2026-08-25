@@ -901,10 +901,23 @@ class ReviewDriver:
             try:
                 completed = self._collect_pass(pending)
                 outcome = pass_outcome(completed.turn_state)
-                self.cli.complete_pass(completed, outcome)
-                self.cli.record_concern_outcome(
-                    attempt.attempt, concern, completed, outcome
-                )
+                # Only the typed findings admission may seal a successful
+                # `read-only-review` pass.  `handle_complete_review_pass`
+                # rejects a generic `complete-pass --outcome succeeded` for this
+                # pass kind outright, and a `succeeded` concern claim is
+                # reconstructed from the sealed pass, so the fan-out barrier
+                # rejects any member whose pass does not already carry a
+                # `ProducedFindings` inventory.  Sending either seal here would
+                # turn every successful concern into a command error and make
+                # the `typed-stage-output-unavailable` boundary below
+                # unreachable, so a successful member stops short of both.  An
+                # unsuccessful member is still sealed and claimed: the daemon
+                # admits generic completion for every non-successful outcome.
+                if outcome != "succeeded":
+                    self.cli.complete_pass(completed, outcome)
+                    self.cli.record_concern_outcome(
+                        attempt.attempt, concern, completed, outcome
+                    )
             except DriverFailure as error:
                 failures.append(f"{concern}:{error.code}")
                 continue
@@ -924,9 +937,10 @@ class ReviewDriver:
         raise DriverFailure(
             "typed-stage-output-unavailable",
             "concerns",
-            "the five sessions succeeded, but the implemented daemon exposes no typed "
-            "submit_review_findings result; transcript prose cannot be admitted as findings "
-            f"(completed: {','.join(successful)})",
+            "the five sessions succeeded, but sealing a read-only-review pass requires "
+            "record-findings with a canonical inventory and the model runtime's "
+            "submit_review_findings contract is unimplemented; transcript prose cannot be "
+            f"admitted as findings (completed: {','.join(successful)})",
         )
 
     def _drive_session_pass(
