@@ -151,6 +151,23 @@ fn exact_api_snapshots_keep_their_recorded_rate_sets() {
 }
 
 #[test]
+fn retired_snapshot_rate_window_ends_with_model_availability() {
+    let catalog = bundled_catalog().unwrap();
+
+    let resolution = catalog
+        .resolve(
+            Provider::Openai,
+            "gpt-4-0314",
+            "2024-06-13",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+    let rate_set = &resolution.price().unwrap().resolved_rate_sets().unwrap()[0];
+
+    assert_eq!(rate_set.interval, "2023-03-14..2024-06-14");
+}
+
+#[test]
 fn codex_subscription_model_resolves_only_to_approximate_api_analogue() {
     let catalog = bundled_catalog().unwrap();
 
@@ -343,6 +360,36 @@ fn observation_bounded_price_transition_returns_ambiguity() {
 }
 
 #[test]
+fn unrelated_rate_overlays_do_not_form_a_transition() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["rate_sets"][37]["id"], "oai-gpt56-sol-current");
+    raw["rate_sets"][37]["window"]["precision"] = Value::String(String::from("observation_window"));
+    raw["rate_sets"][37]["window"]["effective_from"] = Value::Null;
+    raw["rate_sets"][37]["window"]["first_observed_new_rate"] =
+        Value::String(String::from("2026-08-24"));
+    raw["rate_sets"][37]["rates"][0]["qualifier"]["service_tier"] =
+        Value::String(String::from("unrelated"));
+    raw["rate_sets"][37]["rates"][1]["qualifier"]["service_tier"] =
+        Value::String(String::from("unrelated"));
+    raw["rate_sets"][37]["rates"][2]["qualifier"]["service_tier"] =
+        Value::String(String::from("unrelated"));
+    raw["rate_sets"][37]["rates"][3]["qualifier"]["service_tier"] =
+        Value::String(String::from("unrelated"));
+    let catalog = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
+
+    let resolution = catalog
+        .resolve(
+            Provider::Openai,
+            "gpt-5.6-sol",
+            "2026-08-22",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+
+    assert_eq!(resolution.price(), Some(&PriceResolution::Unknown));
+}
+
+#[test]
 fn exact_and_family_consumer_mappings_do_not_conflate() {
     let catalog = bundled_catalog().unwrap();
 
@@ -446,6 +493,82 @@ fn malformed_catalog_field_is_rejected() {
     let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
 
     assert!(error.to_string().contains("unsupported_authority"));
+}
+
+#[test]
+fn rate_window_cannot_extend_past_model_availability() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["rate_sets"][4]["id"], "oai-gpt4-launch");
+    raw["rate_sets"][4]["window"]["effective_until"] = Value::Null;
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("extends beyond model availability")
+    );
+}
+
+#[test]
+fn exact_day_observation_boundary_must_be_ordered() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["rate_sets"][15]["id"], "oai-o3-reduced");
+    raw["rate_sets"][15]["window"]["last_observed_old_rate"] =
+        Value::String(String::from("2025-06-11"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not leave an ordered observation boundary")
+    );
+}
+
+#[test]
+fn source_ownership_uses_the_canonicalized_url_path() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(
+        raw["sources"][28]["id"],
+        "oai-codex-model-catalog-2026-08-24"
+    );
+    raw["sources"][28]["url"] =
+        Value::String(String::from("https://github.com/openai/../attacker/repo"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("not a recognized first-party URL")
+    );
+}
+
+#[test]
+fn concrete_model_requires_a_provider_spelling() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["models"][1]["id"], "openai:gpt-3.5-turbo");
+    raw["models"][1]["provider_model_id"] = Value::Null;
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(error.to_string().contains("requires a provider spelling"));
+}
+
+#[test]
+fn family_reference_must_target_a_family_record() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["models"][1]["id"], "openai:gpt-3.5-turbo");
+    raw["models"][1]["family"] = Value::String(String::from("openai:gpt-3.5-turbo-0301"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("family reference does not target a family")
+    );
 }
 
 #[test]

@@ -7,6 +7,7 @@ use std::{
 
 use rust_decimal::Decimal;
 use serde::Deserialize;
+use url::Url;
 
 use crate::GENERATED_PROJECTION_BANNER;
 
@@ -729,37 +730,55 @@ impl Catalog {
             return Ok(PriceResolution::Resolved(resolved));
         }
 
-        let before = self
+        let transition = self
             .raw
             .rate_sets
             .iter()
-            .filter(|set| set.model_id == pricing_model)
-            .filter(|set| set.commercial_channel == channel)
-            .filter(|set| {
-                set.window
-                    .effective_until
-                    .as_deref()
-                    .is_some_and(|until| until <= date)
-            })
-            .filter_map(|set| {
-                set.window
+            .filter(|new| new.model_id == pricing_model)
+            .filter(|new| new.commercial_channel == channel)
+            .filter(|new| new.window.first_observed_new_rate.as_str() > date)
+            .filter(|new| {
+                new.window
                     .last_observed_old_rate
                     .as_deref()
-                    .filter(|observed| *observed < date)
-                    .map(|observed| (observed, set))
+                    .is_some_and(|observed| observed < date)
             })
-            .max_by_key(|(observed, _)| *observed);
-        let after = self
-            .raw
-            .rate_sets
-            .iter()
-            .filter(|set| set.model_id == pricing_model)
-            .filter(|set| set.commercial_channel == channel)
-            .filter(|set| set.window.first_observed_new_rate.as_str() > date)
-            .min_by_key(|set| set.window.first_observed_new_rate.as_str());
-        if let (Some((last_observed, old)), Some(new)) = (before, after) {
+            .flat_map(|new| {
+                self.raw
+                    .rate_sets
+                    .iter()
+                    .filter(|old| old.model_id == pricing_model)
+                    .filter(|old| old.commercial_channel == channel)
+                    .filter(|old| {
+                        old.window
+                            .effective_until
+                            .as_deref()
+                            .is_some_and(|until| until <= date)
+                    })
+                    .filter(|old| rate_sets_share_dimension_and_qualifier(old, new))
+                    .map(move |old| (new, old))
+            })
+            .min_by(|(left_new, left_old), (right_new, right_old)| {
+                left_new
+                    .window
+                    .first_observed_new_rate
+                    .cmp(&right_new.window.first_observed_new_rate)
+                    .then_with(|| {
+                        right_old
+                            .window
+                            .effective_until
+                            .cmp(&left_old.window.effective_until)
+                    })
+                    .then_with(|| left_new.id.cmp(&right_new.id))
+                    .then_with(|| left_old.id.cmp(&right_old.id))
+            });
+        if let Some((new, old)) = transition {
             return Ok(PriceResolution::TransitionAmbiguous {
-                last_observed_old_rate: String::from(last_observed),
+                last_observed_old_rate: new
+                    .window
+                    .last_observed_old_rate
+                    .clone()
+                    .ok_or_else(|| CatalogError::new("transition boundary disappeared"))?,
                 first_observed_new_rate: new.window.first_observed_new_rate.clone(),
                 candidate_rate_set_ids: vec![old.id.clone(), new.id.clone()],
             });
@@ -950,6 +969,15 @@ impl Catalog {
     }
 }
 
+fn rate_sets_share_dimension_and_qualifier(left: &RateSet, right: &RateSet) -> bool {
+    left.rates.iter().any(|left_rate| {
+        right.rates.iter().any(|right_rate| {
+            left_rate.dimension == right_rate.dimension
+                && left_rate.qualifier == right_rate.qualifier
+        })
+    })
+}
+
 fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
     if raw.schema_version != EXPECTED_SCHEMA_VERSION {
         return Err(CatalogError::new(format!(
@@ -985,11 +1013,20 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
                 )));
             }
         }
-        if model.identity_kind == ModelIdentityKind::Family && model.provider_model_id.is_some() {
-            return Err(CatalogError::new(format!(
-                "family model {} cannot have a provider spelling",
-                model.id
-            )));
+        match (model.identity_kind, model.provider_model_id.is_some()) {
+            (ModelIdentityKind::Family, true) => {
+                return Err(CatalogError::new(format!(
+                    "family model {} cannot have a provider spelling",
+                    model.id
+                )));
+            }
+            (ModelIdentityKind::Family, false) | (_, true) => {}
+            (_, false) => {
+                return Err(CatalogError::new(format!(
+                    "non-family model {} requires a provider spelling",
+                    model.id
+                )));
+            }
         }
         if let Some(date) = &model.available_from {
             validate_date(date, "model available_from")?;
@@ -1033,6 +1070,19 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
     }
     for model in &raw.models {
         validate_model_ref(raw, model.provider, model.family.as_deref(), &model.id)?;
+        if let Some(family) = &model.family {
+            let family = raw
+                .models
+                .iter()
+                .find(|candidate| candidate.id == *family)
+                .ok_or_else(|| CatalogError::new(format!("unknown family {family}")))?;
+            if family.identity_kind != ModelIdentityKind::Family {
+                return Err(CatalogError::new(format!(
+                    "model {} family reference does not target a family",
+                    model.id
+                )));
+            }
+        }
         validate_model_ref(raw, model.provider, model.priced_as.as_deref(), &model.id)?;
         if let Some(priced_as) = &model.priced_as {
             let target = raw
@@ -1081,6 +1131,15 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
             )));
         }
         validate_window(&set.window, &set.id)?;
+        if set.window.precision == DatePrecision::ExactDay
+            && let Some(last_old) = &set.window.last_observed_old_rate
+            && last_old >= &set.window.first_observed_new_rate
+        {
+            return Err(CatalogError::new(format!(
+                "window {} does not leave an ordered observation boundary",
+                set.id
+            )));
+        }
         validate_source_refs(&set.source_ids, &source_ids, &set.id)?;
         validate_source_providers(raw, set.provider, &set.source_ids, &set.id)?;
         let rate_start = set
@@ -1095,6 +1154,18 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
         {
             return Err(CatalogError::new(format!(
                 "rate set {} predates model availability",
+                set.id
+            )));
+        }
+        if let Some(model_until) = model.available_until.as_deref()
+            && set
+                .window
+                .effective_until
+                .as_deref()
+                .is_none_or(|rate_until| rate_until > model_until)
+        {
+            return Err(CatalogError::new(format!(
+                "rate set {} extends beyond model availability",
                 set.id
             )));
         }
@@ -1229,31 +1300,42 @@ fn validate_source(source: &Source) -> Result<(), CatalogError> {
             )));
         }
     }
-    let allowed = match source.provider {
-        Provider::Openai => [
-            "https://openai.com/",
-            "https://developers.openai.com/",
-            "https://platform.openai.com/",
-            "https://help.openai.com/",
-            "https://community.openai.com/",
-            "https://cdn.openai.com/",
-            "https://github.com/openai/",
-        ]
-        .iter()
-        .any(|prefix| source.url.starts_with(prefix)),
-        Provider::Anthropic => [
-            "https://www.anthropic.com/",
-            "https://anthropic.com/",
-            "https://docs.anthropic.com/",
-            "https://platform.claude.com/",
-            "https://support.anthropic.com/",
-            "https://assets.anthropic.com/",
-            "https://www-cdn.anthropic.com/",
-            "https://github.com/anthropics/",
-        ]
-        .iter()
-        .any(|prefix| source.url.starts_with(prefix)),
-    };
+    let url = Url::parse(&source.url)
+        .map_err(|_| CatalogError::new(format!("source {} has an invalid URL", source.id)))?;
+    let allowed = url.scheme() == "https"
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.port().is_none()
+        && match (source.provider, url.host_str()) {
+            (
+                Provider::Openai,
+                Some(
+                    "openai.com"
+                    | "developers.openai.com"
+                    | "platform.openai.com"
+                    | "help.openai.com"
+                    | "community.openai.com"
+                    | "cdn.openai.com",
+                ),
+            ) => true,
+            (Provider::Openai, Some("github.com")) => github_path_is_owned_by(&url, "openai"),
+            (
+                Provider::Anthropic,
+                Some(
+                    "www.anthropic.com"
+                    | "anthropic.com"
+                    | "docs.anthropic.com"
+                    | "platform.claude.com"
+                    | "support.anthropic.com"
+                    | "assets.anthropic.com"
+                    | "www-cdn.anthropic.com",
+                ),
+            ) => true,
+            (Provider::Anthropic, Some("github.com")) => {
+                github_path_is_owned_by(&url, "anthropics")
+            }
+            _ => false,
+        };
     if !allowed {
         return Err(CatalogError::new(format!(
             "source {} is not a recognized first-party URL",
@@ -1261,6 +1343,16 @@ fn validate_source(source: &Source) -> Result<(), CatalogError> {
         )));
     }
     Ok(())
+}
+
+fn github_path_is_owned_by(url: &Url, organization: &str) -> bool {
+    let Some(mut segments) = url.path_segments() else {
+        return false;
+    };
+    segments.next() == Some(organization)
+        && segments
+            .next()
+            .is_some_and(|repository| !repository.is_empty())
 }
 
 fn validate_window(window: &DateWindow, subject: &str) -> Result<(), CatalogError> {
