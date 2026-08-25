@@ -1003,6 +1003,82 @@ describe('BoundedSessionHistory', () => {
     )
   })
 
+  it('rejects a latest window whose first item precedes the descriptor start', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        sizes: { ...descriptor.sizes, item_count: '91', projected_structured_bytes: '7098' },
+        first_address: { event_sequence: '10' },
+        latest_address: { event_sequence: '100' },
+      }),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '9' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 78,
+          },
+          {
+            address: { event_sequence: '100' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 156,
+        continuation_before: null,
+        continuation_after: null,
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(history.load({ kind: 'latest' }, { maxItems: 2, maxBytes: 1024 })).rejects.toThrow(
+      'precedes the cached first address',
+    )
+  })
+
+  it('rejects an around window whose first item precedes the descriptor start', async () => {
+    const scenario = new EnormousSessionScenarioSource()
+    const descriptor = await scenario.readDescriptor(sessionId)
+    const source: SessionTimelineSource = {
+      limits: scenario.limits,
+      readDescriptor: async () => ({
+        ...descriptor,
+        sizes: { ...descriptor.sizes, item_count: '91', projected_structured_bytes: '7098' },
+        first_address: { event_sequence: '10' },
+        latest_address: { event_sequence: '100' },
+      }),
+      readWindow: async () => ({
+        session_id: sessionId,
+        items: [
+          {
+            address: { event_sequence: '9' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 78,
+          },
+          {
+            address: { event_sequence: '11' },
+            kind: 'input_accepted',
+            projected_structured_bytes: 78,
+          },
+        ],
+        projected_structured_bytes: 156,
+        continuation_before: { event_sequence: '9' },
+        continuation_after: { event_sequence: '11' },
+      }),
+    }
+    const history = new BoundedSessionHistory(sessionId, source)
+    await history.describe()
+
+    await expect(
+      history.load({ kind: 'around', eventSequence: '11' }, { maxItems: 2, maxBytes: 1024 }),
+    ).rejects.toThrow('precedes the immutable first address')
+  })
+
   it('rejects a timeline window whose addresses decrease', async () => {
     const scenario = new EnormousSessionScenarioSource()
     const source: SessionTimelineSource = {

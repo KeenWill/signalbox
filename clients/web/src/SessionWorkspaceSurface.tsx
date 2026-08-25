@@ -85,7 +85,10 @@ export function SessionWorkspaceSurface({
     },
     enabled: sessionId !== null && bootstrap?.capabilities.bounded_session_timeline === true,
     gcTime: 0,
-    placeholderData: (previous) => previous,
+    // Keep the previous window on screen only while the same session reloads: another session's
+    // descriptor and addresses must never be relabelled with, or persisted against, this one.
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey[2] === sessionId ? previous : undefined,
   })
   const items = useMemo(
     () => visibleSessionItems(session.data?.window.items ?? [], app.detail),
