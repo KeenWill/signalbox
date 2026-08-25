@@ -84,6 +84,8 @@ const MAX_NAMESPACE_PREFIX_BYTES: usize = 64;
 const MAX_NAMESPACE_URI_BYTES: usize = 1024;
 // numeric-bound: ceiling - bounds live declarations per scope so per-element clones cannot amplify
 const MAX_NAMESPACE_DECLARATIONS: usize = 128;
+// numeric-bound: ceiling - bounds cumulative markup-compatibility state per scope so per-element clones cannot amplify
+const MAX_MARKUP_COMPATIBILITY_ENTRIES: usize = 128;
 // numeric-bound: ceiling - protects worker framing from oversized metadata output
 const METADATA_OUTPUT_BYTES: usize = 16 * 1024;
 const CONTENT_TYPES: &str = "[Content_Types].xml";
@@ -1948,6 +1950,12 @@ fn apply_markup_compatibility_attributes(
                         .get(declared_prefix.as_bytes())
                         .ok_or(XmlIssue::Malformed)?;
                     compatibility.ignorable_namespaces.insert(namespace.clone());
+                    if compatibility.ignorable_namespaces.len()
+                        + compatibility.process_content.len()
+                        > MAX_MARKUP_COMPATIBILITY_ENTRIES
+                    {
+                        return Err(XmlIssue::Malformed);
+                    }
                 }
             }
             b"ProcessContent" => {
@@ -1960,6 +1968,12 @@ fn apply_markup_compatibility_attributes(
                     compatibility
                         .process_content
                         .insert((namespace.clone(), local.as_bytes().to_vec()));
+                    if compatibility.ignorable_namespaces.len()
+                        + compatibility.process_content.len()
+                        > MAX_MARKUP_COMPATIBILITY_ENTRIES
+                    {
+                        return Err(XmlIssue::Malformed);
+                    }
                 }
             }
             _ => {}
@@ -2483,48 +2497,67 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
     let mut value_depth = 0_usize;
     let mut inline_text_depth = 0_usize;
     let mut inline_phonetic_depth = 0_usize;
+    let mut element_depth = 0_usize;
     let mut value = String::new();
     let mut inline_value = String::new();
+    let mut namespace_scopes = vec![std::collections::HashMap::new()];
     loop {
         match reader
             .read_event_into(&mut buffer)
             .map_err(|_| XmlIssue::Malformed)?
         {
-            Event::Start(element) if local_name(element.name().as_ref()) == b"c" => {
-                shared_cell = false;
-                inline_cell = false;
-                value.clear();
-                inline_value.clear();
-                for attribute in element.attributes() {
-                    let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
-                    if attribute.key.as_ref() == b"t" {
-                        let cell_type = attribute
-                            .decoded_and_normalized_value(XmlVersion::Implicit1_0, reader.decoder())
-                            .map_err(|_| XmlIssue::Malformed)?;
-                        shared_cell = cell_type == "s";
-                        inline_cell = cell_type == "inlineStr";
+            Event::Start(element) => {
+                element_depth = next_xml_depth(element_depth)?;
+                let mut scope = namespace_scopes
+                    .last()
+                    .cloned()
+                    .ok_or(XmlIssue::Malformed)?;
+                apply_namespace_declarations(&reader, &element, &mut scope)?;
+                let qualified_name = element.name();
+                let name = local_name(qualified_name.as_ref());
+                // Extension elements (e.g. `<ext:c>`) share local names with
+                // real spreadsheet cells; require the SpreadsheetML namespace
+                // so foreign markup cannot be read back as cell text.
+                let spreadsheet_element = element_uses_scoped_namespace(
+                    qualified_name.as_ref(),
+                    &scope,
+                    SPREADSHEETML_NAMESPACE,
+                );
+                if spreadsheet_element && name == b"c" {
+                    shared_cell = false;
+                    inline_cell = false;
+                    value.clear();
+                    inline_value.clear();
+                    for attribute in element.attributes() {
+                        let attribute = attribute.map_err(|_| XmlIssue::Malformed)?;
+                        if attribute.key.as_ref() == b"t" {
+                            let cell_type = attribute
+                                .decoded_and_normalized_value(
+                                    XmlVersion::Implicit1_0,
+                                    reader.decoder(),
+                                )
+                                .map_err(|_| XmlIssue::Malformed)?;
+                            shared_cell = cell_type == "s";
+                            inline_cell = cell_type == "inlineStr";
+                        }
                     }
-                }
-            }
-            Event::Start(element) if shared_cell && local_name(element.name().as_ref()) == b"v" => {
-                value.clear();
-                value_depth = next_xml_depth(value_depth)?;
-            }
-            Event::Start(element)
-                if inline_cell && local_name(element.name().as_ref()) == b"rPh" =>
-            {
-                inline_phonetic_depth = inline_phonetic_depth
-                    .checked_add(1)
-                    .ok_or(XmlIssue::Malformed)?;
-            }
-            Event::Start(element)
-                if inline_cell
+                } else if shared_cell && spreadsheet_element && name == b"v" {
+                    value.clear();
+                    value_depth = next_xml_depth(value_depth)?;
+                } else if inline_cell && spreadsheet_element && name == b"rPh" {
+                    inline_phonetic_depth = inline_phonetic_depth
+                        .checked_add(1)
+                        .ok_or(XmlIssue::Malformed)?;
+                } else if inline_cell
+                    && spreadsheet_element
                     && inline_phonetic_depth == 0
-                    && local_name(element.name().as_ref()) == b"t" =>
-            {
-                inline_text_depth = inline_text_depth
-                    .checked_add(1)
-                    .ok_or(XmlIssue::Malformed)?;
+                    && name == b"t"
+                {
+                    inline_text_depth = inline_text_depth
+                        .checked_add(1)
+                        .ok_or(XmlIssue::Malformed)?;
+                }
+                namespace_scopes.push(scope);
             }
             Event::Text(text) if value_depth > 0 => {
                 value.push_str(&text.xml10_content().map_err(|_| XmlIssue::Malformed)?);
@@ -2549,38 +2582,45 @@ fn spreadsheet_worksheet_text(bytes: &[u8], shared: &[String]) -> Result<String,
                 let value = decode_xml_reference(&decoded)?;
                 append_xml_text(&mut inline_value, &value)?;
             }
-            Event::End(element)
-                if local_name(element.name().as_ref()) == b"v" && value_depth > 0 =>
-            {
-                value_depth -= 1;
-            }
-            Event::End(element)
-                if local_name(element.name().as_ref()) == b"t" && inline_text_depth > 0 =>
-            {
-                inline_text_depth -= 1;
-            }
-            Event::End(element)
-                if local_name(element.name().as_ref()) == b"rPh" && inline_phonetic_depth > 0 =>
-            {
-                inline_phonetic_depth -= 1;
-            }
-            Event::End(element) if local_name(element.name().as_ref()) == b"c" => {
-                if shared_cell {
-                    let index = value.parse::<usize>().map_err(|_| XmlIssue::Malformed)?;
-                    append_xml_text(&mut output, shared.get(index).ok_or(XmlIssue::Malformed)?)?;
-                    append_xml_text(&mut output, "\n")?;
-                } else if inline_cell {
-                    append_xml_text(&mut output, &inline_value)?;
-                    append_xml_text(&mut output, "\n")?;
+            Event::End(element) => {
+                element_depth = element_depth.checked_sub(1).ok_or(XmlIssue::Malformed)?;
+                // Namespace is not re-checked here: a well-formed document's
+                // end tag always matches the namespace-gated start tag that
+                // incremented these depths or set these flags, so the
+                // Start-side check above is sufficient.
+                let qualified_name = element.name();
+                let name = local_name(qualified_name.as_ref());
+                if name == b"v" && value_depth > 0 {
+                    value_depth -= 1;
+                } else if name == b"t" && inline_text_depth > 0 {
+                    inline_text_depth -= 1;
+                } else if name == b"rPh" && inline_phonetic_depth > 0 {
+                    inline_phonetic_depth -= 1;
+                } else if name == b"c" {
+                    if shared_cell {
+                        let index = value.parse::<usize>().map_err(|_| XmlIssue::Malformed)?;
+                        append_xml_text(
+                            &mut output,
+                            shared.get(index).ok_or(XmlIssue::Malformed)?,
+                        )?;
+                        append_xml_text(&mut output, "\n")?;
+                    } else if inline_cell {
+                        append_xml_text(&mut output, &inline_value)?;
+                        append_xml_text(&mut output, "\n")?;
+                    }
+                    shared_cell = false;
+                    inline_cell = false;
+                    value.clear();
+                    inline_value.clear();
                 }
-                shared_cell = false;
-                inline_cell = false;
-                value.clear();
-                inline_value.clear();
+                namespace_scopes.pop().ok_or(XmlIssue::Malformed)?;
             }
             Event::DocType(_) | Event::GeneralRef(_) => return Err(XmlIssue::Malformed),
             Event::Eof
-                if value_depth == 0 && inline_text_depth == 0 && inline_phonetic_depth == 0 =>
+                if value_depth == 0
+                    && inline_text_depth == 0
+                    && inline_phonetic_depth == 0
+                    && namespace_scopes.len() == 1 =>
             {
                 break;
             }
@@ -4317,6 +4357,15 @@ mod tests {
             result.expect("inline strings should preserve order"),
             "first\nsecond value\n"
         );
+    }
+
+    #[test]
+    fn worksheet_extraction_ignores_extension_cell_names() {
+        let xml = br#"<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:ext="urn:extension"><sheetData><row><c t="inlineStr"><is><t>real</t></is></c><ext:c t="inlineStr"><ext:t>hidden</ext:t></ext:c></row></sheetData></worksheet>"#;
+
+        let result = spreadsheet_worksheet_text(xml, &[]);
+
+        assert_eq!(result.expect("extension cells should be ignored"), "real\n");
     }
 
     #[test]
