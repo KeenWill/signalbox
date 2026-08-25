@@ -6,4 +6,3 @@ xcuserdata/
 # Any DerivedData tree, whatever suffix a build script gives it. Enumerating
 # these one at a time let `.derivedDataRelease/` slip past the list.
 .derivedData*/
-.tart-results/

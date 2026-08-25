@@ -2406,6 +2406,10 @@ final class ProcessSessionDetailViewModel: ObservableObject {
       deciderLabel =
         "\(decisionLabel) by delegate; model selection \(modelSelectionID.rawValue); "
         + "call \(modelCallID.rawValue)"
+    case .userOverride(let commandID, let overriddenToolRequestID):
+      deciderLabel =
+        "\(decisionLabel) by user override; command \(commandID.rawValue); "
+        + "overrides denial of \(overriddenToolRequestID.rawValue)"
     }
     return .tool(
       SignalboxToolCard(
