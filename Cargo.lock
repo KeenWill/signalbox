@@ -3938,6 +3938,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-file-media-provider-runtime"
+version = "0.0.0"
+dependencies = [
+ "signalbox-domain",
+ "signalbox-file-media-runtime",
+ "signalbox-tools-file-media",
+]
+
+[[package]]
+name = "signalbox-file-media-runtime"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "signalbox-model-provider-runtime"
 version = "0.0.0"
 dependencies = [
@@ -4199,6 +4216,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-tools-file-media"
+version = "0.0.0"
+dependencies = [
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "serde_stacker",
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-file-media-runtime",
+ "signalbox-tool-contract",
+]
+
+[[package]]
 name = "signalbox-tools-git"
 version = "0.0.0"
 dependencies = [
@@ -4323,6 +4354,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "signalbox-application",
 ]
 
 [[package]]

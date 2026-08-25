@@ -5,13 +5,13 @@ boundary from its first operation: the daemon holds a distinct credential-file
 reference for each configured repository, reads secret bytes only for that
 repository's request, and never gives a dispatched session the watch credential.
 Per-repository tokens carry the least GitHub scope needed to read the configured
-signals. This is the C0 confused-deputy boundary: a credential for one
-repository cannot authorize a request to another repository. A repository
-without a credential-file reference is invalid configuration and is not watched;
-a repository absent from the list is not watched; an absent repository-watch
-section means that the subsystem does not start. Dispatched sessions retain the
-approval posture of their named session templates, without authority inherited
-from the watcher.
+signals and dismiss an eligible stale pull-request review. This is the C0
+confused-deputy boundary: a credential for one repository cannot authorize a
+request to another repository. A repository without a credential-file reference
+is invalid configuration and is not watched; a repository absent from the list
+is not watched; an absent repository-watch section means that the subsystem does
+not start. Dispatched sessions retain the approval posture of their named
+session templates, without authority inherited from the watcher.
 
 **Foundation contract.** This bottom specification diff owns the
 four-pull-request repository-watch stack. The version-one domain vocabulary and
@@ -29,16 +29,17 @@ completion generations are verified against PR #541
 (`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
 PR #886 (`agent/eager-merge-forward`). Requeue after non-converged dispatch
 termination is verified against PR #894
-(`agent/dispatch-requeue-on-invalidation`). The dispatch attempt budget, the
-delay between attempts, the parked state, and both ways out of it are verified
-against PR #980 (`agent/dispatch-retry-budget`). Safe rule revision admission
-and configuration diagnostics are verified against PR #863
-(`agent/repo-watch-rule-robustness`). The source-independent event occurrence
-identity, its durable frontier, the commit-time coalescing of a restated
-occurrence, and the storage migration are verified against PR #870
-(`agent/repo-watch-content-identity`). The authenticated webhook intake, its
-ingress ceilings, shadow projection, parity view and causes, and targeted
-refresh behavior are verified against this PR
+(`agent/dispatch-requeue-on-invalidation`). Exact-head convergence assessment
+and cutoff are verified against this PR (`agent/dispatch-autonomy-convergence`).
+The dispatch attempt budget, the delay between attempts, the parked state, and
+both ways out of it are verified against PR #980
+(`agent/dispatch-retry-budget`). Safe rule revision admission and configuration
+diagnostics are verified against PR #863 (`agent/repo-watch-rule-robustness`).
+The source-independent event occurrence identity, its durable frontier, the
+commit-time coalescing of a restated occurrence, and the storage migration are
+verified against PR #870 (`agent/repo-watch-content-identity`). The
+authenticated webhook intake, its ingress ceilings, shadow projection, parity
+view and causes, and targeted refresh behavior are verified against this PR
 (`agent/repo-watch-webhook-receiver`). The projection coverage enumeration,
 pull-request issue-comment behavior, per-page hydration coalescing, and
 workflow-run branch symmetry below are verified against PR #891
@@ -49,7 +50,10 @@ of slow complete reconciliation is verified against this PR
 fence and unattended escalation release described below are verified against
 this PR (`agent/headless-approval-escalation`). The operator-commissioned
 dispatch fence and its unattended-escalation coverage are verified against this
-PR (`agent/commissioned-dispatch-fence`).
+PR (`agent/commissioned-dispatch-fence`). External commissioned-session
+obligation blocking and blocker replacement are verified against this PR
+(`agent/daemon-convergence-sweep`). Conservative stale blocking-review dismissal
+is verified against this PR (`agent/dispatch-autonomy-review-clearance`).
 
 ## Configuration and credential boundary
 
@@ -685,34 +689,39 @@ back the whole batch. Each record links the triggering event, rule identity and
 version, singleton key, action ordinal, session-template provenance, and newly
 created session. The action ordinal distinguishes sibling sessions without
 letting the first action suppress later actions from the same match. An occupied
-singleton refuses another match and atomically opens one durable delivery
-obligation for that singleton. Further matching facts join its latest-event
-projection and increment its count, including a match racing with release, so
-one singleton has at most one outstanding obligation. Their individual terminal
-evaluations remain append-only audit facts. The batch releases the singleton at
-the transition that makes every dispatched turn terminal or runtime-irrelevant,
-leaves no live runtime-relevant turn for its session, and leaves no pursuing
-goal. A goal-ending recheck is deferred to its transaction boundary so an active
-turn's stop cascade is visible. A blocked or user-stopped dispatch session, and
-an achieved session whose delivered state is no longer the pull request's latest
-durable head, opens the same latest-state obligation before release; sibling
-terminations and matching events collapse into that one obligation without
-regressing its latest event. A batch delivers its originating event when
-admission dispatched that event, and the target's collapsed current state when
-admission settled an obligation by replaying a still-matching earlier event.
-Achievement is terminal exactly when that delivered state is known and is still
-the pull request's latest durable head, so the successor that carried the newest
-head seals instead of owing another batch after every cooldown. A batch admitted
-before the delivered state was recorded has none, and achievement cannot seal
-it: reading its originating event as the delivered state would seal without
-delivery whenever a head returns to an earlier value. A branch target records no
-durable revision, only a workflow conclusion, so achievement is its own seal
-there. A batch owes at most one requeue, at its own release, and the terminal
-event deciding it is the one ending the generation the dispatch commissioned; a
-later goal generation its session accepts terminates without reopening one,
-including while a sibling action still holds the batch. Termination takes the
-singleton advisory key that admission takes, and locks the rule activation row
-that recording a deactivation shares, so a match racing a termination joins its
+singleton, or an independently commissioned live session owning the same pull
+request, refuses another match and atomically opens one durable delivery
+obligation for that singleton. The obligation records exactly one blocker: the
+occupying repository-watch dispatch or the external commissioned session. If an
+previous blocker terminates but another session is live at redispatch admission,
+the same obligation atomically replaces its blocker and remains non-ready.
+Further matching facts join its latest-event projection and increment its count,
+including a match racing with release, so one singleton has at most one
+outstanding obligation. Their individual terminal evaluations remain append-only
+audit facts. The batch releases the singleton at the transition that makes every
+dispatched turn terminal or runtime-irrelevant, leaves no live runtime-relevant
+turn for its session, and leaves no pursuing goal. A goal-ending recheck is
+deferred to its transaction boundary so an active turn's stop cascade is
+visible. A blocked or user-stopped dispatch session, and an achieved session
+whose delivered state is no longer the pull request's latest durable head, opens
+the same latest-state obligation before release; sibling terminations and
+matching events collapse into that one obligation without regressing its latest
+event. A batch delivers its originating event when admission dispatched that
+event, and the target's collapsed current state when admission settled an
+obligation by replaying a still-matching earlier event. Achievement is terminal
+exactly when that delivered state is known and is still the pull request's
+latest durable head, so the successor that carried the newest head seals instead
+of owing another batch after every cooldown. A batch admitted before the
+delivered state was recorded has none, and achievement cannot seal it: reading
+its originating event as the delivered state would seal without delivery
+whenever a head returns to an earlier value. A branch target records no durable
+revision, only a workflow conclusion, so achievement is its own seal there. A
+batch owes at most one requeue, at its own release, and the terminal event
+deciding it is the one ending the generation the dispatch commissioned; a later
+goal generation its session accepts terminates without reopening one, including
+while a sibling action still holds the batch. Termination takes the singleton
+advisory key that admission takes, and locks the rule activation row that
+recording a deactivation shares, so a match racing a termination joins its
 obligation and a racing deactivation cannot miss it. Termination does not take
 the repository key: it runs inside the transaction ending the goal, which holds
 that session row, and lifecycle-cutoff processing takes the repository key
@@ -902,20 +911,139 @@ savepoint but does not roll back the cutoff: the terminal event remains durably
 dispositioned, healthy commissioned goals are stopped, and later cutoffs remain
 eligible for processing.
 
+**Implemented behavior.** Every completed poll atomically commits its cursor,
+events, and durable convergence evidence for each pull request at the exact head
+and base revision in that cursor. Evidence identical to that identity's latest
+assessment is an idempotent replay; changed evidence appends a new assessment.
+The assessment follows the repository's operational status rule: every review
+thread must be resolved, without filtering by author or outdated state; at least
+one gating check must exist and every gating check on the exact current commit
+must be green; the pull request must be settled with known `mergeable`
+mergeability; and the aggregate review decision must not be `changes_requested`.
+The filtered gating-check inventory is settled only after the same inventory is
+observed in two consecutive committed polls for the unchanged exact head, so a
+fast check cannot permanently seal the head before a later workflow registers.
+Check runs are green only when completed with `success`, `skipped`, or
+`neutral`, and status contexts are green only at `success`. Pending, incomplete,
+missing-conclusion, and other terminal results are not green. Check names
+containing `report only`, `CodeRabbit`, `codecov/project`, or `codecov/patch`,
+compared case-insensitively, are non-gating. The GraphQL check-rollup and
+review-thread connections are read through every bounded page. The head, check,
+and aggregate-review evidence is read before the thread inventory, matching the
+operational reference's ordering so a review thread opened between those reads
+cannot be hidden by an earlier thread snapshot. The branch-head snapshot is read
+before pull-request hydration and supplies the assessed base revision committed
+in the cursor. The rollup's commit, head, and base-branch evidence must agree
+with the REST pull-request projection and cursor generation or the poll fails
+without recording an assessment; independently sampled REST and GraphQL
+mergeability values need not be equal while GitHub settles them.
+
+**Implemented behavior.** A passing assessment for a pull request based on
+`main` is `merge_ready`. A passing assessment based on another branch is
+`internally_converged`, not merge-ready; both classifications end autonomous
+work on that exact head. Every assessment is append-only evidence. An
+append-only cursor-generation identity advances the current projection when an
+A→B→A return reuses A's unchanged evidence, while an exact replay superseded by
+a later generation cannot append evidence or advance that identity.
+`repo_watch_current_pull_request_convergence` exposes the current identity's
+evidence, derived verdict, and any exact-head seal. The first passing assessment
+also creates one monotonic seal for the repository, pull request, exact head
+SHA, and exact base revision. Later checks or reviews on the same sealed
+identity remain visible as newer assessment evidence but cannot reopen dispatch,
+so a session does not revisit threads it already resolved on that unchanged
+identity. A different head SHA or base revision has no inherited seal and is
+assessed and dispatched afresh; convergence therefore terminates unchanged-head
+review cycles without treating a new revision as already finished.
+
+**Implemented behavior.** Repository watch records one convergence cutoff only
+when a seal's head and base revision are the latest assessed identity. Stale
+seals remain pending and become eligible if their identity becomes current
+again. Each transition that makes a sealed identity current records its own
+cutoff application, so work commissioned while another identity was current is
+also stopped when the sealed identity returns. The cutoff applies the ordinary
+parent-only stop to every generation-one goal repository watch commissioned for
+the pull request, with the same provenance limits as a lifecycle cutoff.
+Dispatch admission rechecks the seal under the repository lock: a stale match or
+collapsed obligation settles as `target_converged` only when its head is the
+latest assessed identity and that identity's head and base revision are sealed.
+An older identity cannot stop current work.
+
+**Implemented behavior.** `CHANGES_REQUESTED` gates merging, never dispatching:
+repository watch continues delivering matching findings while that aggregate
+decision remains. It may dismiss a blocking review only when GitHub reports it
+among the pull request's latest opinionated `CHANGES_REQUESTED` reviews and its
+associated commit differs from the exact current head. The current convergence
+evidence must otherwise pass: zero unresolved threads, at least one gating check
+and zero non-green ones, a settled head, and nonconflicting mergeability. An
+unsettled head has not finished registering and completing its exact-head
+checks, so its empty non-green list is the absence of evidence rather than
+evidence of a green head; requiring settlement keeps a dismissal from racing
+checks that have yet to report. A head carrying no gating check at all presents
+that same empty non-green list, which is why the reference convergence rule
+counts it blocked and why clearance refuses it: the dismissed review would be
+the only gate that head ever had. Both the in-memory candidate rule and the
+durable eligibility query enforce that count, the settled head, and
+mergeability, so neither admits an intent the other would refuse. The durable
+query proves each term against the recorded assessment rather than against the
+watcher that raised the candidate, because the assessment it reads is whichever
+watcher recorded one last: a newer assessment appended for the unchanged cursor
+while this watcher reconciled must carry the predicate itself, or the intent
+would claim the review was the head's only blocker while the evidence it names
+records another. Settlement is recorded only for a mergeability GitHub has
+decided, so the query admits `mergeable` alone and refuses nothing the in-memory
+rule admits. Every effective blocking review must target a superseded head; one
+current-head blocker prevents every dismissal for that assessment. A
+current-head review is never dismissed automatically. Why: a new review is live
+judgment, while a stale aggregate decision whose complete thread inventory is
+resolved is forge state that alone prevents an otherwise finished head from
+converging. The following ordinary poll observes the dismissal and may then seal
+convergence; dismissal itself does not stop dispatch.
+
+**Implemented behavior.** Before sending GitHub's review-dismissal mutation, the
+daemon appends a unique intent naming the assessment, repository, pull request,
+exact current and reviewed heads, review node, reviewer, fixed reason kind, and
+the exact human-readable dismissal message. That message identifies the review
+node, reviewer, superseded head, exact current head, and the resolved threads
+and green other gates that justify clearance. It then re-reads the pull request
+and proves the whole predicate again against live evidence, including
+settlement: the gating-check inventory this re-read observes must be the one the
+committed poll that raised the candidate recorded for the same head and update
+stamp. A check that appeared in between leaves the head unsettled and the review
+undismissed until a later poll sees the inventory hold still. It appends the
+provider's terminal result separately. Replaying equal evidence reuses the
+intent rather than creating or sending concurrent duplicate work. After an
+ambiguous process failure, a later poll observes the named review directly: an
+already dismissed review completes the audit, a newer pull-request head
+supersedes the intent, and a review decision cleared by another actor is
+recorded as cleared elsewhere. A still-blocking intent is retried only when a
+current poll again proves the full dismissal predicate. Recovery renews its
+ownership token immediately before observing each intent, because a deeply
+paginated batch can outlive the claim lease; an intent whose lease another
+watcher has since taken is left to that watcher, and a lease lost between the
+renewal and the terminal write likewise leaves that one intent to its new
+claimant rather than abandoning the rest of the batch. The pending-intent
+projection makes every unsettled external action directly observable. The next
+poll observes the dismissal through the ordinary review and convergence
+projections; no synthetic approval is created and no fresh review is requested.
+
 **Implemented behavior.** Held singleton batches are directly observable in the
 `repo_watch_held_dispatch_slot` projection. Each row identifies the repository,
-pull request, rule, singleton key, sessions, and held-since time; states each
-release clause independently; and names every failing clause in `blockers`.
+the origin fact its dispatch was admitted from, rule, singleton key, sessions,
+and held-since time; states each release clause independently; and names every
+failing clause in `blockers`. That origin is a pull request or a workflow branch
+and never both: a batch admitted from a branch workflow-run fact carries
+`workflow_branch` and a null `pull_request_number`, and every other batch
+carries `pull_request_number` and a null `workflow_branch`.
 
 **Implemented behavior.** Outstanding obligations are directly observable in the
 `repo_watch_outstanding_dispatch_obligation` projection. Each row identifies the
 repository, rule, singleton and pull request or stack root, first and latest
 matched events, collapsed count and timestamps, any occupying dispatch and its
-sessions, cooldown eligibility, present readiness, failed-attempt count, and
-parking stamp. Rule deactivation settles an obligation without dispatch rather
-than leaving permanently owed work for semantics that are no longer configured;
-terminal-target settlement likewise records why the obligation no longer remains
-owed.
+sessions or external blocking session, cooldown eligibility, present readiness,
+failed-attempt count, and parking stamp. Rule deactivation settles an obligation
+without dispatch rather than leaving permanently owed work for semantics that
+are no longer configured; terminal-target settlement likewise records why the
+obligation no longer remains owed.
 
 **Implemented behavior.** A newly configured rule activates immediately after
 the repository's current durable event tail, before its task polls, and consumes
@@ -932,44 +1060,46 @@ starts no watch runtime or polling task. It first validates the whole set in one
 transaction it discards, in the Configuration phase before either local socket
 binds, so every refusal is reported there against untouched history. It then
 commits the deactivations and activations in one transaction after every
-remaining fallible startup step succeeds and before any watch task starts. A
-refusal anywhere in the set, and any startup failure before that commit,
-therefore leaves no deactivation and no activation behind: a configuration that
-never started consumes no revision, and restoring the previous configuration is
-admitted rather than refused as reuse. A lost commit response is resolved by
-rereading the durable active set rather than assuming an outcome. That reread
-commits nothing, so it cannot itself become ambiguous, and it answers the only
-question the outcome turned on: either the active set already equals the
-configured admission, so the commit won and startup proceeds, or it does not, so
-the commit never landed, no revision was consumed, and startup fails against
-untouched history with the previous configuration still admissible. Startup does
-not attempt the admission a second time in that failing case; the next start
-admits the same configuration from that untouched history, and only an
-unreachable database defeats the reread. Configuration reconciliation and
-evaluation are serialized per repository: an evaluation already committed may
-replay, but an already-loaded event cannot create a dispatch after deactivation
-commits. Activation stores a digest of the complete versioned matcher, ordered
-action list, singleton scope, and cooldown, plus content-free fingerprints
-labeled with the exact configuration fields they represent. Changing any of
-those semantics while retaining the same rule ID and revision fails in the
-Configuration phase before either local socket binds. The diagnostic names the
-rule and changed field and directs the operator to increment `version`; when
-multiple fields changed, it names the first changed TOML field in canonical
-fingerprint order. It never first appears as a repository-task runtime death. An
-activation recorded before field fingerprints existed cannot produce them from
-its aggregate digest, so the one-time migration introducing fingerprints retires
-every such activation. No active activation lacks fingerprints and the daemon
-carries no path for that shape; a missing fingerprint under any non-deactivated
-activation is storage corruption, checked before reconciliation compares that
-activation against configuration, retires it as an unconfigured rule, or retires
-it because its whole repository left configuration. Retiring an activation
-retires its `(rule ID, revision)` pair, so the first boot after that migration
-refuses every configured rule at its recorded revision as identity reuse,
-including every rule whose semantics did not change, and fails in the
-Configuration phase before either local socket binds. The operator increments
-`version` once for each configured rule on that first upgraded boot; no
-fingerprint backfill can stand in for the bump, because the retained aggregate
-digest does not carry the per-field digests the new revision records.
+remaining fallible startup step succeeds. Before admission commits, startup
+drains both pending lifecycle cutoffs and eligible convergence cutoffs before
+any watch task starts. A refusal anywhere in the set, and any startup failure
+before that commit, therefore leaves no deactivation and no activation behind: a
+configuration that never started consumes no revision, and restoring the
+previous configuration is admitted rather than refused as reuse. A lost commit
+response is resolved by rereading the durable active set rather than assuming an
+outcome. That reread commits nothing, so it cannot itself become ambiguous, and
+it answers the only question the outcome turned on: either the active set
+already equals the configured admission, so the commit won and startup proceeds,
+or it does not, so the commit never landed, no revision was consumed, and
+startup fails against untouched history with the previous configuration still
+admissible. Startup does not attempt the admission a second time in that failing
+case; the next start admits the same configuration from that untouched history,
+and only an unreachable database defeats the reread. Configuration
+reconciliation and evaluation are serialized per repository: an evaluation
+already committed may replay, but an already-loaded event cannot create a
+dispatch after deactivation commits. Activation stores a digest of the complete
+versioned matcher, ordered action list, singleton scope, and cooldown, plus
+content-free fingerprints labeled with the exact configuration fields they
+represent. Changing any of those semantics while retaining the same rule ID and
+revision fails in the Configuration phase before either local socket binds. The
+diagnostic names the rule and changed field and directs the operator to
+increment `version`; when multiple fields changed, it names the first changed
+TOML field in canonical fingerprint order. It never first appears as a
+repository-task runtime death. An activation recorded before field fingerprints
+existed cannot produce them from its aggregate digest, so the one-time migration
+introducing fingerprints retires every such activation. No active activation
+lacks fingerprints and the daemon carries no path for that shape; a missing
+fingerprint under any non-deactivated activation is storage corruption, checked
+before reconciliation compares that activation against configuration, retires it
+as an unconfigured rule, or retires it because its whole repository left
+configuration. Retiring an activation retires its `(rule ID, revision)` pair, so
+the first boot after that migration refuses every configured rule at its
+recorded revision as identity reuse, including every rule whose semantics did
+not change, and fails in the Configuration phase before either local socket
+binds. The operator increments `version` once for each configured rule on that
+first upgraded boot; no fingerprint backfill can stand in for the bump, because
+the retained aggregate digest does not carry the per-field digests the new
+revision records.
 
 **Implemented behavior.** A higher revision under the same rule ID is a
 replacement. Reconciliation appends deactivation of the active old revision and

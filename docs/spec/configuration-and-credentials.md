@@ -1,8 +1,13 @@
 # Configuration and credentials
 
-The browser HTTP listener and same-origin static assets are verified against
-this PR (`agent/web-http-transport`); contract version two and its blob routes
-are verified against this PR (`agent/web-blob-delivery`).
+The model-call recovery telemetry vocabulary is re-verified against this PR
+(`agent/turn-lifecycle-hardening`).
+
+The browser HTTP listener, same-origin static assets, and generated contract
+bootstrap are verified against this PR (`agent/web-http-transport`). The
+composed bounded session descriptor and historical-window routes are verified
+against this PR (`agent/web-session-timeline`). Contract version two and its
+blob routes are verified against this PR (`agent/web-blob-delivery`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -154,9 +159,10 @@ stated where each is owned.
   configuration failure. Otherwise the runner socket uses the same private-node
   discipline but has an independent lock, identity, vocabulary, and listener.
 - `SIGNALBOX_WEB_BIND` — optional browser HTTP socket address. Absence binds
-  `127.0.0.1:37231`, keeping the listener on loopback; an explicit valid socket
-  address is the deployment's opt-in override. An invalid or non-Unicode value
-  fails the `Configuration` phase without logging the value.
+  `127.0.0.1:37231`, keeping the listener on loopback. Explicit addresses must
+  also be loopback because these routes have no application authentication; an
+  invalid, non-Unicode, or non-loopback value fails the `Configuration` phase
+  without logging the value.
 - `SIGNALBOX_WEB_ASSET_ROOT` — optional path to a static production web build.
   An explicitly empty path fails the `Configuration` phase. When absent, non-API
   paths return `404 Not Found`; when present, the daemon serves files from that
@@ -168,18 +174,29 @@ The browser application and `/api/**` share the configured listener and origin.
 API routing takes precedence over static files: an unknown `/api/**` path
 returns a structured API `404` and never the web application's `index.html`. The
 daemon does not emit permissive CORS headers and adds no account, login,
-bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. Those
-deployment boundaries remain outside Signalbox.
+bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
+listener therefore rejects non-loopback binds; any future remote deployment
+requires an explicit authentication and transport-security design first.
+Unauthenticated session descriptor and timeline reads additionally require a
+loopback `Host` authority: `localhost` or an IPv4 or IPv6 loopback address, with
+an optional port. Another authority receives a structured `403 Forbidden`
+transport error with code `non_loopback_host_rejected` before session data is
+read.
 
-`GET /api/bootstrap` returns the exact contract family `signalbox.web-http`,
-version `2`, the `bounded_json`, `same_origin_json_mutations`,
-`ndjson_streaming`, `immutable_blob_content`, `blob_derivations`, and
-`image_derivatives` capabilities, and the effective 65,536-byte JSON-body and
-NDJSON-item hard ceilings. The generated browser decoder rejects an unknown
-field, wrong shape, different family, or different version rather than
-interpreting it as the local process protocol. No process-protocol frame is a
-browser DTO. The descriptor, content, and download routes beneath
-`/api/blobs/{digest}` are the same-origin surface owned by
+`GET /api/bootstrap` describes the production browser contract. It returns the
+exact contract family `signalbox.web-http`, version `2`, the `bounded_json`,
+`same_origin_json_mutations`, and `ndjson_streaming` capabilities, the
+`immutable_blob_content`, `blob_derivations`, and `image_derivatives`
+capabilities, the `bounded_session_timeline` capability, the effective
+65,536-byte JSON-body and NDJSON-item hard ceilings, and the 256-item and
+65,536-projected-byte timeline ceilings. The generated browser decoder rejects
+an unknown field, wrong shape, different family, or different version rather
+than interpreting it as the local process protocol. No process-protocol frame is
+a browser DTO. The descriptor and historical-window route shapes and semantics
+are owned by
+[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline).
+The descriptor, content, and download routes beneath `/api/blobs/{digest}` are
+the same-origin surface owned by
 [blob storage](blob-storage.md#browser-delivery-views-and-derivations).
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
@@ -367,7 +384,7 @@ rate-limited and a transient failure does not stop later scrapes.
 SIGNALBOX_PROMETHEUS_BIND=127.0.0.1:9464
 ```
 
-The initial registry contains exactly three metric names:
+The registry contains exactly six metric names:
 
 - `signalbox_turns_started_total`, with no labels, counts durable turn
   activations. An operator graphs it as the workload-rate denominator and
@@ -380,18 +397,23 @@ The initial registry contains exactly three metric names:
   values are `completed`, `known_failed`, `refused`, `cancelled`, and
   `ambiguous`, counts durable terminal model calls. It separates provider-call
   health and refusal from ambiguity that requires recovery handling.
+- `signalbox_scheduler_passes_in_flight`, with no labels, reports current
+  authoritative scheduler-pass occupancy.
+- `signalbox_scheduler_oldest_in_flight_pass_age_seconds`, with no labels,
+  reports the oldest admitted pass's age at scrape time.
+- `signalbox_scheduler_oldest_in_flight_pass_info{session_id}` reports the
+  daemon-minted session UUID of that oldest pass. It has zero or one series and
+  removes the former label value when the oldest pass changes.
 
-All label children are allocated from those closed enums at registry
-construction. The metric API accepts no string, session id, turn id, model-call
-id, prompt, completion, or tool value. The source is the already-committed typed
-outbox transition, and content-bearing input events are ignored. The dispatcher
-retains only the last observed durable sequence, so a retry of that sequence is
-not counted twice and deduplication has constant memory. Metric help and type
-lines are fixed strings; sample values are counters. There are no tool,
-scheduler, queue-depth, or database-duration metrics in this initial surface:
-the daemon-owned durable transition path can state the three metrics above
-without inventing an inexact observation or instrumenting an adapter or another
-crate's boundary.
+All closed-enum label children are allocated at registry construction. The only
+identity label is the scheduler oldest-pass `session_id`; the metric API accepts
+no turn id, model-call id, prompt, completion, or tool value. The terminal
+metric source is the already-committed typed outbox transition, and
+content-bearing input events are ignored. The dispatcher retains only the last
+observed durable sequence, so a retry of that sequence is not counted twice and
+deduplication has constant memory. Metric help and type lines are fixed strings;
+sample values are counters or gauges. There are no tool, queue-depth, or
+database-duration metrics in this surface.
 
 The complete OTLP record inventory is:
 
@@ -413,7 +435,7 @@ The complete OTLP record inventory is:
   not added.
 - Event name `turn activated`, with `session_id` and `turn_id`;
   `turn terminalized`, with those ids and the closed `terminal_outcome`;
-  `turn parked awaiting user reconciliation`, with those ids;
+  `turn parked awaiting bounded reconciliation`, with those ids;
   `model call dispatched`, with `session_id`, `turn_id`, `model_call_id`, and
   `turn_attempt_id`; and the event names
   `model runtime reported a trustworthy capability-preparation failure`,
