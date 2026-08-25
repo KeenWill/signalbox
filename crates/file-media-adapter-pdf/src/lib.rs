@@ -1,6 +1,11 @@
 //! Bounded PDF interpretation inside the supervised file-media worker.
 
-use std::{collections::BTreeSet, error::Error, num::NonZeroU64, str::FromStr};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    error::Error,
+    num::NonZeroU64,
+    str::FromStr,
+};
 
 use lopdf::{Dictionary, Document, Error as LopdfError, Object, Stream};
 use signalbox_file_media_runtime::{
@@ -44,6 +49,7 @@ const MAX_DECOMPRESSED_PAGE_BYTES: usize = 1024 * 1024;
 // Hard safety ceilings bound object traversal and page-index construction latency.
 const MAX_OBJECTS: usize = 10_000;
 const MAX_PAGES: usize = 10_000;
+const MAX_PAGE_CONTENT_STREAMS: usize = MAX_OBJECTS;
 const MAX_GENERATION: u64 = 65_535;
 const MAX_OBJECT_NUMBER: u64 = u32::MAX as u64;
 const MAX_INDIRECT_LENGTH_DEPTH: usize = 32;
@@ -116,6 +122,13 @@ enum XrefLocation {
 struct LiveXrefEntry {
     reference: IndirectReference,
     location: XrefLocation,
+}
+
+struct CachedObjectStream {
+    object_number: u64,
+    reference: IndirectReference,
+    offset: u64,
+    resolved_length: Option<(IndirectReference, u64)>,
 }
 
 struct ParsedXref {
@@ -473,13 +486,14 @@ async fn inspect_bounded(
     {
         return Ok(malformed_validation());
     }
-    if !bounded_object_stream_targets_are_valid(source, budget, &parsed_xref).await? {
+    let Some((cached_object_streams, object_stream_ranges)) =
+        bounded_object_stream_targets(source, budget, &parsed_xref).await?
+    else {
         return Ok(malformed_validation());
-    }
+    };
     let Some((root, root_location)) = root_location(&parsed_xref) else {
         return Ok(malformed_validation());
     };
-    let mut cached_object_stream = None;
     let mut cached_uncompressed_range = None;
     let catalog = match root_location {
         XrefLocation::Uncompressed(root_offset) => {
@@ -512,37 +526,22 @@ async fn inspect_bounded(
             stream_object,
             index,
         } => {
-            let Some((stream_reference, stream_offset)) =
-                object_stream_offset(&parsed_xref, stream_object)
-            else {
+            let Some(stream) = cached_object_streams.iter().find(|stream| {
+                stream.object_number == stream_object
+                    && stream.reference.object_number == stream_object
+            }) else {
                 return Ok(malformed_validation());
             };
-            let stream_length = budget
-                .remaining_bytes
-                .saturating_sub(2 * ROOT_VALIDATION_BYTES)
-                .min(source_length - stream_offset);
-            if !budget.can_read(stream_length) {
+            let Some(stream_bytes) = cached_range_at(&object_stream_ranges, stream.offset) else {
                 return Ok(malformed_validation());
-            }
-            let stream_bytes =
-                read_validation_range(source, budget, stream_offset, stream_length).await?;
-            let decoded_limit = MAX_OBJECT_STREAM_BYTES;
-            let resolved_length = resolve_object_stream_length(
-                source,
-                budget,
-                &parsed_xref,
-                &stream_bytes,
-                stream_reference,
-                (ROOT_VALIDATION_BYTES, 1),
-            )
-            .await?;
+            };
             let Some(object) = object_stream_object(
-                &stream_bytes,
-                stream_reference,
+                stream_bytes,
+                stream.reference,
                 root,
                 index,
-                decoded_limit,
-                resolved_length,
+                MAX_OBJECT_STREAM_BYTES,
+                stream.resolved_length,
             ) else {
                 return Ok(malformed_validation());
             };
@@ -553,13 +552,6 @@ async fn inspect_bounded(
             if cursor != object.len() {
                 return Ok(malformed_validation());
             }
-            cached_object_stream = Some((
-                stream_object,
-                stream_reference,
-                stream_bytes,
-                decoded_limit,
-                resolved_length,
-            ));
             catalog
         }
     };
@@ -593,7 +585,7 @@ async fn inspect_bounded(
                     owned_pages.as_slice()
                 }
             };
-            if !object_is_pages(pages_bytes, pages) {
+            if !object_is_pages_for_xref(pages_bytes, pages, Some(&parsed_xref.live_entries)) {
                 return Ok(malformed_validation());
             }
         }
@@ -601,65 +593,26 @@ async fn inspect_bounded(
             stream_object,
             index,
         } => {
-            let Some((stream_reference, stream_offset)) =
-                object_stream_offset(&parsed_xref, stream_object)
+            let Some(stream) = cached_object_streams
+                .iter()
+                .find(|stream| stream.object_number == stream_object)
             else {
                 return Ok(malformed_validation());
             };
-            let owned_stream;
-            let (stream_bytes, decoded_limit, resolved_length) = match cached_object_stream.as_ref()
-            {
-                Some((cached_object, cached_reference, bytes, limit, length))
-                    if *cached_object == stream_object && *cached_reference == stream_reference =>
-                {
-                    (bytes.as_slice(), *limit, *length)
-                }
-                _ => {
-                    let cached_stream =
-                        cached_uncompressed_range
-                            .as_ref()
-                            .and_then(|(cached_offset, bytes)| {
-                                let relative = stream_offset.checked_sub(*cached_offset)?;
-                                bytes.get(usize::try_from(relative).ok()?..)
-                            });
-                    let stream_length = cached_stream.map_or_else(
-                        || budget.remaining_bytes.min(source_length - stream_offset),
-                        |bytes| bytes.len() as u64,
-                    );
-                    if cached_stream.is_none() && !budget.can_read(stream_length) {
-                        return Ok(malformed_validation());
-                    }
-                    owned_stream = match cached_stream {
-                        Some(bytes) => bytes.to_vec(),
-                        None => {
-                            read_validation_range(source, budget, stream_offset, stream_length)
-                                .await?
-                        }
-                    };
-                    let limit = MAX_OBJECT_STREAM_BYTES;
-                    let length = resolve_object_stream_length(
-                        source,
-                        budget,
-                        &parsed_xref,
-                        &owned_stream,
-                        stream_reference,
-                        (0, 0),
-                    )
-                    .await?;
-                    (owned_stream.as_slice(), limit, length)
-                }
+            let Some(stream_bytes) = cached_range_at(&object_stream_ranges, stream.offset) else {
+                return Ok(malformed_validation());
             };
             let Some(object) = object_stream_object(
                 stream_bytes,
-                stream_reference,
+                stream.reference,
                 pages,
                 index,
-                decoded_limit,
-                resolved_length,
+                MAX_OBJECT_STREAM_BYTES,
+                stream.resolved_length,
             ) else {
                 return Ok(malformed_validation());
             };
-            if !pages_dictionary_is_valid_for_root(&object, Some(pages)) {
+            if !pages_dictionary_is_valid_for_xref(&object, pages, &parsed_xref.live_entries) {
                 return Ok(malformed_validation());
             }
         }
@@ -1080,6 +1033,9 @@ fn validate_page_contents(
             }
         }
         lopdf::Object::Array(objects) => {
+            if objects.len() > MAX_PAGE_CONTENT_STREAMS {
+                return Err(FileMediaProviderFailure::Failed);
+            }
             for object in objects {
                 let object_id = object
                     .as_reference()
@@ -1799,82 +1755,143 @@ fn valid_xref_targets(parsed: &ParsedXref, source_length: u64) -> bool {
         .any(|entry| entry.reference == root)
 }
 
-async fn bounded_object_stream_targets_are_valid(
+async fn bounded_object_stream_targets(
     source: &dyn VerifiedBlobSource,
     budget: &mut ValidationBudget,
     parsed: &ParsedXref,
-) -> Result<bool, FileMediaProviderFailure> {
-    let stream_objects = parsed
-        .live_entries
-        .iter()
-        .filter_map(|entry| match entry.location {
-            XrefLocation::Compressed { stream_object, .. } => Some(stream_object),
-            XrefLocation::Uncompressed(_) => None,
-        })
-        .collect::<BTreeSet<_>>();
-    for stream_object in stream_objects {
+) -> Result<Option<(Vec<CachedObjectStream>, BTreeMap<u64, Vec<u8>>)>, FileMediaProviderFailure> {
+    let mut targets = BTreeMap::<u64, Vec<(IndirectReference, u64)>>::new();
+    for entry in &parsed.live_entries {
+        if let XrefLocation::Compressed {
+            stream_object,
+            index,
+        } = entry.location
+        {
+            targets
+                .entry(stream_object)
+                .or_default()
+                .push((entry.reference, index));
+        }
+    }
+    let mut ranges = BTreeMap::<u64, Vec<u8>>::new();
+    let mut streams = Vec::with_capacity(targets.len());
+    let mut ordered_targets = Vec::with_capacity(targets.len());
+    for (stream_object, compressed_entries) in targets {
         let Some((stream_reference, stream_offset)) = object_stream_offset(parsed, stream_object)
         else {
-            return Ok(false);
+            return Ok(None);
         };
-        let Some(available) = source.byte_length().get().checked_sub(stream_offset) else {
-            return Ok(false);
-        };
-        let length = ROOT_VALIDATION_BYTES
-            .min(available)
-            .min(budget.available_after_reserving(2 * ROOT_VALIDATION_BYTES, 2));
-        if !budget.can_read(length) {
-            return Ok(false);
-        }
-        let bytes = read_validation_range(source, budget, stream_offset, length).await?;
-        if !object_stream_type_is_valid(&bytes, stream_reference) {
-            return Ok(false);
-        }
+        ordered_targets.push((
+            stream_offset,
+            stream_object,
+            stream_reference,
+            compressed_entries,
+        ));
     }
-    Ok(true)
+    ordered_targets.sort_by_key(|(stream_offset, ..)| *stream_offset);
+    for (stream_offset, stream_object, stream_reference, compressed_entries) in ordered_targets {
+        if cached_range_at(&ranges, stream_offset).is_none() {
+            let Some(available) = source.byte_length().get().checked_sub(stream_offset) else {
+                return Ok(None);
+            };
+            let length =
+                available.min(budget.available_after_reserving(2 * ROOT_VALIDATION_BYTES, 2));
+            if !budget.can_read(length) {
+                return Ok(None);
+            }
+            let bytes = read_validation_range(source, budget, stream_offset, length).await?;
+            ranges.insert(stream_offset, bytes);
+        }
+        let Some(bytes) = cached_range_at(&ranges, stream_offset) else {
+            return Ok(None);
+        };
+        let resolved_length = resolve_object_stream_length(
+            source,
+            budget,
+            parsed,
+            bytes,
+            stream_reference,
+            (2 * ROOT_VALIDATION_BYTES, 2),
+        )
+        .await?;
+        if !object_stream_coordinates_are_valid(
+            bytes,
+            stream_reference,
+            resolved_length,
+            &compressed_entries,
+        ) {
+            return Ok(None);
+        }
+        streams.push(CachedObjectStream {
+            object_number: stream_object,
+            reference: stream_reference,
+            offset: stream_offset,
+            resolved_length,
+        });
+    }
+    Ok(Some((streams, ranges)))
 }
 
-fn object_stream_type_is_valid(bytes: &[u8], expected: IndirectReference) -> bool {
-    let mut cursor = 0;
-    if parse_unsigned(bytes, &mut cursor) != Some(expected.object_number)
-        || skip_required_pdf_space_and_comments(bytes, &mut cursor).is_none()
-        || parse_unsigned(bytes, &mut cursor) != Some(expected.generation)
-        || skip_required_pdf_space_and_comments(bytes, &mut cursor).is_none()
-        || !consume_keyword(bytes, &mut cursor, b"obj")
-    {
+fn cached_range_at(ranges: &BTreeMap<u64, Vec<u8>>, offset: u64) -> Option<&[u8]> {
+    let (start, bytes) = ranges.range(..=offset).next_back()?;
+    let relative = usize::try_from(offset.checked_sub(*start)?).ok()?;
+    bytes.get(relative..)
+}
+
+fn object_stream_coordinates_are_valid(
+    bytes: &[u8],
+    stream_reference: IndirectReference,
+    resolved_length: Option<(IndirectReference, u64)>,
+    targets: &[(IndirectReference, u64)],
+) -> bool {
+    let Some((facts, encoded)) = parse_object_stream(bytes, stream_reference, resolved_length)
+    else {
+        return false;
+    };
+    let Some(count) = facts.count.and_then(|value| usize::try_from(value).ok()) else {
+        return false;
+    };
+    let Some(first) = facts.first.and_then(|value| usize::try_from(value).ok()) else {
+        return false;
+    };
+    if !facts.is_object_stream || count > MAX_OBJECTS {
         return false;
     }
-    skip_pdf_space_and_comments(bytes, &mut cursor);
-    if !bytes
-        .get(cursor..)
-        .is_some_and(|remaining| remaining.starts_with(b"<<"))
-    {
+    let Some(decoded) = decode_pdf_stream(
+        encoded,
+        &facts.filters,
+        facts.decode_parameters.as_deref(),
+        MAX_OBJECT_STREAM_BYTES,
+    ) else {
         return false;
-    }
-    cursor += 2;
-    let mut is_object_stream = false;
-    loop {
-        skip_pdf_space_and_comments(bytes, &mut cursor);
-        if bytes
-            .get(cursor..)
-            .is_some_and(|remaining| remaining.starts_with(b">>"))
-        {
-            return is_object_stream;
+    };
+    let Some(header) = decoded.get(..first) else {
+        return false;
+    };
+    let mut cursor = 0_usize;
+    let mut object_numbers = Vec::with_capacity(count);
+    for index in 0..count {
+        if index > 0 && skip_required_pdf_space_and_comments(header, &mut cursor).is_none() {
+            return false;
         }
-        let Some(key) = parse_name(bytes, &mut cursor) else {
+        let Some(object_number) = parse_nonnegative_integer(header, &mut cursor) else {
             return false;
         };
-        skip_pdf_space_and_comments(bytes, &mut cursor);
-        let value_start = cursor;
-        if skip_pdf_object(bytes, &mut cursor, 0).is_none() {
+        if skip_required_pdf_space_and_comments(header, &mut cursor).is_none()
+            || parse_nonnegative_integer(header, &mut cursor).is_none()
+        {
             return false;
         }
-        if key == b"Type" {
-            let mut value_cursor = value_start;
-            is_object_stream = parse_name(bytes, &mut value_cursor).as_deref() == Some(b"ObjStm")
-                && value_cursor == cursor;
-        }
+        object_numbers.push(object_number);
     }
+    skip_pdf_space_and_comments(header, &mut cursor);
+    cursor == header.len()
+        && targets.iter().all(|(reference, index)| {
+            usize::try_from(*index)
+                .ok()
+                .and_then(|index| object_numbers.get(index))
+                == Some(&reference.object_number)
+        })
 }
 
 fn parse_xref_chain(bytes: &[u8], start: usize) -> Option<ParsedXref> {
@@ -2130,12 +2147,13 @@ fn object_stream_object(
 
 #[cfg(test)]
 fn pages_dictionary_is_valid(bytes: &[u8]) -> bool {
-    pages_dictionary_is_valid_for_root(bytes, None)
+    pages_dictionary_is_valid_for_root(bytes, None, None)
 }
 
 fn pages_dictionary_is_valid_for_root(
     bytes: &[u8],
     expected_root: Option<IndirectReference>,
+    live_entries: Option<&[LiveXrefEntry]>,
 ) -> bool {
     let mut cursor = 0;
     skip_pdf_space_and_comments(bytes, &mut cursor);
@@ -2179,7 +2197,15 @@ fn pages_dictionary_is_valid_for_root(
             b"Type" => {
                 pages = parse_name(bytes, &mut value_cursor).as_deref() == Some(b"Pages");
             }
-            b"Kids" => kids = kids_array_reference_count(bytes, value_start, cursor, expected_root),
+            b"Kids" => {
+                kids = kids_array_reference_count(
+                    bytes,
+                    value_start,
+                    cursor,
+                    expected_root,
+                    live_entries,
+                )
+            }
             b"Count" => {
                 count = parse_nonnegative_integer(bytes, &mut value_cursor)
                     .filter(|_| value_cursor == cursor);
@@ -2193,11 +2219,20 @@ fn pages_dictionary_is_valid_for_root(
     }
 }
 
+fn pages_dictionary_is_valid_for_xref(
+    bytes: &[u8],
+    expected_root: IndirectReference,
+    live_entries: &[LiveXrefEntry],
+) -> bool {
+    pages_dictionary_is_valid_for_root(bytes, Some(expected_root), Some(live_entries))
+}
+
 fn kids_array_reference_count(
     bytes: &[u8],
     start: usize,
     end: usize,
     expected_root: Option<IndirectReference>,
+    live_entries: Option<&[LiveXrefEntry]>,
 ) -> Option<usize> {
     let mut cursor = start;
     if bytes.get(cursor) != Some(&b'[') {
@@ -2213,7 +2248,11 @@ fn kids_array_reference_count(
             return (cursor == end).then_some(references);
         }
         let reference = parse_indirect_reference(bytes, &mut cursor)?;
-        if Some(reference) == expected_root || !unique.insert(reference) {
+        if Some(reference) == expected_root
+            || !unique.insert(reference)
+            || live_entries
+                .is_some_and(|entries| !entries.iter().any(|entry| entry.reference == reference))
+        {
             return None;
         }
         references += 1;
@@ -2636,7 +2675,16 @@ fn parse_catalog_dictionary(bytes: &[u8], mut cursor: usize) -> Option<(CatalogF
     }
 }
 
+#[cfg(test)]
 fn object_is_pages(bytes: &[u8], expected: IndirectReference) -> bool {
+    object_is_pages_for_xref(bytes, expected, None)
+}
+
+fn object_is_pages_for_xref(
+    bytes: &[u8],
+    expected: IndirectReference,
+    live_entries: Option<&[LiveXrefEntry]>,
+) -> bool {
     let mut cursor = 0;
     if parse_unsigned(bytes, &mut cursor) != Some(expected.object_number) {
         return false;
@@ -2686,7 +2734,13 @@ fn object_is_pages(bytes: &[u8], expected: IndirectReference) -> bool {
             let mut value_cursor = value_start;
             pages = parse_name(bytes, &mut value_cursor).as_deref() == Some(b"Pages");
         } else if key == b"Kids" {
-            kids = kids_array_reference_count(bytes, value_start, cursor, Some(expected));
+            kids = kids_array_reference_count(
+                bytes,
+                value_start,
+                cursor,
+                Some(expected),
+                live_entries,
+            );
         } else if key == b"Count" {
             let mut value_cursor = value_start;
             count = parse_nonnegative_integer(bytes, &mut value_cursor)
@@ -3894,6 +3948,7 @@ mod tests {
         assert!(!pages_dictionary_is_valid_for_root(
             b"<< /Type /Pages /Parent 9 0 R /Kids [] /Count 0 >>",
             Some(root),
+            None,
         ));
     }
 
@@ -3907,6 +3962,7 @@ mod tests {
         assert!(!pages_dictionary_is_valid_for_root(
             b"<< /Type /Pages /Kids [9 0 R 9 0 R] /Count 2 >>",
             Some(root),
+            None,
         ));
     }
 
@@ -3920,6 +3976,25 @@ mod tests {
         assert!(!pages_dictionary_is_valid_for_root(
             b"<< /Type /Pages /Kids [8 0 R] /Count 1 >>",
             Some(root),
+            None,
+        ));
+    }
+
+    #[test]
+    fn bounded_page_tree_root_rejects_a_dangling_kid() {
+        let root = IndirectReference {
+            object_number: 8,
+            generation: 0,
+        };
+        let entries = [LiveXrefEntry {
+            reference: root,
+            location: XrefLocation::Uncompressed(0),
+        }];
+
+        assert!(!pages_dictionary_is_valid_for_xref(
+            b"<< /Type /Pages /Kids [9 0 R] /Count 1 >>",
+            root,
+            &entries,
         ));
     }
 
@@ -4146,6 +4221,19 @@ endobj",
         });
 
         assert!(validate_page_contents(&document, page_id).is_ok());
+    }
+
+    #[test]
+    fn page_content_stream_arrays_are_bounded_before_lookup() {
+        let mut document = Document::with_version("1.5");
+        let stream_id = document.add_object(Stream::new(Dictionary::new(), Vec::new()));
+        let contents = vec![Object::Reference(stream_id); MAX_PAGE_CONTENT_STREAMS + 1];
+        let page_id = document.add_object(dictionary! {
+            "Type" => "Page",
+            "Contents" => contents,
+        });
+
+        assert!(validate_page_contents(&document, page_id).is_err());
     }
 
     #[test]
@@ -4452,19 +4540,47 @@ endobj",
     }
 
     #[test]
-    fn compressed_xref_target_requires_an_object_stream_dictionary() {
-        let reference = IndirectReference {
+    fn compressed_xref_coordinates_require_the_indexed_object() {
+        let stream = IndirectReference {
             object_number: 5,
             generation: 0,
         };
+        let target = IndirectReference {
+            object_number: 7,
+            generation: 0,
+        };
+        let content = b"7 0 null";
+        let mut bytes = format!(
+            "5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length {} >>\nstream\n",
+            content.len()
+        )
+        .into_bytes();
+        bytes.extend_from_slice(content);
+        bytes.extend_from_slice(b"\nendstream\nendobj");
 
-        assert!(object_stream_type_is_valid(
-            b"5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length 4 >>",
-            reference,
+        assert!(object_stream_coordinates_are_valid(
+            &bytes,
+            stream,
+            None,
+            &[(target, 0)],
         ));
-        assert!(!object_stream_type_is_valid(
-            b"5 0 obj\n<< /Type /Catalog /Pages 8 0 R >>",
-            reference,
+        assert!(!object_stream_coordinates_are_valid(
+            &bytes,
+            stream,
+            None,
+            &[(target, 1)],
+        ));
+        assert!(!object_stream_coordinates_are_valid(
+            &bytes,
+            stream,
+            None,
+            &[(
+                IndirectReference {
+                    object_number: 8,
+                    generation: 0,
+                },
+                0,
+            )],
         ));
     }
 
@@ -4508,6 +4624,66 @@ endobj",
                 .ok_or(signalbox_file_media_runtime::SourceReadError::RangeOutOfBounds);
             Box::pin(async move { value })
         }
+    }
+
+    #[tokio::test]
+    async fn bounded_object_stream_targets_reuse_covering_ranges() {
+        let first = b"5 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length 8 >>\nstream\n7 0 null\nendstream\nendobj\n";
+        let second_offset = u64::try_from(first.len()).expect("second offset");
+        let second = b"6 0 obj\n<< /Type /ObjStm /N 1 /First 4 /Length 8 >>\nstream\n8 0 null\nendstream\nendobj\n";
+        let mut bytes = first.to_vec();
+        bytes.extend_from_slice(second);
+        bytes.resize(16_384, b' ');
+        let source = UnitSource::new(bytes);
+        let parsed = ParsedXref {
+            facts: TrailerFacts::default(),
+            live_entries: vec![
+                LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number: 5,
+                        generation: 0,
+                    },
+                    location: XrefLocation::Uncompressed(0),
+                },
+                LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number: 6,
+                        generation: 0,
+                    },
+                    location: XrefLocation::Uncompressed(second_offset),
+                },
+                LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number: 7,
+                        generation: 0,
+                    },
+                    location: XrefLocation::Compressed {
+                        stream_object: 5,
+                        index: 0,
+                    },
+                },
+                LiveXrefEntry {
+                    reference: IndirectReference {
+                        object_number: 8,
+                        generation: 0,
+                    },
+                    location: XrefLocation::Compressed {
+                        stream_object: 6,
+                        index: 0,
+                    },
+                },
+            ],
+            declared_objects: BTreeSet::from([5, 6, 7, 8]),
+            object_limit_exceeded: false,
+        };
+        let mut budget = ValidationBudget::new(source.byte_length().get(), 3);
+
+        let validated = bounded_object_stream_targets(&source, &mut budget, &parsed)
+            .await
+            .expect("bounded validation");
+
+        assert!(validated.is_some());
+        assert_eq!(budget.remaining_ranges, 2);
     }
 
     #[tokio::test]
