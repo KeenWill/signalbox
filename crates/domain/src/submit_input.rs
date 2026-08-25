@@ -6115,7 +6115,14 @@ mod tests {
             .expect("the canonical reclassified origin has exact accepted content");
 
         assert_eq!(content.accepted_input(), accepted_input_id(0x73));
-        assert_eq!(content.content().text().as_str(), "reclassified steering");
+        assert_eq!(
+            content
+                .content()
+                .single_text()
+                .expect("the fixture has exactly one text part")
+                .as_str(),
+            "reclassified steering"
+        );
     }
 
     /// Replays a rejection whose reclassified origin's source turn ended with

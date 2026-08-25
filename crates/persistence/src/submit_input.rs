@@ -699,6 +699,7 @@ impl SubmitInputRepository {
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -792,6 +793,7 @@ where
             | CommandKind::ReplaceSessionDefaults
             | CommandKind::ReplaceSessionMetadata
             | CommandKind::DecideToolRequest
+            | CommandKind::OverrideDeniedToolRequest
             | CommandKind::ReviewWorkflow
             | CommandKind::ReviewOrchestration
             | CommandKind::CompactSession
@@ -834,6 +836,7 @@ where
                 | CommandKind::ReplaceSessionDefaults
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -3883,6 +3886,18 @@ pub(crate) async fn load_scheduling_projection(
             call.context_frontier_id,
             call.state_kind,
             call.terminal_disposition_kind,
+            manifest.turn_instruction_manifest_id,
+            manifest.boundary_kind AS instruction_manifest_boundary_kind,
+            manifest.eligibility_hash_algorithm
+                AS instruction_eligibility_hash_algorithm,
+            manifest.eligibility_hash AS instruction_eligibility_hash,
+            manifest.admitted_set_hash_algorithm
+                AS instruction_admitted_set_hash_algorithm,
+            manifest.admitted_set_hash AS instruction_admitted_set_hash,
+            manifest.manifest_hash_algorithm
+                AS instruction_manifest_hash_algorithm,
+            manifest.manifest_hash AS instruction_manifest_hash,
+            discovery.scan_complete AS instruction_discovery_complete,
             lifecycle.origin_kind AS turn_origin_kind,
             lifecycle.pinned_provider_model_identity_id,
             (attempt.continued_from_attempt_id IS NOT NULL)
@@ -3895,6 +3910,12 @@ pub(crate) async fn load_scheduling_projection(
            JOIN turn_lifecycle AS lifecycle
              ON lifecycle.turn_id = call.turn_id
             AND lifecycle.session_id = call.session_id
+      LEFT JOIN turn_instruction_manifest AS manifest
+             ON manifest.turn_instruction_manifest_id = call.turn_instruction_manifest_id
+            AND manifest.session_id = call.session_id
+            AND manifest.turn_id = call.turn_id
+      LEFT JOIN instruction_discovery AS discovery
+             ON discovery.instruction_discovery_id = manifest.instruction_discovery_id
           WHERE call.session_id = $1
             AND call.model_call_id = ANY($2)
           ORDER BY call.model_call_id",
@@ -3932,6 +3953,9 @@ pub(crate) async fn load_scheduling_projection(
         let frontier_uuid: Uuid = required(&row, "context_frontier_id")?;
         let turn_uuid: Uuid = required(&row, "turn_id")?;
         let turn = turn_id_from_uuid(turn_uuid);
+        crate::model_execution::authenticate_model_call_instruction_manifest(
+            &row, session_id, turn,
+        )?;
         let turn_origin_kind: String = required(&row, "turn_origin_kind")?;
         if turn_origin_kind == "delegation" {
             delegated_turns.insert(turn);
@@ -5445,7 +5469,7 @@ fn map_tool_loop_error(
     }
 }
 
-fn require_applied_interrupt_from_attempt(
+pub(crate) fn require_applied_interrupt_from_attempt(
     row: &PgRow,
     owning_turn: TurnId,
     recorded_commands: &BTreeMap<DurableCommandId, ReconstitutedSubmitInput>,
@@ -5887,7 +5911,7 @@ async fn insert_prepared_command(
     .bind(actor.turn)
     .bind(actor.tool_request)
     .bind("text")
-    .bind(command.content().text().as_str())
+    .bind(required_single_text(command.content())?)
     .bind(delivery.kind)
     .bind(delivery.descendant_scope)
     .bind(delivery.expected_active_turn)
@@ -5956,7 +5980,7 @@ async fn insert_prepared_effects(
         .bind(durable_command_id_to_uuid(command.command_id()))
         .bind(session_id_to_uuid(applied.session()))
         .bind("text")
-        .bind(command.content().text().as_str())
+        .bind(required_single_text(command.content())?)
         .bind(delivery.kind)
         .bind(delivery.descendant_scope)
         .bind(delivery.expected_active_turn)
@@ -6066,7 +6090,7 @@ async fn insert_prepared_effects(
         .bind(accepted_input_id_to_uuid(applied.accepted_input()))
         .bind(durable_command_id_to_uuid(command.command_id()))
         .bind(session_id_to_uuid(applied.session()))
-        .bind(command.content().text().as_str())
+        .bind(required_single_text(command.content())?)
         .bind(turn_id_to_uuid(applied.binding().source_turn()))
         .bind(model_settings_overlay_to_json(
             signalbox_domain::ModelSettingsOverlay::inherit_all(),
@@ -6077,6 +6101,18 @@ async fn insert_prepared_effects(
     }
 
     Ok(())
+}
+
+fn required_single_text(content: &UserContent) -> Result<&str, SubmitInputRepositoryError> {
+    content
+        .single_text()
+        .map(signalbox_domain::NonEmptyUnicodeText::as_str)
+        .ok_or_else(|| {
+            SubmitInputCorruption::Inconsistent(
+                "multipart content requires the ordered-parts storage migration",
+            )
+            .into()
+        })
 }
 
 struct EncodedActor {

@@ -45,6 +45,7 @@ mod turn_eligibility;
 mod turn_lifecycle;
 mod user_content;
 mod workspace;
+mod workspace_instruction;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
@@ -325,15 +326,18 @@ pub use tool::{
     DecideToolRequestAppliedResult, DecideToolRequestConstructionError,
     DecideToolRequestPreparationError, DecideToolRequestRejectedResult, DecideToolRequestResult,
     DelegateApprovalRecommendation, DelegateToolApproval, DelegateToolApprovalError,
-    InitialToolApproval, NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecider,
-    ToolApprovalDecision, ToolApprovalPosture, ToolApprovalResolution,
-    ToolApprovalResolutionReconstitutionError, ToolApprovalResolutionReconstitutionInput,
-    ToolArgumentsError, ToolArgumentsFailure, ToolArgumentsKind, ToolCallProposal,
-    ToolDecisionRationale, ToolDecisionRationaleError, ToolDecisionSource, ToolDenialReason,
-    ToolDenialReasonError, ToolDenialReasonFailure, ToolEffectClass, ToolName, ToolNameError,
-    ToolNameFailure, ToolPermissionDefault, ToolRequest, ToolRequestOrdinal,
-    ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent, ToolResultText,
-    ToolResultTextError, ToolResultTextFailure, ToolUsingAssistantResponse,
+    InitialToolApproval, NormalizedToolArguments, OverrideDeniedToolRequest,
+    OverrideDeniedToolRequestAppliedResult, OverrideDeniedToolRequestConstructionError,
+    OverrideDeniedToolRequestPreparationError, OverrideDeniedToolRequestRejectedResult,
+    OverrideDeniedToolRequestResult, PreparedDecideToolRequest, PreparedOverrideDeniedToolRequest,
+    RecordedUserOverride, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalPosture,
+    ToolApprovalResolution, ToolApprovalResolutionReconstitutionError,
+    ToolApprovalResolutionReconstitutionInput, ToolArgumentsError, ToolArgumentsFailure,
+    ToolArgumentsKind, ToolCallProposal, ToolDecisionRationale, ToolDecisionRationaleError,
+    ToolDecisionSource, ToolDenialReason, ToolDenialReasonError, ToolDenialReasonFailure,
+    ToolEffectClass, ToolName, ToolNameError, ToolNameFailure, ToolPermissionDefault, ToolRequest,
+    ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent,
+    ToolResultText, ToolResultTextError, ToolResultTextFailure, ToolUsingAssistantResponse,
     ToolUsingAssistantResponseError,
 };
 pub use tool_attempt::{
@@ -375,9 +379,9 @@ pub use turn_eligibility::{
     ActiveTurnSchedulingReconstitutionInput, AutomaticReconciliationAuthority,
     CancelledTurnExecutionReconstitutionInput, ConsumedSteeringInput,
     ConsumedSteeringReconstitutionInput, ContinuationRoundReconstitutionInput,
-    DelegatedTurnActivationInput, DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState,
-    DelegatedWakeTurnActivationInput, FailedAcceptedInputTurn,
-    FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
+    DelegatedModelCallRecoveryReconstitutionInput, DelegatedTurnActivationInput,
+    DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegatedWakeTurnActivationInput,
+    FailedAcceptedInputTurn, FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
     PreparedAcceptedInputTurnActivation, PreparedAcceptedInputTurnFailure,
     PreparedDelegatedTurnActivation, PreparedTurnActivation,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -389,9 +393,20 @@ pub use turn_lifecycle::{
     NonEmptyIssuedOperationRefsError, ReconciliationMarker, ReconciliationReason, TurnDisposition,
 };
 pub use user_content::{
+    AttachmentDisplayFilename, AttachmentDisplayFilenameError, AttachmentDisplayFilenameFailure,
+    AttachmentKind, DeclaredMediaType, DeclaredMediaTypeError, DeclaredMediaTypeFailure,
     NonEmptyUnicodeText, NonEmptyUnicodeTextError, NonEmptyUnicodeTextFailure, UserContent,
+    UserContentError, UserContentFailure, UserContentPart,
 };
 pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
+pub use workspace_instruction::{
+    EmptyTurnInstructionManifestEvidence, InstructionBundleId, InstructionBundleKind,
+    InstructionBundleRegistration, InstructionBundleRegistrationInput, InstructionDigest,
+    InstructionDiscoveryId, InstructionDiscoveryRootKind, InstructionPath, InstructionPathError,
+    InstructionSkillMetadata, InstructionSkillMetadataError, InstructionSkillMetadataInput,
+    InstructionSourcePath, InstructionSourcePathInterner, InstructionSourcePathPrefix,
+    TurnInstructionManifest, TurnInstructionManifestId,
+};
 
 macro_rules! define_identity {
     ($(#[$documentation:meta])* $name:ident) => {

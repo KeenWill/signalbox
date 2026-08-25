@@ -1770,7 +1770,7 @@ extension SignalboxTranscriptTurnState {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .queued(_, let content):
-      return UInt(content.utf8.count)
+      return content.retainedUTF8Bytes
     case .queuedDelegated(_, _, _, let content):
       return UInt(content.utf8.count)
     case .queuedDelegationWake:
@@ -2055,7 +2055,7 @@ extension SignalboxProcessSessionEvent {
   fileprivate var retainedUTF8Bytes: UInt {
     switch self {
     case .inputAccepted(_, _, _, let content):
-      return UInt(content.utf8.count)
+      return content.retainedUTF8Bytes
     case .modelCallTransition(_, _, let state):
       return state.retainedUTF8Bytes
     case .toolBatchTransition(_, _, let state):

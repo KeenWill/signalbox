@@ -44,6 +44,56 @@ specification diff. Accepted cross-component and wire contracts live in the
 
 ## Model-input projection
 
+### Graded approval judging
+
+Whether execution-approval judging should replace its direct recommendation with
+separate risk and brief-alignment grades remains undecided. Any such change must
+define the grade contract, trusted outcome derivation, remaining input evidence,
+durable audit shape, graded wire and projection data, evaluation method, and
+shadow-to-live promotion path in an owner-accepted specification and
+implementing stack. Safety ceilings remain owned by
+[Additional high-risk guardrails](#tool-safety), while parent-supplied task and
+authority evidence remains owned by
+[Turn-origin instructions in the approval-judge request](#tool-safety). The
+interactive prompting and later client-form choices remain owned by
+[Client approval presentation](#client-scope). The following related questions
+also require owner rulings:
+
+- **Corpus governance.** Approval corpora follow the identity, admitted storage
+  forms, digest, and cross-storage reproducibility contract owned by
+  [evaluation system](spec/eval-system.md#corpus-and-expectations). Which
+  admitted storage form this corpus uses remains undecided, together with
+  access, redaction, retention, and deletion rules.
+
+- **Promotion bounds.** The maximum false-allow rate, minimum acceptable
+  improvement, minimum labeled case count, required slices, and statistical
+  treatment for promotion from shadow to live graded authority remain open. A
+  promotion comparison must define each metric's denominator and its treatment
+  of parks, failed calls, and repeated trials.
+
+- **Label semantics.** Whether an ordinary user allow or deny is the final
+  quality label, or evaluation needs a separate “judge correct” ruling and an
+  approval rationale, remains open. Execution rulings are observations rather
+  than correctness labels until this is decided.
+
+- **Unparked sampling.** Whether and how operators may provide post-hoc labels
+  for automatically allowed or denied requests remains open. Without it, the
+  recorded corpus is selected toward parked requests and cannot support
+  whole-population promotion claims.
+
+- **Shadow budget.** The graded shadow sampling fraction for production shadow
+  traffic remains open. Provider-cost ceilings and concurrency remain owned by
+  [First-release resource limits](#identity-credentials-and-resource-governance).
+  Retention and deletion of observations admitted to the approval corpus remain
+  owned by Corpus governance above.
+
+- **Configuration actor audit.** If trusted outcome derivation introduces
+  mutable threshold configuration, whether source-control and deployment audit
+  are sufficient provenance for changes to it, or Signalbox needs an
+  authenticated configuration-change command, remains open.
+
+### Further projection and summarization
+
 - **Projection and summarization beyond the implemented role mappings.**
   [Model-call execution](spec/model-call-execution.md) owns the implemented
   model-input projections; [conversation-import](spec/conversation-import.md)
@@ -54,6 +104,37 @@ specification diff. Accepted cross-component and wire contracts live in the
   [turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md) and
   [sessions-and-transcript](spec/sessions-and-transcript.md). Blocks those
   extensions. (S02, S17, S28)
+
+### Workspace instructions and skills
+
+The accepted baseline in
+[workspace instructions and skills](spec/workspace-instructions.md) owns greedy
+candidate discovery, typed registration, session/template eligibility,
+deliberate admission, projection rather than transcript append, and exact
+per-turn provenance. The following extensions remain undecided:
+
+- **Discovery invalidation and expansion.** Whether the daemon watches or
+  explicitly rescans roots, which ignore language or depth bound applies,
+  whether and how symbolic links may be followed, and which additional vendor
+  instruction formats become candidates. See the owning
+  [discovery contract](spec/workspace-instructions.md#discovery).
+- **Runner-workspace discovery.** The accepted daemon-local refusal needs a
+  placement-revision-correlated runner operation for greedy discovery, typed
+  findings, and exact source reads before runner-provisioned workspaces can
+  contribute candidates. Blocks workspace discovery for runner-backed sessions;
+  configured daemon roots remain available.
+- **Retrieval and automatic activation.** Search or deterministic ranking over
+  eligible metadata, path-triggered admission, and any template-eager tier need
+  exact recorded trigger and budget contracts. The baseline remains deliberate
+  identity-addressed admission.
+- **Skill resources and rendered-byte externalization.** Addressing and hashing
+  files below a skill bundle, export policy for retained rendered plaintext, and
+  whether a later migration moves version-one admission-row wrapper bytes to
+  content-addressed blob storage remain open.
+- **Whole-bundle unload.** Projection reserves removal at a later turn boundary,
+  but unload authority, tombstone rendering, admitted-set history, and the
+  model-facing operation remain foundation work. See the owning
+  [projection contract](spec/workspace-instructions.md#projection-rather-than-transcript-append).
 
 ## Conversation import
 
@@ -227,11 +308,15 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
 - **Additional effective-configuration categories.** Prompt composition,
   sampling and output-shape parameters beyond the implemented model/session
-  settings contract, instructions, tool enablement/configuration, placement
-  constraints, per-turn resources, and interpreting-policy selections remain
-  unavailable; a future subsystem decision must extend the request,
-  session-default, override, and effective-value algebras together
+  settings contract, tool enablement/configuration, placement constraints,
+  per-turn resources, and interpreting-policy selections remain unavailable; a
+  future subsystem decision must extend the request, session-default, override,
+  and effective-value algebras together
   ([configuration-and-credentials](spec/configuration-and-credentials.md)).
+  Workspace-instruction eligibility is the separate typed selector and
+  allow-list algebra owned by
+  [workspace instructions and skills](spec/workspace-instructions.md#eligibility),
+  so it neither waits on nor satisfies this general configuration question.
   Reasoning level, fast mode, and provider-tagged service tier are owned by
   [model and session settings](spec/model-session-settings.md). Compaction
   threshold, target size, and never-compact/full-context controls remain

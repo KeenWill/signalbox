@@ -1551,7 +1551,16 @@ impl PreparedModelCallRequest {
 
     /// Iterates over the exact ordered semantic frontier.
     pub fn frontier_entries(&self) -> impl ExactSizeIterator<Item = &SemanticTranscriptEntry> {
-        self.frontier_entries.iter()
+        self.frontier_entry_slice().iter()
+    }
+
+    /// Borrows the exact ordered semantic frontier.
+    ///
+    /// Rendering projects and bounds the frontier before cloning any of it,
+    /// which a borrow of the stored order supports and an owning copy of the
+    /// same entries would defeat by duplicating every payload's content first.
+    pub const fn frontier_entry_slice(&self) -> &[SemanticTranscriptEntry] {
+        &self.frontier_entries
     }
 
     /// Borrows the exact user content for a frontier origin.
@@ -4188,7 +4197,8 @@ fn initial_tool_approval_matches_posture(
             | InitialToolApproval::SessionBlanket
             | InitialToolApproval::PolicyAuto
             | InitialToolApproval::Human
-            | InitialToolApproval::Delegated,
+            | InitialToolApproval::Delegated
+            | InitialToolApproval::UserOverride { .. },
         )
         | (
             DangerousToolAutoApproval::Disabled,
@@ -4196,7 +4206,8 @@ fn initial_tool_approval_matches_posture(
             | InitialToolApproval::AlwaysConfirm
             | InitialToolApproval::PolicyAuto
             | InitialToolApproval::Human
-            | InitialToolApproval::Delegated,
+            | InitialToolApproval::Delegated
+            | InitialToolApproval::UserOverride { .. },
         ) => true,
     }
 }
@@ -4423,6 +4434,7 @@ pub(crate) fn apply_automatic_reconciliation(
         || call.turn() != active_turn.turn()
         || call.attempt() != attempt.id()
         || call.disposition() != ModelCallDisposition::Ambiguous
+        || source_snapshot.frontier().owning_session() != active_turn.session()
         || call.frontier() != source_snapshot.frontier()
         || source_snapshot.frontier().owning_session() != active_turn.session()
     {
@@ -5157,9 +5169,9 @@ mod tests {
         ToolExecutionErrorKind, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
         TranscriptAncestry,
         test_support::{
-            accepted_input_id, context_frontier_id, direct, model_call_id, provider_model_identity,
-            semantic_transcript_entry_id, session_id, tool_attempt_id, tool_request_id,
-            turn_attempt_id, turn_id,
+            accepted_input_id, command_id, context_frontier_id, direct, model_call_id,
+            provider_model_identity, semantic_transcript_entry_id, session_id, tool_attempt_id,
+            tool_request_id, turn_attempt_id, turn_id,
         },
     };
 
@@ -5206,6 +5218,32 @@ mod tests {
         assert!(initial_tool_approval_matches_posture(
             DangerousToolAutoApproval::ApproveAll,
             InitialToolApproval::Delegated,
+        ));
+    }
+
+    /// A consumed user override is admitted wherever its `Delegated` base
+    /// selection is: the override substitutes for the judge, not for the
+    /// blanket, so neither frozen blanket posture contradicts it.
+    #[test]
+    fn user_override_approval_is_admitted_when_blanket_posture_is_disabled() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::UserOverride {
+                command: command_id(1),
+                denied_request: tool_request_id(2),
+            },
+        ));
+    }
+
+    /// See [`user_override_approval_is_admitted_when_blanket_posture_is_disabled`].
+    #[test]
+    fn user_override_approval_is_admitted_under_dangerous_blanket_posture() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::UserOverride {
+                command: command_id(1),
+                denied_request: tool_request_id(2),
+            },
         ));
     }
 
@@ -6936,7 +6974,8 @@ mod tests {
             request
                 .origin_content(accepted_input_id(4))
                 .expect("the checked origin has exact user content")
-                .text()
+                .single_text()
+                .expect("the fixture has exactly one text part")
                 .as_str(),
             "hello"
         );

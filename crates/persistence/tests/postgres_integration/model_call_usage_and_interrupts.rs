@@ -2,6 +2,15 @@
 
 use crate::*;
 
+fn expect_ready_model_call(
+    outcome: PrepareInitialModelCallOutcome,
+) -> Box<PreparedModelCallRequest> {
+    match outcome {
+        PrepareInitialModelCallOutcome::Ready { request, .. } => request,
+        _ => panic!("the fixture call must resume from its Prepared checkpoint"),
+    }
+}
+
 /// INV-014: the credential-reference column is total; the migrated schema
 /// rejects a NULL stored reference.
 #[tokio::test(flavor = "multi_thread")]
@@ -324,7 +333,7 @@ async fn inv014_model_call_credential_reference_is_immutable() -> Result<(), Box
 /// attempt and call provenance, before any resubmission.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_committed()
+async fn inv006_model_call_prepared_failure_reread_distinguishes_pending_and_committed()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x7000;
@@ -366,9 +375,9 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
 
     assert_eq!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call)
             .await?,
-        RetainedCapabilityFailureStatus::Pending
+        RetainedPreparedFailureStatus::Pending
     );
     let failed = repository
         .fail_prepared_call(
@@ -387,9 +396,9 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
     );
     assert_eq!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call)
             .await?,
-        RetainedCapabilityFailureStatus::AlreadyCommitted
+        RetainedPreparedFailureStatus::AlreadyCommitted
     );
     let terminal_execution: (Uuid, Uuid) = sqlx::query_as(
         "SELECT terminal_attempt_id, terminal_model_call_id
@@ -439,10 +448,10 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
         .await?;
     assert!(matches!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call)
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
-            "retained capability failure durable closure is incomplete"
+            "retained prepared failure durable closure is incomplete"
         ))
     ));
 
@@ -465,10 +474,10 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
         .await?;
     assert!(matches!(
         issued_repository
-            .reread_capability_failure(issued.session, issued.call)
+            .reread_prepared_failure(issued.session, issued.call)
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
-            "retained capability failure durable closure is incomplete"
+            "retained prepared failure durable closure is incomplete"
         ))
     ));
     assert_eq!(
@@ -502,7 +511,7 @@ async fn inv006_model_call_capability_failure_reread_distinguishes_pending_and_c
     Ok(())
 }
 
-/// INV-006 / INV-014 / INV-037: retained capability failure and ambiguous
+/// INV-006 / INV-014 / INV-037: retained prepared failure and ambiguous
 /// authorization rereads accept an exact interrupt-caused cancellation of the
 /// still-Prepared call as authoritative no-work, and reject an incomplete
 /// cancellation closure.
@@ -522,35 +531,32 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
     .expect("one restart fixture target forms a catalog");
     let repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
-    let PrepareInitialModelCallOutcome::Ready {
-        request: prepared, ..
-    } = repository
-        .prepare_initial_call(
-            fixture.session,
-            ModelCallId::from_uuid(Uuid::from_u128(seed + 22)),
-            FailedModelCallTurnIdentities::new(
-                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
-                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
-            ),
-            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 25)),
-            |_| {
-                (
-                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
-                    TurnId::from_uuid(Uuid::from_u128(seed + 27)),
-                )
-            },
-        )
-        .await?
-    else {
-        panic!("the fixture call must resume from its Prepared checkpoint")
-    };
+    let prepared = expect_ready_model_call(
+        repository
+            .prepare_initial_call(
+                fixture.session,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 22)),
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 25)),
+                |_| {
+                    (
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
+                        TurnId::from_uuid(Uuid::from_u128(seed + 27)),
+                    )
+                },
+            )
+            .await?,
+    );
 
     SubmitInputRepository::new(pool.clone())
         .handle(
             input_with_delivery(
                 seed + 19,
                 seed + 1,
-                "cancel retained capability failure",
+                "cancel retained prepared failure",
                 DeliveryRequest::Interrupt {
                     expected_active_turn: fixture.turn,
                     descendant_scope: DescendantTerminationScope::ParentAlone,
@@ -563,9 +569,9 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
         .await?;
     assert_eq!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call)
             .await?,
-        RetainedCapabilityFailureStatus::Cancelled
+        RetainedPreparedFailureStatus::Cancelled
     );
     assert_eq!(
         repository
@@ -586,10 +592,10 @@ async fn inv006_inv014_inv037_failure_rereads_accept_prepared_cancellation()
         .await?;
     assert!(matches!(
         repository
-            .reread_capability_failure(fixture.session, fixture.call)
+            .reread_prepared_failure(fixture.session, fixture.call)
             .await,
         Err(ModelCallRepositoryError::InvalidTransition(
-            "retained capability failure cancellation closure is incomplete"
+            "retained prepared failure cancellation closure is incomplete"
         ))
     ));
     assert!(matches!(

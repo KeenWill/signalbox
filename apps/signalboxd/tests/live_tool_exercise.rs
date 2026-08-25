@@ -40,9 +40,9 @@ use signalbox_persistence::{
     start_eligible_turn::StartEligibleTurnRepository,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
-    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RequestId, ServerFrame, ServerMessage,
-    SessionPlacement, SystemPromptMember, ToolDecision, TurnState, decode_server_line,
+    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, ModelSelection,
+    ModelSettingsOverlay, ProtocolVersion, RequestId, ServerFrame, ServerMessage, SessionPlacement,
+    SystemPromptMember, ToolDecision, TurnState, UserInputContent, decode_server_line,
     encode_client_line,
 };
 use signalbox_tools_basic::SESSION_STATUS_UPDATE_NAME;
@@ -295,7 +295,12 @@ async fn run_live_smoke() -> SmokeResult {
         InProcessAttemptDispatchGate::default(),
         provider,
     )
-    .with_tool_loop(tool_gate, tool_catalog, tool_executor);
+    .with_tool_loop(tool_gate, tool_catalog, tool_executor)
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        pool.clone(),
+        None,
+        Vec::new(),
+    ));
 
     run_automatic_turn(
         &pool,
@@ -1162,7 +1167,7 @@ async fn submit_turn(
         .send(ClientRequest::SubmitInput {
             command_id: command()?,
             session_id: session,
-            content: InputContent::new(content.to_owned()),
+            content: UserInputContent::text(content.to_owned()),
             expected_defaults_version: Some(CanonicalU64::new(1)),
             model_settings: ModelSettingsOverlay::inherit_all(),
             delivery: None,
