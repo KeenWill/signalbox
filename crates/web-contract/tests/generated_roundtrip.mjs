@@ -1186,9 +1186,9 @@ test("generated imports decoders enforce canonical decimal u64 strings", () => {
       source_session_id: null,
     },
     sizes: {
-      raw_source_bytes: "0",
-      normalized_source_record_bytes: "0",
-      normalized_entry_bytes: "0",
+      raw_source_bytes: "384",
+      normalized_source_record_bytes: "128",
+      normalized_entry_bytes: "192",
     },
     timeline: { first: frontier, latest: frontier },
   };
@@ -1197,6 +1197,14 @@ test("generated imports decoders enforce canonical decimal u64 strings", () => {
   assert.throws(
     () => decodeWebImportDescriptor({ ...descriptor, raw_record_count: "0" }),
     /raw_record_count must be a positive canonical decimal u64 string/,
+  );
+  assert.throws(
+    () =>
+      decodeWebImportDescriptor({
+        ...descriptor,
+        sizes: { ...descriptor.sizes, raw_source_bytes: "0" },
+      }),
+    /raw_source_bytes must be a positive canonical decimal u64 string/,
   );
   assert.throws(
     () =>
