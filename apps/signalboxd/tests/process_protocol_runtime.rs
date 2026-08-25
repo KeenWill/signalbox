@@ -3974,21 +3974,51 @@ async fn process_runtime_reads_populated_convergence_status_rows() -> Result<(),
         "INSERT INTO repo_watch_cursor (
             repository, generation, storage_version, cursor_payload,
             recording_transaction_id
-         ) VALUES ('example/repo', 1, 1, '{\"storage_version\": 1}',
-                   pg_current_xact_id())",
+         ) VALUES ('example/repo', 1, 2, $1, pg_current_xact_id())",
     )
+    .bind(sqlx::types::Json(serde_json::json!({
+        "storage_version": 2,
+        "signal_reviewers": [],
+        "event_identity_frontier": [],
+        "state": {
+            "pull_requests": [{
+                "number": 41,
+                "head_sha": "1111111111111111111111111111111111111111",
+                "head_repository": "example/repo",
+                "base_branch": "main",
+                "head_branch": "topic",
+                "title": "Example",
+                "body": "",
+                "labels": [],
+                "draft": false,
+                "author": null,
+                "lifecycle": "open",
+                "mergeable_state": "mergeable",
+                "completed_check_suites": [],
+                "completed_check_runs": [],
+                "reviews": [],
+                "threads": [],
+                "reactions": []
+            }],
+            "workflow_runs": [],
+            "branch_heads": [{
+                "branch": "main",
+                "head": "2222222222222222222222222222222222222222"
+            }]
+        }
+    })))
     .execute(&runtime.pool)
     .await?;
     sqlx::query(
         "INSERT INTO repo_watch_pull_request_convergence_assessment (
             assessment_id, repository, cursor_generation, pull_request_number,
-            head_sha, base_branch, base_revision, mergeable_state,
+            head_sha, base_branch, base_revision, mergeable_state, settled,
             review_decision, unresolved_threads, gating_check_count,
             non_green_gating_checks, verdict_kind, recorded_at
          ) VALUES ($1, 'example/repo', 1, 41,
                    '1111111111111111111111111111111111111111', 'main',
                    '2222222222222222222222222222222222222222', 'mergeable',
-                   'changes_requested', ARRAY[]::text[], 1, ARRAY['ci'],
+                   true, 'changes_requested', ARRAY[]::text[], 1, ARRAY['ci'],
                    'not_converged', transaction_timestamp())",
     )
     .bind(assessment_id)
