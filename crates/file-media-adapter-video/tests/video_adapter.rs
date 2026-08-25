@@ -197,8 +197,26 @@ async fn invalid_encrypted_mp4_sample_entry_is_malformed() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
+async fn empty_mp4_protection_information_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::mp4_with_empty_protection_information(),
+        "malformed_video",
+    )
+    .await
+}
+
+#[tokio::test]
 async fn encrypted_webm_is_terminal_without_a_key_channel() -> Result<(), Box<dyn Error>> {
     assert_locked(VideoFixture::encrypted_webm()).await
+}
+
+#[tokio::test]
+async fn encrypted_webm_missing_track_fields_is_malformed() -> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        VideoFixture::encrypted_webm_missing_track_fields(),
+        "malformed_video",
+    )
+    .await
 }
 
 #[tokio::test]

@@ -105,11 +105,38 @@ impl VideoFixture {
         )
     }
 
+    pub fn mp4_with_empty_protection_information() -> Self {
+        let mut payload = vec![0_u8; 78];
+        payload[6..8].copy_from_slice(&1_u16.to_be_bytes());
+        payload[24..26].copy_from_slice(&1920_u16.to_be_bytes());
+        payload[26..28].copy_from_slice(&1080_u16.to_be_bytes());
+        payload.extend_from_slice(&mp4_box(*b"sinf", &[]));
+        Self::new(
+            FixtureKind::Mp4,
+            mp4_bytes_with_sample_entry(
+                MP4_TIMESCALE,
+                MP4_DURATION_UNITS,
+                mp4_box(*b"encv", &payload),
+            ),
+        )
+    }
+
     pub fn encrypted_webm() -> Self {
         Self::new(
             FixtureKind::Webm,
             webm_bytes(WEBM_DURATION_TIMECODE_UNITS, ContentProtection::Encrypted),
         )
+    }
+
+    pub fn encrypted_webm_missing_track_fields() -> Self {
+        let info = webm_info(Some(WEBM_DURATION_TIMECODE_UNITS));
+        let content_encryption = ebml_element(&[0x50, 0x35], &[]);
+        let content_encoding = ebml_element(&[0x62, 0x40], &content_encryption);
+        let encodings = ebml_element(&[0x6d, 0x80], &content_encoding);
+        let track_entry = ebml_element(&[0xae], &encodings);
+        let tracks = ebml_element(&[0x16, 0x54, 0xae, 0x6b], &track_entry);
+        let segment = ebml_element(&[0x18, 0x53, 0x80, 0x67], &[info, tracks].concat());
+        Self::new(FixtureKind::Webm, [ebml_header(), segment].concat())
     }
 
     pub fn recursive_mp4() -> Self {
@@ -1397,7 +1424,15 @@ fn encrypted_visual_sample_entry() -> Vec<u8> {
     payload[6..8].copy_from_slice(&1_u16.to_be_bytes());
     payload[24..26].copy_from_slice(&1920_u16.to_be_bytes());
     payload[26..28].copy_from_slice(&1080_u16.to_be_bytes());
-    payload.extend_from_slice(&mp4_box(*b"sinf", &[]));
+    let original_format = mp4_box(*b"frma", b"avc1");
+    let mut scheme = vec![0_u8; 12];
+    scheme[4..8].copy_from_slice(b"cenc");
+    let scheme = mp4_box(*b"schm", &scheme);
+    let scheme_information = mp4_box(*b"schi", &mp4_box(*b"tenc", &[0_u8; 25]));
+    payload.extend_from_slice(&mp4_box(
+        *b"sinf",
+        &[original_format, scheme, scheme_information].concat(),
+    ));
     mp4_box(*b"encv", &payload)
 }
 

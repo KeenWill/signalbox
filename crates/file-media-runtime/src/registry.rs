@@ -189,13 +189,7 @@ impl FileMediaRegistry {
                 match sanitize_probe(reader, raw)? {
                     SanitizedProbe::NoMatch => {}
                     SanitizedProbe::Candidate(candidate) => {
-                        let declaration = self
-                            .readers
-                            .get(&candidate.reader)
-                            .ok_or(FileMediaFailure::ProcessorFailed)?;
-                        if declaration.probe().cumulative_bytes()
-                            <= self.ceilings.validation_source_bytes
-                        {
+                        if candidate.evidence_bytes <= self.ceilings.validation_source_bytes {
                             candidates.push(candidate);
                         }
                     }
@@ -296,6 +290,7 @@ impl FileMediaRegistry {
                         reader: reader.clone(),
                         media_type: declared,
                         strength: ProbeStrength::DeclaredCandidate,
+                        evidence_bytes: 0,
                     },
                     ValidationEvidence::DeclaredCandidateStructurallyValidated,
                 )
@@ -324,6 +319,7 @@ impl FileMediaRegistry {
                         reader: declaration.identity().clone(),
                         media_type: text_plain,
                         strength: ProbeStrength::DeclaredCandidate,
+                        evidence_bytes: 0,
                     },
                     ValidationEvidence::StreamingTextValidation,
                 )
@@ -617,6 +613,7 @@ struct Candidate {
     reader: ReaderIdentity,
     media_type: CanonicalMediaType,
     strength: ProbeStrength,
+    evidence_bytes: u64,
 }
 
 fn recognized_probe_strength(strength: ProbeStrength) -> bool {
@@ -648,11 +645,14 @@ fn sanitize_probe(
         ProcessorProbeOutput::Candidate {
             media_type,
             strength,
+            evidence_bytes,
         } => {
             let media_type = CanonicalMediaType::from_str(&media_type)
                 .map_err(|_| FileMediaFailure::ProcessorFailed)?;
             if !reader.media_types().contains(&media_type)
                 || strength == ProbeStrength::DeclaredCandidate
+                || evidence_bytes == 0
+                || evidence_bytes > reader.probe().cumulative_bytes()
             {
                 return Err(FileMediaFailure::ProcessorFailed);
             }
@@ -660,6 +660,7 @@ fn sanitize_probe(
                 reader: reader.identity().clone(),
                 media_type,
                 strength,
+                evidence_bytes,
             }))
         }
         ProcessorProbeOutput::RecognizedMalformed {

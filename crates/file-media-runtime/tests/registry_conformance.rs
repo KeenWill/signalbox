@@ -119,6 +119,7 @@ impl FileMediaProcessor for SyntheticProcessor {
                 Ok(ProcessorProbeOutput::Candidate {
                     media_type: String::from(SYNTHETIC_MEDIA_TYPE),
                     strength: ProbeStrength::Strong,
+                    evidence_bytes: SYNTHETIC_SIGNATURE.len() as u64,
                 })
             } else {
                 Ok(ProcessorProbeOutput::NoMatch)
@@ -352,10 +353,12 @@ impl FileMediaProcessor for SelectionProcessor {
                 SelectionProbe::Strong => ProcessorProbeOutput::Candidate {
                     media_type: String::from(SYNTHETIC_MEDIA_TYPE),
                     strength: ProbeStrength::Strong,
+                    evidence_bytes: 4,
                 },
                 SelectionProbe::Structural => ProcessorProbeOutput::Candidate {
                     media_type: String::from(SYNTHETIC_MEDIA_TYPE),
                     strength: ProbeStrength::StructuralCandidate,
+                    evidence_bytes: 4,
                 },
                 SelectionProbe::Malformed => ProcessorProbeOutput::RecognizedMalformed {
                     media_type: String::from(SYNTHETIC_MEDIA_TYPE),
@@ -428,7 +431,7 @@ fn selection_registry_with_ceilings(
         reader: FileReaderName::try_new("fixture").expect("fixture reader name is valid"),
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(owned_media_type)],
-        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        probe: ProbeDeclaration::new(4, 0, 0, 8),
         views: vec![text_view()],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback,
@@ -481,6 +484,30 @@ fn structural_candidate_precedes_declared_candidate() {
         StreamingTextFallback::Disabled,
     )
     .expect("structural candidate validates");
+
+    assert_eq!(
+        validated_evidence(inspection),
+        ValidationEvidence::StructuralValidation
+    );
+}
+
+#[test]
+fn structural_candidate_with_actual_probe_inside_validation_ceiling_is_retained() {
+    let source = MemorySource::synthetic();
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 4;
+    let registry = selection_registry_with_ceilings(
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+        ceilings,
+    );
+    let processor = SelectionProcessor {
+        probe: SelectionProbe::Structural,
+        validation: SelectionValidation::Validated,
+    };
+
+    let inspection = inspect(&registry, &processor, &source, SYNTHETIC_MEDIA_TYPE)
+        .expect("actual probe evidence within the validation ceiling is retained");
 
     assert_eq!(
         validated_evidence(inspection),

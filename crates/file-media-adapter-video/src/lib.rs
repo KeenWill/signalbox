@@ -120,6 +120,8 @@ impl FileMediaProvider for VideoProvider {
                 Ok(_) | Err(VideoIssue::Encrypted) => Ok(ProcessorProbeOutput::Candidate {
                     media_type: String::from(kind.media_type()),
                     strength: ProbeStrength::StructuralCandidate,
+                    evidence_bytes: u64::try_from(bytes.len())
+                        .map_err(|_| FileMediaProviderFailure::Failed)?,
                 }),
                 Err(_) => Ok(ProcessorProbeOutput::NoMatch),
             }
@@ -316,6 +318,7 @@ fn matches_mp4_probe(bytes: &[u8]) -> bool {
         return false;
     };
     payload.len() >= 8
+        && mp4_compatible_brand_count_fits(payload)
         && (supported_mp4_brand(&payload[..4])
             || payload[8..].chunks_exact(4).any(supported_mp4_brand))
 }
@@ -323,8 +326,16 @@ fn matches_mp4_probe(bytes: &[u8]) -> bool {
 fn supported_ftyp(payload: &[u8]) -> bool {
     payload.len() >= 8
         && (payload.len() - 8).is_multiple_of(4)
+        && mp4_compatible_brand_count_fits(payload)
         && (supported_mp4_brand(&payload[..4])
             || payload[8..].chunks_exact(4).any(supported_mp4_brand))
+}
+
+fn mp4_compatible_brand_count_fits(payload: &[u8]) -> bool {
+    payload
+        .len()
+        .checked_sub(8)
+        .is_some_and(|bytes| bytes / 4 <= MAX_NODES)
 }
 
 fn matches_webm_probe(bytes: &[u8]) -> bool {
@@ -360,7 +371,12 @@ fn matches_webm_probe(bytes: &[u8]) -> bool {
 fn ebml_header_has_webm_doc_type(bytes: &[u8], allow_truncated_tail: bool) -> bool {
     let mut cursor = 0_usize;
     let mut doc_type_seen = false;
+    let mut nodes = 0_usize;
     while cursor < bytes.len() {
+        nodes += 1;
+        if nodes > MAX_NODES {
+            return false;
+        }
         let Ok((id, id_bytes, _)) = read_ebml_vint(bytes, cursor, EbmlVintKind::Identifier, 4)
         else {
             return allow_truncated_tail && doc_type_seen;
@@ -450,11 +466,16 @@ enum Mp4Scope {
 enum VideoTrackPresence {
     Absent,
     Present,
+    Encrypted,
 }
 
 impl VideoTrackPresence {
     fn is_present(self) -> bool {
-        self == Self::Present
+        matches!(self, Self::Present | Self::Encrypted)
+    }
+
+    fn is_encrypted(self) -> bool {
+        self == Self::Encrypted
     }
 }
 
@@ -904,7 +925,7 @@ fn mp4_box_is_truncated_prefix(
     let size32 = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
     let available = bytes.len() - cursor;
     if size32 == 0 {
-        return Ok(true);
+        return Ok(false);
     }
     if size32 == 1 {
         let Some(extended_end) = cursor.checked_add(16) else {
@@ -1006,6 +1027,14 @@ fn truncated_mp4_movie_prefix(
 fn parse_ftyp(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
     if state.brand.is_some() || !supported_ftyp(payload) {
         return Err(VideoIssue::Malformed);
+    }
+    let compatible_brands = (payload.len() - 8) / 4;
+    state.nodes = state
+        .nodes
+        .checked_add(compatible_brands)
+        .ok_or(VideoIssue::Structure)?;
+    if state.nodes > MAX_NODES {
+        return Err(VideoIssue::Structure);
     }
     let major_brand = payload.get(..4).ok_or(VideoIssue::Malformed)?;
     let brand = if supported_mp4_brand(major_brand) {
@@ -1240,7 +1269,7 @@ fn require_protection_information(
     let mut cursor = 0_usize;
     let mut protection_seen = false;
     while cursor < children.len() {
-        let (box_type, _, consumed) = mp4_box_at(children, cursor, false)?;
+        let (box_type, child_payload, consumed) = mp4_box_at(children, cursor, false)?;
         state.nodes = state.nodes.checked_add(1).ok_or(VideoIssue::Structure)?;
         if state.nodes > MAX_NODES {
             return Err(VideoIssue::Structure);
@@ -1250,10 +1279,54 @@ fn require_protection_information(
                 return Err(VideoIssue::Malformed);
             }
             protection_seen = true;
+            validate_protection_information(child_payload, state)?;
         }
         cursor = cursor.checked_add(consumed).ok_or(VideoIssue::Structure)?;
     }
     if !protection_seen {
+        return Err(VideoIssue::Malformed);
+    }
+    Ok(())
+}
+
+fn validate_protection_information(payload: &[u8], state: &mut Mp4State) -> Result<(), VideoIssue> {
+    let mut cursor = 0_usize;
+    let mut original_format_seen = false;
+    let mut scheme_seen = false;
+    let mut scheme_information_seen = false;
+    while cursor < payload.len() {
+        let (box_type, child, consumed) = mp4_box_at(payload, cursor, false)?;
+        state.nodes = state.nodes.checked_add(1).ok_or(VideoIssue::Structure)?;
+        if state.nodes > MAX_NODES {
+            return Err(VideoIssue::Structure);
+        }
+        match box_type {
+            [b'f', b'r', b'm', b'a'] => {
+                if original_format_seen || child.len() != 4 {
+                    return Err(VideoIssue::Malformed);
+                }
+                original_format_seen = true;
+            }
+            [b's', b'c', b'h', b'm'] => {
+                if scheme_seen || child.len() < 12 || child[..4] != [0, 0, 0, 0] {
+                    return Err(VideoIssue::Malformed);
+                }
+                if !matches!(&child[4..8], b"cenc" | b"cbc1" | b"cens" | b"cbcs") {
+                    return Err(VideoIssue::Malformed);
+                }
+                scheme_seen = true;
+            }
+            [b's', b'c', b'h', b'i'] => {
+                if scheme_information_seen || child.is_empty() {
+                    return Err(VideoIssue::Malformed);
+                }
+                scheme_information_seen = true;
+            }
+            _ => {}
+        }
+        cursor = cursor.checked_add(consumed).ok_or(VideoIssue::Structure)?;
+    }
+    if !original_format_seen || !scheme_seen || !scheme_information_seen {
         return Err(VideoIssue::Malformed);
     }
     Ok(())
@@ -1585,6 +1658,7 @@ struct EbmlState {
     timecode_scale: u64,
     duration: Option<f64>,
     video_tracks: u64,
+    encrypted_video: bool,
     track_numbers: Vec<u64>,
     track_uids: Vec<u64>,
 }
@@ -1608,6 +1682,7 @@ impl Default for EbmlState {
             timecode_scale: 1_000_000,
             duration: None,
             video_tracks: 0,
+            encrypted_video: false,
             track_numbers: Vec::new(),
             track_uids: Vec::new(),
         }
@@ -1642,6 +1717,9 @@ fn parse_webm(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIss
     }
     if state.video_tracks == 0 {
         return Err(VideoIssue::NoVideo);
+    }
+    if state.encrypted_video {
+        return Err(VideoIssue::Encrypted);
     }
     let duration_milliseconds = state
         .duration
@@ -1680,6 +1758,7 @@ fn parse_ebml_scope(
     let mut pixel_width_seen = false;
     let mut pixel_height_seen = false;
     let mut content_encodings_seen = false;
+    let mut encrypted = false;
     while cursor < bytes.len() {
         let (id, id_bytes, _) =
             match read_ebml_vint(bytes, cursor, EbmlVintKind::Identifier, state.max_id_length) {
@@ -1828,20 +1907,20 @@ fn parse_ebml_scope(
                 )?;
             }
             (EBML_TRACK_ENTRY, EbmlScope::Tracks) => {
-                if parse_ebml_scope(
+                let evidence = parse_ebml_scope(
                     payload,
                     depth + 1,
                     EbmlScope::TrackEntry,
                     false,
                     u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
                     state,
-                )?
-                .is_present()
-                {
+                )?;
+                if evidence.is_present() {
                     state.video_tracks = state
                         .video_tracks
                         .checked_add(1)
                         .ok_or(VideoIssue::Structure)?;
+                    state.encrypted_video |= evidence.is_encrypted();
                 }
             }
             (EBML_CONTENT_ENCODINGS, EbmlScope::TrackEntry) => {
@@ -1849,7 +1928,7 @@ fn parse_ebml_scope(
                     return Err(VideoIssue::Malformed);
                 }
                 content_encodings_seen = true;
-                parse_ebml_scope(
+                let evidence = parse_ebml_scope(
                     payload,
                     depth + 1,
                     EbmlScope::ContentEncodings,
@@ -1857,9 +1936,10 @@ fn parse_ebml_scope(
                     u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
                     state,
                 )?;
+                encrypted |= evidence.is_encrypted();
             }
             (EBML_CONTENT_ENCODING, EbmlScope::ContentEncodings) => {
-                parse_ebml_scope(
+                let evidence = parse_ebml_scope(
                     payload,
                     depth + 1,
                     EbmlScope::ContentEncoding,
@@ -1867,9 +1947,10 @@ fn parse_ebml_scope(
                     u64::try_from(payload.len()).map_err(|_| VideoIssue::Structure)?,
                     state,
                 )?;
+                encrypted |= evidence.is_encrypted();
             }
             (EBML_CONTENT_ENCRYPTION, EbmlScope::ContentEncoding) => {
-                return Err(VideoIssue::Encrypted);
+                encrypted = true;
             }
             (EBML_DOCTYPE, EbmlScope::Header) => parse_doc_type(payload, state)?,
             (EBML_MAX_ID_LENGTH, EbmlScope::Header) => {
@@ -1997,7 +2078,9 @@ fn parse_ebml_scope(
         {
             return Err(VideoIssue::Malformed);
         }
-        return Ok(if track_type == EbmlTrackKind::Video {
+        return Ok(if track_type == EbmlTrackKind::Video && encrypted {
+            VideoTrackPresence::Encrypted
+        } else if track_type == EbmlTrackKind::Video {
             VideoTrackPresence::Present
         } else {
             VideoTrackPresence::Absent
@@ -2009,7 +2092,11 @@ fn parse_ebml_scope(
         }
         return Ok(VideoTrackPresence::Present);
     }
-    Ok(VideoTrackPresence::Absent)
+    Ok(if encrypted {
+        VideoTrackPresence::Encrypted
+    } else {
+        VideoTrackPresence::Absent
+    })
 }
 
 fn recognized_ebml_id(id: u64) -> bool {
