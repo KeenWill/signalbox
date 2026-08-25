@@ -4482,7 +4482,6 @@ template = "{WATCH_TEMPLATE}"
                 .expect("configured judge fixture UUID is valid"),
         )
     }
-
     #[test]
     fn configured_tool_postures_are_typed() {
         let configured = HubModelConfiguration::parse(&format!(
@@ -4507,7 +4506,6 @@ template = "{WATCH_TEMPLATE}"
         assert_eq!(postures[2].0.as_str(), WEB_FETCH_NAME);
         assert_eq!(postures[2].1, ToolApprovalPosture::Human);
     }
-
     #[test]
     fn configured_judge_selection_is_typed() {
         let configured = HubModelConfiguration::parse(&format!(
