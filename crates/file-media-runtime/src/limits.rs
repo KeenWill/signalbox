@@ -319,9 +319,9 @@ mod tests {
         MIN_WORKER_FILE_DESCRIPTORS,
     };
 
-    /// INV-072: deployment configuration can lower but never raise a compiled ceiling.
+    /// INV-088: deployment configuration can lower but never raise a compiled ceiling.
     #[test]
-    fn inv072_file_media_ceiling_overrides_are_lowerable_only() {
+    fn inv088_file_media_ceiling_overrides_are_lowerable_only() {
         let media = FileMediaCeilings::version_one();
         assert_eq!(
             media.media_references_per_call,
