@@ -59,12 +59,669 @@ const schemas = {
     "title": "WebApiErrorResponse",
     "type": "object"
   },
+  "WebAttentionSnapshot": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unix_milliseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebAttentionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_turn_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebAttentionActivity"
+          },
+          "session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          }
+        },
+        "required": [
+          "session_id",
+          "state",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "continuation_after_session_id": {
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "cursor": {
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      },
+      "summaries": {
+        "items": {
+          "$ref": "#/$defs/WebAttentionSummary"
+        },
+        "maxItems": 32,
+        "type": "array"
+      }
+    },
+    "required": [
+      "cursor",
+      "summaries"
+    ],
+    "title": "WebAttentionSnapshot",
+    "type": "object"
+  },
+  "WebAttentionStreamEvent": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unix_milliseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "continuation_after_session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "summaries": {
+            "items": {
+              "$ref": "#/$defs/WebAttentionSummary"
+            },
+            "maxItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "cursor",
+          "summaries"
+        ],
+        "type": "object"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebAttentionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_turn_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebAttentionActivity"
+          },
+          "session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          }
+        },
+        "required": [
+          "session_id",
+          "state",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "snapshot",
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/$defs/WebAttentionSnapshot"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshot"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "kind": {
+            "const": "update",
+            "type": "string"
+          },
+          "summaries": {
+            "items": {
+              "$ref": "#/$defs/WebAttentionSummary"
+            },
+            "maxItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor",
+          "summaries"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "kind": {
+            "const": "resync_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WebAttentionStreamEvent"
+  },
+  "WebBlobDescriptor": {
+    "$defs": {
+      "WebBlobAvailableView": {
+        "additionalProperties": false,
+        "description": "One server-admitted representation; clients select by `kind`, never MIME inference.",
+        "properties": {
+          "byte_length": {
+            "type": "string"
+          },
+          "content_url": {
+            "type": "string"
+          },
+          "derivations": {
+            "items": {
+              "$ref": "#/$defs/WebBlobDerivation"
+            },
+            "maxItems": 1,
+            "type": "array"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebBlobViewKind"
+          },
+          "media_type": {
+            "maxLength": 255,
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "media_type",
+          "byte_length",
+          "content_url",
+          "derivations"
+        ],
+        "type": "object"
+      },
+      "WebBlobDerivation": {
+        "additionalProperties": false,
+        "description": "Immutable blob-to-blob relation attached to an available derivative view.",
+        "properties": {
+          "derivation_id": {
+            "type": "string"
+          },
+          "input_digests": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": "array"
+          },
+          "output_digests": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 16,
+            "minItems": 1,
+            "type": "array"
+          },
+          "parameters_json": {
+            "type": "string"
+          },
+          "producer": {
+            "$ref": "#/$defs/WebBlobDerivationProducer"
+          },
+          "transformation_name": {
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z][a-z0-9_.-]{0,63}$",
+            "type": "string"
+          },
+          "transformation_version": {
+            "format": "uint32",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "derivation_id",
+          "input_digests",
+          "transformation_name",
+          "transformation_version",
+          "parameters_json",
+          "producer",
+          "output_digests"
+        ],
+        "type": "object"
+      },
+      "WebBlobDerivationProducer": {
+        "description": "Exact producer provenance projected without persistence representation.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "cache_key": {
+                "type": "string"
+              },
+              "class": {
+                "const": "deterministic",
+                "type": "string"
+              },
+              "implementation_digest": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "class",
+              "implementation_digest",
+              "cache_key"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "class": {
+                "const": "executed",
+                "type": "string"
+              },
+              "execution_id": {
+                "type": "string"
+              },
+              "implementation_digest": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "class",
+              "execution_id",
+              "implementation_digest"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "class": {
+                "const": "model_derived",
+                "type": "string"
+              },
+              "model_call_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "class",
+              "model_call_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebBlobViewKind": {
+        "description": "Closed browser renderer capability advertised by the daemon.",
+        "enum": [
+          "download",
+          "browser_native",
+          "thumbnail",
+          "preview"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Browser read projection for one semantic use of immutable bytes.",
+    "properties": {
+      "available_views": {
+        "items": {
+          "$ref": "#/$defs/WebBlobAvailableView"
+        },
+        "maxItems": 4,
+        "type": "array"
+      },
+      "byte_length": {
+        "type": "string"
+      },
+      "declared_media_type": {
+        "maxLength": 255,
+        "type": "string"
+      },
+      "digest": {
+        "type": "string"
+      },
+      "display_filename": {
+        "items": {
+          "type": "string"
+        },
+        "maxItems": 1,
+        "type": "array"
+      }
+    },
+    "required": [
+      "digest",
+      "byte_length",
+      "declared_media_type",
+      "display_filename",
+      "available_views"
+    ],
+    "title": "WebBlobDescriptor",
+    "type": "object"
+  },
   "WebContractBootstrap": {
     "$defs": {
       "WebContractCapabilities": {
         "additionalProperties": false,
         "description": "Transport capabilities present in the exact contract version.",
         "properties": {
+          "blob_derivations": {
+            "description": "Blob-to-blob provenance reads are present on derivative views.",
+            "type": "boolean"
+          },
           "bounded_json": {
             "description": "Ordinary bounded JSON responses are available under `/api/`.",
             "type": "boolean"
@@ -75,6 +732,22 @@ const schemas = {
           },
           "bounded_session_timeline": {
             "description": "Stable bounded session descriptors and historical windows are available.",
+            "type": "boolean"
+          },
+          "image_derivatives": {
+            "description": "The daemon can lazily produce isolated deterministic image derivatives.",
+            "type": "boolean"
+          },
+          "immutable_blob_content": {
+            "description": "Immutable same-origin blob descriptors and byte delivery are available.",
+            "type": "boolean"
+          },
+          "import_discovery": {
+            "description": "Bounded imported-conversation discovery and entry windows are available.",
+            "type": "boolean"
+          },
+          "imported_continuations": {
+            "description": "Imported frontiers can seed a native session through an idempotent command.",
             "type": "boolean"
           },
           "ndjson_streaming": {
@@ -90,6 +763,11 @@ const schemas = {
           "bounded_json",
           "same_origin_json_mutations",
           "ndjson_streaming",
+          "immutable_blob_content",
+          "blob_derivations",
+          "image_derivatives",
+          "import_discovery",
+          "imported_continuations",
           "bounded_session_timeline",
           "bounded_lexical_search"
         ],
@@ -219,6 +897,972 @@ const schemas = {
     "title": "WebContractExample",
     "type": "object"
   },
+  "WebImportContinuationRequest": {
+    "$defs": {
+      "WebImportContinuationReference": {
+        "additionalProperties": false,
+        "description": "One immutable imported frontier suitable for precise continuation.",
+        "properties": {
+          "imported_conversation_id": {
+            "description": "Owning imported-conversation UUID.",
+            "type": "string"
+          },
+          "imported_entry_id": {
+            "description": "Exact imported-entry UUID at the inclusive frontier.",
+            "type": "string"
+          },
+          "position": {
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "WebImportedSessionRelationship": {
+        "description": "Resume or fork relationship chosen for a new native session.",
+        "oneOf": [
+          {
+            "const": "resume",
+            "description": "Resume the selected imported history.",
+            "type": "string"
+          },
+          {
+            "const": "fork",
+            "description": "Fork from the selected imported history.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebModelSelection": {
+        "description": "Initial model-selection request for a continued native session.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Exact direct model-selection UUID.",
+            "properties": {
+              "kind": {
+                "const": "direct",
+                "type": "string"
+              },
+              "selection_id": {
+                "description": "Direct model-selection UUID.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "selection_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Alias UUID resolved by the daemon at command admission.",
+            "properties": {
+              "alias_id": {
+                "description": "Model alias UUID.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "alias_id"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Idempotent continuation command for one selected immutable frontier.",
+    "properties": {
+      "command_id": {
+        "description": "Durable command UUID minted before network I/O and retained for retry.",
+        "type": "string"
+      },
+      "frontier": {
+        "$ref": "#/$defs/WebImportContinuationReference",
+        "description": "Exact selected immutable imported frontier."
+      },
+      "initial_model_selection": {
+        "$ref": "#/$defs/WebModelSelection",
+        "description": "Initial model selection; other settings use provider defaults."
+      },
+      "relationship": {
+        "$ref": "#/$defs/WebImportedSessionRelationship",
+        "description": "Resume or fork relationship."
+      }
+    },
+    "required": [
+      "command_id",
+      "frontier",
+      "relationship",
+      "initial_model_selection"
+    ],
+    "title": "WebImportContinuationRequest",
+    "type": "object"
+  },
+  "WebImportContinuationResponse": {
+    "$defs": {
+      "WebImportContinuationReference": {
+        "additionalProperties": false,
+        "description": "One immutable imported frontier suitable for precise continuation.",
+        "properties": {
+          "imported_conversation_id": {
+            "description": "Owning imported-conversation UUID.",
+            "type": "string"
+          },
+          "imported_entry_id": {
+            "description": "Exact imported-entry UUID at the inclusive frontier.",
+            "type": "string"
+          },
+          "position": {
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "WebImportedSessionRelationship": {
+        "description": "Resume or fork relationship chosen for a new native session.",
+        "oneOf": [
+          {
+            "const": "resume",
+            "description": "Resume the selected imported history.",
+            "type": "string"
+          },
+          {
+            "const": "fork",
+            "description": "Fork from the selected imported history.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Durable applied result of an imported continuation command.",
+    "properties": {
+      "command_id": {
+        "description": "Replayed durable command UUID.",
+        "type": "string"
+      },
+      "frontier": {
+        "$ref": "#/$defs/WebImportContinuationReference",
+        "description": "Exact selected immutable imported frontier."
+      },
+      "relationship": {
+        "$ref": "#/$defs/WebImportedSessionRelationship",
+        "description": "Recorded resume or fork relationship."
+      },
+      "session_id": {
+        "description": "Newly created or replayed native session UUID.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id",
+      "session_id",
+      "frontier",
+      "relationship"
+    ],
+    "title": "WebImportContinuationResponse",
+    "type": "object"
+  },
+  "WebImportDescriptor": {
+    "$defs": {
+      "WebImportContinuationReference": {
+        "additionalProperties": false,
+        "description": "One immutable imported frontier suitable for precise continuation.",
+        "properties": {
+          "imported_conversation_id": {
+            "description": "Owning imported-conversation UUID.",
+            "type": "string"
+          },
+          "imported_entry_id": {
+            "description": "Exact imported-entry UUID at the inclusive frontier.",
+            "type": "string"
+          },
+          "position": {
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "WebImportFormat": {
+        "description": "Exact source format and converter interpretation for one import.",
+        "oneOf": [
+          {
+            "const": "claude_code_session_jsonl_v1",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          },
+          {
+            "const": "claude_code_session_jsonl_v2",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 2.",
+            "type": "string"
+          },
+          {
+            "const": "codex_rollout_jsonl_v1",
+            "description": "Codex rollout JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportSizeFacts": {
+        "additionalProperties": false,
+        "description": "Byte facts projected from immutable stored import members.",
+        "properties": {
+          "normalized_entry_bytes": {
+            "description": "Sum of normalized entry and source-metadata encoding bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "normalized_source_record_bytes": {
+            "description": "Sum of normalized source-record encoding bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "raw_source_bytes": {
+            "description": "Sum of exact raw source-record occurrence bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "raw_source_bytes",
+          "normalized_source_record_bytes",
+          "normalized_entry_bytes"
+        ],
+        "type": "object"
+      },
+      "WebImportSourceEvidence": {
+        "additionalProperties": false,
+        "description": "Source and converter evidence retained by one immutable import.",
+        "properties": {
+          "format": {
+            "$ref": "#/$defs/WebImportFormat",
+            "description": "Exact source format and converter interpretation."
+          },
+          "source_digest_sha256": {
+            "description": "SHA-256 digest of the exact ordered source records.",
+            "type": "string"
+          },
+          "source_session_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebImportSourceSessionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bounded converter-attested source-session evidence, when consistent."
+          }
+        },
+        "required": [
+          "format",
+          "source_digest_sha256"
+        ],
+        "type": "object"
+      },
+      "WebImportSourceSessionEvidence": {
+        "additionalProperties": false,
+        "description": "Bounded projection of exact converter-attested source-session evidence.",
+        "properties": {
+          "completeness": {
+            "$ref": "#/$defs/WebImportTextCompleteness",
+            "description": "Whether the projection contains the complete identifier."
+          },
+          "leading_text": {
+            "description": "Exact leading UTF-8 text within the response ceiling.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "leading_text",
+          "completeness"
+        ],
+        "type": "object"
+      },
+      "WebImportTextCompleteness": {
+        "description": "Completeness of a bounded attested-text preview.",
+        "oneOf": [
+          {
+            "const": "complete",
+            "description": "The exact attested text fits the preview bound.",
+            "type": "string"
+          },
+          {
+            "const": "truncated",
+            "description": "Only the leading UTF-8 prefix fits the preview bound.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportTimelineBounds": {
+        "additionalProperties": false,
+        "description": "First and latest immutable positions in an imported timeline.",
+        "properties": {
+          "first": {
+            "$ref": "#/$defs/WebImportContinuationReference",
+            "description": "First selectable frontier."
+          },
+          "latest": {
+            "$ref": "#/$defs/WebImportContinuationReference",
+            "description": "Latest selectable frontier."
+          }
+        },
+        "required": [
+          "first",
+          "latest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Complete bounded descriptor for one immutable import.",
+    "properties": {
+      "display_title": {
+        "description": "Evidence-derived display title, when available.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "entry_count": {
+        "description": "Number of normalized imported entries.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "imported_conversation_id": {
+        "description": "Immutable imported-conversation UUID.",
+        "type": "string"
+      },
+      "raw_record_count": {
+        "description": "Number of exact raw source records.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "sizes": {
+        "$ref": "#/$defs/WebImportSizeFacts",
+        "description": "Projected byte facts; no raw blob bytes are included."
+      },
+      "source": {
+        "$ref": "#/$defs/WebImportSourceEvidence",
+        "description": "Source and converter evidence, distinct from native execution evidence."
+      },
+      "timeline": {
+        "$ref": "#/$defs/WebImportTimelineBounds",
+        "description": "Addressable first and latest imported frontiers."
+      }
+    },
+    "required": [
+      "imported_conversation_id",
+      "raw_record_count",
+      "entry_count",
+      "source",
+      "sizes",
+      "timeline"
+    ],
+    "title": "WebImportDescriptor",
+    "type": "object"
+  },
+  "WebImportEntryWindow": {
+    "$defs": {
+      "WebImportContinuationReference": {
+        "additionalProperties": false,
+        "description": "One immutable imported frontier suitable for precise continuation.",
+        "properties": {
+          "imported_conversation_id": {
+            "description": "Owning imported-conversation UUID.",
+            "type": "string"
+          },
+          "imported_entry_id": {
+            "description": "Exact imported-entry UUID at the inclusive frontier.",
+            "type": "string"
+          },
+          "position": {
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "WebImportTextCompleteness": {
+        "description": "Completeness of a bounded attested-text preview.",
+        "oneOf": [
+          {
+            "const": "complete",
+            "description": "The exact attested text fits the preview bound.",
+            "type": "string"
+          },
+          {
+            "const": "truncated",
+            "description": "Only the leading UTF-8 prefix fits the preview bound.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportTextEvidence": {
+        "description": "Bounded text evidence for an imported entry.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The text member was omitted by the source.",
+            "properties": {
+              "kind": {
+                "const": "not_attested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The source explicitly supplied no text.",
+            "properties": {
+              "kind": {
+                "const": "attested_absent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The source supplied exact text, possibly represented by a bounded prefix.",
+            "properties": {
+              "completeness": {
+                "$ref": "#/$defs/WebImportTextCompleteness",
+                "description": "Whether the prefix is the complete text."
+              },
+              "kind": {
+                "const": "attested",
+                "type": "string"
+              },
+              "leading_text": {
+                "description": "Exact leading text within the byte ceiling.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "leading_text",
+              "completeness"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebImportedContentKind": {
+        "description": "Closed normalized imported content kind.",
+        "oneOf": [
+          {
+            "const": "source_event",
+            "description": "Non-message source record.",
+            "type": "string"
+          },
+          {
+            "const": "source_message_block",
+            "description": "Source-defined message block.",
+            "type": "string"
+          },
+          {
+            "const": "text",
+            "description": "Source text or explicit text absence.",
+            "type": "string"
+          },
+          {
+            "const": "tool_call",
+            "description": "Source tool call.",
+            "type": "string"
+          },
+          {
+            "const": "tool_result",
+            "description": "Source tool result.",
+            "type": "string"
+          },
+          {
+            "const": "thinking",
+            "description": "Source-visible thinking.",
+            "type": "string"
+          },
+          {
+            "const": "redacted_thinking",
+            "description": "Source redacted-thinking data.",
+            "type": "string"
+          },
+          {
+            "const": "document",
+            "description": "Source document descriptor.",
+            "type": "string"
+          },
+          {
+            "const": "message_content_absent",
+            "description": "Precisely classified absent message content.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportedEntry": {
+        "additionalProperties": false,
+        "description": "One normalized imported entry in a bounded window.",
+        "properties": {
+          "content_kind": {
+            "$ref": "#/$defs/WebImportedContentKind",
+            "description": "Source-neutral normalized content kind."
+          },
+          "frontier": {
+            "$ref": "#/$defs/WebImportContinuationReference",
+            "description": "Exact immutable continuation frontier."
+          },
+          "raw_record_position": {
+            "description": "One-based physical source-record occurrence.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "record_entry_position": {
+            "description": "One-based normalized entry position within that source record.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_speaker": {
+            "$ref": "#/$defs/WebImportedSpeakerEvidence",
+            "description": "Source speaker attestation, never native author evidence."
+          },
+          "text": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebImportTextEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bounded text evidence only for normalized text content."
+          }
+        },
+        "required": [
+          "frontier",
+          "raw_record_position",
+          "record_entry_position",
+          "source_speaker",
+          "content_kind"
+        ],
+        "type": "object"
+      },
+      "WebImportedSpeakerEvidence": {
+        "description": "Source-attested speaker evidence for one imported entry.",
+        "oneOf": [
+          {
+            "const": "not_attested",
+            "description": "The source omitted speaker evidence.",
+            "type": "string"
+          },
+          {
+            "const": "attested_absent",
+            "description": "The source explicitly attested no speaker.",
+            "type": "string"
+          },
+          {
+            "const": "user",
+            "description": "The source attested a user-role speaker.",
+            "type": "string"
+          },
+          {
+            "const": "assistant",
+            "description": "The source attested an assistant-role speaker.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded imported-entry window.",
+    "properties": {
+      "anchor_position": {
+        "description": "Resolved immutable anchor position.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "first_position": {
+        "description": "First position returned.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "has_after": {
+        "description": "Whether later entries exist.",
+        "type": "boolean"
+      },
+      "has_before": {
+        "description": "Whether earlier entries exist.",
+        "type": "boolean"
+      },
+      "items": {
+        "description": "Entries in ascending immutable position order.",
+        "items": {
+          "$ref": "#/$defs/WebImportedEntry"
+        },
+        "type": "array"
+      },
+      "last_position": {
+        "description": "Last position returned.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "anchor_position",
+      "first_position",
+      "last_position",
+      "has_before",
+      "has_after",
+      "items"
+    ],
+    "title": "WebImportEntryWindow",
+    "type": "object"
+  },
+  "WebImportEntryWindowRequest": {
+    "$defs": {
+      "WebImportWindowAnchor": {
+        "description": "Logical anchor for an imported-entry window.",
+        "oneOf": [
+          {
+            "const": "first",
+            "description": "Anchor at imported position one.",
+            "type": "string"
+          },
+          {
+            "const": "latest",
+            "description": "Anchor at the immutable latest position.",
+            "type": "string"
+          },
+          {
+            "const": "position",
+            "description": "Anchor at the supplied exact position.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Bounded imported-entry window request carried as query parameters.",
+    "properties": {
+      "after": {
+        "description": "Number of entries requested after the anchor.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "anchor": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebImportWindowAnchor"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Logical anchor; defaults to `first` when omitted."
+      },
+      "before": {
+        "description": "Number of entries requested before the anchor.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "position": {
+        "description": "Required only for the `position` anchor.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "title": "WebImportEntryWindowRequest",
+    "type": "object"
+  },
+  "WebImportListPage": {
+    "$defs": {
+      "WebImportFormat": {
+        "description": "Exact source format and converter interpretation for one import.",
+        "oneOf": [
+          {
+            "const": "claude_code_session_jsonl_v1",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          },
+          {
+            "const": "claude_code_session_jsonl_v2",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 2.",
+            "type": "string"
+          },
+          {
+            "const": "codex_rollout_jsonl_v1",
+            "description": "Codex rollout JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportSourceSessionEvidence": {
+        "additionalProperties": false,
+        "description": "Bounded projection of exact converter-attested source-session evidence.",
+        "properties": {
+          "completeness": {
+            "$ref": "#/$defs/WebImportTextCompleteness",
+            "description": "Whether the projection contains the complete identifier."
+          },
+          "leading_text": {
+            "description": "Exact leading UTF-8 text within the response ceiling.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "leading_text",
+          "completeness"
+        ],
+        "type": "object"
+      },
+      "WebImportSummary": {
+        "additionalProperties": false,
+        "description": "One bounded imports catalog row.",
+        "properties": {
+          "display_title": {
+            "description": "Evidence-derived display title, when the source supplied one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "entry_count": {
+            "description": "Number of normalized imported entries.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "format": {
+            "$ref": "#/$defs/WebImportFormat",
+            "description": "Exact source format and converter interpretation."
+          },
+          "imported_conversation_id": {
+            "description": "Immutable imported-conversation UUID.",
+            "type": "string"
+          },
+          "source_session_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebImportSourceSessionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bounded converter-attested source-session evidence, when consistent."
+          },
+          "source_session_id_sha256": {
+            "description": "SHA-256 of the complete source-session identifier, when present.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "format",
+          "entry_count"
+        ],
+        "type": "object"
+      },
+      "WebImportTextCompleteness": {
+        "description": "Completeness of a bounded attested-text preview.",
+        "oneOf": [
+          {
+            "const": "complete",
+            "description": "The exact attested text fits the preview bound.",
+            "type": "string"
+          },
+          {
+            "const": "truncated",
+            "description": "Only the leading UTF-8 prefix fits the preview bound.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One keyset page of imports.",
+    "properties": {
+      "exact_source_session_id_sha256": {
+        "description": "SHA-256 of the complete exact-search value, absent for ordinary catalog reads.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "items": {
+        "description": "Rows in stable UUID order.",
+        "items": {
+          "$ref": "#/$defs/WebImportSummary"
+        },
+        "type": "array"
+      },
+      "next_cursor": {
+        "description": "Exclusive cursor for the next page, absent at the end.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "search_correlation": {
+        "description": "Client-selected exact-search correlation UUID, absent for ordinary catalog reads.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "items"
+    ],
+    "title": "WebImportListPage",
+    "type": "object"
+  },
+  "WebImportListRequest": {
+    "$defs": {
+      "WebImportFormat": {
+        "description": "Exact source format and converter interpretation for one import.",
+        "oneOf": [
+          {
+            "const": "claude_code_session_jsonl_v1",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          },
+          {
+            "const": "claude_code_session_jsonl_v2",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 2.",
+            "type": "string"
+          },
+          {
+            "const": "codex_rollout_jsonl_v1",
+            "description": "Codex rollout JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Bounded imports catalog request carried as query parameters. An exact\nsource-session filter is carried separately as the bounded raw UTF-8 body of\n`POST /api/imports/searches`; empty text and edge whitespace are preserved.",
+    "properties": {
+      "after": {
+        "description": "Exclusive imported-conversation UUID cursor.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "format": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebImportFormat"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Optional exact source/converter filter."
+      },
+      "limit": {
+        "description": "Requested page size; the server rejects values above its hard ceiling.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "search_correlation": {
+        "description": "Client-selected UUID echoed by an exact-search response.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "source_session_id": {
+        "description": "Optional exact converter-attested source-session identifier.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "WebImportListRequest",
+    "type": "object"
+  },
   "WebSearchPage": {
     "$defs": {
       "WebSearchContentClass": {
@@ -234,23 +1878,6 @@ const schemas = {
           "derived_text_artifact"
         ],
         "type": "string"
-      },
-      "WebSearchCursor": {
-        "additionalProperties": false,
-        "description": "Stable opaque descending search keyset boundary.",
-        "properties": {
-          "address": {
-            "$ref": "#/$defs/WebTimelineAddress"
-          },
-          "projection_id": {
-            "$ref": "#/$defs/WebSearchProjectionId"
-          }
-        },
-        "required": [
-          "address",
-          "projection_id"
-        ],
-        "type": "object"
       },
       "WebSearchHighlight": {
         "additionalProperties": false,
@@ -535,7 +2162,21 @@ const schemas = {
       "continuation": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebSearchCursor"
+            "additionalProperties": false,
+            "description": "Stable opaque descending search keyset boundary.",
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/WebTimelineAddress"
+              },
+              "projection_id": {
+                "$ref": "#/$defs/WebSearchProjectionId"
+              }
+            },
+            "required": [
+              "address",
+              "projection_id"
+            ],
+            "type": "object"
           },
           {
             "type": "null"
@@ -551,7 +2192,8 @@ const schemas = {
       }
     },
     "required": [
-      "results"
+      "results",
+      "continuation"
     ],
     "title": "WebSearchPage",
     "type": "object"
@@ -819,6 +2461,22 @@ function fail(path, expected) {
   throw new TypeError(`${path} must be ${expected}`);
 }
 
+function isWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        return false;
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function resolveReference(root, reference) {
   const prefix = "#/$defs/";
   if (!reference.startsWith(prefix)) {
@@ -848,22 +2506,9 @@ function assertSchema(root, schema, value, path) {
     }
     return;
   }
-  if (schema.oneOf !== undefined) {
-    const accepted = schema.oneOf.some((candidate) => {
-      try {
-        assertSchema(root, candidate, value, path);
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    if (!accepted) {
-      fail(path, "one recognized variant");
-    }
-    return;
-  }
-  if (schema.anyOf !== undefined) {
-    const accepted = schema.anyOf.some((candidate) => {
+  const alternatives = schema.oneOf ?? schema.anyOf;
+  if (alternatives !== undefined) {
+    const accepted = alternatives.some((candidate) => {
       try {
         assertSchema(root, candidate, value, path);
         return true;
@@ -922,6 +2567,9 @@ function assertSchema(root, schema, value, path) {
     if (!Array.isArray(value)) {
       fail(path, "an array");
     }
+    if (schema.minItems !== undefined && value.length < schema.minItems) {
+      fail(path, `at least ${schema.minItems} items`);
+    }
     if (schema.maxItems !== undefined && value.length > schema.maxItems) {
       fail(path, `at most ${schema.maxItems} items`);
     }
@@ -949,60 +2597,482 @@ function assertSchema(root, schema, value, path) {
     }
     return;
   }
+  if (schema.type === "string") {
+    if (typeof value !== "string") {
+      fail(path, "string");
+    }
+    if (!isWellFormedUnicode(value)) {
+      fail(path, "well-formed Unicode scalar values");
+    }
+    if (
+      (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+      value.length > 20
+    ) {
+      fail(path, "an unsigned 64-bit integer");
+    }
+    if (schema.minLength !== undefined && Array.from(value).length < schema.minLength) {
+      fail(path, `at least ${schema.minLength} Unicode scalar values`);
+    }
+    if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {
+      fail(path, `matching ${schema.pattern}`);
+    }
+    if (
+      (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+      BigInt(value) > 18446744073709551615n
+    ) {
+      fail(path, "an unsigned 64-bit integer");
+    }
+    if (
+      schema.pattern === "^[1-9][0-9]{0,18}$" &&
+      BigInt(value) > 9223372036854775807n
+    ) {
+      fail(path, "a positive signed 64-bit integer");
+    }
+    if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {
+      fail(path, `at most ${schema.maxLength} Unicode scalar values`);
+    }
+    return;
+  }
   if (typeof value !== schema.type) {
     fail(path, schema.type);
   }
+}
+
+function assertAttentionSummary(summary, path) {
+  const action = summary.action ?? null;
+  const goalBlock = summary.goal_block ?? null;
+  const valid =
+    (summary.state === "blocked" &&
+      (action === "provide_goal_need" ||
+        (action === null && goalBlock?.reason === "execution_failure"))) ||
+    (summary.state === "awaiting_approval" &&
+      (action === null || action === "decide_approval")) ||
+    (summary.state === "ambiguous" && action === "reconcile_turn") ||
+    ([
+      "active",
+      "queued",
+      "awaiting_tool_recovery",
+      "awaiting_reconciliation",
+      "runner_lost",
+      "idle",
+    ].includes(summary.state) && action === null);
+  if (!valid) {
+    fail(`${path}.action`, `consistent with attention state ${JSON.stringify(summary.state)}`);
+  }
+  const validGoalBlock =
+    (summary.state === "blocked" && goalBlock !== null) ||
+    summary.state === "runner_lost" ||
+    (summary.state !== "blocked" && goalBlock === null);
+  if (!validGoalBlock) {
+    fail(
+      `${path}.goal_block`,
+      `consistent with attention state ${JSON.stringify(summary.state)}`,
+    );
+  }
+}
+
+function assertAttentionSummaries(summaries, path) {
+  summaries.forEach((summary, index) =>
+    assertAttentionSummary(summary, `${path}[${index}]`),
+  );
+}
+
+function assertAttentionSnapshot(snapshot, path) {
+  assertAttentionSummaries(snapshot.summaries, `${path}.summaries`);
+  const continuation = snapshot.continuation_after_session_id ?? null;
+  if (continuation !== null) {
+    const last = snapshot.summaries.at(-1);
+    if (last === undefined || continuation !== last.session_id) {
+      fail(
+        `${path}.continuation_after_session_id`,
+        "the last returned session identity",
+      );
+    }
+  }
+}
+
+function assertCanonicalU64(value, path) {
+  if (!/^[1-9][0-9]{0,19}$/.test(value) || BigInt(value) > 18446744073709551615n) {
+    fail(path, "a positive canonical decimal u64 string");
+  }
+}
+
+const utf8 = new TextEncoder();
+
+function compareUtf8(left, right) {
+  const leftBytes = utf8.encode(left);
+  const rightBytes = utf8.encode(right);
+  const shared = Math.min(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < shared; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) return leftBytes[index] - rightBytes[index];
+  }
+  return leftBytes.length - rightBytes.length;
+}
+
+function parseCanonicalJson(source) {
+  let cursor = 0;
+  const parseString = () => {
+    const start = cursor;
+    cursor += 1;
+    while (cursor < source.length) {
+      if (source[cursor] === "\\") cursor += source[cursor + 1] === "u" ? 6 : 2;
+      else if (source[cursor] === '"') {
+        cursor += 1;
+        const spelling = source.slice(start, cursor);
+        const decoded = JSON.parse(spelling);
+        if (JSON.stringify(decoded) !== spelling) throw new TypeError();
+        for (let index = 0; index < decoded.length; index += 1) {
+          const unit = decoded.charCodeAt(index);
+          if (unit >= 0xd800 && unit <= 0xdbff) {
+            const next = decoded.charCodeAt(index + 1);
+            if (!(next >= 0xdc00 && next <= 0xdfff)) throw new TypeError();
+            index += 1;
+          } else if (unit >= 0xdc00 && unit <= 0xdfff) throw new TypeError();
+        }
+        return decoded;
+      } else cursor += 1;
+    }
+    throw new TypeError();
+  };
+  const parseValue = () => {
+    const byte = source[cursor];
+    if (byte === '"') { parseString(); return; }
+    if (byte === "[") {
+      cursor += 1;
+      if (source[cursor] === "]") { cursor += 1; return; }
+      while (true) {
+        parseValue();
+        if (source[cursor] === "]") { cursor += 1; return; }
+        if (source[cursor] !== ",") throw new TypeError();
+        cursor += 1;
+      }
+    }
+    if (byte === "{") {
+      cursor += 1;
+      if (source[cursor] === "}") { cursor += 1; return; }
+      let previous;
+      while (true) {
+        if (source[cursor] !== '"') throw new TypeError();
+        const key = parseString();
+        if (previous !== undefined && compareUtf8(previous, key) >= 0) throw new TypeError();
+        previous = key;
+        if (source[cursor] !== ":") throw new TypeError();
+        cursor += 1;
+        parseValue();
+        if (source[cursor] === "}") { cursor += 1; return; }
+        if (source[cursor] !== ",") throw new TypeError();
+        cursor += 1;
+      }
+    }
+    for (const literal of ["true", "false", "null"]) {
+      if (source.startsWith(literal, cursor)) { cursor += literal.length; return; }
+    }
+    const number = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?/u.exec(source.slice(cursor))?.[0];
+    if (number === undefined) throw new TypeError();
+    cursor += number.length;
+  };
+  parseValue();
+  if (cursor !== source.length) throw new TypeError();
+}
+
+function assertCanonicalParametersJson(value, path) {
+  if (utf8.encode(value).length > 4096) {
+    fail(path, "canonical JSON of at most 4096 UTF-8 bytes");
+  }
+  try {
+    parseCanonicalJson(value);
+  } catch {
+    fail(path, "canonical JSON");
+  }
+}
+
+function assertDisplayFilename(value, path) {
   if (
-    schema.type === "string" &&
-    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
-    value.length > 20
+    typeof value !== "string" ||
+    value.length === 0 ||
+    new TextEncoder().encode(value).length > 1024 ||
+    /\p{Cc}/u.test(value)
   ) {
-    fail(path, "an unsigned 64-bit integer");
+    fail(path, "a nonempty, control-free filename of at most 1024 UTF-8 bytes");
   }
-  if (schema.type === "string" && schema.pattern !== undefined && !(new RegExp(schema.pattern)).test(value)) {
-    fail(path, `a string matching ${schema.pattern}`);
+}
+
+function isMimeTokenCharacter(value) {
+  return /^[!#$%&'*+.^_`|~0-9A-Za-z-]$/u.test(value);
+}
+
+function consumeMimeToken(value, cursor) {
+  const start = cursor;
+  while (cursor < value.length && isMimeTokenCharacter(value[cursor])) cursor += 1;
+  return cursor === start ? -1 : cursor;
+}
+
+function isMimeValue(value) {
+  let cursor = 0;
+  cursor = consumeMimeToken(value, cursor);
+  if (cursor < 0 || value[cursor] !== "/") return false;
+  cursor += 1;
+  cursor = consumeMimeToken(value, cursor);
+  if (cursor < 0) return false;
+  if (cursor === value.length) return true;
+  if (value[cursor] !== ";") return false;
+  cursor += 1;
+  while (cursor < value.length) {
+    while (value[cursor] === " ") cursor += 1;
+    if (cursor === value.length) return true;
+    cursor = consumeMimeToken(value, cursor);
+    if (cursor < 0 || value[cursor] !== "=") return false;
+    cursor += 1;
+    if (value[cursor] === '"') {
+      cursor += 1;
+      const start = cursor;
+      while (cursor < value.length && value[cursor] !== '"') {
+        const unit = value.charCodeAt(cursor);
+        if (unit <= 31 || unit === 127) return false;
+        cursor += 1;
+      }
+      if (cursor === start || value[cursor] !== '"') return false;
+      cursor += 1;
+      while (value[cursor] === " ") cursor += 1;
+    } else {
+      cursor = consumeMimeToken(value, cursor);
+      if (cursor < 0) return false;
+    }
+    if (cursor === value.length) return true;
+    if (value[cursor] !== ";") return false;
+    cursor += 1;
   }
+  return true;
+}
+
+function assertMediaType(value, path) {
   if (
-    schema.type === "string" &&
-    schema.pattern === "^[1-9][0-9]{0,18}$" &&
-    BigInt(value) > 9223372036854775807n
+    typeof value !== "string" ||
+    utf8.encode(value).length > 255 ||
+    !isMimeValue(value)
   ) {
-    fail(path, "a positive signed 64-bit integer");
-  }
-  if (
-    schema.type === "string" &&
-    (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
-    BigInt(value) > 18446744073709551615n
-  ) {
-    fail(path, "an unsigned 64-bit integer");
+    fail(path, "a MIME value of at most 255 UTF-8 bytes");
   }
 }
 
-export function decodeWebContractBootstrap(value) {
-  assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "bootstrap");
-  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "1") {
-    throw new TypeError("bootstrap carries an incompatible web contract");
+function assertBlobDigest(value, path) {
+  if (!/^sha256:[0-9a-f]{64}$/.test(value)) {
+    fail(path, "a tagged lowercase SHA-256 digest");
+  }
+}
+
+function assertUuid(value, path) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) {
+    fail(path, "a canonical lowercase UUID");
+  }
+}
+
+function assertSameOriginBlobUrl(value, path) {
+  const base = "http://signalbox.invalid";
+  if (typeof value !== "string" || !value.startsWith("/") || value.startsWith("//")) {
+    fail(path, "a root-relative blob API path");
+  }
+  const parsed = new URL(value, base);
+  if (parsed.origin !== base || !parsed.pathname.startsWith("/api/blobs/") || parsed.hash !== "") {
+    fail(path, "a same-origin blob API path");
+  }
+  const route = /^\/api\/blobs\/(sha256:[0-9a-f]{64})\/(download|content\/(?:image-png|image-jpeg|image-gif|image-webp))$/u.exec(parsed.pathname);
+  if (route === null) {
+    fail(path, "a canonical blob API route");
+  }
+  let mediaType;
+  if (route[2] === "download") {
+    const mediaTypes = parsed.searchParams.getAll("media_type");
+    const filenames = parsed.searchParams.getAll("display_filename");
+    const known = [...parsed.searchParams.keys()].every((key) => key === "media_type" || key === "display_filename");
+    if (mediaTypes.length !== 1 || mediaTypes[0] === "" || filenames.length > 1 || !known) {
+      fail(path, "a download route with required media type metadata");
+    }
+    assertMediaType(mediaTypes[0], `${path} media_type`);
+    mediaType = mediaTypes[0];
+    if (filenames.length === 1) {
+      assertDisplayFilename(filenames[0], `${path} display_filename`);
+    }
+  } else if (parsed.search !== "") {
+    fail(path, "a content route without query metadata");
+  } else {
+    mediaType = {
+      "content/image-png": "image/png",
+      "content/image-jpeg": "image/jpeg",
+      "content/image-gif": "image/gif",
+      "content/image-webp": "image/webp",
+    }[route[2]];
+  }
+  return {
+    digest: route[1],
+    kind: route[2],
+    mediaType,
+    displayFilename: route[2] === "download"
+      ? parsed.searchParams.get("display_filename") ?? undefined
+      : undefined,
+  };
+}
+
+function u64Bytes(value) {
+  const output = new Uint8Array(8);
+  let remaining = BigInt(value);
+  for (let index = 7; index >= 0; index -= 1) { output[index] = Number(remaining & 255n); remaining >>= 8n; }
+  return output;
+}
+
+function digestBytes(value) {
+  return Uint8Array.from(value.slice(7).match(/../gu), (pair) => Number.parseInt(pair, 16));
+}
+
+function sha256(bytes) {
+  const constants = new Uint32Array([0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2]);
+  const paddedLength = Math.ceil((bytes.length + 9) / 64) * 64;
+  const padded = new Uint8Array(paddedLength); padded.set(bytes); padded[bytes.length] = 0x80;
+  let bits = BigInt(bytes.length) * 8n;
+  for (let index = paddedLength - 1; index >= paddedLength - 8; index -= 1) { padded[index] = Number(bits & 255n); bits >>= 8n; }
+  const state = new Uint32Array([0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19]);
+  const words = new Uint32Array(64);
+  const rotate = (value, count) => (value >>> count) | (value << (32 - count));
+  for (let block = 0; block < paddedLength; block += 64) {
+    for (let index = 0; index < 16; index += 1) { const offset = block + index * 4; words[index] = (padded[offset] << 24) | (padded[offset + 1] << 16) | (padded[offset + 2] << 8) | padded[offset + 3]; }
+    for (let index = 16; index < 64; index += 1) { const x=words[index-15], y=words[index-2]; words[index]=(words[index-16]+(rotate(x,7)^rotate(x,18)^(x>>>3))+words[index-7]+(rotate(y,17)^rotate(y,19)^(y>>>10)))>>>0; }
+    let [a,b,c,d,e,f,g,h]=state;
+    for (let index=0; index<64; index+=1) { const sum1=(h+(rotate(e,6)^rotate(e,11)^rotate(e,25))+((e&f)^(~e&g))+constants[index]+words[index])>>>0; const sum0=(rotate(a,2)^rotate(a,13)^rotate(a,22))>>>0; const majority=((a&b)^(a&c)^(b&c))>>>0; h=g;g=f;f=e;e=(d+sum1)>>>0;d=c;c=b;b=a;a=(sum1+sum0+majority)>>>0; }
+    for (const [index,value] of [a,b,c,d,e,f,g,h].entries()) state[index]=(state[index]+value)>>>0;
+  }
+  return [...state].map((word) => word.toString(16).padStart(8, "0")).join("");
+}
+
+function deterministicCacheKey(derivation) {
+  const name=utf8.encode(derivation.transformation_name), parameters=utf8.encode(derivation.parameters_json);
+  const version=new Uint8Array(4); new DataView(version.buffer).setUint32(0, derivation.transformation_version);
+  const pieces=[utf8.encode("signalbox.blob-derivation.v1\0"),u64Bytes(derivation.input_digests.length)];
+  derivation.input_digests.forEach((digest)=>pieces.push(digestBytes(digest)));
+  pieces.push(u64Bytes(name.length),name,version,u64Bytes(parameters.length),parameters,digestBytes(derivation.producer.implementation_digest));
+  const framed=new Uint8Array(pieces.reduce((total,piece)=>total+piece.length,0)); let offset=0;
+  pieces.forEach((piece)=>{ framed.set(piece,offset); offset+=piece.length; });
+  return `sha256:${sha256(framed)}`;
+}
+
+export function decodeWebBlobDescriptor(value) {
+  assertSchema(schemas.WebBlobDescriptor, schemas.WebBlobDescriptor, value, "blob_descriptor");
+  assertBlobDigest(value.digest, "blob_descriptor.digest");
+  assertCanonicalU64(value.byte_length, "blob_descriptor.byte_length");
+  assertMediaType(value.declared_media_type, "blob_descriptor.declared_media_type");
+  value.display_filename.forEach((filename, index) =>
+    assertDisplayFilename(filename, `blob_descriptor.display_filename[${index}]`));
+  value.available_views.forEach((view, index) => {
+    assertMediaType(view.media_type, `blob_descriptor.available_views[${index}].media_type`);
+    assertCanonicalU64(view.byte_length, `blob_descriptor.available_views[${index}].byte_length`);
+    const contentPath = `blob_descriptor.available_views[${index}].content_url`;
+    const contentRoute = assertSameOriginBlobUrl(view.content_url, contentPath);
+    const contentDigest = contentRoute.digest;
+    if (view.media_type !== contentRoute.mediaType) {
+      fail(`blob_descriptor.available_views[${index}].media_type`, "the content route media type");
+    }
+    if (view.kind === "download" || view.kind === "browser_native") {
+      if (view.derivations.length !== 0) {
+        fail(`blob_descriptor.available_views[${index}].derivations`, "empty for an original representation");
+      }
+      if (contentDigest !== value.digest) {
+        fail(contentPath, "a route for the descriptor digest");
+      }
+      if ((view.kind === "download") !== (contentRoute.kind === "download")) {
+        fail(contentPath, "a route matching the advertised view kind");
+      }
+      if (view.byte_length !== value.byte_length) {
+        fail(`blob_descriptor.available_views[${index}].byte_length`, "the descriptor byte length for an original representation");
+      }
+      if (view.kind === "download" && view.media_type !== value.declared_media_type) {
+        fail(`blob_descriptor.available_views[${index}].media_type`, "the descriptor declared media type for the download representation");
+      }
+      if (
+        view.kind === "download" &&
+        contentRoute.displayFilename !== value.display_filename[0]
+      ) {
+        fail(contentPath, "download filename metadata matching the descriptor");
+      }
+      if (
+        view.kind === "browser_native" &&
+        value.declared_media_type.split(";", 1)[0].trim().toLowerCase() !== contentRoute.mediaType
+      ) {
+        fail(contentPath, "an original-image route matching the descriptor declared media type");
+      }
+    } else {
+      if (contentRoute.kind !== "content/image-png") {
+        fail(contentPath, "an image-content route for a derivative view");
+      }
+      if (!view.derivations.some((derivation) =>
+        derivation.input_digests.includes(value.digest) &&
+        derivation.output_digests.includes(contentDigest))) {
+        fail(contentPath, "a route for a derivation output bound to the descriptor input");
+      }
+    }
+    view.derivations.forEach((derivation, derivationIndex) => {
+      const path = `blob_descriptor.available_views[${index}].derivations[${derivationIndex}]`;
+      assertCanonicalParametersJson(derivation.parameters_json, `${path}.parameters_json`);
+      assertUuid(derivation.derivation_id, `${path}.derivation_id`);
+      derivation.input_digests.forEach((digest, digestIndex) =>
+        assertBlobDigest(digest, `${path}.input_digests[${digestIndex}]`));
+      derivation.output_digests.forEach((digest, digestIndex) =>
+        assertBlobDigest(digest, `${path}.output_digests[${digestIndex}]`));
+      if (derivation.producer.class === "deterministic") {
+        assertBlobDigest(derivation.producer.implementation_digest, `${path}.producer.implementation_digest`);
+        assertBlobDigest(derivation.producer.cache_key, `${path}.producer.cache_key`);
+        if (deterministicCacheKey(derivation) !== derivation.producer.cache_key) {
+          fail(`${path}.producer.cache_key`, "the deterministic key for the advertised provenance");
+        }
+      } else if (derivation.producer.class === "executed") {
+        assertUuid(derivation.producer.execution_id, `${path}.producer.execution_id`);
+        assertBlobDigest(derivation.producer.implementation_digest, `${path}.producer.implementation_digest`);
+      } else {
+        assertUuid(derivation.producer.model_call_id, `${path}.producer.model_call_id`);
+      }
+    });
+    if (view.kind === "thumbnail" || view.kind === "preview") {
+      const derivation = view.derivations[0];
+      const expectedName = view.kind === "thumbnail" ? "image.thumbnail" : "image.preview";
+      const expectedParameters = view.kind === "thumbnail"
+        ? '{"edge_px":256,"format":"image/png"}'
+        : '{"edge_px":1600,"format":"image/png"}';
+      if (
+        derivation === undefined ||
+        derivation.transformation_name !== expectedName ||
+        derivation.transformation_version !== 1 ||
+        derivation.parameters_json !== expectedParameters ||
+        derivation.producer.class !== "deterministic"
+      ) {
+        fail(
+          `blob_descriptor.available_views[${index}].derivations`,
+          "the exact deterministic image transformation for the advertised view kind",
+        );
+      }
+    }
+  });
+  const downloadViews = value.available_views.filter((view) => view.kind === "download");
+  if (downloadViews.length !== 1) {
+    fail("blob_descriptor.available_views", "exactly one download view");
+  }
+  const representationKinds = value.available_views.map((view) => view.kind);
+  if (new Set(representationKinds).size !== representationKinds.length) {
+    fail("blob_descriptor.available_views", "at most one view of each representation kind");
   }
   return value;
 }
 
-export function decodeWebContractExample(value) {
-  assertSchema(schemas.WebContractExample, schemas.WebContractExample, value, "example");
+export function decodeWebAttentionSnapshot(value) {
+  assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  assertAttentionSnapshot(value, "attention_snapshot");
   return value;
 }
 
-export function decodeWebApiErrorResponse(value) {
-  assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "error_response");
-  return value;
-}
-
-export function decodeWebSessionTimelineDescriptor(value) {
-  assertSchema(schemas.WebSessionTimelineDescriptor, schemas.WebSessionTimelineDescriptor, value, "session_descriptor");
-  return value;
-}
-
-export function decodeWebSessionTimelineWindow(value) {
-  assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "timeline_window");
+export function decodeWebAttentionStreamEvent(value) {
+  assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  if (value.kind === "snapshot") {
+    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+  } else if (value.kind === "update") {
+    assertAttentionSummaries(value.summaries, "attention_event.summaries");
+  }
   return value;
 }
 
@@ -1094,5 +3164,74 @@ export function decodeWebSearchPage(value) {
       previousEnd = highlight.end_byte;
     });
   });
+  return value;
+}
+export function decodeWebContractBootstrap(value) {
+  assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "webcontractbootstrap");
+  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "2" ||
+      value.capabilities.bounded_json !== true ||
+      value.capabilities.same_origin_json_mutations !== true ||
+      value.capabilities.ndjson_streaming !== true ||
+      value.capabilities.import_discovery !== true ||
+      value.capabilities.imported_continuations !== true ||
+      value.limits.max_json_body_bytes !== 65536 ||
+      value.limits.max_ndjson_item_bytes !== 65536) {
+    throw new TypeError("bootstrap carries an incompatible web contract");
+  }
+  return value;
+}
+
+export function decodeWebContractExample(value) {
+  assertSchema(schemas.WebContractExample, schemas.WebContractExample, value, "webcontractexample");
+  return value;
+}
+
+export function decodeWebApiErrorResponse(value) {
+  assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "webapierrorresponse");
+  return value;
+}
+
+export function decodeWebSessionTimelineDescriptor(value) {
+  assertSchema(schemas.WebSessionTimelineDescriptor, schemas.WebSessionTimelineDescriptor, value, "websessiontimelinedescriptor");
+  return value;
+}
+
+export function decodeWebSessionTimelineWindow(value) {
+  assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "websessiontimelinewindow");
+  return value;
+}
+
+export function decodeWebImportListRequest(value) {
+  assertSchema(schemas.WebImportListRequest, schemas.WebImportListRequest, value, "webimportlistrequest");
+  return value;
+}
+
+export function decodeWebImportListPage(value) {
+  assertSchema(schemas.WebImportListPage, schemas.WebImportListPage, value, "webimportlistpage");
+  return value;
+}
+
+export function decodeWebImportDescriptor(value) {
+  assertSchema(schemas.WebImportDescriptor, schemas.WebImportDescriptor, value, "webimportdescriptor");
+  return value;
+}
+
+export function decodeWebImportEntryWindowRequest(value) {
+  assertSchema(schemas.WebImportEntryWindowRequest, schemas.WebImportEntryWindowRequest, value, "webimportentrywindowrequest");
+  return value;
+}
+
+export function decodeWebImportEntryWindow(value) {
+  assertSchema(schemas.WebImportEntryWindow, schemas.WebImportEntryWindow, value, "webimportentrywindow");
+  return value;
+}
+
+export function decodeWebImportContinuationRequest(value) {
+  assertSchema(schemas.WebImportContinuationRequest, schemas.WebImportContinuationRequest, value, "webimportcontinuationrequest");
+  return value;
+}
+
+export function decodeWebImportContinuationResponse(value) {
+  assertSchema(schemas.WebImportContinuationResponse, schemas.WebImportContinuationResponse, value, "webimportcontinuationresponse");
   return value;
 }
