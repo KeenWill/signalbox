@@ -73,6 +73,14 @@ const schemas = {
             "description": "Stable bounded session descriptors and historical windows are available.",
             "type": "boolean"
           },
+          "import_discovery": {
+            "description": "Bounded imported-conversation discovery and entry windows are available.",
+            "type": "boolean"
+          },
+          "imported_continuations": {
+            "description": "Imported frontiers can seed a native session through an idempotent command.",
+            "type": "boolean"
+          },
           "ndjson_streaming": {
             "description": "Incremental response items use newline-delimited JSON.",
             "type": "boolean"
@@ -86,6 +94,8 @@ const schemas = {
           "bounded_json",
           "same_origin_json_mutations",
           "ndjson_streaming",
+          "import_discovery",
+          "imported_continuations",
           "bounded_session_timeline"
         ],
         "type": "object"
@@ -191,6 +201,972 @@ const schemas = {
       "message"
     ],
     "title": "WebContractExample",
+    "type": "object"
+  },
+  "WebImportContinuationRequest": {
+    "$defs": {
+      "WebImportContinuationReference": {
+        "additionalProperties": false,
+        "description": "One immutable imported frontier suitable for precise continuation.",
+        "properties": {
+          "imported_conversation_id": {
+            "description": "Owning imported-conversation UUID.",
+            "type": "string"
+          },
+          "imported_entry_id": {
+            "description": "Exact imported-entry UUID at the inclusive frontier.",
+            "type": "string"
+          },
+          "position": {
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "WebImportedSessionRelationship": {
+        "description": "Resume or fork relationship chosen for a new native session.",
+        "oneOf": [
+          {
+            "const": "resume",
+            "description": "Resume the selected imported history.",
+            "type": "string"
+          },
+          {
+            "const": "fork",
+            "description": "Fork from the selected imported history.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebModelSelection": {
+        "description": "Initial model-selection request for a continued native session.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "Exact direct model-selection UUID.",
+            "properties": {
+              "kind": {
+                "const": "direct",
+                "type": "string"
+              },
+              "selection_id": {
+                "description": "Direct model-selection UUID.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "selection_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Alias UUID resolved by the daemon at command admission.",
+            "properties": {
+              "alias_id": {
+                "description": "Model alias UUID.",
+                "type": "string"
+              },
+              "kind": {
+                "const": "alias",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "alias_id"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Idempotent continuation command for one selected immutable frontier.",
+    "properties": {
+      "command_id": {
+        "description": "Durable command UUID minted before network I/O and retained for retry.",
+        "type": "string"
+      },
+      "frontier": {
+        "$ref": "#/$defs/WebImportContinuationReference",
+        "description": "Exact selected immutable imported frontier."
+      },
+      "initial_model_selection": {
+        "$ref": "#/$defs/WebModelSelection",
+        "description": "Initial model selection; other settings use provider defaults."
+      },
+      "relationship": {
+        "$ref": "#/$defs/WebImportedSessionRelationship",
+        "description": "Resume or fork relationship."
+      }
+    },
+    "required": [
+      "command_id",
+      "frontier",
+      "relationship",
+      "initial_model_selection"
+    ],
+    "title": "WebImportContinuationRequest",
+    "type": "object"
+  },
+  "WebImportContinuationResponse": {
+    "$defs": {
+      "WebImportContinuationReference": {
+        "additionalProperties": false,
+        "description": "One immutable imported frontier suitable for precise continuation.",
+        "properties": {
+          "imported_conversation_id": {
+            "description": "Owning imported-conversation UUID.",
+            "type": "string"
+          },
+          "imported_entry_id": {
+            "description": "Exact imported-entry UUID at the inclusive frontier.",
+            "type": "string"
+          },
+          "position": {
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "WebImportedSessionRelationship": {
+        "description": "Resume or fork relationship chosen for a new native session.",
+        "oneOf": [
+          {
+            "const": "resume",
+            "description": "Resume the selected imported history.",
+            "type": "string"
+          },
+          {
+            "const": "fork",
+            "description": "Fork from the selected imported history.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Durable applied result of an imported continuation command.",
+    "properties": {
+      "command_id": {
+        "description": "Replayed durable command UUID.",
+        "type": "string"
+      },
+      "frontier": {
+        "$ref": "#/$defs/WebImportContinuationReference",
+        "description": "Exact selected immutable imported frontier."
+      },
+      "relationship": {
+        "$ref": "#/$defs/WebImportedSessionRelationship",
+        "description": "Recorded resume or fork relationship."
+      },
+      "session_id": {
+        "description": "Newly created or replayed native session UUID.",
+        "type": "string"
+      }
+    },
+    "required": [
+      "command_id",
+      "session_id",
+      "frontier",
+      "relationship"
+    ],
+    "title": "WebImportContinuationResponse",
+    "type": "object"
+  },
+  "WebImportDescriptor": {
+    "$defs": {
+      "WebImportContinuationReference": {
+        "additionalProperties": false,
+        "description": "One immutable imported frontier suitable for precise continuation.",
+        "properties": {
+          "imported_conversation_id": {
+            "description": "Owning imported-conversation UUID.",
+            "type": "string"
+          },
+          "imported_entry_id": {
+            "description": "Exact imported-entry UUID at the inclusive frontier.",
+            "type": "string"
+          },
+          "position": {
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "WebImportFormat": {
+        "description": "Exact source format and converter interpretation for one import.",
+        "oneOf": [
+          {
+            "const": "claude_code_session_jsonl_v1",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          },
+          {
+            "const": "claude_code_session_jsonl_v2",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 2.",
+            "type": "string"
+          },
+          {
+            "const": "codex_rollout_jsonl_v1",
+            "description": "Codex rollout JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportSizeFacts": {
+        "additionalProperties": false,
+        "description": "Byte facts projected from immutable stored import members.",
+        "properties": {
+          "normalized_entry_bytes": {
+            "description": "Sum of normalized entry and source-metadata encoding bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "normalized_source_record_bytes": {
+            "description": "Sum of normalized source-record encoding bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "raw_source_bytes": {
+            "description": "Sum of exact raw source-record occurrence bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "raw_source_bytes",
+          "normalized_source_record_bytes",
+          "normalized_entry_bytes"
+        ],
+        "type": "object"
+      },
+      "WebImportSourceEvidence": {
+        "additionalProperties": false,
+        "description": "Source and converter evidence retained by one immutable import.",
+        "properties": {
+          "format": {
+            "$ref": "#/$defs/WebImportFormat",
+            "description": "Exact source format and converter interpretation."
+          },
+          "source_digest_sha256": {
+            "description": "SHA-256 digest of the exact ordered source records.",
+            "type": "string"
+          },
+          "source_session_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebImportSourceSessionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bounded converter-attested source-session evidence, when consistent."
+          }
+        },
+        "required": [
+          "format",
+          "source_digest_sha256"
+        ],
+        "type": "object"
+      },
+      "WebImportSourceSessionEvidence": {
+        "additionalProperties": false,
+        "description": "Bounded projection of exact converter-attested source-session evidence.",
+        "properties": {
+          "completeness": {
+            "$ref": "#/$defs/WebImportTextCompleteness",
+            "description": "Whether the projection contains the complete identifier."
+          },
+          "leading_text": {
+            "description": "Exact leading UTF-8 text within the response ceiling.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "leading_text",
+          "completeness"
+        ],
+        "type": "object"
+      },
+      "WebImportTextCompleteness": {
+        "description": "Completeness of a bounded attested-text preview.",
+        "oneOf": [
+          {
+            "const": "complete",
+            "description": "The exact attested text fits the preview bound.",
+            "type": "string"
+          },
+          {
+            "const": "truncated",
+            "description": "Only the leading UTF-8 prefix fits the preview bound.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportTimelineBounds": {
+        "additionalProperties": false,
+        "description": "First and latest immutable positions in an imported timeline.",
+        "properties": {
+          "first": {
+            "$ref": "#/$defs/WebImportContinuationReference",
+            "description": "First selectable frontier."
+          },
+          "latest": {
+            "$ref": "#/$defs/WebImportContinuationReference",
+            "description": "Latest selectable frontier."
+          }
+        },
+        "required": [
+          "first",
+          "latest"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Complete bounded descriptor for one immutable import.",
+    "properties": {
+      "display_title": {
+        "description": "Evidence-derived display title, when available.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "entry_count": {
+        "description": "Number of normalized imported entries.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "imported_conversation_id": {
+        "description": "Immutable imported-conversation UUID.",
+        "type": "string"
+      },
+      "raw_record_count": {
+        "description": "Number of exact raw source records.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "sizes": {
+        "$ref": "#/$defs/WebImportSizeFacts",
+        "description": "Projected byte facts; no raw blob bytes are included."
+      },
+      "source": {
+        "$ref": "#/$defs/WebImportSourceEvidence",
+        "description": "Source and converter evidence, distinct from native execution evidence."
+      },
+      "timeline": {
+        "$ref": "#/$defs/WebImportTimelineBounds",
+        "description": "Addressable first and latest imported frontiers."
+      }
+    },
+    "required": [
+      "imported_conversation_id",
+      "raw_record_count",
+      "entry_count",
+      "source",
+      "sizes",
+      "timeline"
+    ],
+    "title": "WebImportDescriptor",
+    "type": "object"
+  },
+  "WebImportEntryWindow": {
+    "$defs": {
+      "WebImportContinuationReference": {
+        "additionalProperties": false,
+        "description": "One immutable imported frontier suitable for precise continuation.",
+        "properties": {
+          "imported_conversation_id": {
+            "description": "Owning imported-conversation UUID.",
+            "type": "string"
+          },
+          "imported_entry_id": {
+            "description": "Exact imported-entry UUID at the inclusive frontier.",
+            "type": "string"
+          },
+          "position": {
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "imported_entry_id",
+          "position"
+        ],
+        "type": "object"
+      },
+      "WebImportTextCompleteness": {
+        "description": "Completeness of a bounded attested-text preview.",
+        "oneOf": [
+          {
+            "const": "complete",
+            "description": "The exact attested text fits the preview bound.",
+            "type": "string"
+          },
+          {
+            "const": "truncated",
+            "description": "Only the leading UTF-8 prefix fits the preview bound.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportTextEvidence": {
+        "description": "Bounded text evidence for an imported entry.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "description": "The text member was omitted by the source.",
+            "properties": {
+              "kind": {
+                "const": "not_attested",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The source explicitly supplied no text.",
+            "properties": {
+              "kind": {
+                "const": "attested_absent",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "The source supplied exact text, possibly represented by a bounded prefix.",
+            "properties": {
+              "completeness": {
+                "$ref": "#/$defs/WebImportTextCompleteness",
+                "description": "Whether the prefix is the complete text."
+              },
+              "kind": {
+                "const": "attested",
+                "type": "string"
+              },
+              "leading_text": {
+                "description": "Exact leading text within the byte ceiling.",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "leading_text",
+              "completeness"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebImportedContentKind": {
+        "description": "Closed normalized imported content kind.",
+        "oneOf": [
+          {
+            "const": "source_event",
+            "description": "Non-message source record.",
+            "type": "string"
+          },
+          {
+            "const": "source_message_block",
+            "description": "Source-defined message block.",
+            "type": "string"
+          },
+          {
+            "const": "text",
+            "description": "Source text or explicit text absence.",
+            "type": "string"
+          },
+          {
+            "const": "tool_call",
+            "description": "Source tool call.",
+            "type": "string"
+          },
+          {
+            "const": "tool_result",
+            "description": "Source tool result.",
+            "type": "string"
+          },
+          {
+            "const": "thinking",
+            "description": "Source-visible thinking.",
+            "type": "string"
+          },
+          {
+            "const": "redacted_thinking",
+            "description": "Source redacted-thinking data.",
+            "type": "string"
+          },
+          {
+            "const": "document",
+            "description": "Source document descriptor.",
+            "type": "string"
+          },
+          {
+            "const": "message_content_absent",
+            "description": "Precisely classified absent message content.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportedEntry": {
+        "additionalProperties": false,
+        "description": "One normalized imported entry in a bounded window.",
+        "properties": {
+          "content_kind": {
+            "$ref": "#/$defs/WebImportedContentKind",
+            "description": "Source-neutral normalized content kind."
+          },
+          "frontier": {
+            "$ref": "#/$defs/WebImportContinuationReference",
+            "description": "Exact immutable continuation frontier."
+          },
+          "raw_record_position": {
+            "description": "One-based physical source-record occurrence.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "record_entry_position": {
+            "description": "One-based normalized entry position within that source record.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "source_speaker": {
+            "$ref": "#/$defs/WebImportedSpeakerEvidence",
+            "description": "Source speaker attestation, never native author evidence."
+          },
+          "text": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebImportTextEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bounded text evidence only for normalized text content."
+          }
+        },
+        "required": [
+          "frontier",
+          "raw_record_position",
+          "record_entry_position",
+          "source_speaker",
+          "content_kind"
+        ],
+        "type": "object"
+      },
+      "WebImportedSpeakerEvidence": {
+        "description": "Source-attested speaker evidence for one imported entry.",
+        "oneOf": [
+          {
+            "const": "not_attested",
+            "description": "The source omitted speaker evidence.",
+            "type": "string"
+          },
+          {
+            "const": "attested_absent",
+            "description": "The source explicitly attested no speaker.",
+            "type": "string"
+          },
+          {
+            "const": "user",
+            "description": "The source attested a user-role speaker.",
+            "type": "string"
+          },
+          {
+            "const": "assistant",
+            "description": "The source attested an assistant-role speaker.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded imported-entry window.",
+    "properties": {
+      "anchor_position": {
+        "description": "Resolved immutable anchor position.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "first_position": {
+        "description": "First position returned.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      },
+      "has_after": {
+        "description": "Whether later entries exist.",
+        "type": "boolean"
+      },
+      "has_before": {
+        "description": "Whether earlier entries exist.",
+        "type": "boolean"
+      },
+      "items": {
+        "description": "Entries in ascending immutable position order.",
+        "items": {
+          "$ref": "#/$defs/WebImportedEntry"
+        },
+        "type": "array"
+      },
+      "last_position": {
+        "description": "Last position returned.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
+      }
+    },
+    "required": [
+      "anchor_position",
+      "first_position",
+      "last_position",
+      "has_before",
+      "has_after",
+      "items"
+    ],
+    "title": "WebImportEntryWindow",
+    "type": "object"
+  },
+  "WebImportEntryWindowRequest": {
+    "$defs": {
+      "WebImportWindowAnchor": {
+        "description": "Logical anchor for an imported-entry window.",
+        "oneOf": [
+          {
+            "const": "first",
+            "description": "Anchor at imported position one.",
+            "type": "string"
+          },
+          {
+            "const": "latest",
+            "description": "Anchor at the immutable latest position.",
+            "type": "string"
+          },
+          {
+            "const": "position",
+            "description": "Anchor at the supplied exact position.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Bounded imported-entry window request carried as query parameters.",
+    "properties": {
+      "after": {
+        "description": "Number of entries requested after the anchor.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "anchor": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebImportWindowAnchor"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Logical anchor; defaults to `first` when omitted."
+      },
+      "before": {
+        "description": "Number of entries requested before the anchor.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "position": {
+        "description": "Required only for the `position` anchor.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      }
+    },
+    "title": "WebImportEntryWindowRequest",
+    "type": "object"
+  },
+  "WebImportListPage": {
+    "$defs": {
+      "WebImportFormat": {
+        "description": "Exact source format and converter interpretation for one import.",
+        "oneOf": [
+          {
+            "const": "claude_code_session_jsonl_v1",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          },
+          {
+            "const": "claude_code_session_jsonl_v2",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 2.",
+            "type": "string"
+          },
+          {
+            "const": "codex_rollout_jsonl_v1",
+            "description": "Codex rollout JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          }
+        ]
+      },
+      "WebImportSourceSessionEvidence": {
+        "additionalProperties": false,
+        "description": "Bounded projection of exact converter-attested source-session evidence.",
+        "properties": {
+          "completeness": {
+            "$ref": "#/$defs/WebImportTextCompleteness",
+            "description": "Whether the projection contains the complete identifier."
+          },
+          "leading_text": {
+            "description": "Exact leading UTF-8 text within the response ceiling.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "leading_text",
+          "completeness"
+        ],
+        "type": "object"
+      },
+      "WebImportSummary": {
+        "additionalProperties": false,
+        "description": "One bounded imports catalog row.",
+        "properties": {
+          "display_title": {
+            "description": "Evidence-derived display title, when the source supplied one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "entry_count": {
+            "description": "Number of normalized imported entries.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "format": {
+            "$ref": "#/$defs/WebImportFormat",
+            "description": "Exact source format and converter interpretation."
+          },
+          "imported_conversation_id": {
+            "description": "Immutable imported-conversation UUID.",
+            "type": "string"
+          },
+          "source_session_id": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebImportSourceSessionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Bounded converter-attested source-session evidence, when consistent."
+          },
+          "source_session_id_sha256": {
+            "description": "SHA-256 of the complete source-session identifier, when present.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "imported_conversation_id",
+          "format",
+          "entry_count"
+        ],
+        "type": "object"
+      },
+      "WebImportTextCompleteness": {
+        "description": "Completeness of a bounded attested-text preview.",
+        "oneOf": [
+          {
+            "const": "complete",
+            "description": "The exact attested text fits the preview bound.",
+            "type": "string"
+          },
+          {
+            "const": "truncated",
+            "description": "Only the leading UTF-8 prefix fits the preview bound.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One keyset page of imports.",
+    "properties": {
+      "exact_source_session_id_sha256": {
+        "description": "SHA-256 of the complete exact-search value, absent for ordinary catalog reads.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "items": {
+        "description": "Rows in stable UUID order.",
+        "items": {
+          "$ref": "#/$defs/WebImportSummary"
+        },
+        "type": "array"
+      },
+      "next_cursor": {
+        "description": "Exclusive cursor for the next page, absent at the end.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "search_correlation": {
+        "description": "Client-selected exact-search correlation UUID, absent for ordinary catalog reads.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "required": [
+      "items"
+    ],
+    "title": "WebImportListPage",
+    "type": "object"
+  },
+  "WebImportListRequest": {
+    "$defs": {
+      "WebImportFormat": {
+        "description": "Exact source format and converter interpretation for one import.",
+        "oneOf": [
+          {
+            "const": "claude_code_session_jsonl_v1",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          },
+          {
+            "const": "claude_code_session_jsonl_v2",
+            "description": "Claude Code JSONL interpreted by Signalbox converter version 2.",
+            "type": "string"
+          },
+          {
+            "const": "codex_rollout_jsonl_v1",
+            "description": "Codex rollout JSONL interpreted by Signalbox converter version 1.",
+            "type": "string"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Bounded imports catalog request carried as query parameters. An exact\nsource-session filter is carried separately as the bounded raw UTF-8 body of\n`POST /api/imports/searches`; empty text and edge whitespace are preserved.",
+    "properties": {
+      "after": {
+        "description": "Exclusive imported-conversation UUID cursor.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "format": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebImportFormat"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Optional exact source/converter filter."
+      },
+      "limit": {
+        "description": "Requested page size; the server rejects values above its hard ceiling.",
+        "format": "uint32",
+        "minimum": 0,
+        "type": [
+          "integer",
+          "null"
+        ]
+      },
+      "search_correlation": {
+        "description": "Client-selected UUID echoed by an exact-search response.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "source_session_id": {
+        "description": "Optional exact converter-attested source-session identifier.",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "title": "WebImportListRequest",
     "type": "object"
   },
   "WebSessionTimelineDescriptor": {
@@ -485,22 +1461,9 @@ function assertSchema(root, schema, value, path) {
     }
     return;
   }
-  if (schema.oneOf !== undefined) {
-    const accepted = schema.oneOf.some((candidate) => {
-      try {
-        assertSchema(root, candidate, value, path);
-        return true;
-      } catch {
-        return false;
-      }
-    });
-    if (!accepted) {
-      fail(path, "one recognized variant");
-    }
-    return;
-  }
-  if (schema.anyOf !== undefined) {
-    const accepted = schema.anyOf.some((candidate) => {
+  const alternatives = schema.oneOf ?? schema.anyOf;
+  if (alternatives !== undefined) {
+    const accepted = alternatives.some((candidate) => {
       try {
         assertSchema(root, candidate, value, path);
         return true;
@@ -606,29 +1569,71 @@ function assertSchema(root, schema, value, path) {
 }
 
 export function decodeWebContractBootstrap(value) {
-  assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "bootstrap");
-  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "1") {
+  assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "webcontractbootstrap");
+  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "2" ||
+      value.capabilities.bounded_json !== true ||
+      value.capabilities.same_origin_json_mutations !== true ||
+      value.capabilities.ndjson_streaming !== true ||
+      value.capabilities.import_discovery !== true ||
+      value.capabilities.imported_continuations !== true ||
+      value.limits.max_json_body_bytes !== 65536 ||
+      value.limits.max_ndjson_item_bytes !== 65536) {
     throw new TypeError("bootstrap carries an incompatible web contract");
   }
   return value;
 }
 
 export function decodeWebContractExample(value) {
-  assertSchema(schemas.WebContractExample, schemas.WebContractExample, value, "example");
+  assertSchema(schemas.WebContractExample, schemas.WebContractExample, value, "webcontractexample");
   return value;
 }
 
 export function decodeWebApiErrorResponse(value) {
-  assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "error_response");
+  assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "webapierrorresponse");
   return value;
 }
 
 export function decodeWebSessionTimelineDescriptor(value) {
-  assertSchema(schemas.WebSessionTimelineDescriptor, schemas.WebSessionTimelineDescriptor, value, "session_descriptor");
+  assertSchema(schemas.WebSessionTimelineDescriptor, schemas.WebSessionTimelineDescriptor, value, "websessiontimelinedescriptor");
   return value;
 }
 
 export function decodeWebSessionTimelineWindow(value) {
-  assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "timeline_window");
+  assertSchema(schemas.WebSessionTimelineWindow, schemas.WebSessionTimelineWindow, value, "websessiontimelinewindow");
+  return value;
+}
+
+export function decodeWebImportListRequest(value) {
+  assertSchema(schemas.WebImportListRequest, schemas.WebImportListRequest, value, "webimportlistrequest");
+  return value;
+}
+
+export function decodeWebImportListPage(value) {
+  assertSchema(schemas.WebImportListPage, schemas.WebImportListPage, value, "webimportlistpage");
+  return value;
+}
+
+export function decodeWebImportDescriptor(value) {
+  assertSchema(schemas.WebImportDescriptor, schemas.WebImportDescriptor, value, "webimportdescriptor");
+  return value;
+}
+
+export function decodeWebImportEntryWindowRequest(value) {
+  assertSchema(schemas.WebImportEntryWindowRequest, schemas.WebImportEntryWindowRequest, value, "webimportentrywindowrequest");
+  return value;
+}
+
+export function decodeWebImportEntryWindow(value) {
+  assertSchema(schemas.WebImportEntryWindow, schemas.WebImportEntryWindow, value, "webimportentrywindow");
+  return value;
+}
+
+export function decodeWebImportContinuationRequest(value) {
+  assertSchema(schemas.WebImportContinuationRequest, schemas.WebImportContinuationRequest, value, "webimportcontinuationrequest");
+  return value;
+}
+
+export function decodeWebImportContinuationResponse(value) {
+  assertSchema(schemas.WebImportContinuationResponse, schemas.WebImportContinuationResponse, value, "webimportcontinuationresponse");
   return value;
 }
