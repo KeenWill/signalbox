@@ -33,6 +33,7 @@ use signalbox_model_runtime::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository},
     goal_turn::GoalTurnCandidates,
@@ -142,7 +143,8 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -251,7 +253,13 @@ fn assert_execution_failure_blocked(goal: &Goal) {
         panic!("fixture goal must be blocked");
     };
     assert_eq!(*reason, GoalBlockedReasonKind::ExecutionFailure);
-    assert!(!need.as_str().is_empty());
+    // The first failure of a run is under the automatic-resumption budget, so
+    // the need text states the scheduled attempt before the operator repair
+    // every execution-failure need carries.
+    assert_eq!(
+        need.as_str(),
+        "The goal turn failed to execute and automatic resumption is scheduled. If the goal is still blocked here once resumption ends, it is waiting for an operator. Resolve the failed goal turn's execution condition, then resume the goal."
+    );
 }
 
 #[track_caller]
@@ -392,12 +400,12 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         "post-activation execution failure must stop this isolated scheduler"
     );
 
-    let transcript = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+    let transcript = sqlx::query_as::<_, (String, Option<serde_json::Value>, Option<String>)>(
         "SELECT entry.payload_kind,
-                (SELECT string_agg(part.text_value, '' ORDER BY part.position)
-                   FROM accepted_input_content_part AS part
-                  WHERE part.accepted_input_id = entry.origin_accepted_input_id
-                    AND part.part_kind = 'text'),
+                CASE WHEN accepted.accepted_input_id IS NULL THEN NULL
+                     ELSE accepted_input_content_parts_json(
+                        accepted.accepted_input_id)
+                END,
                 entry.assistant_text_value
            FROM turn_lifecycle AS lifecycle
            JOIN context_frontier_member AS member
@@ -406,6 +414,9 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
            JOIN semantic_transcript_entry AS entry
              ON entry.source_session_id = member.source_session_id
             AND entry.semantic_entry_id = member.semantic_entry_id
+           LEFT JOIN accepted_input AS accepted
+             ON accepted.session_id = entry.source_session_id
+            AND accepted.accepted_input_id = entry.origin_accepted_input_id
           WHERE lifecycle.session_id = $1
             AND lifecycle.turn_id = $2
           ORDER BY member.member_position",
@@ -419,7 +430,15 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         vec![
             (
                 String::from("origin_accepted_input"),
-                Some(String::from("offline user request")),
+                Some(serde_json::json!([{
+                    "position": 0,
+                    "part_kind": "text",
+                    "text_value": "offline user request",
+                    "blob_digest": null,
+                    "attachment_kind": null,
+                    "declared_media_type": null,
+                    "display_filename": null,
+                }])),
                 None,
             ),
             (

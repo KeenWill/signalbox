@@ -60,6 +60,7 @@ use signalbox_persistence::{
     },
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     scheduler::PostgresEligibilitySweep,
@@ -69,12 +70,12 @@ use signalbox_persistence::{
 };
 use signalbox_process_protocol::{
     BlobChunk, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame,
-    ClientRequest, CommandId, ConversationImportFormat, ConversationImportSource,
-    ConversationOriginFilter, ConversationSummary, CurrentModelCallState,
+    ClientRequest, CommandId, CommissionedSessionFence, ConversationImportFormat,
+    ConversationImportSource, ConversationOriginFilter, ConversationSummary, CurrentModelCallState,
     DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail, FastMode,
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
-    ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputDelivery, MetadataActor,
-    ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
+    ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
+    MetadataActor, ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
     ModelSettingsPrecedence, ModelSettingsSnapshot, ProtocolVersion, ReasoningLevel,
     RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
     ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
@@ -282,7 +283,8 @@ async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -673,6 +675,24 @@ impl RunningRuntime {
         &mut self,
         configuration: &str,
     ) -> Result<usize, Box<dyn Error>> {
+        let model_configuration = HubModelConfiguration::parse(configuration)?;
+        let template_configuration = session_template_configuration(&model_configuration)?;
+        self.restart_with_templates(configuration, template_configuration)
+            .await
+    }
+
+    /// Restarts over the same database with every session template removed
+    /// from configuration, as a template rename or deletion would leave it.
+    async fn restart_without_templates(&mut self) -> Result<usize, Box<dyn Error>> {
+        self.restart_with_templates(MODEL_CONFIGURATION, SessionTemplateConfiguration::default())
+            .await
+    }
+
+    async fn restart_with_templates(
+        &mut self,
+        configuration: &str,
+        template_configuration: SessionTemplateConfiguration,
+    ) -> Result<usize, Box<dyn Error>> {
         self.shutdown.send(true)?;
         timeout(Duration::from_secs(10), &mut self.runtime_task).await???;
 
@@ -686,7 +706,6 @@ impl RunningRuntime {
         let sweep = PostgresEligibilitySweep::new(self.pool.clone());
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
         let model_configuration = HubModelConfiguration::parse(configuration)?;
-        let template_configuration = session_template_configuration(&model_configuration)?;
         let mut runtime = ProcessRuntime::new_with_templates(
             listener,
             self.pool.clone(),
@@ -1298,6 +1317,122 @@ async fn read_goal_messages(
             return Ok(messages);
         }
     }
+}
+
+/// One commission request atomically creates a template session under a
+/// recorded authority fence with its goal and first input; the same command
+/// identity replays to the committed session, and the same identity naming a
+/// different fence is a conflicting reuse.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let commission_command = command()?;
+    let statement = String::from("Address the review findings on pull request 41.");
+    let fence = CommissionedSessionFence::PullRequest {
+        repository: String::from("sample-user/sample-repository"),
+        pull_request: CanonicalU64::new(41),
+        head_sha: String::from("1111111111111111111111111111111111111111"),
+        head_repository: String::from("sample-user/sample-repository"),
+        head_branch: String::from("agent/sample-feature"),
+        base_branch: String::from("main"),
+    };
+    let request = ClientRequest::CommissionSession {
+        command_id: commission_command,
+        template_name: String::from("merge-forward"),
+        fence: fence.clone(),
+        statement: statement.clone(),
+        content: InputContent::new(String::from("Respond to the open review threads.")),
+    };
+
+    connection.request(2, request.clone()).await?;
+    let commissioned = response_within(&mut connection).await?.message().clone();
+    let ServerMessage::SessionCommissioned {
+        session_id,
+        dispatch_id,
+    } = commissioned
+    else {
+        panic!("unexpected commission response: {commissioned:?}");
+    };
+
+    connection.request(3, request.clone()).await?;
+    let replayed = response_within(&mut connection).await?.message().clone();
+    assert_eq!(
+        replayed,
+        ServerMessage::SessionCommissioned {
+            session_id,
+            dispatch_id,
+        }
+    );
+
+    connection
+        .request(
+            4,
+            ClientRequest::CommissionSession {
+                command_id: commission_command,
+                template_name: String::from("merge-forward"),
+                fence: CommissionedSessionFence::Branch {
+                    repository: String::from("sample-user/sample-repository"),
+                    branch: String::from("main"),
+                },
+                statement: statement.clone(),
+                content: InputContent::new(String::from("Respond to the open review threads.")),
+            },
+        )
+        .await?;
+    let conflicting = response_within(&mut connection).await?.message().clone();
+    let ServerMessage::Error { code, .. } = conflicting else {
+        panic!("a conflicting commission reuse must be refused: {conflicting:?}");
+    };
+    assert_eq!(code, ErrorCode::ConflictingReuse);
+
+    let history = read_goal_messages(&mut connection, 5, session_id).await?;
+    assert_eq!(
+        history.first(),
+        Some(&ServerMessage::GoalHistoryStart {
+            session_id,
+            current_generation: CanonicalU64::new(1),
+            current_statement: statement.clone(),
+        })
+    );
+
+    // Template-configuration drift: restart over the same database with every
+    // template removed. The committed commission stays discoverable through
+    // the exact retry, because replay is resolved from the durable record
+    // before the live template catalog is consulted.
+    runtime.restart_without_templates().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection.request(6, request).await?;
+    let drift_replayed = response_within(&mut connection).await?.message().clone();
+    assert_eq!(
+        drift_replayed,
+        ServerMessage::SessionCommissioned {
+            session_id,
+            dispatch_id,
+        }
+    );
+
+    // A fresh commission naming the removed template is still refused: only
+    // replay of committed work survives configuration drift.
+    connection
+        .request(
+            7,
+            ClientRequest::CommissionSession {
+                command_id: command()?,
+                template_name: String::from("merge-forward"),
+                fence,
+                statement,
+                content: InputContent::new(String::from("Respond to the open review threads.")),
+            },
+        )
+        .await?;
+    let refused = response_within(&mut connection).await?.message().clone();
+    let ServerMessage::Error { code, .. } = refused else {
+        panic!("a fresh commission under a removed template must refuse: {refused:?}");
+    };
+    assert_eq!(code, ErrorCode::InvalidRequest);
+    Ok(())
 }
 
 /// INV-048: process goal commands preserve immutable supersession lineage and

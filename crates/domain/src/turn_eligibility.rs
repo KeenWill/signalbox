@@ -25,10 +25,10 @@ use crate::{
     AcceptedInputQueueOrderError, AcceptedInputQueuePriority, AcceptedInputQueueWork,
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
     AppliedInterruptCommandResult, AttemptEnd, CancellationStopDisposition, ChildWait,
-    ContextFrontierId, CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest,
-    DirectModelSelection, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
-    ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration,
-    ReconstitutedImportedSession, ReconstitutedModelCall,
+    ContextFrontierId, ContextFrontierProjection, CurrentTurnAttempt, DelegationContent,
+    DelegationWaitMode, DeliveryRequest, DirectModelSelection, EndedTurnAttempt,
+    InitialSemanticTranscriptEntryPayload, ModelCallDisposition, NonEmptyIssuedOperationRefs,
+    OriginConfiguration, ReconstitutedImportedSession, ReconstitutedModelCall,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
@@ -546,6 +546,7 @@ enum StoredActiveTurnPhase {
         runner: crate::RunnerId,
         placement_revision: crate::RunnerGeneration,
         interrupted_tool_attempt: Option<crate::ToolAttemptId>,
+        source_frontier: Option<ContextFrontierId>,
     },
 }
 
@@ -832,6 +833,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
         runner: crate::RunnerId,
         placement_revision: crate::RunnerGeneration,
         interrupted_tool_attempt: Option<crate::ToolAttemptId>,
+        source_frontier: Option<ContextFrontierId>,
     ) -> Self {
         Self {
             owning_turn,
@@ -840,6 +842,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
                 runner,
                 placement_revision,
                 interrupted_tool_attempt,
+                source_frontier,
             },
             executing_tool_batch: None,
         }
@@ -868,6 +871,7 @@ impl ActiveTurnSchedulingReconstitutionInput {
             runner,
             placement_revision,
             interrupted_tool_attempt,
+            ..
         } = self.state
         {
             return self.current_attempt.is_none().then_some(
@@ -2322,7 +2326,9 @@ pub struct AcceptedInputSchedulingProjection {
     snapshots: BTreeMap<ContextFrontierId, ResolvedContextFrontierSnapshot>,
     attempt_owners: BTreeMap<TurnAttemptId, TurnId>,
     active_model_call_recovery: Option<ActiveModelCallRecoveryWait>,
+    active_stop_requested_frontier: Option<ContextFrontierId>,
     active_tool_recovery_attempt: Option<EndedTurnAttempt>,
+    active_tool_recovery_frontier: Option<ContextFrontierId>,
     active_executing_tool_batch: Option<ActiveExecutingToolBatchCorrelation>,
     preceding_non_accepted_successors: BTreeMap<TurnId, TurnId>,
     preceding_non_accepted_terminals:
@@ -2375,6 +2381,31 @@ impl AcceptedInputSchedulingProjection {
         active.active_turn_execution_with_pending(pending_steering, consumed_steering)
     }
 
+    /// Returns accepted-input origins retained by the active turn's exact
+    /// model-visible frontier.
+    pub fn active_rendered_frontier_origins(&self) -> Option<Vec<AcceptedInputId>> {
+        let active = self.active_turn()?;
+        if matches!(
+            active.active_phase(),
+            Some(ActiveTurnPhase::AwaitingRunnerRecovery { .. })
+        ) {
+            return None;
+        }
+        let snapshot = self
+            .active_model_call_recovery
+            .as_ref()
+            .map(|recovery| recovery.source_snapshot.frontier().snapshot())
+            .or(self.active_stop_requested_frontier)
+            .or_else(|| {
+                self.active_executing_tool_batch
+                    .map(|batch| batch.yielded_frontier)
+            })
+            .or(self.active_tool_recovery_frontier)
+            .or_else(|| active.start().map(|start| start.frontier().snapshot()))
+            .and_then(|frontier| self.snapshots.get(&frontier));
+        Self::rendered_frontier_origins(snapshot, &self.semantic_entries)
+    }
+
     /// Returns the earliest queued work in durable total order.
     pub fn earliest_queued_turn(&self) -> Option<&AcceptedInputTurnSchedulingProjection> {
         self.turns
@@ -2423,10 +2454,47 @@ impl AcceptedInputSchedulingProjection {
                 .filter(|latest| terminal.is_semantic_prefix_of(latest))
                 .or(Some(terminal))
         };
+        Self::rendered_frontier_origins(base, &self.semantic_entries)
+    }
+
+    /// Returns the rendered base origins for a queued turn rooted directly at
+    /// a terminal non-accepted predecessor.
+    ///
+    /// Absence means this turn continues the accepted-input chain and does not
+    /// reset prospective frontier accounting.
+    pub fn external_predecessor_rendered_base_origins(
+        &self,
+        turn: TurnId,
+    ) -> Option<Vec<AcceptedInputId>> {
+        let predecessor = self.preceding_non_accepted_successors.get(&turn)?;
+        let terminal = &self.preceding_non_accepted_terminals.get(predecessor)?.0;
+        let base = self
+            .latest_compaction_result
+            .and_then(|frontier| self.snapshots.get(&frontier))
+            .filter(|latest| terminal.is_semantic_prefix_of(latest))
+            .unwrap_or(terminal);
+        Self::rendered_frontier_origins(Some(base), &self.semantic_entries)
+    }
+
+    fn rendered_frontier_origins(
+        snapshot: Option<&ResolvedContextFrontierSnapshot>,
+        semantic_entries: &BTreeMap<SemanticTranscriptEntryRef, SemanticTranscriptEntry>,
+    ) -> Option<Vec<AcceptedInputId>> {
+        let complete_entries = snapshot
+            .into_iter()
+            .flat_map(ResolvedContextFrontierSnapshot::ordered_entries)
+            .map(|reference| semantic_entries.get(&reference).cloned())
+            .collect::<Option<Vec<_>>>()?;
+        let projection =
+            ContextFrontierProjection::from_complete_entries(&complete_entries).ok()?;
+        let entries_by_reference = complete_entries
+            .iter()
+            .map(|entry| (entry.reference(), entry))
+            .collect::<BTreeMap<_, _>>();
         let mut origins = Vec::new();
         let mut distinct = BTreeSet::new();
-        for reference in base.into_iter().flat_map(|base| base.ordered_entries()) {
-            let accepted_input = match self.semantic_entries.get(&reference)?.payload() {
+        for reference in projection.ordered_entries() {
+            let accepted_input = match entries_by_reference.get(&reference)?.payload() {
                 SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
                 | SemanticTranscriptEntryPayload::SteeringAcceptedInput {
                     accepted_input, ..
@@ -5252,7 +5320,9 @@ fn reconstitute_inner(
     let mut previous_selected = None;
     let mut active = None;
     let mut active_model_call_recovery = None;
+    let mut active_stop_requested_frontier = None;
     let mut active_tool_recovery_attempt = None;
+    let mut active_tool_recovery_frontier = None;
     let mut active_executing_tool_batch = None;
     let mut queued_seen = false;
     let mut referenced_snapshots = consumed_snapshots;
@@ -5404,14 +5474,36 @@ fn reconstitute_inner(
                         }
                         ActiveTurnPhase::AwaitingChild { wait: *wait }
                     }
-                    StoredActiveTurnPhase::AwaitingRunnerRecovery { .. } => phase
-                        .canonical_evidence_free_phase()
-                        .ok_or(
-                        AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
-                            turn,
-                            accepted_input: record.accepted_input.id(),
-                        },
-                    )?,
+                    StoredActiveTurnPhase::AwaitingRunnerRecovery {
+                        source_frontier,
+                        ..
+                    } => {
+                        if let Some(source_frontier) = source_frontier {
+                            let source_snapshot = snapshots.get(source_frontier).ok_or(
+                                AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                    turn,
+                                    accepted_input: record.accepted_input.id(),
+                                },
+                            )?;
+                            if !snapshots[starting_frontier]
+                                .is_semantic_prefix_of(source_snapshot)
+                            {
+                                return Err(
+                                    AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                        turn,
+                                        accepted_input: record.accepted_input.id(),
+                                    },
+                                );
+                            }
+                            referenced_snapshots.insert(*source_frontier);
+                        }
+                        phase.canonical_evidence_free_phase().ok_or(
+                            AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
+                                turn,
+                                accepted_input: record.accepted_input.id(),
+                            },
+                        )?
+                    }
                     StoredActiveTurnPhase::AwaitingToolRecovery { wait, attempt_end } => {
                         let Some(current_attempt) = phase.current_attempt else {
                             return Err(
@@ -5483,6 +5575,8 @@ fn reconstitute_inner(
                             );
                         };
                         active_tool_recovery_attempt = Some(canonical_end);
+                        active_tool_recovery_frontier = Some(wait.yielded_frontier());
+                        referenced_snapshots.insert(wait.yielded_frontier());
                         ActiveTurnPhase::AwaitingRecoveryDecision {
                             ambiguous_operations: NonEmptyIssuedOperationRefs::singleton(
                                 crate::IssuedOperationRef::ToolAttempt(wait.attempt()),
@@ -5550,6 +5644,8 @@ fn reconstitute_inner(
                         if current_call.frontier().snapshot() != *starting_frontier {
                             referenced_snapshots.insert(current_call.frontier().snapshot());
                         }
+                        active_stop_requested_frontier =
+                            Some(current_call.frontier().snapshot());
                         referenced_model_calls.insert(*call);
                         phase.canonical_evidence_free_phase().ok_or(
                             AcceptedInputSchedulingReconstitutionFailure::ActivePhaseEvidenceMismatch {
@@ -6887,7 +6983,9 @@ fn reconstitute_inner(
         snapshots,
         attempt_owners,
         active_model_call_recovery,
+        active_stop_requested_frontier,
         active_tool_recovery_attempt,
+        active_tool_recovery_frontier,
         active_executing_tool_batch,
         preceding_non_accepted_successors,
         preceding_non_accepted_terminals,
@@ -10189,6 +10287,44 @@ mod tests {
             AcceptedInputTurnFailureFailure::PendingSteering {
                 accepted_input: pending.accepted_input(),
             }
+        );
+    }
+
+    /// INV-061: pending steering remains outside the active rendered frontier
+    /// until a safe-point continuation incorporates it.
+    #[test]
+    fn inv061_pending_steering_is_not_an_active_rendered_frontier_origin() {
+        let session = current_session();
+        let active = accepted_origin(1);
+        let pending = accepted_origin(2);
+        let mut facts = ActiveReconstitutionFacts::matching(&session, active);
+        let tail = facts
+            .acceptance_tail
+            .as_mut()
+            .expect("matching facts contain the active tail");
+        tail.observed_last_position = pending.position();
+        tail.entries
+            .push(SessionAcceptanceTailEntryReconstitutionInput::new(
+                session.id(),
+                AcceptedInputLifecycle::new(
+                    pending.accepted_input(),
+                    AcceptedInputDisposition::PendingSteering {
+                        binding: crate::SteeringBinding::new(active.turn()),
+                    },
+                ),
+                pending.position(),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: active.turn(),
+                },
+            ));
+        let projection = facts
+            .input()
+            .reconstitute()
+            .expect("the pending-steering tail is complete");
+
+        assert_eq!(
+            projection.active_rendered_frontier_origins(),
+            Some(vec![active.accepted_input()])
         );
     }
 
@@ -16468,6 +16604,62 @@ mod tests {
         );
     }
 
+    /// INV-015 / INV-061: attachment origins hidden by completed context
+    /// compaction do not contribute to the rendered frontier bound.
+    #[test]
+    fn inv015_inv061_rendered_frontier_origins_exclude_compacted_input() {
+        let session = current_session();
+        let hidden_input = accepted_input_id(1);
+        let hidden_origin = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(1),
+            session.id(),
+            InitialSemanticTranscriptEntryPayload::OriginAcceptedInput {
+                accepted_input: hidden_input,
+            },
+        );
+        let terminal = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(2),
+            session.id(),
+            InitialSemanticTranscriptEntryPayload::TurnCompleted { turn: turn_id(1) },
+        );
+        let summary = SemanticTranscriptEntry::from_validated_parts(
+            semantic_transcript_entry_id(3),
+            session.id(),
+            InitialSemanticTranscriptEntryPayload::ContextSummary {
+                producing_call: model_call_id(4),
+                summarized: crate::ContextCompactionRange::inclusive(
+                    hidden_origin.reference(),
+                    terminal.reference(),
+                ),
+                value: AssistantText::try_new(String::from("summary"))
+                    .expect("fixture summary is nonempty"),
+            },
+        );
+        let snapshot = ResolvedContextFrontierSnapshot::try_from_candidate(
+            session.id(),
+            context_frontier_id(5),
+            vec![
+                hidden_origin.reference(),
+                terminal.reference(),
+                summary.reference(),
+            ],
+        )
+        .expect("the complete frontier retains compacted entries");
+        let semantic_entries = BTreeMap::from([
+            (hidden_origin.reference(), hidden_origin),
+            (terminal.reference(), terminal),
+            (summary.reference(), summary),
+        ]);
+
+        assert_eq!(
+            AcceptedInputSchedulingProjection::rendered_frontier_origins(
+                Some(&snapshot),
+                &semantic_entries,
+            ),
+            Some(Vec::new())
+        );
+    }
+
     /// S03 / INV-009 / INV-015: the stored starting snapshot must be exactly
     /// the predecessor prefix plus the turn's origin entry; a snapshot
     /// omitting the origin fails closed.
@@ -17075,6 +17267,7 @@ mod tests {
             runner,
             revision,
             interrupted_tool_attempt,
+            None,
         );
 
         assert_eq!(

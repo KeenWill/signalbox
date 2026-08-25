@@ -4,6 +4,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     error::Error,
     fmt, fs, io,
+    net::{Ipv4Addr, SocketAddr, SocketAddrV4},
     num::NonZeroU64,
     path::{Component, Path, PathBuf},
     str::FromStr,
@@ -12,6 +13,7 @@ use std::{
 };
 
 use rust_decimal::Decimal;
+use signalbox_application::scheduler_pass_admission_cap;
 use signalbox_domain::{
     AnthropicServiceTier, BranchName, CheckConclusion, CodexCliServiceTier, DirectModelSelection,
     FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, LabelName, MergeableState,
@@ -106,7 +108,6 @@ pub const CLAUDE_CLI_CREDENTIAL_REFERENCE: &str = "claude-subscription-primary";
 const MIGRATED_ANTHROPIC_MODEL_FAMILY: &str = "anthropic";
 const MAX_REPOSITORY_WATCH_RULES: usize = 128;
 const MAX_REPOSITORY_WATCH_ACTIONS: usize = 32;
-
 /// One provider-availability cause a pool trigger can react to.
 ///
 /// Only these three carry proof that the request was not accepted, so only they
@@ -468,12 +469,66 @@ pub const DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES: usize = 256 * 1024 * 102
 const MAX_WATCHED_REPOSITORIES: usize = 128;
 const MAX_SIGNAL_REVIEWERS: usize = 128;
 
+/// Loopback-only reference address selected when the webhook listener table
+/// omits `bind_address`.
+pub const DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS: SocketAddr =
+    SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, 3333));
+
+/// One deployment-owned local HTTP listener for authenticated GitHub hooks.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepositoryWatchWebhookConfiguration {
+    bind_address: SocketAddr,
+    path: Arc<str>,
+}
+
+impl RepositoryWatchWebhookConfiguration {
+    /// Returns the exact local socket address the daemon must bind.
+    pub const fn bind_address(&self) -> SocketAddr {
+        self.bind_address
+    }
+
+    /// Returns the exact absolute local request path the listener admits.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+}
+
+/// One watched repository's authenticated webhook association.
+#[derive(Clone, Eq, PartialEq)]
+pub struct WatchedRepositoryWebhookConfiguration {
+    hook_id: NonZeroU64,
+    secret_file: PathBuf,
+}
+
+impl WatchedRepositoryWebhookConfiguration {
+    /// Returns the positive GitHub hook identity selecting this repository.
+    pub const fn hook_id(&self) -> NonZeroU64 {
+        self.hook_id
+    }
+
+    /// Returns the deployment-owned webhook-secret file reference.
+    pub fn secret_file(&self) -> &Path {
+        &self.secret_file
+    }
+}
+
+impl fmt::Debug for WatchedRepositoryWebhookConfiguration {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WatchedRepositoryWebhookConfiguration")
+            .field("hook_id", &self.hook_id)
+            .field("secret_file", &"[REDACTED REFERENCE]")
+            .finish()
+    }
+}
+
 /// One repository-specific version-one polling and credential configuration.
 #[derive(Clone, Eq, PartialEq)]
 pub struct WatchedRepositoryConfiguration {
     repository: RepositorySlug,
     poll_interval: Duration,
     credential_file: PathBuf,
+    webhook: Option<WatchedRepositoryWebhookConfiguration>,
 }
 
 impl WatchedRepositoryConfiguration {
@@ -496,6 +551,22 @@ impl WatchedRepositoryConfiguration {
     pub fn credential_reference(&self) -> CredentialReference {
         CredentialReference::new(format!("repository-watch:{}", self.repository.as_str()))
     }
+
+    /// Returns this repository's authenticated webhook association, if enabled.
+    pub const fn webhook(&self) -> Option<&WatchedRepositoryWebhookConfiguration> {
+        self.webhook.as_ref()
+    }
+
+    /// Returns the non-secret reference used to resolve this repository's
+    /// webhook secret, if webhook delivery is enabled for it.
+    pub fn webhook_secret_reference(&self) -> Option<CredentialReference> {
+        self.webhook.as_ref().map(|_| {
+            CredentialReference::new(format!(
+                "repository-watch-webhook:{}",
+                self.repository.as_str()
+            ))
+        })
+    }
 }
 
 impl fmt::Debug for WatchedRepositoryConfiguration {
@@ -505,6 +576,7 @@ impl fmt::Debug for WatchedRepositoryConfiguration {
             .field("repository", &self.repository)
             .field("poll_interval", &self.poll_interval)
             .field("credential_file", &"[REDACTED REFERENCE]")
+            .field("webhook", &self.webhook)
             .finish()
     }
 }
@@ -515,6 +587,7 @@ pub struct RepositoryWatchConfiguration {
     signal_reviewers: Box<[RepoWatchAuthorLogin]>,
     repositories: Box<[WatchedRepositoryConfiguration]>,
     rules: Box<[RepoWatchRule]>,
+    webhook: Option<RepositoryWatchWebhookConfiguration>,
 }
 
 impl RepositoryWatchConfiguration {
@@ -531,6 +604,12 @@ impl RepositoryWatchConfiguration {
     /// Returns the validated structured rules in declaration order.
     pub fn rules(&self) -> &[RepoWatchRule] {
         &self.rules
+    }
+
+    /// Returns the configured local webhook listener, or absence when webhook
+    /// intake is disabled.
+    pub const fn webhook(&self) -> Option<&RepositoryWatchWebhookConfiguration> {
+        self.webhook.as_ref()
     }
 
     /// Validates every rule against the immutable session-template catalog.
@@ -589,6 +668,7 @@ pub struct HubModelConfiguration {
     approval_judge_selection: Option<DirectModelSelection>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
+    scheduler_max_in_flight_passes: Option<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -632,6 +712,7 @@ impl HubModelConfiguration {
                 "approval_judge",
                 "repository_watch",
                 "blob_storage",
+                "scheduler",
             ],
         )?;
         if document.get("version").and_then(|item| item.as_integer()) != Some(1) {
@@ -680,6 +761,8 @@ impl HubModelConfiguration {
         let blob_storage =
             BlobStorageConfiguration::parse(document.get("blob_storage"), minimum_blob_bytes)
                 .map_err(|_| HubModelConfigurationError::InvalidBlobStorageConfiguration)?;
+        let scheduler_max_in_flight_passes =
+            parse_scheduler_max_in_flight_passes(document.get("scheduler"))?;
         let web_fetch_egress_policy = document
             .get("web_fetch")
             .map(|item| {
@@ -1248,6 +1331,7 @@ impl HubModelConfiguration {
             approval_judge_selection,
             repository_watch,
             blob_storage,
+            scheduler_max_in_flight_passes,
         })
     }
 
@@ -1638,6 +1722,11 @@ impl HubModelConfiguration {
         self.repository_watch.as_ref()
     }
 
+    /// Returns the deployment override for concurrent scheduler passes.
+    pub const fn scheduler_max_in_flight_passes(&self) -> Option<usize> {
+        self.scheduler_max_in_flight_passes
+    }
+
     /// Resolves one configured alias to the immutable definition frozen at
     /// acceptance time.
     pub fn resolve_alias(&self, alias: ModelAlias) -> Option<FrozenAliasDefinition> {
@@ -1675,7 +1764,13 @@ fn parse_repository_watch_configuration(
         .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
     reject_unknown_fields(
         table,
-        &["version", "signal_reviewers", "repositories", "rules"],
+        &[
+            "version",
+            "signal_reviewers",
+            "repositories",
+            "rules",
+            "webhook",
+        ],
     )
     .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
     if table.get("version").and_then(Item::as_integer) != Some(1) {
@@ -1705,6 +1800,8 @@ fn parse_repository_watch_configuration(
     }
     signal_reviewers.sort();
 
+    let webhook = parse_repository_watch_webhook_configuration(table.get("webhook"))?;
+
     let repository_tables = table
         .get("repositories")
         .and_then(Item::as_array_of_tables)
@@ -1715,10 +1812,18 @@ fn parse_repository_watch_configuration(
     let mut repositories = Vec::with_capacity(repository_tables.len());
     let mut repository_set = HashSet::with_capacity(repository_tables.len());
     let mut credential_file_references: Vec<PathBuf> = Vec::with_capacity(repository_tables.len());
+    let mut webhook_hook_ids = HashSet::with_capacity(repository_tables.len());
+    let mut webhook_repository_count = 0_usize;
     for repository in repository_tables {
         reject_unknown_fields(
             repository,
-            &["repository", "poll_interval_seconds", "credential_file"],
+            &[
+                "repository",
+                "poll_interval_seconds",
+                "credential_file",
+                "webhook_hook_id",
+                "webhook_secret_file",
+            ],
         )
         .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
         let repository_slug = RepositorySlug::try_new(
@@ -1756,11 +1861,57 @@ fn parse_repository_watch_configuration(
             return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
         }
         credential_file_references.push(resolved_credential_file);
+        let repository_webhook = match (
+            repository.get("webhook_hook_id"),
+            repository.get("webhook_secret_file"),
+        ) {
+            (None, None) => None,
+            (Some(hook_id), Some(secret_file)) => {
+                let hook_id = hook_id
+                    .as_integer()
+                    .and_then(|value| u64::try_from(value).ok())
+                    .and_then(NonZeroU64::new)
+                    .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+                if !webhook_hook_ids.insert(hook_id) {
+                    return Err(HubModelConfigurationError::DuplicateRepositoryWatchWebhookHookId);
+                }
+                let secret_file = secret_file
+                    .as_str()
+                    .map(PathBuf::from)
+                    .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+                if !secret_file.is_absolute()
+                    || secret_file
+                        .components()
+                        .any(|component| matches!(component, Component::ParentDir))
+                {
+                    return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+                }
+                let resolved_secret_file = resolved_credential_file_reference(&secret_file)?;
+                if credential_file_references.iter().any(|existing| {
+                    credential_file_references_conflict(existing, &resolved_secret_file)
+                }) {
+                    return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
+                }
+                credential_file_references.push(resolved_secret_file);
+                webhook_repository_count += 1;
+                Some(WatchedRepositoryWebhookConfiguration {
+                    hook_id,
+                    secret_file,
+                })
+            }
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+            }
+        };
         repositories.push(WatchedRepositoryConfiguration {
             repository: repository_slug,
             poll_interval: Duration::from_secs(interval),
             credential_file,
+            webhook: repository_webhook,
         });
+    }
+    if webhook.is_some() != (webhook_repository_count > 0) {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
     }
     repositories.sort_by(|left, right| left.repository.cmp(&right.repository));
     let rules = parse_repository_watch_rules(table)?;
@@ -1768,8 +1919,56 @@ fn parse_repository_watch_configuration(
         signal_reviewers: signal_reviewers.into_boxed_slice(),
         repositories: repositories.into_boxed_slice(),
         rules: rules.into_boxed_slice(),
+        webhook,
     })
 }
+
+fn parse_repository_watch_webhook_configuration(
+    item: Option<&Item>,
+) -> Result<Option<RepositoryWatchWebhookConfiguration>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    reject_unknown_fields(table, &["bind_address", "path"])
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    let bind_address = table
+        .get("bind_address")
+        .map(|item| {
+            item.as_str()
+                .and_then(|value| value.parse::<SocketAddr>().ok())
+                .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        })
+        .transpose()?
+        .unwrap_or(DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS);
+    let path = required_string(table, "path")
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    if !valid_repository_watch_webhook_path(path) {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
+    Ok(Some(RepositoryWatchWebhookConfiguration {
+        bind_address,
+        path: Arc::from(path),
+    }))
+}
+
+/// Whether the configured path names exactly one literal request path.
+///
+/// Configuration promises one exact path, but `Router::route` reads its argument
+/// as a route pattern: Axum 0.8 treats `{name}` and `{*name}` as captures that
+/// match many paths, and it panics on the legacy `:name` and `*name` forms. Both
+/// are rejected here rather than at listener start.
+fn valid_repository_watch_webhook_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.bytes().all(|byte| byte.is_ascii_graphic())
+        && !path.contains(['?', '#'])
+        && !path.contains(REPOSITORY_WATCH_WEBHOOK_ROUTE_METACHARACTERS)
+}
+
+/// Characters Axum reads as routing syntax rather than as literal path bytes.
+const REPOSITORY_WATCH_WEBHOOK_ROUTE_METACHARACTERS: [char; 4] = ['*', ':', '{', '}'];
 
 fn parse_repository_watch_rules(
     table: &Table,
@@ -2476,6 +2675,26 @@ fn parse_daemon_tool_settings(
     Ok(Some(executable))
 }
 
+fn parse_scheduler_max_in_flight_passes(
+    item: Option<&Item>,
+) -> Result<Option<usize>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidSchedulerConfiguration)?;
+    reject_unknown_fields(table, &["max_in_flight_passes"])
+        .map_err(|_| HubModelConfigurationError::InvalidSchedulerConfiguration)?;
+    let limit = table
+        .get("max_in_flight_passes")
+        .and_then(Item::as_integer)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value <= scheduler_pass_admission_cap())
+        .ok_or(HubModelConfigurationError::InvalidSchedulerConfiguration)?;
+    Ok(Some(limit))
+}
+
 fn parse_git_identity(
     item: Option<&Item>,
 ) -> Result<Option<GitIdentity>, HubModelConfigurationError> {
@@ -3180,6 +3399,8 @@ pub enum HubModelConfigurationError {
     InvalidConversationImportLimit,
     /// The optional blob-store registry or its routes were malformed.
     InvalidBlobStorageConfiguration,
+    /// The optional scheduler pass-admission table was malformed or unsafe.
+    InvalidSchedulerConfiguration,
     /// The optional web-fetch table was malformed or named an invalid origin.
     InvalidWebFetchPolicy,
     /// The optional version-one repository-watch section was malformed.
@@ -3195,8 +3416,11 @@ pub enum HubModelConfigurationError {
     DuplicateWatchedRepository,
     /// Two signal-reviewer spellings normalized to the same login.
     DuplicateSignalReviewer,
-    /// Two watched repositories named the same credential-file reference.
+    /// Two repository-watch polling credentials or webhook secrets resolve to
+    /// the same file reference.
     DuplicateRepositoryWatchCredentialFile,
+    /// Two webhook-enabled repositories named the same positive GitHub hook ID.
+    DuplicateRepositoryWatchWebhookHookId,
     /// One direct selection appeared more than once.
     DuplicateSelection,
     /// One per-model settings capability record was malformed.
@@ -3364,6 +3588,9 @@ impl fmt::Display for HubModelConfigurationError {
             Self::InvalidBlobStorageConfiguration => {
                 "model configuration contains invalid blob-storage settings"
             }
+            Self::InvalidSchedulerConfiguration => {
+                "model configuration contains invalid scheduler settings"
+            }
             Self::InvalidWebFetchPolicy => {
                 "model configuration contains an invalid web_fetch egress policy"
             }
@@ -3379,6 +3606,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::DuplicateRepositoryWatchCredentialFile => {
                 "model configuration repeats a repository-watch credential-file reference"
+            }
+            Self::DuplicateRepositoryWatchWebhookHookId => {
+                "model configuration repeats a repository-watch webhook hook ID"
             }
             Self::DuplicateSelection => "model configuration repeats a direct selection",
             Self::InvalidModelCapabilities => {
@@ -3538,6 +3768,7 @@ async fn read_bounded_credential_file(path: &Path, maximum_bytes: usize) -> io::
 mod tests {
     use std::{
         collections::HashSet,
+        net::SocketAddr,
         num::NonZeroU64,
         path::{Path, PathBuf},
         sync::Arc,
@@ -3567,10 +3798,11 @@ mod tests {
 
     use super::{
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
-        FileCredentialAccess, HubModelConfiguration, HubModelConfigurationError,
-        MAX_COMPACTION_PROMPT_UTF8_BYTES, MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter,
-        ModelCallInputUsage, UnknownSessionModel, absolute_search_entries, credential_bytes,
-        resolved_mcp_bridge_reference, validate_alias_count, validate_model_count,
+        DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS, FileCredentialAccess, HubModelConfiguration,
+        HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
+        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage, UnknownSessionModel,
+        absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference,
+        scheduler_pass_admission_cap, validate_alias_count, validate_model_count,
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
@@ -3602,9 +3834,29 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const SECOND_WATCH_REPOSITORY: &str = "namespace/second";
     const WATCH_CREDENTIAL_FILE: &str = "/run/credentials/repository-watch-token";
     const SECOND_WATCH_CREDENTIAL_FILE: &str = "/run/credentials/second-watch-token";
+    const WATCH_WEBHOOK_SECRET_FILE: &str = "/run/credentials/repository-watch-webhook-secret";
+    const SECOND_WATCH_WEBHOOK_SECRET_FILE: &str =
+        "/run/credentials/second-repository-watch-webhook-secret";
+    const RELATIVE_WATCH_WEBHOOK_SECRET_FILE: &str = "relative/webhook-secret";
+    const PARENT_COMPONENT_WATCH_WEBHOOK_SECRET_FILE: &str =
+        "/run/credentials/alias/../repository-watch-webhook-secret";
     const PARENT_COMPONENT_WATCH_CREDENTIAL_FILE: &str =
         "/run/credentials/alias/../repository-watch-token";
     const WATCH_CREDENTIAL_REFERENCE: &str = "repository-watch:namespace/project";
+    const WATCH_WEBHOOK_SECRET_REFERENCE: &str = "repository-watch-webhook:namespace/project";
+    const WATCH_WEBHOOK_HOOK_ID: NonZeroU64 =
+        NonZeroU64::new(123_456_789).expect("fixture hook ID is positive");
+    const SECOND_WATCH_WEBHOOK_HOOK_ID: NonZeroU64 =
+        NonZeroU64::new(987_654_321).expect("fixture hook ID is positive");
+    const WATCH_WEBHOOK_BIND_ADDRESS: &str = "127.0.0.1:3333";
+    const IPV6_WATCH_WEBHOOK_BIND_ADDRESS: &str = "[::1]:4444";
+    const INVALID_WATCH_WEBHOOK_BIND_ADDRESS: &str = "localhost:3333";
+    const WATCH_WEBHOOK_PATH: &str = "/";
+    const RELATIVE_WATCH_WEBHOOK_PATH: &str = "github/webhooks";
+    const QUERY_WATCH_WEBHOOK_PATH: &str = "/github/webhooks?mode=shadow";
+    const CAPTURE_WATCH_WEBHOOK_PATH: &str = "/github/{delivery}";
+    const LEGACY_CAPTURE_WATCH_WEBHOOK_PATH: &str = "/github/:delivery";
+    const WILDCARD_WATCH_WEBHOOK_PATH: &str = "/github/*rest";
     const WATCH_INTERVAL_SECONDS: u64 = 90;
     const SECOND_WATCH_INTERVAL_SECONDS: u64 = 120;
     const SIGNAL_REVIEWER: &str = "signal-reviewer";
@@ -3954,6 +4206,27 @@ credential_file = "{SECOND_WATCH_CREDENTIAL_FILE}"
         )
     }
 
+    fn configuration_with_repository_watch_webhook_entry() -> String {
+        configuration_with_repository_watch().replace(
+            &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
+            &format!(
+                "credential_file = \"{WATCH_CREDENTIAL_FILE}\"\nwebhook_hook_id = {WATCH_WEBHOOK_HOOK_ID}\nwebhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\""
+            ),
+        )
+    }
+
+    fn configuration_with_repository_watch_webhook() -> String {
+        format!(
+            r#"{}
+
+[repository_watch.webhook]
+bind_address = "{WATCH_WEBHOOK_BIND_ADDRESS}"
+path = "{WATCH_WEBHOOK_PATH}"
+"#,
+            configuration_with_repository_watch_webhook_entry()
+        )
+    }
+
     fn configuration_with_repository_watch_rule() -> String {
         format!(
             r#"{}
@@ -4191,6 +4464,381 @@ selection_id = "10000000-0000-4000-8000-000000000001"
 
         assert!(!debug.contains(WATCH_CREDENTIAL_FILE));
         assert!(debug.contains("[REDACTED REFERENCE]"));
+    }
+
+    #[test]
+    fn repository_watch_webhook_is_absent_by_default() {
+        let configured = HubModelConfiguration::parse(&configuration_with_repository_watch())
+            .expect("repository-watch fixture is valid");
+        let repository_watch = configured
+            .repository_watch()
+            .expect("fixture configures repository watch");
+
+        assert_eq!(repository_watch.webhook(), None);
+        assert_eq!(repository_watch.repositories()[0].webhook(), None);
+    }
+
+    #[test]
+    fn repository_watch_webhook_preserves_the_local_listener() {
+        let configured =
+            HubModelConfiguration::parse(&configuration_with_repository_watch_webhook())
+                .expect("repository-watch webhook fixture is valid");
+        let webhook = configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .webhook()
+            .expect("fixture configures the webhook listener");
+
+        assert_eq!(
+            webhook.bind_address(),
+            DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS
+        );
+        assert_eq!(webhook.path(), WATCH_WEBHOOK_PATH);
+    }
+
+    #[test]
+    fn repository_watch_webhook_defaults_the_bind_address() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("bind_address = \"{WATCH_WEBHOOK_BIND_ADDRESS}\"\n"),
+            "",
+        );
+        let parsed = HubModelConfiguration::parse(&configured)
+            .expect("the omitted bind address selects the reference default");
+        let webhook = parsed
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .webhook()
+            .expect("fixture configures the webhook listener");
+
+        assert_eq!(
+            webhook.bind_address(),
+            DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_accepts_a_configured_socket_address() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("bind_address = \"{WATCH_WEBHOOK_BIND_ADDRESS}\""),
+            &format!("bind_address = \"{IPV6_WATCH_WEBHOOK_BIND_ADDRESS}\""),
+        );
+        let parsed = HubModelConfiguration::parse(&configured)
+            .expect("the configured IPv6 loopback listener is valid");
+        let webhook = parsed
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .webhook()
+            .expect("fixture configures the webhook listener");
+
+        assert_eq!(
+            webhook.bind_address(),
+            IPV6_WATCH_WEBHOOK_BIND_ADDRESS
+                .parse::<SocketAddr>()
+                .expect("fixture address is valid")
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_associates_hook_and_secret_with_repository() {
+        let configured =
+            HubModelConfiguration::parse(&configuration_with_repository_watch_webhook())
+                .expect("repository-watch webhook fixture is valid");
+        let watched = &configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories()[0];
+        let webhook = watched
+            .webhook()
+            .expect("the first repository configures webhook intake");
+
+        assert_eq!(webhook.hook_id(), WATCH_WEBHOOK_HOOK_ID);
+        assert_eq!(webhook.secret_file(), Path::new(WATCH_WEBHOOK_SECRET_FILE));
+        assert_eq!(
+            watched
+                .webhook_secret_reference()
+                .expect("the webhook repository has a secret reference")
+                .as_str(),
+            WATCH_WEBHOOK_SECRET_REFERENCE
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_debug_redacts_the_secret_file_reference() {
+        let configured =
+            HubModelConfiguration::parse(&configuration_with_repository_watch_webhook())
+                .expect("repository-watch webhook fixture is valid");
+        let webhook = configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories()[0]
+            .webhook()
+            .expect("the first repository configures webhook intake");
+        let debug = format!("{webhook:?}");
+
+        assert!(!debug.contains(WATCH_WEBHOOK_SECRET_FILE));
+        assert!(debug.contains("[REDACTED REFERENCE]"));
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_listener_without_enabled_repository() {
+        let configured = format!(
+            "{}\n[repository_watch.webhook]\npath = \"{WATCH_WEBHOOK_PATH}\"\n",
+            configuration_with_repository_watch()
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_an_entry_without_listener() {
+        let configured = configuration_with_repository_watch_webhook_entry();
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_hook_id_without_secret_file() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\"\n"),
+            "",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_secret_file_without_hook_id() {
+        let configured = configuration_with_repository_watch_webhook()
+            .replace(&format!("webhook_hook_id = {WATCH_WEBHOOK_HOOK_ID}\n"), "");
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_zero_hook_id() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("webhook_hook_id = {WATCH_WEBHOOK_HOOK_ID}"),
+            "webhook_hook_id = 0",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_duplicate_hook_ids() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("credential_file = \"{SECOND_WATCH_CREDENTIAL_FILE}\""),
+            &format!(
+                "credential_file = \"{SECOND_WATCH_CREDENTIAL_FILE}\"\nwebhook_hook_id = {WATCH_WEBHOOK_HOOK_ID}\nwebhook_secret_file = \"{SECOND_WATCH_WEBHOOK_SECRET_FILE}\""
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchWebhookHookId)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_relative_local_path() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("path = \"{WATCH_WEBHOOK_PATH}\""),
+            &format!("path = \"{RELATIVE_WATCH_WEBHOOK_PATH}\""),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_query_in_local_path() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("path = \"{WATCH_WEBHOOK_PATH}\""),
+            &format!("path = \"{QUERY_WATCH_WEBHOOK_PATH}\""),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    /// Parses the webhook fixture with `path` replaced, returning any failure.
+    fn repository_watch_webhook_path_failure(path: &str) -> Option<HubModelConfigurationError> {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("path = \"{WATCH_WEBHOOK_PATH}\""),
+            &format!("path = \"{path}\""),
+        );
+        HubModelConfiguration::parse(&configured).err()
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_braced_capture_local_path() {
+        assert_eq!(
+            repository_watch_webhook_path_failure(CAPTURE_WATCH_WEBHOOK_PATH),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_legacy_capture_local_path() {
+        assert_eq!(
+            repository_watch_webhook_path_failure(LEGACY_CAPTURE_WATCH_WEBHOOK_PATH),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_wildcard_local_path() {
+        assert_eq!(
+            repository_watch_webhook_path_failure(WILDCARD_WATCH_WEBHOOK_PATH),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_an_invalid_bind_address() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("bind_address = \"{WATCH_WEBHOOK_BIND_ADDRESS}\""),
+            &format!("bind_address = \"{INVALID_WATCH_WEBHOOK_BIND_ADDRESS}\""),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_poll_credential_as_secret() {
+        let configured = configuration_with_repository_watch_webhook()
+            .replace(WATCH_WEBHOOK_SECRET_FILE, WATCH_CREDENTIAL_FILE);
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_relative_secret_file() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            WATCH_WEBHOOK_SECRET_FILE,
+            RELATIVE_WATCH_WEBHOOK_SECRET_FILE,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_parent_components_in_secret_file() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            WATCH_WEBHOOK_SECRET_FILE,
+            PARENT_COMPONENT_WATCH_WEBHOOK_SECRET_FILE,
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_symlink_to_poll_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("watch-token");
+        std::fs::write(&credential, []).expect("the polling credential fixture exists");
+        let secret_alias = directory.path().join("webhook-secret-alias");
+        std::os::unix::fs::symlink(&credential, &secret_alias)
+            .expect("the webhook secret alias exists");
+        let configured = configuration_with_repository_watch_webhook()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string())
+            .replace(
+                WATCH_WEBHOOK_SECRET_FILE,
+                &secret_alias.display().to_string(),
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_watch_webhook_rejects_a_hard_link_to_poll_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("watch-token");
+        std::fs::write(&credential, []).expect("the polling credential fixture exists");
+        let secret_hard_link = directory.path().join("webhook-secret-hard-link");
+        std::fs::hard_link(&credential, &secret_hard_link)
+            .expect("the webhook secret hard link exists");
+        let configured = configuration_with_repository_watch_webhook()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string())
+            .replace(
+                WATCH_WEBHOOK_SECRET_FILE,
+                &secret_hard_link.display().to_string(),
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_dangling_alias_to_poll_credential() {
+        let directory = tempfile::tempdir().expect("the credential fixture directory exists");
+        let credential = directory.path().join("pending-watch-token");
+        let secret_alias = directory.path().join("pending-webhook-secret-alias");
+        std::os::unix::fs::symlink(&credential, &secret_alias)
+            .expect("the dangling webhook secret alias exists");
+        let configured = configuration_with_repository_watch_webhook()
+            .replace(WATCH_CREDENTIAL_FILE, &credential.display().to_string())
+            .replace(
+                WATCH_WEBHOOK_SECRET_FILE,
+                &secret_alias.display().to_string(),
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_shared_secret_file() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("credential_file = \"{SECOND_WATCH_CREDENTIAL_FILE}\""),
+            &format!(
+                "credential_file = \"{SECOND_WATCH_CREDENTIAL_FILE}\"\nwebhook_hook_id = {SECOND_WATCH_WEBHOOK_HOOK_ID}\nwebhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\""
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile)
+        );
     }
 
     #[test]
@@ -4500,7 +5148,7 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         let configured = configuration_with_repository_watch().replace(
             &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
             &format!(
-                "credential_file = \"{WATCH_CREDENTIAL_FILE}\"\nwebhook_secret_file = \"/not-v1\""
+                "credential_file = \"{WATCH_CREDENTIAL_FILE}\"\nwebhook_secret_path = \"/not-v1\""
             ),
         );
 
@@ -4665,6 +5313,72 @@ selection_id = "10000000-0000-4000-8000-000000000001"
         assert_eq!(
             HubModelConfiguration::parse(&configured).err(),
             Some(HubModelConfigurationError::InvalidConversationImportLimit)
+        );
+    }
+
+    #[test]
+    fn scheduler_pass_limit_is_optional() {
+        let configuration = HubModelConfiguration::parse(CONFIGURATION)
+            .expect("the fixture configuration is valid");
+
+        assert_eq!(configuration.scheduler_max_in_flight_passes(), None);
+    }
+
+    #[test]
+    fn scheduler_pass_limit_accepts_a_bounded_override() {
+        let configured_limit = scheduler_pass_admission_cap();
+        let configured = CONFIGURATION.replace(
+            "[compaction]",
+            &format!("[scheduler]\nmax_in_flight_passes = {configured_limit}\n\n[compaction]"),
+        );
+        let configuration = HubModelConfiguration::parse(&configured)
+            .expect("the bounded scheduler override is valid");
+
+        assert_eq!(
+            configuration.scheduler_max_in_flight_passes(),
+            Some(configured_limit)
+        );
+    }
+
+    #[test]
+    fn scheduler_pass_limit_accepts_zero_as_an_explicit_pause() {
+        let configured_limit = 0;
+        let paused = CONFIGURATION.replace(
+            "[compaction]",
+            &format!("[scheduler]\nmax_in_flight_passes = {configured_limit}\n\n[compaction]"),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&paused)
+                .expect("the paused scheduler setting is valid")
+                .scheduler_max_in_flight_passes(),
+            Some(configured_limit)
+        );
+    }
+
+    #[test]
+    fn scheduler_pass_limit_rejects_an_excessive_value() {
+        let configured = CONFIGURATION.replace(
+            "[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 17\n\n[compaction]",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
+        );
+    }
+
+    #[test]
+    fn scheduler_pass_limit_rejects_an_unknown_field() {
+        let configured = CONFIGURATION.replace(
+            "[compaction]",
+            "[scheduler]\nmax_in_flight_passes = 4\nextra = 1\n\n[compaction]",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidSchedulerConfiguration)
         );
     }
 
