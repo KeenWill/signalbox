@@ -30,6 +30,7 @@ mod turn_activation;
 mod turn_liveness;
 mod workspace_instruction_authority;
 mod workspace_instruction_migration;
+mod workspace_instructions;
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
