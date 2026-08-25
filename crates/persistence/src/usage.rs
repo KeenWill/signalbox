@@ -4,22 +4,139 @@ use std::{error::Error, fmt};
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport, UsageAggregateTokenAxes,
-    UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPage,
-    UsageCallQuery, UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageReader,
-    UsageTimestampMicros, UsageTokenAxes, UsageTokenCoverage, UsageTokenPresence,
-    max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_credential_profile_utf8_bytes,
+    UsageAggregateCompleteness, UsageAggregateGroup, UsageAggregateKey, UsageAggregateReport,
+    UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallEvidence, UsageCallKind,
+    UsageCallOrder, UsageCallPage, UsageCallPageContinuation, UsageCallPageLimit, UsageCallQuery,
+    UsageCallScope, UsageCredentialProfileLabel, UsageInputTokenSemantics, UsageProvenance,
+    UsageQuery, UsageReader, UsageTimestampMicros, UsageTokenAxes, UsageTokenCoverage,
+    UsageTokenPresence, max_usage_aggregate_calls, max_usage_aggregate_groups,
+    max_usage_credential_profile_utf8_bytes,
 };
 use signalbox_domain::{
     ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId,
 };
-use sqlx::{PgPool, Row, postgres::PgRow, types::time::OffsetDateTime};
+use sqlx::{
+    PgPool, Row,
+    postgres::{PgArguments, PgRow},
+    types::time::OffsetDateTime,
+};
 use uuid::Uuid;
 
 use crate::mapping::{
     usage_call_kind_from_str, usage_call_kind_to_str, usage_provenance_from_str,
     usage_provenance_to_str,
 };
+
+// Each statement is assembled with only the selected dimensions' predicates,
+// so every selection shape gets its own cached prepared statement and even a
+// generic plan sees exactly the conjunction its ordered index serves; no
+// `$n IS NULL OR` disjunction survives to defeat index selection. A turn
+// belongs to exactly one session, so when a selection supplies both, the
+// projection predicate stays turn-led and the session filter collapses to one
+// bounded `turn_lifecycle` unique probe (an uncorrelated one-time filter): a
+// matched pair reads exactly the turn scope and a mismatched pair is proven
+// empty without scanning either dimension's history.
+#[derive(Clone, Copy)]
+enum StatementBind {
+    Time(OffsetDateTime),
+    Id(Uuid),
+    Label(&'static str),
+    Count(i64),
+}
+
+struct StatementBuilder {
+    predicates: Vec<String>,
+    binds: Vec<StatementBind>,
+}
+
+impl StatementBuilder {
+    const fn new() -> Self {
+        Self {
+            predicates: Vec::new(),
+            binds: Vec::new(),
+        }
+    }
+
+    fn bind(&mut self, value: StatementBind) -> usize {
+        self.binds.push(value);
+        self.binds.len()
+    }
+
+    fn predicate(&mut self, clause: String) {
+        self.predicates.push(clause);
+    }
+
+    fn where_clause(&self) -> String {
+        if self.predicates.is_empty() {
+            "true".to_owned()
+        } else {
+            self.predicates.join("\n       AND ")
+        }
+    }
+
+    // The assembled text is built solely from static SQL fragments and
+    // sequential parameter numbers; every caller-influenced value is a bound
+    // parameter, so no caller-provided SQL text reaches the statement.
+    fn query(&self, sql: String) -> sqlx::query::Query<'static, sqlx::Postgres, PgArguments> {
+        let mut statement = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for bind in &self.binds {
+            statement = match *bind {
+                StatementBind::Time(value) => statement.bind(value),
+                StatementBind::Id(value) => statement.bind(value),
+                StatementBind::Label(value) => statement.bind(value),
+                StatementBind::Count(value) => statement.bind(value),
+            };
+        }
+        statement
+    }
+}
+
+fn selection_statement(filters: &QueryBindings) -> StatementBuilder {
+    let mut builder = StatementBuilder::new();
+    if let Some(from) = filters.from {
+        let parameter = builder.bind(StatementBind::Time(from));
+        builder.predicate(format!("recorded_at >= ${parameter}"));
+    }
+    if let Some(to) = filters.to {
+        let parameter = builder.bind(StatementBind::Time(to));
+        builder.predicate(format!("recorded_at < ${parameter}"));
+    }
+    match (filters.turn, filters.session) {
+        (Some(turn), Some(session)) => {
+            let turn_parameter = builder.bind(StatementBind::Id(turn));
+            builder.predicate(format!("turn_id = ${turn_parameter}"));
+            let session_parameter = builder.bind(StatementBind::Id(session));
+            builder.predicate(format!(
+                "EXISTS (SELECT 1 FROM turn_lifecycle \
+                 WHERE turn_id = ${turn_parameter} AND session_id = ${session_parameter})"
+            ));
+        }
+        (Some(turn), None) => {
+            let parameter = builder.bind(StatementBind::Id(turn));
+            builder.predicate(format!("turn_id = ${parameter}"));
+        }
+        (None, Some(session)) => {
+            let parameter = builder.bind(StatementBind::Id(session));
+            builder.predicate(format!("session_id = ${parameter}"));
+        }
+        (None, None) => {}
+    }
+    if let Some(model) = filters.model {
+        let parameter = builder.bind(StatementBind::Id(model));
+        builder.predicate(format!(
+            "resolved_provider_model_identity_id = ${parameter}"
+        ));
+    }
+    if let Some(provenance) = filters.provenance {
+        let parameter = builder.bind(StatementBind::Label(provenance));
+        builder.predicate(format!("usage_provenance_kind = ${parameter}"));
+    }
+    if let Some(call_kind) = filters.call_kind {
+        let parameter = builder.bind(StatementBind::Label(call_kind));
+        builder.predicate(format!("call_kind = ${parameter}"));
+    }
+    builder
+}
 
 // Canonical references are unbounded, so neither query may copy a
 // reconstructed reference into per-call rows. Both resolve the oversized
@@ -28,26 +145,27 @@ use crate::mapping::{
 // configured profile, so it derives no cost and is reported as over-ceiling
 // instead of being materialized. The aggregate resolves each emitted group's
 // reference exactly once, after grouping and the group ceiling.
-const AGGREGATE_SQL: &str = "
+fn aggregate_sql(
+    where_clause: &str,
+    source_probe: usize,
+    source_limit: usize,
+    group_probe: usize,
+) -> String {
+    format!(
+        "
 WITH candidate_calls AS MATERIALIZED (
     SELECT *
       FROM web_usage_call_projection
-     WHERE ($1::timestamptz IS NULL OR recorded_at >= $1)
-       AND ($2::timestamptz IS NULL OR recorded_at < $2)
-       AND ($3::uuid IS NULL OR session_id = $3)
-       AND ($4::uuid IS NULL OR turn_id = $4)
-       AND ($5::uuid IS NULL OR resolved_provider_model_identity_id = $5)
-       AND ($6::text IS NULL OR usage_provenance_kind = $6)
-       AND ($7::text IS NULL OR call_kind = $7)
+     WHERE {where_clause}
      ORDER BY recorded_at DESC, model_call_id DESC
-     LIMIT $8
+     LIMIT ${source_probe}
 ), bounded_calls AS (
     SELECT *
       FROM candidate_calls
      ORDER BY recorded_at DESC, model_call_id DESC
-     LIMIT $9
+     LIMIT ${source_limit}
 ), bounded_state AS (
-    SELECT count(*) > $9 AS calls_truncated FROM candidate_calls
+    SELECT count(*) > ${source_limit} AS calls_truncated FROM candidate_calls
 ), grouped AS (
     SELECT call_kind, resolved_provider_model_identity_id,
            credential_profile_label,
@@ -64,10 +182,12 @@ WITH candidate_calls AS MATERIALIZED (
            usage_input_includes_cache_tokens IS NOT NULL
            AND bool_and(
                usage_input_includes_cache_tokens IS DISTINCT FROM true
-               OR input_tokens IS NULL
-               OR cache_creation_input_tokens IS NULL
-               OR cache_read_input_tokens IS NULL
-               OR input_tokens >= cache_creation_input_tokens + cache_read_input_tokens
+               OR (
+                   input_tokens IS NOT NULL
+                   AND cache_creation_input_tokens IS NOT NULL
+                   AND cache_read_input_tokens IS NOT NULL
+                   AND input_tokens >= cache_creation_input_tokens + cache_read_input_tokens
+               )
            ) AS cache_normalization_safe,
            bounded_state.calls_truncated
       FROM bounded_calls
@@ -82,10 +202,10 @@ WITH candidate_calls AS MATERIALIZED (
               credential_profile_label, usage_provenance_kind,
               usage_input_includes_cache_tokens NULLS FIRST,
               has_input, has_output, has_cache_creation, has_cache_read
-     LIMIT $10
+     LIMIT ${group_probe}
 )
 SELECT call_kind, resolved_provider_model_identity_id,
-       credential_profile_label AS web_profile,
+       credential_profile_label,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        has_input, has_output, has_cache_creation, has_cache_read,
        call_count, input_tokens, output_tokens,
@@ -107,11 +227,18 @@ SELECT call_kind, resolved_provider_model_identity_id,
  ORDER BY call_kind, resolved_provider_model_identity_id,
           credential_profile_label, usage_provenance_kind,
           usage_input_includes_cache_tokens NULLS FIRST,
-          has_input, has_output, has_cache_creation, has_cache_read";
+          has_input, has_output, has_cache_creation, has_cache_read"
+    )
+}
 
-const CALLS_NEWEST_SQL: &str = "
+// Selection specialization matches `aggregate_sql` above; the strict keyset
+// cursor predicate is appended as a selection predicate when present.
+fn calls_newest_sql(where_clause: &str, page_probe: usize) -> String {
+    format!(
+        "
 SELECT model_call_id, call_kind, session_id, turn_id,
        resolved_provider_model_identity_id,
+       credential_profile_label,
        CASE
            WHEN credential_profile_label LIKE 'exact:%'
                THEN substring(credential_profile_label FROM 7)
@@ -121,28 +248,18 @@ SELECT model_call_id, call_kind, session_id, turn_id,
        END AS credential_reference,
        COALESCE(octet_length(oversized_profile.exact_reference) > 256, false)
            AS credential_reference_over_ceiling,
-       credential_profile_label AS web_profile,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens, recorded_at
-  FROM web_usage_call_projection AS usage_call
+  FROM web_usage_call_projection
   LEFT JOIN web_usage_oversized_profile_identity AS oversized_profile
     ON credential_profile_label NOT LIKE 'exact:%'
    AND oversized_profile.profile_id::text = substring(credential_profile_label FROM 8)
- WHERE ($1::timestamptz IS NULL OR recorded_at >= $1)
-   AND ($2::timestamptz IS NULL OR recorded_at < $2)
-   AND ($3::uuid IS NULL OR session_id = $3)
-   AND ($4::uuid IS NULL OR turn_id = $4)
-   AND ($5::uuid IS NULL OR resolved_provider_model_identity_id = $5)
-   AND ($6::text IS NULL OR usage_provenance_kind = $6)
-   AND ($7::text IS NULL OR call_kind = $7)
-   AND (
-       $8::timestamptz IS NULL
-       OR recorded_at < $8
-       OR (recorded_at = $8 AND model_call_id < $9)
-   )
+ WHERE {where_clause}
  ORDER BY recorded_at DESC, model_call_id DESC
- LIMIT $10";
+ LIMIT ${page_probe}"
+    )
+}
 
 /// Integrity failure in the dedicated usage projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -229,32 +346,36 @@ impl UsageRepository {
         query: UsageQuery,
     ) -> Result<UsageAggregateReport, UsageRepositoryError> {
         let filters = QueryBindings::new(query)?;
-        let rows = sqlx::query(AGGREGATE_SQL)
-            .bind(filters.from)
-            .bind(filters.to)
-            .bind(filters.session)
-            .bind(filters.turn)
-            .bind(filters.model)
-            .bind(filters.provenance)
-            .bind(filters.call_kind)
-            .bind(i64::from(max_usage_aggregate_calls()) + 1)
-            .bind(i64::from(max_usage_aggregate_calls()))
-            .bind(i64::from(max_usage_aggregate_groups()) + 1)
-            .fetch_all(&self.pool)
-            .await?;
+        let mut builder = selection_statement(&filters);
+        let where_clause = builder.where_clause();
+        let source_probe = builder.bind(StatementBind::Count(
+            i64::from(max_usage_aggregate_calls()) + 1,
+        ));
+        let source_limit =
+            builder.bind(StatementBind::Count(i64::from(max_usage_aggregate_calls())));
+        let group_probe = builder.bind(StatementBind::Count(
+            i64::from(max_usage_aggregate_groups()) + 1,
+        ));
+        let sql = aggregate_sql(&where_clause, source_probe, source_limit, group_probe);
+        let rows = builder.query(sql).fetch_all(&self.pool).await?;
         let limit = usize::from(max_usage_aggregate_groups());
         let source_calls_truncated = rows
             .first()
             .map(|row| row.try_get::<bool, _>("calls_truncated"))
             .transpose()?
             .unwrap_or(false);
-        let truncated = rows.len() > limit || source_calls_truncated;
+        let completeness = if rows.len() > limit || source_calls_truncated {
+            UsageAggregateCompleteness::Truncated
+        } else {
+            UsageAggregateCompleteness::Complete
+        };
         let groups = rows
             .into_iter()
             .take(limit)
             .map(decode_aggregate)
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(UsageAggregateReport { groups, truncated })
+        UsageAggregateReport::new(groups, completeness)
+            .map_err(|_| UsageProjectionCorruption::Invalid("aggregate group ceiling").into())
     }
 
     /// Reads one strict terminal-time/UUID keyset page.
@@ -262,28 +383,26 @@ impl UsageRepository {
         &self,
         query: UsageCallQuery,
     ) -> Result<UsageCallPage, UsageRepositoryError> {
+        let UsageCallOrder::NewestFirst = query.order;
         let filters = QueryBindings::new(query.scope)?;
-        let cursor_time = query
-            .after
-            .map(|cursor| timestamp_to_offset(cursor.recorded_at))
-            .transpose()?;
-        let cursor_call = query.after.map(|cursor| cursor.call.into_uuid());
-        let rows = match query.order {
-            UsageCallOrder::NewestFirst => sqlx::query(CALLS_NEWEST_SQL),
+        let mut builder = selection_statement(&filters);
+        if let Some(cursor) = query.after {
+            let time_parameter = builder.bind(StatementBind::Time(timestamp_to_offset(
+                cursor.recorded_at,
+            )?));
+            let call_parameter = builder.bind(StatementBind::Id(cursor.call.into_uuid()));
+            // One lexicographic row-value comparison so the descending
+            // `(recorded_at, model_call_id)` index seeks directly to the
+            // exclusive cursor instead of filtering the emitted prefix.
+            builder.predicate(format!(
+                "(recorded_at, model_call_id) < (${time_parameter}, ${call_parameter})"
+            ));
         }
-        .bind(filters.from)
-        .bind(filters.to)
-        .bind(filters.session)
-        .bind(filters.turn)
-        .bind(filters.model)
-        .bind(filters.provenance)
-        .bind(filters.call_kind)
-        .bind(cursor_time)
-        .bind(cursor_call)
-        .bind(i64::from(query.limit.get()) + 1)
-        .fetch_all(&self.pool)
-        .await?;
-        decode_call_page(rows, usize::from(query.limit.get()))
+        let where_clause = builder.where_clause();
+        let page_probe = builder.bind(StatementBind::Count(i64::from(query.limit.get()) + 1));
+        let sql = calls_newest_sql(&where_clause, page_probe);
+        let rows = builder.query(sql).fetch_all(&self.pool).await?;
+        decode_call_page(rows, query.limit)
     }
 }
 
@@ -347,43 +466,47 @@ pub fn usage_timestamp_is_representable(timestamp: UsageTimestampMicros) -> bool
     timestamp_to_offset(timestamp).is_ok()
 }
 
-fn decode_call_page(rows: Vec<PgRow>, limit: usize) -> Result<UsageCallPage, UsageRepositoryError> {
-    let has_more = rows.len() > limit;
-    let mut calls = rows
+fn decode_call_page(
+    rows: Vec<PgRow>,
+    limit: UsageCallPageLimit,
+) -> Result<UsageCallPage, UsageRepositoryError> {
+    let continuation = if rows.len() > usize::from(limit.get()) {
+        UsageCallPageContinuation::HasMore
+    } else {
+        UsageCallPageContinuation::Exhausted
+    };
+    let calls = rows
         .into_iter()
-        .take(limit)
+        .take(usize::from(limit.get()))
         .map(decode_call)
         .collect::<Result<Vec<_>, _>>()?;
-    let next = if has_more {
-        calls.last().map(|call| UsageCallCursor {
-            recorded_at: call.recorded_at,
-            call: call.call,
-        })
-    } else {
-        None
-    };
-    Ok(UsageCallPage {
-        calls: std::mem::take(&mut calls),
-        next,
-    })
+    UsageCallPage::new(calls, continuation, limit)
+        .map_err(|_| UsageProjectionCorruption::Invalid("page ceiling").into())
 }
 
 fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
-    let web_profile: String = row.try_get("web_profile")?;
-    if web_profile.is_empty() || web_profile.len() > 256 {
-        return Err(UsageProjectionCorruption::Invalid("web profile").into());
-    }
-    let credential_profile = decode_credential_reference(&row)?;
+    let credential_profile = decode_credential_profile(&row)?;
+    let credential_reference = decode_credential_reference(&row)?;
+    let call_kind = decode_call_kind(row.try_get("call_kind")?)?;
+    let turn = row
+        .try_get::<Option<Uuid>, _>("turn_id")?
+        .map(TurnId::from_uuid);
+    let scope = match (call_kind, turn) {
+        (UsageCallKind::ModelCall, Some(turn)) => UsageCallScope::ModelCall(turn),
+        (UsageCallKind::ApprovalJudge, Some(turn)) => UsageCallScope::ApprovalJudge(turn),
+        (UsageCallKind::ContextCompaction, None) => UsageCallScope::ContextCompaction,
+        (UsageCallKind::ModelCall | UsageCallKind::ApprovalJudge, None)
+        | (UsageCallKind::ContextCompaction, Some(_)) => {
+            return Err(UsageProjectionCorruption::Invalid("turn correlation").into());
+        }
+    };
     Ok(UsageCallEvidence {
-        call_kind: decode_call_kind(row.try_get("call_kind")?)?,
+        scope,
         call: ModelCallId::from_uuid(row.try_get("model_call_id")?),
         session: SessionId::from_uuid(row.try_get("session_id")?),
-        turn: row
-            .try_get::<Option<Uuid>, _>("turn_id")?
-            .map(TurnId::from_uuid),
         model: decode_model(&row)?,
-        web_profile,
         credential_profile,
+        credential_reference,
         provenance: decode_provenance(row.try_get("usage_provenance_kind")?)?,
         input_semantics: decode_input_semantics(row.try_get("usage_input_includes_cache_tokens")?),
         tokens: decode_tokens(&row)?,
@@ -392,37 +515,39 @@ fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
 }
 
 fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryError> {
-    let web_profile: String = row.try_get("web_profile")?;
-    if web_profile.is_empty() || web_profile.len() > 256 {
-        return Err(UsageProjectionCorruption::Invalid("web profile").into());
-    }
-    let credential_profile = decode_credential_reference(&row)?;
+    let credential_profile = decode_credential_profile(&row)?;
+    let credential_reference = decode_credential_reference(&row)?;
     let call_count = u64::try_from(row.try_get::<i64, _>("call_count")?)
         .map_err(|_| UsageProjectionCorruption::Invalid("call count"))?;
-    if call_count == 0 {
-        return Err(UsageProjectionCorruption::Invalid("call count").into());
-    }
-    Ok(UsageAggregateGroup {
-        key: UsageAggregateKey {
-            call_kind: decode_call_kind(row.try_get("call_kind")?)?,
-            model: decode_model(&row)?,
-            web_profile,
-            credential_profile,
-            provenance: decode_provenance(row.try_get("usage_provenance_kind")?)?,
-            input_semantics: decode_input_semantics(
-                row.try_get("usage_input_includes_cache_tokens")?,
-            ),
-            coverage: UsageTokenCoverage {
-                input: decode_presence(row.try_get("has_input")?),
-                output: decode_presence(row.try_get("has_output")?),
-                cache_creation_input: decode_presence(row.try_get("has_cache_creation")?),
-                cache_read_input: decode_presence(row.try_get("has_cache_read")?),
-            },
+    let key = UsageAggregateKey {
+        call_kind: decode_call_kind(row.try_get("call_kind")?)?,
+        model: decode_model(&row)?,
+        credential_profile,
+        credential_reference,
+        provenance: decode_provenance(row.try_get("usage_provenance_kind")?)?,
+        input_semantics: decode_input_semantics(row.try_get("usage_input_includes_cache_tokens")?),
+        coverage: UsageTokenCoverage {
+            input: decode_presence(row.try_get("has_input")?),
+            output: decode_presence(row.try_get("has_output")?),
+            cache_creation_input: decode_presence(row.try_get("has_cache_creation")?),
+            cache_read_input: decode_presence(row.try_get("has_cache_read")?),
         },
+    };
+    UsageAggregateGroup::new(
+        key,
         call_count,
-        tokens: decode_aggregate_tokens(&row)?,
-        cache_normalization_safe: row.try_get("cache_normalization_safe")?,
-    })
+        decode_aggregate_tokens(&row)?,
+        decode_cache_normalization(row.try_get("cache_normalization_safe")?),
+    )
+    .map_err(|_| UsageProjectionCorruption::Invalid("aggregate consistency").into())
+}
+
+fn decode_credential_profile(
+    row: &PgRow,
+) -> Result<UsageCredentialProfileLabel, UsageRepositoryError> {
+    let credential_profile: String = row.try_get("credential_profile_label")?;
+    UsageCredentialProfileLabel::new(credential_profile)
+        .map_err(|_| UsageProjectionCorruption::Invalid("credential profile").into())
 }
 
 /// Decodes the ceiling-bounded credential reference used for cost derivation.
@@ -449,6 +574,14 @@ fn decode_credential_reference(row: &PgRow) -> Result<Option<String>, UsageRepos
                 Err(UsageProjectionCorruption::Invalid("credential profile").into())
             }
         }
+    }
+}
+
+const fn decode_cache_normalization(safe: bool) -> UsageCacheNormalization {
+    if safe {
+        UsageCacheNormalization::Safe
+    } else {
+        UsageCacheNormalization::Unsafe
     }
 }
 
@@ -565,43 +698,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn usage_queries_retain_raw_and_bounded_profile_projections() {
-        assert!(AGGREGATE_SQL.contains("oversized_profile.exact_reference"));
-        assert!(AGGREGATE_SQL.contains("substring(credential_profile_label FROM 7)"));
-        assert!(AGGREGATE_SQL.contains("credential_profile_label AS web_profile"));
-        assert!(CALLS_NEWEST_SQL.contains("oversized_profile.exact_reference"));
-        assert!(CALLS_NEWEST_SQL.contains("substring(credential_profile_label FROM 7)"));
-        assert!(CALLS_NEWEST_SQL.contains("credential_profile_label AS web_profile"));
-    }
-
-    #[test]
-    fn usage_queries_bound_reconstructed_references_to_the_profile_ceiling() {
-        let ceiling_guard = format!(
-            "octet_length(oversized_profile.exact_reference) <= {}",
-            max_usage_credential_profile_utf8_bytes()
-        );
-        let over_ceiling_marker = format!(
-            "COALESCE(octet_length(oversized_profile.exact_reference) > {}, false)",
-            max_usage_credential_profile_utf8_bytes()
-        );
-
-        assert!(AGGREGATE_SQL.contains(&ceiling_guard));
-        assert!(AGGREGATE_SQL.contains(&over_ceiling_marker));
-        assert!(CALLS_NEWEST_SQL.contains(&ceiling_guard));
-        assert!(CALLS_NEWEST_SQL.contains(&over_ceiling_marker));
-    }
-
-    #[test]
-    fn usage_aggregate_resolves_references_only_after_grouping() {
-        let (grouping, reference_join) = AGGREGATE_SQL
-            .split_once("GROUP BY")
-            .expect("the aggregate query groups bounded calls");
-
-        assert!(!grouping.contains("oversized_profile"));
-        assert!(reference_join.contains("LEFT JOIN web_usage_oversized_profile_identity"));
-    }
-
-    #[test]
     fn timestamp_conversion_preserves_exact_microseconds() {
         let timestamp =
             UsageTimestampMicros::new(1_777_777_777_123_456).expect("fixture timestamp fits");
@@ -623,5 +719,93 @@ mod tests {
                 .expect("maximum timestamp decodes"),
             timestamp
         );
+    }
+
+    fn selection_fixture() -> QueryBindings {
+        QueryBindings {
+            from: None,
+            to: None,
+            session: Some(Uuid::from_u128(0xA1)),
+            turn: Some(Uuid::from_u128(0xB2)),
+            model: None,
+            provenance: None,
+            call_kind: None,
+        }
+    }
+
+    #[test]
+    fn unselected_shape_reduces_to_a_constant_predicate() {
+        let filters = QueryBindings {
+            session: None,
+            turn: None,
+            ..selection_fixture()
+        };
+
+        assert_eq!(selection_statement(&filters).where_clause(), "true");
+    }
+
+    #[test]
+    fn session_only_shape_carries_exactly_the_session_predicate() {
+        let filters = QueryBindings {
+            turn: None,
+            ..selection_fixture()
+        };
+
+        assert_eq!(
+            selection_statement(&filters).where_clause(),
+            "session_id = $1"
+        );
+    }
+
+    #[test]
+    fn combined_session_and_turn_shape_stays_turn_led_with_an_ownership_probe() {
+        let filters = selection_fixture();
+
+        assert_eq!(
+            selection_statement(&filters).where_clause(),
+            "turn_id = $1\n       AND EXISTS (SELECT 1 FROM turn_lifecycle \
+             WHERE turn_id = $1 AND session_id = $2)"
+        );
+    }
+
+    #[test]
+    fn usage_queries_retain_raw_and_bounded_profile_projections() {
+        let aggregate = aggregate_sql("true", 1, 2, 3);
+        let calls = calls_newest_sql("true", 1);
+
+        assert!(aggregate.contains("oversized_profile.exact_reference"));
+        assert!(aggregate.contains("substring(credential_profile_label FROM 7)"));
+        assert!(calls.contains("oversized_profile.exact_reference"));
+        assert!(calls.contains("substring(credential_profile_label FROM 7)"));
+    }
+
+    #[test]
+    fn usage_queries_bound_reconstructed_references_to_the_profile_ceiling() {
+        let ceiling_guard = format!(
+            "octet_length(oversized_profile.exact_reference) <= {}",
+            max_usage_credential_profile_utf8_bytes()
+        );
+        let over_ceiling_marker = format!(
+            "COALESCE(octet_length(oversized_profile.exact_reference) > {}, false)",
+            max_usage_credential_profile_utf8_bytes()
+        );
+        let aggregate = aggregate_sql("true", 1, 2, 3);
+        let calls = calls_newest_sql("true", 1);
+
+        assert!(aggregate.contains(&ceiling_guard));
+        assert!(aggregate.contains(&over_ceiling_marker));
+        assert!(calls.contains(&ceiling_guard));
+        assert!(calls.contains(&over_ceiling_marker));
+    }
+
+    #[test]
+    fn usage_aggregate_resolves_references_only_after_grouping() {
+        let aggregate = aggregate_sql("true", 1, 2, 3);
+        let (grouping, reference_join) = aggregate
+            .split_once("GROUP BY")
+            .expect("the aggregate query groups bounded calls");
+
+        assert!(!grouping.contains("oversized_profile"));
+        assert!(reference_join.contains("LEFT JOIN web_usage_oversized_profile_identity"));
     }
 }

@@ -1,0 +1,165 @@
+# File and media interpretation
+
+The first provider-neutral core is verified against PR #898
+(`agent/file-media-core`). It includes the type model, declaration and registry
+checks, detection and validation algorithm, untrusted processor-response
+boundary, stable agent tool contracts, and visibility-authorizing application
+bridge.
+
+This page owns typed interpretation above immutable blob bytes. Blob identity,
+catalog placement, replica verification, raw reads, attachment visibility, and
+generated-artifact ingest remain owned by [blob storage](blob-storage.md). Tool
+attempt authority and result durability remain owned by
+[the tool loop](tool-loop.md).
+
+## Frames and checked values
+
+`FileDigest` is the provider-neutral spelling of the same exact SHA-256 bytes as
+domain `BlobDigest`; it carries no type fact. `FileUse` carries one digest,
+positive catalogued length, caller attachment intent, exact bounded declared
+media type, and optional checked display basename. `ValidatedFile` adds only
+byte-derived canonical media type, exact provider/reader/revision identity,
+closed content-silent validation evidence, bounded canonical metadata, and a
+nonempty ordered view inventory. Caller declaration and filename never select a
+reader without byte validation.
+
+Canonical media types are lowercase ASCII `type/subtype` essences with no
+parameters. Provider, reader, view, and reason names are checked bounded
+lowercase ASCII tokens. View argument schemas are bounded canonical JSON objects
+whose root declares `type: object`; processor metadata is separately parsed and
+bounded as a canonical JSON object before it reaches a tool result.
+
+The common output vocabulary is closed as text, structure, image, audio, or
+general file. The provider-neutral core admits only text and structured views;
+rich view registration remains unavailable until the durable media-reference
+result path lands. View names and meanings remain provider-owned. Every view
+declares an object options schema, streaming or finite-range access posture,
+cumulative source work, and output-specific finite bounds. Text and structured
+views bound body bytes; structure also bounds depth, nodes, and strings. Image,
+audio, and general-file views carry the corresponding dimension, pixel, channel,
+sample, duration, and byte bounds.
+
+## Registry and adapter boundary
+
+`signalbox-file-media-runtime` depends on no domain, application, persistence,
+daemon, parser, image, audio, or provider crate. A format-family adapter depends
+on that runtime and implements `FileMediaProvider` inside the processor worker.
+The daemon-side registry stores checked declarations and calls only
+`FileMediaProcessor`; it never invokes adapter code in its own process.
+
+Registry construction sorts unsigned-ASCII provider/reader identities and
+rejects duplicate providers or readers, duplicate exact media-type claims,
+duplicate per-reader types, views, or reason codes, absent or excessive probe
+and output bounds, read source work or range fan-out above their compiled
+lowerable ceilings, contradictory image bounds, ambiguous streaming-text
+fallback, unavailable isolation when any provider is present, and any effective
+ceiling above the compiled version-one value. An empty registry is valid.
+Configuration can therefore disable providers or lower bounds but cannot add a
+media-type mapping, alias, executable, or precedence rule.
+
+An adapter author supplies one provider declaration with exact owned canonical
+types, probe budget, view schemas and resource envelopes, registered sanitized
+reason codes, and immutable reader revision. Probe, inspect, and read methods
+receive only a placement-free `VerifiedBlobSource`, cooperative cancellation,
+and their checked request. An adapter may report only adapter execution failure;
+the daemon supervisor originates process availability, timeout, cancellation,
+and framing failures. Validation requests carry effective lowerable source-byte
+and exact-range ceilings for broker enforcement. They return raw processor
+outputs: the registry reparses and cross-checks every type, evidence claim,
+reason, metadata object, body, JSON tree, continuation, and bound before
+admitting it. Structured output node and per-container entry ceilings stop
+duplicate-aware deserialization before structural excess is materialized.
+
+## Detection and validation
+
+Inspection first requires the verified source digest and length to equal the
+selected `FileUse`. It probes every reader in canonical identity order; this
+orders bounded work and telemetry only. A processor claim is admitted only when
+its canonical type belongs to that exact reader. Registration order never
+settles conflicting claims.
+
+Incompatible strong claims return ambiguity. Compatible strong claims resolve to
+their sole type and reader and require strong-signature validation. With no
+strong claim, a sole compatible structural candidate receives structural
+validation. This ordering is the simplest interpretation of the accepted
+design's otherwise unplaced `StructuralCandidate` strength. With neither, a
+syntactically canonical declaration may nominate its exact reader for
+independent structural validation. Finally, the sole registered text fallback
+may claim only through complete streaming validation. No successful path returns
+an ordinary declaration as evidence.
+
+A recognized-malformed probe is terminal; incompatible recognized types are
+ambiguous. Strong or structural validation cannot quietly return no-match and
+fall through. A declared or streaming candidate that does not validate becomes
+ordinary unknown. Successful detection that disagrees with a syntactically
+canonical caller declaration becomes `DeclaredTypeMismatch`, blocking typed
+reads without changing the blob or its metadata. Recognized encrypted or locked
+content is terminal `EncryptedOrLocked`; version one has no password channel.
+
+## Agent tools
+
+The stable `file_inspect` contract accepts exactly a canonical `digest` and an
+optional bounded visible-part selector. `file_read` adds an exact provider-owned
+`view` and object `options`; it accepts no model-supplied type or reader. Both
+are effect-free tool declarations. The generic executor projects only compact
+JSON or bounded typed failure evidence.
+
+`signalbox-file-media-provider-runtime` supplies their registry-backed service.
+Its injected `FileUseResolver` is the sole authorization boundary: it must reuse
+the rendered-frontier allow-set, disambiguate repeated digest uses, finish
+catalog work, and return exact use metadata plus a placement-free verified
+source. The bridge rejects a resolver that returns another digest, repeats
+inspection for every read, and never exposes a store locator, path, credential,
+or open database transaction to a processor.
+
+Unknown inspection is successful and has no views. Malformed, ambiguous,
+declared-mismatch, and encrypted outcomes are known typed failures. Reads admit
+only a declared view; options remain structured data for adapter validation. A
+complete `file_read` argument document admits a maximum nesting depth of 256
+JSON object and array containers; the outer argument and options objects count
+toward that depth. Text must be bounded valid UTF-8 without U+0000. Structured
+output must parse as bounded JSON within its declared depth, node, string, and
+byte limits. A cursor is absent on complete output and is a bounded control-free
+opaque value on a truncated result. A continuation read sends that cursor
+instead of initial view options through the same checked service and processor
+request contracts.
+
+**Committed unimplemented functionality.** No present daemon catalog composes
+these tools because the concrete rendered-frontier attachment resolver is not
+yet on `main`; no adapter is registered and the empty registry recognizes no
+format. The compatibility constraint is that daemon composition supplies the
+existing visibility proof to `FileUseResolver`, not a weaker catalog-presence
+check. Format adapters are separate follow-on changes and add no MIME branch to
+the executor, bridge, or daemon.
+
+## Processor and durable media boundary
+
+The raw processor enums deliberately carry strings and JSON text rather than
+checked registry values. Oversized, malformed, injection-shaped, cross-reader,
+unregistered-reason, wrong-output-kind, contradictory continuation, and
+excessively nested responses collapse to sanitized processor failure without
+partial success (INV-076). Detection uses generated synthetic bytes and
+byte-derived evidence independent of caller declaration (INV-075).
+
+**Committed unimplemented functionality.** The daemon-supervised fresh local
+worker, sandbox launch, source-read broker, framing, process resource
+enforcement, and durable media-reference result path land in the implementing
+child slice. No present production `FileMediaProcessor` implementation executes
+an adapter. The compatibility constraint is that every adapter remains an
+untrusted black box executed across this raw boundary; native decoder libraries
+do not weaken sanitization or containment.
+
+No classification cache exists. Earlier durable tool results preserve what a
+model saw while a later request may use a newer immutable reader revision. OCR
+and transcription are absent in version one.
+
+## Open edges
+
+- Concrete format families and their independently reviewed dependencies remain
+  with
+  [general-purpose artifacts](../open-questions.md#general-purpose-artifacts).
+- Cumulative per-turn typed-read and source-work budgets wait for the first
+  adapter benchmarks under
+  [identity, credentials, and resource governance](../open-questions.md#identity-credentials-and-resource-governance).
+- Provider-native general-file inventories remain adapter-specific review work;
+  no generic provider file capability admits unknown bytes.

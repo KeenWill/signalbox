@@ -5,29 +5,36 @@
 )]
 
 use std::{
-    collections::VecDeque,
+    collections::{HashSet, VecDeque},
     error::Error,
     fs,
+    future::{Future, pending},
     io::{self, ErrorKind},
     os::unix::fs::PermissionsExt,
+    panic::{AssertUnwindSafe, resume_unwind},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
+use futures_util::FutureExt;
 use signalbox_application::{
     AuthorizeModelCallOutcome, ClassifyOperatorFailure,
     CreateSessionFromImportedFrontierIdGenerator, CreateSessionFromImportedFrontierOutcome,
     CreateSessionFromImportedFrontierRequest, CreateSessionFromImportedFrontierService,
-    EligibilityPass, ImportConversationOutcome, ImportConversationService,
-    ImportedConversationIdGenerator, InProcessAttemptDispatchGate, InProcessEligibilityWorkSource,
-    InProcessToolDispatchGate, ModelCallCredentialReference, ModelCallExecutionOutcome,
-    ModelCallExecutionService, ModelCallInputTokenCount, ModelCallInputTokenCounter, NoToolCatalog,
-    OperatorFailureClass, PreparedModelOperation, ReplaceSessionMetadataOutcome,
-    ReplaceSessionMetadataRequest, ReplaceSessionMetadataService, SchedulerLoop, SchedulerLoopExit,
-    ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartupScanService, UuidV7ModelCallExecutionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    EligibilityPass, EligibilitySweep, EligibilitySweepBatch, ImportConversationOutcome,
+    ImportConversationService, ImportedConversationIdGenerator, InProcessAttemptDispatchGate,
+    InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallInputTokenCount,
+    ModelCallInputTokenCounter, NoToolCatalog, OperatorFailureClass, PreparedModelOperation,
+    ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
+    SchedulerLoop, SchedulerLoopExit, ScriptedModelCallProvider, ScriptedModelCallStep,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
+    UuidV7ModelCallExecutionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
@@ -47,9 +54,9 @@ use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeMod
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionEvidence, CompletionFinish,
     DeliveryMode, ExchangeFacts, InputTokenCountOutcome, LossCause, MessagePart,
-    ModelInputTokenCounter, ModelOperation, ModelRuntime, ObservationFact, ObservationSink,
-    PreparationOutcome, ProviderReportedModel, Script, ScriptedModel, ScriptedPrepared,
-    TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss,
+    ModelInputTokenCounter, ModelOperation, ModelRuntime, Observation, ObservationFact,
+    ObservationSink, PreparationOutcome, ProviderReportedModel, Script, ScriptedModel,
+    ScriptedPrepared, TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_persistence::{
     blob::BlobCatalogRepository,
@@ -68,6 +75,7 @@ use signalbox_persistence::{
     session_metadata::SessionMetadataRepository,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
+    test_support::{FleetSoakCensus, FleetSoakCensusRepository},
 };
 use signalbox_process_protocol::{
     BlobChunk, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame,
@@ -562,13 +570,158 @@ async fn create_imported_session(pool: &PgPool) -> Result<CanonicalUuid, Box<dyn
     Ok(CanonicalUuid::from_uuid(session.into_uuid()))
 }
 
+#[derive(Clone, Debug)]
+struct ReconciliationWitness {
+    completed_cycles: Arc<AtomicUsize>,
+    cycle: Arc<Mutex<ReconciliationCycle>>,
+}
+
+#[derive(Debug, Default)]
+struct ReconciliationCycle {
+    hinted_sessions: HashSet<SessionId>,
+    processed_sessions: HashSet<SessionId>,
+    final_batch_seen: bool,
+}
+
+impl ReconciliationWitness {
+    fn new() -> Self {
+        Self {
+            completed_cycles: Arc::new(AtomicUsize::new(0)),
+            cycle: Arc::new(Mutex::new(ReconciliationCycle::default())),
+        }
+    }
+
+    fn record_batch(&self, sessions: &[SessionId], continuation: bool) {
+        let mut cycle = self
+            .cycle
+            .lock()
+            .expect("the reconciliation witness lock is available");
+        cycle.hinted_sessions.extend(sessions.iter().copied());
+        cycle.final_batch_seen = !continuation;
+        self.complete_drained_cycle(&mut cycle);
+    }
+
+    fn record_processed_session(&self, session: SessionId) {
+        let mut cycle = self
+            .cycle
+            .lock()
+            .expect("the reconciliation witness lock is available");
+        cycle.processed_sessions.insert(session);
+        self.complete_drained_cycle(&mut cycle);
+    }
+
+    fn complete_drained_cycle(&self, cycle: &mut ReconciliationCycle) {
+        if cycle.final_batch_seen && cycle.hinted_sessions.is_subset(&cycle.processed_sessions) {
+            self.completed_cycles.fetch_add(1, Ordering::SeqCst);
+            *cycle = ReconciliationCycle::default();
+        }
+    }
+
+    fn completed_cycles(&self) -> usize {
+        self.completed_cycles.load(Ordering::SeqCst)
+    }
+}
+
+#[test]
+fn reconciliation_witness_waits_for_final_batch_hints_to_finish() {
+    let witness = ReconciliationWitness::new();
+    let session = SessionId::from_uuid(Uuid::from_u128(1));
+
+    witness.record_batch(&[session], false);
+    assert_eq!(witness.completed_cycles(), 0);
+
+    witness.record_processed_session(session);
+    assert_eq!(witness.completed_cycles(), 1);
+}
+
+#[test]
+fn reconciliation_witness_completes_an_empty_cycle_immediately() {
+    let witness = ReconciliationWitness::new();
+
+    witness.record_batch(&[], false);
+
+    assert_eq!(witness.completed_cycles(), 1);
+}
+
+struct WitnessedEligibilitySweep<Sweep> {
+    inner: Sweep,
+    witness: ReconciliationWitness,
+}
+
+impl<Sweep> WitnessedEligibilitySweep<Sweep> {
+    fn new(inner: Sweep, witness: ReconciliationWitness) -> Self {
+        Self { inner, witness }
+    }
+}
+
+impl<Sweep> EligibilitySweep for WitnessedEligibilitySweep<Sweep>
+where
+    Sweep: EligibilitySweep + Send,
+{
+    type Error = Sweep::Error;
+
+    fn find_sessions(
+        &mut self,
+    ) -> impl Future<Output = Result<EligibilitySweepBatch, Self::Error>> + Send {
+        let witness = self.witness.clone();
+        async move {
+            let batch = self.inner.find_sessions().await?;
+            let (sessions, continuation) = batch.clone().into_parts();
+            witness.record_batch(&sessions, continuation);
+            Ok(batch)
+        }
+    }
+}
+
+struct WitnessedEligibilityPass<Pass> {
+    inner: Pass,
+    witness: ReconciliationWitness,
+}
+
+impl<Pass> WitnessedEligibilityPass<Pass> {
+    fn new(inner: Pass, witness: ReconciliationWitness) -> Self {
+        Self { inner, witness }
+    }
+}
+
+impl<Pass> EligibilityPass for WitnessedEligibilityPass<Pass>
+where
+    Pass: EligibilityPass + Send,
+{
+    type Error = Pass::Error;
+
+    fn failure_stage(error: &Self::Error) -> &'static str {
+        Pass::failure_stage(error)
+    }
+
+    fn failure_turn(error: &Self::Error) -> Option<TurnId> {
+        Pass::failure_turn(error)
+    }
+
+    fn run(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.inner.run(session);
+        let witness = self.witness.clone();
+        async move {
+            let outcome = execution.await;
+            witness.record_processed_session(session);
+            outcome
+        }
+    }
+}
+
+type RuntimeEligibilitySweep = WitnessedEligibilitySweep<PostgresEligibilitySweep>;
+
 struct RunningRuntime {
     container: ContainerAsync<Postgres>,
     pool: PgPool,
     socket_directory: SocketDirectory,
     shutdown: watch::Sender<bool>,
-    runtime_task: JoinHandle<Result<(), ProcessRuntimeError>>,
-    work_source: Option<InProcessEligibilityWorkSource<PostgresEligibilitySweep>>,
+    runtime_task: Option<JoinHandle<Result<(), ProcessRuntimeError>>>,
+    work_source: Option<InProcessEligibilityWorkSource<RuntimeEligibilitySweep>>,
+    reconciliation_witness: ReconciliationWitness,
     provider_text_deltas: ProcessProviderTextDeltaSink,
     blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     blob_storage_root: Option<BlobStorageFixture>,
@@ -608,7 +761,11 @@ impl RunningRuntime {
         let (container, pool) = postgres().await?;
         let socket_directory = SocketDirectory::create()?;
         let listener = LocalProcessListener::bind(socket_directory.socket())?;
-        let sweep = PostgresEligibilitySweep::new(pool.clone());
+        let reconciliation_witness = ReconciliationWitness::new();
+        let sweep = WitnessedEligibilitySweep::new(
+            PostgresEligibilitySweep::new(pool.clone()),
+            reconciliation_witness.clone(),
+        );
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
         let blob_storage_root = match blob_storage {
             BlobStorageFixtureMode::Disabled => None,
@@ -655,8 +812,9 @@ impl RunningRuntime {
             pool,
             socket_directory,
             shutdown,
-            runtime_task,
+            runtime_task: Some(runtime_task),
             work_source: Some(work_source),
+            reconciliation_witness,
             provider_text_deltas,
             blob_store_registry,
             blob_storage_root,
@@ -695,8 +853,21 @@ impl RunningRuntime {
         template_configuration: SessionTemplateConfiguration,
     ) -> Result<usize, Box<dyn Error>> {
         self.shutdown.send(true)?;
-        timeout(Duration::from_secs(10), &mut self.runtime_task).await???;
+        let runtime_task = self
+            .runtime_task
+            .as_mut()
+            .expect("a running runtime has an installed task");
+        timeout(Duration::from_secs(10), runtime_task).await???;
+        self.runtime_task = None;
+        self.restart_after_stop(configuration, template_configuration)
+            .await
+    }
 
+    async fn restart_after_stop(
+        &mut self,
+        configuration: &str,
+        template_configuration: SessionTemplateConfiguration,
+    ) -> Result<usize, Box<dyn Error>> {
         let mut scan = StartupScanService::new(
             UuidV7StartupScanIdGenerator,
             PostgresStartupScanRepository::new(self.pool.clone()),
@@ -704,7 +875,11 @@ impl RunningRuntime {
         let recovered_turn_count = scan.execute().await?.recovered_turn_count();
 
         let listener = LocalProcessListener::bind(self.socket())?;
-        let sweep = PostgresEligibilitySweep::new(self.pool.clone());
+        let reconciliation_witness = ReconciliationWitness::new();
+        let sweep = WitnessedEligibilitySweep::new(
+            PostgresEligibilitySweep::new(self.pool.clone()),
+            reconciliation_witness.clone(),
+        );
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
         let model_configuration = HubModelConfiguration::parse(configuration)?;
         let mut runtime = ProcessRuntime::new_with_templates(
@@ -721,16 +896,42 @@ impl RunningRuntime {
         let provider_text_deltas = runtime.provider_text_delta_sink();
         let (shutdown, shutdown_receiver) = watch::channel(false);
         self.shutdown = shutdown;
-        self.runtime_task = tokio::spawn(runtime.run(shutdown_receiver));
+        self.runtime_task = Some(tokio::spawn(runtime.run(shutdown_receiver)));
         self.work_source = Some(work_source);
+        self.reconciliation_witness = reconciliation_witness;
         self.provider_text_deltas = provider_text_deltas;
         Ok(recovered_turn_count)
     }
 
-    fn take_work_source(&mut self) -> InProcessEligibilityWorkSource<PostgresEligibilitySweep> {
+    /// Simulates the uncatchable process death used by the fleet soak. The
+    /// replacement opens the same socket and database only after the killed
+    /// task has stopped, so no graceful runtime shutdown can repair its work.
+    async fn kill_and_restart(&mut self) -> Result<usize, Box<dyn Error>> {
+        let runtime_task = self
+            .runtime_task
+            .take()
+            .expect("a running runtime has an installed task");
+        runtime_task.abort();
+        let killed = runtime_task.await;
+        assert!(
+            matches!(&killed, Err(error) if error.is_cancelled()),
+            "the runtime task must stop by cancellation, not by returning: {killed:?}"
+        );
+
+        let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+        let template_configuration = session_template_configuration(&model_configuration)?;
+        self.restart_after_stop(MODEL_CONFIGURATION, template_configuration)
+            .await
+    }
+
+    fn take_work_source(&mut self) -> InProcessEligibilityWorkSource<RuntimeEligibilitySweep> {
         self.work_source
             .take()
             .expect("the streaming fixture takes the work source once")
+    }
+
+    fn reconciliation_witness(&self) -> ReconciliationWitness {
+        self.reconciliation_witness.clone()
     }
 
     fn provider_text_delta_sink(&self) -> ProcessProviderTextDeltaSink {
@@ -745,9 +946,11 @@ impl RunningRuntime {
         )
     }
 
-    async fn stop(self) -> Result<(), Box<dyn Error>> {
-        self.shutdown.send(true)?;
-        timeout(Duration::from_secs(10), self.runtime_task).await???;
+    async fn stop(mut self) -> Result<(), Box<dyn Error>> {
+        if let Some(runtime_task) = self.runtime_task.take() {
+            self.shutdown.send(true)?;
+            timeout(Duration::from_secs(10), runtime_task).await???;
+        }
         self.pool.close().await;
         self.socket_directory.cleanup()?;
         drop(self.blob_storage_root);
@@ -1371,6 +1574,25 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
         .request(
             4,
             ClientRequest::CommissionSession {
+                command_id: command()?,
+                template_name: String::from("merge-forward"),
+                fence: fence.clone(),
+                statement: statement.clone(),
+                content: InputContent::new(String::from("Respond to the open review threads.")),
+            },
+        )
+        .await?;
+    let busy = response_within(&mut connection).await?.message().clone();
+    assert_eq!(protocol_error_code(&busy), ErrorCode::Rejected);
+    assert_eq!(
+        protocol_error_detail(&busy),
+        Some(RejectionDetail::CommissionTargetBusy { session_id })
+    );
+
+    connection
+        .request(
+            5,
+            ClientRequest::CommissionSession {
                 command_id: commission_command,
                 template_name: String::from("merge-forward"),
                 fence: CommissionedSessionFence::Branch {
@@ -1388,7 +1610,7 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
     };
     assert_eq!(code, ErrorCode::ConflictingReuse);
 
-    let history = read_goal_messages(&mut connection, 5, session_id).await?;
+    let history = read_goal_messages(&mut connection, 6, session_id).await?;
     assert_eq!(
         history.first(),
         Some(&ServerMessage::GoalHistoryStart {
@@ -1404,7 +1626,7 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
     // before the live template catalog is consulted.
     runtime.restart_without_templates().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
-    connection.request(6, request).await?;
+    connection.request(7, request).await?;
     let drift_replayed = response_within(&mut connection).await?.message().clone();
     assert_eq!(
         drift_replayed,
@@ -1418,7 +1640,7 @@ async fn commission_session_records_its_fence_goal_and_first_input() -> Result<(
     // replay of committed work survives configuration drift.
     connection
         .request(
-            7,
+            8,
             ClientRequest::CommissionSession {
                 command_id: command()?,
                 template_name: String::from("merge-forward"),
@@ -2169,6 +2391,686 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
         content: vec![AssistantPart::Text(text.to_owned())],
         usage,
     }))
+}
+
+// Fleet-soak foundation for issue #1027.
+//
+// The default CI mode proves that current main still exhibits the hung-call
+// failure signature without making the PostgreSQL integration job red. Set
+// `SIGNALBOX_ENFORCE_FLEET_LIVENESS=1` to invert that probe into the desired
+// bounded-occupancy assertion. Restart recovery separately verifies the
+// specification-mandated ambiguity park without inventing automatic recovery
+// authority. Slow/failing tools, boundary loss, an
+// unprovisioned workspace, and scheduled goal resumption are named follow-on
+// slices: they need the same fleet census but not more boot infrastructure.
+
+// numeric-bound: derived ceiling from SCHEDULER_PASS_ADMISSION_CAP
+const FLEET_SESSION_COUNT: usize = scheduler_pass_admission_cap();
+// numeric-bound: tunable - keeps each fault observation short in CI
+const FLEET_ASSERTION_BOUND: Duration = Duration::from_secs(2);
+// numeric-bound: tunable - admits contended CI scheduling without weakening assertions
+const FLEET_SETUP_BOUND: Duration = Duration::from_secs(60);
+const FLEET_ENFORCEMENT_ENV: &str = "SIGNALBOX_ENFORCE_FLEET_LIVENESS";
+
+struct FleetPrepared {
+    correlation: ModelCallId,
+    inner: ScriptedPrepared<ModelCallId>,
+}
+
+#[derive(Clone, Copy)]
+struct FleetModelCardinality {
+    hanging: usize,
+    completing: usize,
+}
+
+#[derive(Clone)]
+struct FleetScriptedModel {
+    inner: ScriptedModel<ModelCallId>,
+    hangs_remaining: Arc<AtomicUsize>,
+    in_flight_hangs: Arc<AtomicUsize>,
+    completed_calls: Arc<Mutex<Vec<ModelCallId>>>,
+}
+
+impl FleetScriptedModel {
+    fn new(cardinality: FleetModelCardinality) -> Self {
+        Self {
+            inner: ScriptedModel::following(std::iter::repeat_n(
+                completed_script(
+                    "fixture-model",
+                    "fleet session completed",
+                    TokenUsage::unreported(),
+                ),
+                cardinality.hanging + cardinality.completing,
+            )),
+            hangs_remaining: Arc::new(AtomicUsize::new(cardinality.hanging)),
+            in_flight_hangs: Arc::new(AtomicUsize::new(0)),
+            completed_calls: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn in_flight_hangs(&self) -> usize {
+        self.in_flight_hangs.load(Ordering::SeqCst)
+    }
+
+    fn completed_call_ids(&self) -> Vec<ModelCallId> {
+        self.completed_calls
+            .lock()
+            .expect("the fleet completion lock is available")
+            .clone()
+    }
+}
+
+struct FleetHangGuard(Arc<AtomicUsize>);
+
+impl Drop for FleetHangGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl ModelRuntime<ModelCallId> for FleetScriptedModel {
+    type Prepared = FleetPrepared;
+
+    async fn prepare(
+        &self,
+        operation: ModelOperation<ModelCallId>,
+        cancellation: CancellationSignal,
+    ) -> PreparationOutcome<ModelCallId, Self::Prepared> {
+        let correlation = operation.correlation;
+        match self.inner.prepare(operation, cancellation).await {
+            PreparationOutcome::Prepared(inner) => {
+                PreparationOutcome::Prepared(FleetPrepared { correlation, inner })
+            }
+            PreparationOutcome::Defect {
+                correlation,
+                defect,
+            } => PreparationOutcome::Defect {
+                correlation,
+                defect,
+            },
+            PreparationOutcome::Cancelled { correlation } => {
+                PreparationOutcome::Cancelled { correlation }
+            }
+            PreparationOutcome::Failed {
+                correlation,
+                failure,
+            } => PreparationOutcome::Failed {
+                correlation,
+                failure,
+            },
+        }
+    }
+
+    async fn execute(
+        &self,
+        prepared: Self::Prepared,
+        sink: &mut (dyn ObservationSink<ModelCallId> + Send),
+        cancellation: CancellationSignal,
+    ) -> TerminalReport<ModelCallId> {
+        let hangs = self
+            .hangs_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
+        if hangs {
+            sink.observe(Observation {
+                correlation: prepared.correlation,
+                fact: ObservationFact::SendCommenced,
+            });
+            self.in_flight_hangs.fetch_add(1, Ordering::SeqCst);
+            let _guard = FleetHangGuard(Arc::clone(&self.in_flight_hangs));
+            pending::<TerminalReport<ModelCallId>>().await
+        } else {
+            let correlation = prepared.correlation;
+            let report = self.inner.execute(prepared.inner, sink, cancellation).await;
+            self.completed_calls
+                .lock()
+                .expect("the fleet completion lock is available")
+                .push(correlation);
+            report
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CommissionedFleet {
+    sessions: Vec<CanonicalUuid>,
+}
+
+async fn commission_fleet(runtime: &RunningRuntime) -> Result<CommissionedFleet, Box<dyn Error>> {
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let mut sessions = Vec::with_capacity(FLEET_SESSION_COUNT);
+    for index in 0..FLEET_SESSION_COUNT {
+        connection
+            .request(
+                u64::try_from(index + 2)?,
+                ClientRequest::CommissionSession {
+                    command_id: command()?,
+                    template_name: String::from("merge-forward"),
+                    fence: CommissionedSessionFence::Branch {
+                        repository: String::from("sample-user/sample-repository"),
+                        branch: format!("agent/fleet-soak-{index}"),
+                    },
+                    statement: format!("complete fleet soak session {index}"),
+                    content: InputContent::new(String::from("return the scripted reply")),
+                },
+            )
+            .await?;
+        let response = response_within(&mut connection).await?.message().clone();
+        let ServerMessage::SessionCommissioned { session_id, .. } = response else {
+            panic!("fleet commission returned {response:?}");
+        };
+        sessions.push(session_id);
+    }
+    Ok(CommissionedFleet { sessions })
+}
+
+async fn commission_fleet_control(
+    runtime: &RunningRuntime,
+) -> Result<CanonicalUuid, Box<dyn Error>> {
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    connection
+        .request(
+            1,
+            ClientRequest::CommissionSession {
+                command_id: command()?,
+                template_name: String::from("merge-forward"),
+                fence: CommissionedSessionFence::Branch {
+                    repository: String::from("sample-user/sample-repository"),
+                    branch: String::from("agent/fleet-soak-control"),
+                },
+                statement: String::from("complete the fleet scheduler readiness control"),
+                content: InputContent::new(String::from("return the scripted reply")),
+            },
+        )
+        .await?;
+    let response = response_within(&mut connection).await?.message().clone();
+    let ServerMessage::SessionCommissioned { session_id, .. } = response else {
+        return Err(
+            io::Error::other(format!("fleet control commission returned {response:?}")).into(),
+        );
+    };
+    Ok(session_id)
+}
+
+fn start_fleet_scheduler(
+    runtime: &mut RunningRuntime,
+    model: FleetScriptedModel,
+) -> Result<JoinHandle<SchedulerLoopExit>, Box<dyn Error>> {
+    let configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let provider = RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog())
+        .with_text_delta_sink(runtime.provider_text_delta_sink());
+    let (execution, fatal) = FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
+        PostgresModelCallRepository::new(
+            runtime.pool.clone(),
+            configuration.target_catalog(),
+            ModelCallCredentialReference::new("fleet-soak-fixture"),
+        ),
+        InProcessAttemptDispatchGate::default(),
+        provider,
+    ));
+    let pass = ActivatedTurnPass::new(
+        StartEligibleTurnService::new(
+            UuidV7StartEligibleTurnIdGenerator,
+            StartEligibleTurnRepository::new(runtime.pool.clone()),
+        ),
+        execution,
+    );
+    let pass = WitnessedEligibilityPass::new(pass, runtime.reconciliation_witness());
+    let mut scheduler = SchedulerLoop::new(runtime.take_work_source(), pass);
+    Ok(tokio::spawn(async move {
+        scheduler.run_until(fatal.wait()).await
+    }))
+}
+
+async fn wait_for_hangs(model: &FleetScriptedModel, expected: usize) -> Result<(), Box<dyn Error>> {
+    timeout(FLEET_SETUP_BOUND, async {
+        while model.in_flight_hangs() != expected {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
+async fn wait_for_reconciliation(witness: &ReconciliationWitness) -> Result<(), Box<dyn Error>> {
+    timeout(FLEET_SETUP_BOUND, async {
+        while witness.completed_cycles() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
+async fn abort_fleet_scheduler(
+    scheduler: JoinHandle<SchedulerLoopExit>,
+) -> Result<(), Box<dyn Error>> {
+    scheduler.abort();
+    let stopped = scheduler.await;
+    if !matches!(&stopped, Ok(SchedulerLoopExit::Shutdown))
+        && !matches!(&stopped, Err(error) if error.is_cancelled())
+    {
+        return Err(io::Error::other(format!(
+            "the fleet scheduler must stop by cancellation or fatal-driven shutdown: {stopped:?}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FleetFatalShutdownOutcome {
+    Live,
+    Restarted,
+}
+
+enum FleetSchedulerWait {
+    Elapsed,
+    Stopped(Result<SchedulerLoopExit, tokio::task::JoinError>),
+}
+
+fn classify_fleet_scheduler_wait(
+    wait: FleetSchedulerWait,
+) -> Result<FleetFatalShutdownOutcome, Box<dyn Error>> {
+    match wait {
+        FleetSchedulerWait::Elapsed => Ok(FleetFatalShutdownOutcome::Live),
+        FleetSchedulerWait::Stopped(Ok(SchedulerLoopExit::Shutdown)) => {
+            Ok(FleetFatalShutdownOutcome::Restarted)
+        }
+        FleetSchedulerWait::Stopped(stopped) => Err(io::Error::other(format!(
+            "the fleet scheduler must stop by fatal-driven shutdown: {stopped:?}"
+        ))
+        .into()),
+    }
+}
+
+#[test]
+fn fleet_scheduler_wait_classifies_elapsed_as_live() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        classify_fleet_scheduler_wait(FleetSchedulerWait::Elapsed)?,
+        FleetFatalShutdownOutcome::Live
+    );
+    Ok(())
+}
+
+#[test]
+fn fleet_scheduler_wait_classifies_shutdown_as_restarted() -> Result<(), Box<dyn Error>> {
+    assert_eq!(
+        classify_fleet_scheduler_wait(FleetSchedulerWait::Stopped(Ok(
+            SchedulerLoopExit::Shutdown,
+        )))?,
+        FleetFatalShutdownOutcome::Restarted
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn fleet_scheduler_wait_rejects_join_error() {
+    let scheduler = tokio::spawn(pending::<SchedulerLoopExit>());
+    scheduler.abort();
+    let stopped = scheduler.await;
+    let error = classify_fleet_scheduler_wait(FleetSchedulerWait::Stopped(stopped))
+        .expect_err("a cancelled scheduler join must not select a fleet oracle");
+    assert!(
+        error
+            .to_string()
+            .contains("the fleet scheduler must stop by fatal-driven shutdown")
+    );
+}
+
+async fn restart_after_fatal_shutdown(
+    scheduler: &mut Option<JoinHandle<SchedulerLoopExit>>,
+    runtime: &mut RunningRuntime,
+) -> Result<FleetFatalShutdownOutcome, Box<dyn Error>> {
+    let stopped = timeout(
+        FLEET_ASSERTION_BOUND,
+        scheduler
+            .as_mut()
+            .expect("the fatal-driven fleet scheduler was installed"),
+    )
+    .await;
+    let wait = match stopped {
+        Ok(stopped) => {
+            scheduler.take();
+            FleetSchedulerWait::Stopped(stopped)
+        }
+        Err(_) => FleetSchedulerWait::Elapsed,
+    };
+    let outcome = classify_fleet_scheduler_wait(wait)?;
+    if outcome == FleetFatalShutdownOutcome::Restarted {
+        runtime.kill_and_restart().await?;
+    }
+    Ok(outcome)
+}
+
+async fn wait_for_completed_calls(
+    model: &FleetScriptedModel,
+    expected: usize,
+) -> Result<Vec<ModelCallId>, Box<dyn Error>> {
+    Ok(timeout(FLEET_SETUP_BOUND, async {
+        loop {
+            let completed = model.completed_call_ids();
+            if completed.len() == expected {
+                return completed;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?)
+}
+
+async fn wait_for_model_call_for_session(
+    repository: &FleetSoakCensusRepository,
+    session: CanonicalUuid,
+) -> Result<ModelCallId, Box<dyn Error>> {
+    timeout(FLEET_SETUP_BOUND, async {
+        loop {
+            if let Some(model_call) = repository
+                .model_call_id_for_session(SessionId::from_uuid(session.into_uuid()))
+                .await?
+            {
+                return Ok::<ModelCallId, Box<dyn Error>>(model_call);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?
+}
+
+async fn wait_for_completed_call(
+    model: &FleetScriptedModel,
+    expected: ModelCallId,
+) -> Result<(), Box<dyn Error>> {
+    timeout(FLEET_SETUP_BOUND, async {
+        while !model.completed_call_ids().contains(&expected) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    Ok(())
+}
+
+async fn wait_for_terminal_calls(
+    repository: &FleetSoakCensusRepository,
+    model_calls: &[ModelCallId],
+) -> Result<(), Box<dyn Error>> {
+    timeout(FLEET_SETUP_BOUND, async {
+        loop {
+            if repository
+                .census_for(model_calls)
+                .await?
+                .terminal_model_calls()
+                == i64::try_from(model_calls.len())?
+            {
+                return Ok::<(), Box<dyn Error>>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+async fn wait_for_terminal_turns(
+    repository: &FleetSoakCensusRepository,
+    model_calls: &[ModelCallId],
+) -> Result<(), Box<dyn Error>> {
+    timeout(FLEET_SETUP_BOUND, async {
+        loop {
+            if repository.census_for(model_calls).await?.terminal_turns()
+                == i64::try_from(model_calls.len())?
+            {
+                return Ok::<(), Box<dyn Error>>(());
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+fn enforce_fleet_liveness() -> bool {
+    std::env::var(FLEET_ENFORCEMENT_ENV).is_ok_and(|value| value == "1")
+}
+
+fn assert_hung_fleet_outcome(
+    enforce_liveness: bool,
+    model: &FleetScriptedModel,
+    census: FleetSoakCensus,
+    hung_call_has_ambiguity_park: bool,
+    fatal_shutdown: FleetFatalShutdownOutcome,
+) -> Result<(), Box<dyn Error>> {
+    let active = census.active_turns();
+    let terminal = census.terminal_turns();
+    let typed_terminal_calls = census.terminal_model_calls();
+    if enforce_liveness {
+        if model.in_flight_hangs() != 0
+            || active != 1
+            || terminal != i64::try_from(FLEET_SESSION_COUNT - 1)?
+            || typed_terminal_calls != i64::try_from(FLEET_SESSION_COUNT)?
+            || census.awaiting_model_call_recovery_turns() != 1
+            || census.ambiguous_model_calls() != 1
+            || !hung_call_has_ambiguity_park
+        {
+            return Err(io::Error::other(format!(
+                "fleet liveness failed: fatal_shutdown={fatal_shutdown:?}, hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}, recovery_parks={}, ambiguous_calls={}, hung_call_has_ambiguity_park={hung_call_has_ambiguity_park}",
+                model.in_flight_hangs(),
+                census.awaiting_model_call_recovery_turns(),
+                census.ambiguous_model_calls()
+            ))
+            .into());
+        }
+    } else if fatal_shutdown != FleetFatalShutdownOutcome::Live
+        || model.in_flight_hangs() != 1
+        || active != 1
+        || terminal != i64::try_from(FLEET_SESSION_COUNT - 1)?
+        || typed_terminal_calls != i64::try_from(FLEET_SESSION_COUNT - 1)?
+    {
+        return Err(io::Error::other(format!(
+            "issue #1027 no longer reproduces: fatal_shutdown={fatal_shutdown:?}, hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}",
+            model.in_flight_hangs()
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn assert_restarted_fleet_outcome(
+    census: FleetSoakCensus,
+    original_model: &FleetScriptedModel,
+    replacement_model: &FleetScriptedModel,
+    control_model_call: ModelCallId,
+) -> Result<(), Box<dyn Error>> {
+    let replacement_completions = replacement_model.completed_call_ids();
+    if census.active_turns() != i64::try_from(FLEET_SESSION_COUNT)?
+        || census.terminal_turns() != 0
+        || census.awaiting_model_call_recovery_turns() != i64::try_from(FLEET_SESSION_COUNT)?
+        || census.terminal_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
+        || census.ambiguous_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
+        || original_model.in_flight_hangs() != 0
+        || replacement_model.in_flight_hangs() != 0
+        || replacement_completions.as_slice() != [control_model_call]
+    {
+        return Err(io::Error::other(format!(
+            "restart must preserve the ambiguity park after releasing original executions while the replacement scheduler completes only its readiness control: census={census:?}, original_hangs={}, replacement_hangs={}, replacement_completions={replacement_completions:?}, control_model_call={control_model_call:?}",
+            original_model.in_flight_hangs(),
+            replacement_model.in_flight_hangs()
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+/// Issue #1027 expected failure: a hung model call retains one authoritative
+/// scheduler pass and has no durable typed terminal record beyond the stated
+/// occupancy bound. Enforcement mode asserts the intended inverse.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposition()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut scheduler = None;
+    let scenario = AssertUnwindSafe(async {
+        let enforce_liveness = enforce_fleet_liveness();
+        let fleet = commission_fleet(&runtime).await?;
+        let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
+        let model = FleetScriptedModel::new(FleetModelCardinality {
+            hanging: 1,
+            completing: FLEET_SESSION_COUNT - 1,
+        });
+        scheduler = Some(start_fleet_scheduler(&mut runtime, model.clone())?);
+        wait_for_hangs(&model, 1).await?;
+        let completed_calls = wait_for_completed_calls(&model, FLEET_SESSION_COUNT - 1).await?;
+        wait_for_terminal_calls(&census_repository, &completed_calls).await?;
+        wait_for_terminal_turns(&census_repository, &completed_calls).await?;
+        let fatal_shutdown = restart_after_fatal_shutdown(&mut scheduler, &mut runtime).await?;
+        let model_calls = census_repository.model_call_ids().await?;
+        let census = census_repository.census_for(&model_calls).await?;
+        assert_eq!(
+            fleet.sessions.len(),
+            FLEET_SESSION_COUNT,
+            "fleet session cardinality mismatch"
+        );
+        assert_eq!(
+            model_calls.len(),
+            FLEET_SESSION_COUNT,
+            "fleet model-call cardinality mismatch"
+        );
+        let hung_model_calls = model_calls
+            .iter()
+            .copied()
+            .filter(|model_call| !completed_calls.contains(model_call))
+            .collect::<Vec<_>>();
+        let [hung_model_call] = hung_model_calls.as_slice() else {
+            return Err(io::Error::other(format!(
+                "expected one hung model call, observed {hung_model_calls:?}"
+            ))
+            .into());
+        };
+        let hung_call_has_ambiguity_park = census_repository
+            .has_ambiguous_recovery_park(*hung_model_call)
+            .await?;
+        assert_hung_fleet_outcome(
+            enforce_liveness,
+            &model,
+            census,
+            hung_call_has_ambiguity_park,
+            fatal_shutdown,
+        )
+    })
+    .catch_unwind()
+    .await;
+
+    let scheduler_cleanup = match scheduler {
+        Some(scheduler) => abort_fleet_scheduler(scheduler).await,
+        None => Ok(()),
+    };
+    let runtime_cleanup = runtime.stop().await;
+    match scenario {
+        Ok(outcome) => {
+            scheduler_cleanup?;
+            runtime_cleanup?;
+            outcome
+        }
+        Err(panic) => {
+            if let Err(error) = scheduler_cleanup {
+                eprintln!("fleet scheduler cleanup after panic failed: {error}");
+            }
+            if let Err(error) = runtime_cleanup {
+                eprintln!("fleet runtime cleanup after panic failed: {error}");
+            }
+            resume_unwind(panic)
+        }
+    }
+}
+
+/// INV-034: killing the daemon with a full fleet after every send leaves each model
+/// call ambiguous. Recovery must release local scheduler ownership while
+/// preserving every turn in the specification-mandated user-decision park.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut scheduler = None;
+    let scenario = AssertUnwindSafe(async {
+        let fleet = commission_fleet(&runtime).await?;
+        let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
+        let hanging_model = FleetScriptedModel::new(FleetModelCardinality {
+            hanging: FLEET_SESSION_COUNT,
+            completing: 0,
+        });
+        scheduler = Some(start_fleet_scheduler(&mut runtime, hanging_model.clone())?);
+        wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
+        let pre_kill_model_call_ids = census_repository.model_call_ids().await?;
+        assert_eq!(
+            pre_kill_model_call_ids.len(),
+            FLEET_SESSION_COUNT,
+            "pre-kill model-call cardinality mismatch"
+        );
+        abort_fleet_scheduler(
+            scheduler
+                .take()
+                .expect("the first fleet scheduler was installed"),
+        )
+        .await?;
+        wait_for_hangs(&hanging_model, 0).await?;
+        let _recovered = runtime.kill_and_restart().await?;
+        let replacement_model = FleetScriptedModel::new(FleetModelCardinality {
+            hanging: 0,
+            completing: FLEET_SESSION_COUNT,
+        });
+        let replacement_reconciliation = runtime.reconciliation_witness();
+        scheduler = Some(start_fleet_scheduler(
+            &mut runtime,
+            replacement_model.clone(),
+        )?);
+        wait_for_reconciliation(&replacement_reconciliation).await?;
+        let control_session = commission_fleet_control(&runtime).await?;
+        let control_model_call =
+            wait_for_model_call_for_session(&census_repository, control_session).await?;
+        wait_for_completed_call(&replacement_model, control_model_call).await?;
+        tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
+        let census = census_repository
+            .census_for(&pre_kill_model_call_ids)
+            .await?;
+        assert_eq!(
+            fleet.sessions.len(),
+            FLEET_SESSION_COUNT,
+            "fleet session cardinality mismatch"
+        );
+        assert_restarted_fleet_outcome(
+            census,
+            &hanging_model,
+            &replacement_model,
+            control_model_call,
+        )
+    })
+    .catch_unwind()
+    .await;
+
+    let scheduler_cleanup = match scheduler {
+        Some(scheduler) => abort_fleet_scheduler(scheduler).await,
+        None => Ok(()),
+    };
+    let runtime_cleanup = runtime.stop().await;
+    match scenario {
+        Ok(outcome) => {
+            scheduler_cleanup?;
+            runtime_cleanup?;
+            outcome
+        }
+        Err(panic) => {
+            if let Err(error) = scheduler_cleanup {
+                eprintln!("fleet scheduler cleanup after panic failed: {error}");
+            }
+            if let Err(error) = runtime_cleanup {
+                eprintln!("fleet runtime cleanup after panic failed: {error}");
+            }
+            resume_unwind(panic)
+        }
+    }
 }
 
 fn rendered_text_messages(
@@ -5005,7 +5907,7 @@ async fn authorize_issued_model_call(
 ) -> Result<
     (
         PostgresModelCallRepository,
-        signalbox_domain::AuthorizedModelCall,
+        Box<signalbox_domain::AuthorizedModelCall>,
         ModelCallId,
     ),
     Box<dyn Error>,
@@ -5044,7 +5946,7 @@ async fn authorize_issued_model_call(
     else {
         return Err(io::Error::other("the fixture call must authorize send").into());
     };
-    Ok((calls, *authorized, call))
+    Ok((calls, authorized, call))
 }
 
 /// Commits a confirm-classified tool round over the issued fixture call, so
@@ -5305,7 +6207,8 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
     let session_id = create_alias_session(&mut connection).await?;
     let (_, stopped_turn_id) =
         submit_first_input(&mut connection, session_id, String::from("first request")).await?;
-    let (_, _, issued_call) = authorize_issued_model_call(&runtime.pool, session_id).await?;
+    let (_, _, issued_call) =
+        Box::pin(authorize_issued_model_call(&runtime.pool, session_id)).await?;
     let first_stop_command = command()?;
 
     connection

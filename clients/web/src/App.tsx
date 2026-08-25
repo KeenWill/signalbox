@@ -1,5 +1,6 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import {
   type CommandContext,
@@ -16,6 +17,7 @@ import {
   ScenarioTransport,
   scenarios,
 } from './platform'
+import type { ProductRouteId } from './product'
 import { ScenarioNavigation } from './ScenarioNavigation'
 import { type SearchUsageRouteState, SearchUsageWorkbench } from './SearchUsage'
 import { type DiagnosticSnapshot, Diagnostics, OverlaySurfaces, Toolbar } from './Surfaces'
@@ -65,6 +67,7 @@ export function Workspace({
   route: SearchUsageRouteState
   onRouteChange: (patch: Partial<SearchUsageRouteState>) => void
 }) {
+  const navigate = useNavigate()
   const knownId = scenarios.some((scenario) => scenario.id === scenarioId)
     ? (scenarioId as ScenarioId)
     : 'streaming'
@@ -107,6 +110,11 @@ export function Workspace({
       dispatch,
       getState: store.getState,
       timelineIds,
+      navigate: (path) =>
+        void navigate({
+          to: '/$surface',
+          params: { surface: path.slice(1) as ProductRouteId },
+        }),
       focusTimeline: () => {
         const active = document.activeElement
         if (active instanceof HTMLElement) active.blur()
@@ -115,7 +123,7 @@ export function Workspace({
       searchAvailable: knownId === 'search-usage',
       focusSearch: () => document.querySelector<HTMLInputElement>('#lexical-search-input')?.focus(),
     }),
-    [dispatch, knownId, timelineIds],
+    [dispatch, knownId, navigate, timelineIds],
   )
   useCommandHotkeys(commandContext)
 
@@ -127,6 +135,13 @@ export function Workspace({
     document.documentElement.dataset.theme = app.theme
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
+
+  useEffect(() => {
+    document.title = `${transport.scenario.title} · Signalbox scenarios`
+    return () => {
+      document.title = 'Signalbox'
+    }
+  }, [transport.scenario.title])
 
   const snapshot = useMemo<DiagnosticSnapshot>(
     () => ({
@@ -244,7 +259,12 @@ export function Workspace({
             knownId === 'search-usage' ? 'primary-stack search-usage-stack' : 'primary-stack'
           }
         >
-          <Transcript key={`timeline-${knownId}`} items={timeline.items} context={commandContext} />
+          <Transcript
+            key={`timeline-${knownId}`}
+            items={timeline.items}
+            context={commandContext}
+            autoFocus
+          />
           {app.layout === 'workbench' && knownId === 'search-usage' && (
             <SearchUsageWorkbench
               source={searchUsageSource}

@@ -32,9 +32,10 @@ use signalbox_application::{
     SearchContentClass, SearchCursor, SearchPageLimit, SearchQuery, SearchResultSource,
     SearchScope, SearchStrategy, SearchText, SessionTimelineDescriptor, SessionTimelineEventKind,
     SessionTimelineWindow, TimelineAddress, TimelineContinuation, TimelineWindowAnchor,
-    TimelineWindowLimits, UsageAggregateGroup, UsageAggregateTokenAxes, UsageCallCursor,
-    UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPageLimit, UsageCallQuery,
-    UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageSelection, UsageTimeRange,
+    TimelineWindowLimits, UsageAggregateCompleteness, UsageAggregateGroup, UsageAggregateTokenAxes,
+    UsageCacheNormalization, UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder,
+    UsageCallPageLimit, UsageCallQuery, UsageInputTokenSemantics, UsageProvenance, UsageQuery,
+    UsageSelection, UsageTimeFromInclusive, UsageTimeRange, UsageTimeToExclusive,
     UsageTimestampMicros, UsageTokenAxes, UsageTokenPresence,
 };
 use signalbox_domain::{
@@ -603,11 +604,11 @@ async fn usage_summary(
     match repository.aggregate(query).await {
         Ok(report) => Json(WebUsageSummary {
             groups: report
-                .groups
-                .into_iter()
+                .groups()
+                .iter()
                 .map(|group| usage_aggregate_dto(group, &configuration))
                 .collect(),
-            truncated: report.truncated,
+            truncated: report.completeness() == UsageAggregateCompleteness::Truncated,
         })
         .into_response(),
         Err(error) => usage_repository_error(error),
@@ -664,11 +665,11 @@ async fn usage_calls(
     {
         Ok(page) => Json(WebUsageCallPage {
             calls: page
-                .calls
-                .into_iter()
+                .calls()
+                .iter()
                 .map(|call| usage_call_dto(call, &configuration))
                 .collect(),
-            continuation: page.next.map(|cursor| WebUsageCallCursor {
+            continuation: page.next().map(|cursor| WebUsageCallCursor {
                 recorded_at_micros: WebUsageTimestampMicros::from_application(
                     cursor.recorded_at.get(),
                 ),
@@ -692,7 +693,11 @@ fn parse_usage_query(
 ) -> Option<UsageQuery> {
     let from_inclusive = parse_optional(from_micros, parse_usage_timestamp)?;
     let to_exclusive = parse_optional(to_micros, parse_usage_timestamp)?;
-    let time = UsageTimeRange::new(from_inclusive, to_exclusive).ok()?;
+    let time = UsageTimeRange::new(
+        from_inclusive.map(UsageTimeFromInclusive),
+        to_exclusive.map(UsageTimeToExclusive),
+    )
+    .ok()?;
     let selection = UsageSelection {
         session: parse_optional(session_id, |value| {
             uuid::Uuid::parse_str(value).ok().map(SessionId::from_uuid)
@@ -785,39 +790,39 @@ fn usage_repository_error(error: UsageRepositoryError) -> Response {
 }
 
 fn usage_aggregate_dto(
-    group: UsageAggregateGroup,
+    group: &UsageAggregateGroup,
     configuration: &HubModelConfiguration,
 ) -> WebUsageAggregateGroup {
     WebUsageAggregateGroup {
-        call_kind: usage_call_kind_dto(group.key.call_kind),
-        model_id: web_uuid(group.key.model.identity().into_uuid()),
+        call_kind: usage_call_kind_dto(group.key().call_kind),
+        model_id: web_uuid(group.key().model.identity().into_uuid()),
         profile_id: signalbox_web_contract::WebUsageProfileId::from_bounded(
-            group.key.web_profile.clone(),
+            group.key().credential_profile.as_str().to_owned(),
         ),
-        provenance: usage_provenance_dto(group.key.provenance),
-        input_semantics: usage_input_semantics_dto(group.key.input_semantics),
+        provenance: usage_provenance_dto(group.key().provenance),
+        input_semantics: usage_input_semantics_dto(group.key().input_semantics),
         coverage: WebUsageTokenCoverage {
-            input: group.key.coverage.input == UsageTokenPresence::Present,
-            output: group.key.coverage.output == UsageTokenPresence::Present,
-            cache_creation_input: group.key.coverage.cache_creation_input
+            input: group.key().coverage.input == UsageTokenPresence::Present,
+            output: group.key().coverage.output == UsageTokenPresence::Present,
+            cache_creation_input: group.key().coverage.cache_creation_input
                 == UsageTokenPresence::Present,
-            cache_read_input: group.key.coverage.cache_read_input == UsageTokenPresence::Present,
+            cache_read_input: group.key().coverage.cache_read_input == UsageTokenPresence::Present,
         },
-        call_count: WebUsageCallCount::from_positive(group.call_count),
-        tokens: usage_aggregate_tokens_dto(group.tokens),
-        cost: usage_aggregate_cost_dto(configuration, &group),
+        call_count: WebUsageCallCount::from_positive(group.call_count()),
+        tokens: usage_aggregate_tokens_dto(group.tokens()),
+        cost: usage_aggregate_cost_dto(configuration, group),
     }
 }
 
-fn usage_call_dto(call: UsageCallEvidence, configuration: &HubModelConfiguration) -> WebUsageCall {
+fn usage_call_dto(call: &UsageCallEvidence, configuration: &HubModelConfiguration) -> WebUsageCall {
     WebUsageCall {
-        call_kind: usage_call_kind_dto(call.call_kind),
+        call_kind: usage_call_kind_dto(call.scope.call_kind()),
         call_id: web_uuid(call.call.into_uuid()),
         session_id: WebSessionId::from_uuid_bytes(*call.session.into_uuid().as_bytes()),
-        turn_id: call.turn.map(|turn| web_uuid(turn.into_uuid())),
+        turn_id: call.scope.turn().map(|turn| web_uuid(turn.into_uuid())),
         model_id: web_uuid(call.model.identity().into_uuid()),
         profile_id: signalbox_web_contract::WebUsageProfileId::from_bounded(
-            call.web_profile.clone(),
+            call.credential_profile.as_str().to_owned(),
         ),
         provenance: usage_provenance_dto(call.provenance),
         input_semantics: usage_input_semantics_dto(call.input_semantics),
@@ -826,7 +831,7 @@ fn usage_call_dto(call: UsageCallEvidence, configuration: &HubModelConfiguration
         cost: usage_cost_dto(
             configuration,
             call.model,
-            call.credential_profile.as_deref(),
+            call.credential_reference.as_deref(),
             call.input_semantics,
             call.tokens,
             true,
@@ -911,14 +916,15 @@ fn usage_aggregate_cost_dto(
     group: &UsageAggregateGroup,
 ) -> WebUsageCost {
     let unavailable = |reason| WebUsageCost::Unavailable { reason };
-    if group.tokens.input.is_none()
-        && group.tokens.output.is_none()
-        && group.tokens.cache_creation_input.is_none()
-        && group.tokens.cache_read_input.is_none()
+    let tokens = group.tokens();
+    if tokens.input.is_none()
+        && tokens.output.is_none()
+        && tokens.cache_creation_input.is_none()
+        && tokens.cache_read_input.is_none()
     {
         return unavailable(WebUsageCostUnavailableReason::NoTokenEvidence);
     }
-    let semantics = match group.key.input_semantics {
+    let semantics = match group.key().input_semantics {
         UsageInputTokenSemantics::Unknown => {
             return unavailable(WebUsageCostUnavailableReason::UnknownInputSemantics);
         }
@@ -926,20 +932,19 @@ fn usage_aggregate_cost_dto(
             ProcessModelCallInputTokenSemantics::CacheExclusive
         }
         UsageInputTokenSemantics::CacheInclusive => {
-            if group.tokens.output.is_none()
-                && group.tokens.cache_creation_input.is_none()
-                && group.tokens.cache_read_input.is_none()
+            if tokens.output.is_none()
+                && tokens.cache_creation_input.is_none()
+                && tokens.cache_read_input.is_none()
             {
                 return unavailable(WebUsageCostUnavailableReason::IncompleteCacheAxes);
             }
-            if group
-                .tokens
+            if tokens
                 .cache_creation_input
-                .zip(group.tokens.cache_read_input)
+                .zip(tokens.cache_read_input)
                 .is_some_and(|(creation, read)| {
                     creation
                         .checked_add(read)
-                        .is_none_or(|cache| group.tokens.input.is_some_and(|input| input < cache))
+                        .is_none_or(|cache| tokens.input.is_some_and(|input| input < cache))
                 })
             {
                 return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
@@ -947,23 +952,23 @@ fn usage_aggregate_cost_dto(
             ProcessModelCallInputTokenSemantics::CacheInclusive
         }
     };
-    if group.key.input_semantics == UsageInputTokenSemantics::CacheInclusive
-        && !group.cache_normalization_safe
+    if group.key().input_semantics == UsageInputTokenSemantics::CacheInclusive
+        && group.cache_normalization() == UsageCacheNormalization::Unsafe
     {
         return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
     }
-    let Some(credential_profile) = group.key.credential_profile.as_deref() else {
+    let Some(credential_reference) = group.key().credential_reference.as_deref() else {
         return unavailable(WebUsageCostUnavailableReason::ConfigurationUnavailable);
     };
     let Some(cost) = configuration.derive_usage_aggregate_cost(
-        group.key.model,
-        credential_profile,
+        group.key().model,
+        credential_reference,
         semantics,
         [
-            group.tokens.input,
-            group.tokens.output,
-            group.tokens.cache_creation_input,
-            group.tokens.cache_read_input,
+            tokens.input,
+            tokens.output,
+            tokens.cache_creation_input,
+            tokens.cache_read_input,
         ],
     ) else {
         return unavailable(WebUsageCostUnavailableReason::ConfigurationUnavailable);
@@ -1304,7 +1309,7 @@ pub fn deterministic_test_router() -> Router {
         .route("/mutate", post(deterministic_mutation))
         .route_layer(middleware::from_fn(validate_json_mutation));
     let api = Router::new()
-        .route("/bootstrap", get(contract_bootstrap))
+        .route("/bootstrap", get(deterministic_contract_bootstrap))
         .route("/test/read", get(deterministic_read))
         .route("/test/stream", get(deterministic_stream))
         .nest("/test", mutation)
@@ -1317,6 +1322,12 @@ pub fn deterministic_test_router() -> Router {
 
 async fn contract_bootstrap() -> Json<WebContractBootstrap> {
     Json(WebContractBootstrap::current())
+}
+
+async fn deterministic_contract_bootstrap() -> Json<WebContractBootstrap> {
+    let mut bootstrap = WebContractBootstrap::current();
+    bootstrap.capabilities.bounded_session_timeline = false;
+    Json(bootstrap)
 }
 
 fn deterministic_example() -> WebContractExample {
@@ -2264,6 +2275,84 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["kind"], "transport");
         assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    /// Drives a session read at the loopback gate and reports only the status.
+    ///
+    /// The query is deliberately malformed, which separates the gate from
+    /// everything behind it: `FORBIDDEN` means the gate rejected the
+    /// authority, while `BAD_REQUEST` comes from the handler and is therefore
+    /// reachable only once the gate has admitted the request.
+    async fn session_read_status_for_host(host: &str) -> StatusCode {
+        let request = Request::get(
+            "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?max_items=nope",
+        )
+        .header(header::HOST, host)
+        .body(Body::empty())
+        .expect("the request is valid");
+        production_router(None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn session_reads_admit_loopback_authorities_including_ip_literals() {
+        // `127.0.0.1` is the daemon's own DEFAULT_WEB_BIND_ADDRESS, so a
+        // regression that tightened this branch would 403 the default
+        // deployment. `[::1]` exercises the bracket strip that precedes the
+        // parse, and `127.5.6.7` covers the whole 127.0.0.0/8 loopback range
+        // rather than only the canonical address.
+        for host in [
+            "localhost",
+            "localhost:37231",
+            "LocalHost",
+            "127.0.0.1",
+            "127.0.0.1:37231",
+            "127.5.6.7",
+            "[::1]",
+            "[::1]:37231",
+        ] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::BAD_REQUEST,
+                "`{host}` is a loopback authority and must reach the handler",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_non_loopback_ip_literal_authorities() {
+        // Every authority here parses as an address, so `is_loopback` — not
+        // the `parse::<IpAddr>()` that already turns hostnames away — is what
+        // has to reject them. A regression that loosened the branch to accept
+        // any parseable address would expose session history to any host that
+        // can reach the port.
+        for host in [
+            "10.0.0.5",
+            "10.0.0.5:37231",
+            "192.168.1.20",
+            "[2001:db8::1]",
+            "[2001:db8::1]:37231",
+        ] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "`{host}` parses as a non-loopback address and must be rejected",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_authorities_that_are_neither_localhost_nor_literals() {
+        for host in ["attacker.example", "localhost.attacker.example"] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "`{host}` is neither localhost nor a loopback literal",
+            );
+        }
     }
 
     #[test]

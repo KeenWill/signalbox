@@ -428,8 +428,20 @@ pub struct WebSessionTimelineWindow {
     pub session_id: WebSessionId,
     pub items: Vec<WebSessionTimelineItem>,
     pub projected_structured_bytes: u32,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation_before: Option<WebTimelineAddress>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation_after: Option<WebTimelineAddress>,
+}
+
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
 }
 
 /// Closed browser-visible class of matched indexed content.
@@ -997,6 +1009,9 @@ struct GeneratedSchemas {
 pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContractError> {
     let mut search_page = schemars::schema_for!(WebSearchPage).to_value();
     search_page["properties"]["results"]["maxItems"] = json!(max_search_page_items());
+    let mut window = canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
+    make_property_nullable(&mut window, "continuation_before")?;
+    make_property_nullable(&mut window, "continuation_after")?;
     let schemas = GeneratedSchemas {
         bootstrap: canonical_schema(schemars::schema_for!(WebContractBootstrap).to_value()),
         example: canonical_schema(schemars::schema_for!(WebContractExample).to_value()),
@@ -1004,7 +1019,7 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         descriptor: canonical_schema(
             schemars::schema_for!(WebSessionTimelineDescriptor).to_value(),
         ),
-        window: canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value()),
+        window,
         search_page: canonical_schema(search_page),
         usage_summary: canonical_schema(schemars::schema_for!(WebUsageSummary).to_value()),
         usage_call_page: canonical_schema(schemars::schema_for!(WebUsageCallPage).to_value()),
@@ -1039,6 +1054,18 @@ fn canonical_schema(mut schema: Value) -> Value {
     // must not change checked-in artifacts.
     schema.sort_all_objects();
     schema
+}
+
+fn make_property_nullable(
+    schema: &mut Value,
+    property_name: &str,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(&format!("/properties/{property_name}"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let concrete = property.take();
+    *property = json!({ "anyOf": [concrete, { "type": "null" }] });
+    Ok(())
 }
 
 fn runtime_module(schemas: &GeneratedSchemas) -> Result<String, GenerateWebContractError> {

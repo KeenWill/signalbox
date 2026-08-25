@@ -4,8 +4,9 @@ use std::collections::BTreeMap;
 
 use crate::*;
 use signalbox_application::{
-    UsageAggregateReport, UsageCallEvidence, UsageCallOrder, UsageCallPage, UsageCallPageLimit,
-    UsageCallQuery, UsageProvenance, UsageQuery, UsageSelection, UsageTimeRange,
+    UsageAggregateCompleteness, UsageAggregateReport, UsageCacheNormalization, UsageCallEvidence,
+    UsageCallOrder, UsageCallPage, UsageCallPageLimit, UsageCallQuery, UsageProvenance, UsageQuery,
+    UsageSelection, UsageTimeFromInclusive, UsageTimeRange,
 };
 use signalbox_persistence::usage::UsageRepository;
 
@@ -135,12 +136,12 @@ fn aggregate_signature(
     report: &UsageAggregateReport,
 ) -> BTreeMap<(ProviderModelIdentity, UsageProvenance), (u64, Option<u128>)> {
     report
-        .groups
+        .groups()
         .iter()
         .map(|group| {
             (
-                (group.key.model.identity(), group.key.provenance),
-                (group.call_count, group.tokens.input),
+                (group.key().model.identity(), group.key().provenance),
+                (group.call_count(), group.tokens().input),
             )
         })
         .collect()
@@ -151,9 +152,9 @@ fn paged_evidence_signature(
     second: &UsageCallPage,
 ) -> BTreeMap<ModelCallId, (UsageProvenance, Option<u64>)> {
     first
-        .calls
+        .calls()
         .iter()
-        .chain(&second.calls)
+        .chain(second.calls())
         .map(|call| (call.call, (call.provenance, call.tokens.input)))
         .collect()
 }
@@ -197,18 +198,18 @@ async fn mixed_provenance_aggregates_reconcile_with_exact_paged_call_evidence()
     .await?;
     let repository = UsageRepository::new(pool.clone());
     let first_page = repository.calls(call_query(2, None)).await?;
-    let second_page = repository.calls(call_query(2, first_page.next)).await?;
+    let second_page = repository.calls(call_query(2, first_page.next())).await?;
     let report = repository.aggregate(all_usage_query()).await?;
     let all_calls = [
-        first_page.calls[0].clone(),
-        first_page.calls[1].clone(),
-        second_page.calls[0].clone(),
+        first_page.calls()[0].clone(),
+        first_page.calls()[1].clone(),
+        second_page.calls()[0].clone(),
     ];
 
-    assert_eq!(first_page.calls.len(), 2);
-    assert!(first_page.next.is_some());
-    assert_eq!(second_page.calls.len(), 1);
-    assert_eq!(second_page.next, None);
+    assert_eq!(first_page.calls().len(), 2);
+    assert!(first_page.next().is_some());
+    assert_eq!(second_page.calls().len(), 1);
+    assert_eq!(second_page.next(), None);
     assert_eq!(
         paged_evidence_signature(&first_page, &second_page),
         evidence_signature(&all_calls)
@@ -234,7 +235,7 @@ async fn mixed_provenance_aggregates_reconcile_with_exact_paged_call_evidence()
             ),
         ])
     );
-    assert!(!report.truncated);
+    assert_eq!(report.completeness(), UsageAggregateCompleteness::Complete);
 
     pool.close().await;
     drop(container);
@@ -269,9 +270,79 @@ async fn usage_exact_selection_filters_call_evidence() -> Result<(), Box<dyn Err
             after: None,
         })
         .await?;
-    assert_eq!(page.calls.len(), 1);
-    assert_eq!(page.calls[0].call, fixture.call);
-    assert_eq!(page.calls[0].tokens.output, Some(SELECTED_OUTPUT_TOKENS));
+    assert_eq!(page.calls().len(), 1);
+    assert_eq!(page.calls()[0].call, fixture.call);
+    assert_eq!(page.calls()[0].tokens.output, Some(SELECTED_OUTPUT_TOKENS));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn mismatched_session_and_turn_selection_reads_empty_bounded_evidence()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let owning = terminal_reported_usage_call(
+        &pool,
+        0x99_000,
+        ProviderReportedTokenUsage::unreported().with_output_tokens(Some(SELECTED_OUTPUT_TOKENS)),
+    )
+    .await?;
+    let foreign = terminal_reported_usage_call(
+        &pool,
+        0x9a_000,
+        ProviderReportedTokenUsage::unreported().with_output_tokens(Some(SELECTED_OUTPUT_TOKENS)),
+    )
+    .await?;
+    let repository = UsageRepository::new(pool.clone());
+    let mismatched_scope = UsageQuery {
+        time: UsageTimeRange::all(),
+        selection: UsageSelection {
+            session: Some(foreign.session),
+            turn: Some(owning.turn),
+            model: None,
+            provenance: None,
+            call_kind: None,
+        },
+    };
+    let mismatched_page = repository
+        .calls(UsageCallQuery {
+            scope: mismatched_scope,
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(1).expect("fixture page limit fits"),
+            after: None,
+        })
+        .await?;
+    let mismatched_report = repository.aggregate(mismatched_scope).await?;
+    let matched_page = repository
+        .calls(UsageCallQuery {
+            scope: UsageQuery {
+                time: UsageTimeRange::all(),
+                selection: UsageSelection {
+                    session: Some(owning.session),
+                    turn: Some(owning.turn),
+                    model: None,
+                    provenance: None,
+                    call_kind: None,
+                },
+            },
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(1).expect("fixture page limit fits"),
+            after: None,
+        })
+        .await?;
+
+    assert_eq!(mismatched_page.calls().to_vec(), Vec::new());
+    assert_eq!(mismatched_page.next(), None);
+    assert_eq!(mismatched_report.groups().to_vec(), Vec::new());
+    assert_eq!(
+        mismatched_report.completeness(),
+        UsageAggregateCompleteness::Complete
+    );
+    assert_eq!(matched_page.calls()[0].call, owning.call);
+    assert_eq!(matched_page.calls()[0].session, owning.session);
 
     pool.close().await;
     drop(container);
@@ -298,16 +369,16 @@ async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Bo
         })
         .await?;
     let next_microsecond =
-        signalbox_application::UsageTimestampMicros::new(page.calls[0].recorded_at.get() + 1)?;
+        signalbox_application::UsageTimestampMicros::new(page.calls()[0].recorded_at.get() + 1)?;
     let excluded = repository
         .aggregate(UsageQuery {
-            time: UsageTimeRange::new(Some(next_microsecond), None)?,
+            time: UsageTimeRange::new(Some(UsageTimeFromInclusive(next_microsecond)), None)?,
             selection: UsageSelection::all(),
         })
         .await?;
 
-    assert_eq!(page.calls[0].call, fixture.call);
-    assert_eq!(excluded.groups, Vec::new());
+    assert_eq!(page.calls()[0].call, fixture.call);
+    assert_eq!(excluded.groups().to_vec(), Vec::new());
 
     pool.close().await;
     drop(container);
@@ -361,8 +432,11 @@ async fn incomplete_cache_inclusive_aggregates_preserve_independent_axes()
         })
         .await?;
 
-    assert_eq!(report.groups.len(), 1);
-    assert!(report.groups[0].cache_normalization_safe);
+    assert_eq!(report.groups().len(), 1);
+    assert_eq!(
+        report.groups()[0].cache_normalization(),
+        UsageCacheNormalization::Unsafe
+    );
 
     pool.close().await;
     drop(container);
@@ -440,6 +514,210 @@ async fn usage_projection_has_combined_selection_indexes() -> Result<(), Box<dyn
     assert!(model_kind_index_definition.contains(
         "resolved_provider_model_identity_id, call_kind, recorded_at DESC, model_call_id DESC"
     ));
+    let session_model_provenance_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_session_model_provenance_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(session_model_provenance_index_definition.contains(
+        "session_id, resolved_provider_model_identity_id, usage_provenance_kind, \
+         recorded_at DESC, model_call_id DESC"
+    ));
+    let session_full_selection_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_session_model_provenance_kind_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(session_full_selection_index_definition.contains(
+        "session_id, resolved_provider_model_identity_id, usage_provenance_kind, \
+         call_kind, recorded_at DESC, model_call_id DESC"
+    ));
+    let turn_full_selection_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_turn_model_provenance_kind_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(turn_full_selection_index_definition.contains(
+        "turn_id, resolved_provider_model_identity_id, usage_provenance_kind, \
+         call_kind, recorded_at DESC, model_call_id DESC"
+    ));
+    let model_provenance_kind_index_definition: String = sqlx::query_scalar(
+        "SELECT indexdef FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND tablename = 'web_usage_call_projection'
+            AND indexname = 'web_usage_by_model_provenance_kind_recorded_call'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(model_provenance_kind_index_definition.contains(
+        "resolved_provider_model_identity_id, usage_provenance_kind, call_kind, \
+         recorded_at DESC, model_call_id DESC"
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_rejects_call_kind_contradicting_global_identity() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _repository, _authorized) =
+        authorize_checkpointed_model_call(&pool, 0x9c_000).await?;
+    let error = sqlx::query(
+        "INSERT INTO web_usage_call_projection (
+             model_call_id, call_kind, session_id, turn_id,
+             resolved_provider_model_identity_id, credential_profile_label,
+             usage_provenance_kind, usage_input_includes_cache_tokens
+         )
+         VALUES ($1, 'context_compaction', $2, NULL, $3, 'exact:guard-test', 'reported', true)",
+    )
+    .bind(fixture.call.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(0x9c_0f0))
+    .execute(&pool)
+    .await
+    .expect_err("contradicted call kind must be rejected");
+
+    assert!(error.to_string().contains("contradicts identity kind"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_rejects_ownership_contradicting_the_source_call() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let owning = terminal_reported_usage_call(
+        &pool,
+        0x9d_000,
+        ProviderReportedTokenUsage::unreported().with_output_tokens(Some(SELECTED_OUTPUT_TOKENS)),
+    )
+    .await?;
+    let foreign = terminal_reported_usage_call(
+        &pool,
+        0x9e_000,
+        ProviderReportedTokenUsage::unreported().with_output_tokens(Some(SELECTED_OUTPUT_TOKENS)),
+    )
+    .await?;
+    let error = sqlx::query(
+        "INSERT INTO web_usage_call_projection (
+             model_call_id, call_kind, session_id, turn_id,
+             resolved_provider_model_identity_id, credential_profile_label,
+             usage_provenance_kind, usage_input_includes_cache_tokens
+         )
+         VALUES ($1, 'model_call', $2, $3, $4, 'exact:guard-test', 'reported', false)",
+    )
+    .bind(owning.call.into_uuid())
+    .bind(foreign.session.into_uuid())
+    .bind(foreign.turn.into_uuid())
+    .bind(Uuid::from_u128(0x9d_0f0))
+    .execute(&pool)
+    .await
+    .expect_err("contradicted source ownership must be rejected");
+
+    assert!(error.to_string().contains("contradicts source session"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_rejects_rows_for_nonterminal_source_calls() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _repository, _authorized) =
+        authorize_checkpointed_model_call(&pool, 0xa1_000).await?;
+    let error = sqlx::query(
+        "INSERT INTO web_usage_call_projection (
+             model_call_id, call_kind, session_id, turn_id,
+             resolved_provider_model_identity_id, credential_profile_label,
+             usage_provenance_kind, usage_input_includes_cache_tokens
+         )
+         VALUES ($1, 'model_call', $2, $3, $4, 'exact:guard-test', 'reported', false)",
+    )
+    .bind(fixture.call.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(Uuid::from_u128(0xa1_0f0))
+    .execute(&pool)
+    .await
+    .expect_err("a projection for a nonterminal source call must be rejected");
+
+    assert!(error.to_string().contains("has no terminal source record"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_rejects_evidence_contradicting_the_source_call() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = terminal_reported_usage_call(
+        &pool,
+        0xa2_000,
+        ProviderReportedTokenUsage::unreported().with_output_tokens(Some(SELECTED_OUTPUT_TOKENS)),
+    )
+    .await?;
+    let error = sqlx::query(
+        "INSERT INTO web_usage_call_projection (
+             model_call_id, call_kind, session_id, turn_id,
+             resolved_provider_model_identity_id, credential_profile_label,
+             usage_provenance_kind, usage_input_includes_cache_tokens
+         )
+         VALUES ($1, 'model_call', $2, $3, $4, 'exact:fabricated', 'reported', false)",
+    )
+    .bind(fixture.call.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(Uuid::from_u128(0xa2_0f0))
+    .execute(&pool)
+    .await
+    .expect_err("fabricated projection evidence must be rejected");
+
+    assert!(
+        error
+            .to_string()
+            .contains("contradicts its terminal source record")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_timestamps_are_bounded_to_the_shared_representable_range()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let recorded_at_constraint: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid)
+           FROM pg_constraint
+          WHERE conrelid = 'web_usage_call_projection'::regclass
+            AND conname = 'web_usage_recorded_at_representable'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(recorded_at_constraint.contains("1970-01-01"));
+    assert!(recorded_at_constraint.contains("9999-12-31"));
 
     pool.close().await;
     drop(container);
@@ -460,6 +738,57 @@ async fn context_compaction_usage_axes_have_the_canonical_u64_ceiling() -> Resul
     .fetch_one(&pool)
     .await?;
     assert!(compaction_usage_constraint.contains("18446744073709551615"));
+    assert!(compaction_usage_constraint.contains("trunc(input_tokens)"));
+    assert!(compaction_usage_constraint.contains("trunc(output_tokens)"));
+    assert!(compaction_usage_constraint.contains("trunc(cache_read_input_tokens)"));
+    assert!(compaction_usage_constraint.contains("trunc(cache_creation_input_tokens)"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn context_compaction_usage_axes_stay_integral_at_the_column_type()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let input_scale: i32 = sqlx::query_scalar(
+        "SELECT numeric_scale FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'context_compaction_model_call'
+            AND column_name = 'input_tokens'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(input_scale, 0);
+    let output_scale: i32 = sqlx::query_scalar(
+        "SELECT numeric_scale FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'context_compaction_model_call'
+            AND column_name = 'output_tokens'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(output_scale, 0);
+    let cache_read_scale: i32 = sqlx::query_scalar(
+        "SELECT numeric_scale FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'context_compaction_model_call'
+            AND column_name = 'cache_read_input_tokens'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(cache_read_scale, 0);
+    let cache_creation_scale: i32 = sqlx::query_scalar(
+        "SELECT numeric_scale FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'context_compaction_model_call'
+            AND column_name = 'cache_creation_input_tokens'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(cache_creation_scale, 0);
 
     pool.close().await;
     drop(container);
@@ -732,13 +1061,13 @@ async fn usage_projection_retains_only_bounded_credential_identity() -> Result<(
     let page = repository.calls(call_query(1, None)).await?;
     let report = repository.aggregate(all_usage_query()).await?;
 
-    assert_eq!(page.calls[0].call, fixture.call);
+    assert_eq!(page.calls()[0].call, fixture.call);
     assert_eq!(
-        page.calls[0].credential_profile.as_deref(),
+        page.calls()[0].credential_reference.as_deref(),
         Some(model_credential_reference().as_str())
     );
     assert_eq!(
-        report.groups[0].key.credential_profile.as_deref(),
+        report.groups()[0].key().credential_reference.as_deref(),
         Some(model_credential_reference().as_str())
     );
 
@@ -799,13 +1128,18 @@ async fn usage_reads_reconstruct_a_mapped_reference_within_the_profile_ceiling()
     let page = repository.calls(call_query(1, None)).await?;
     let report = repository.aggregate(all_usage_query()).await?;
 
-    assert!(page.calls[0].web_profile.starts_with("mapped:"));
+    assert!(
+        page.calls()[0]
+            .credential_profile
+            .as_str()
+            .starts_with("mapped:")
+    );
     assert_eq!(
-        page.calls[0].credential_profile.as_deref(),
+        page.calls()[0].credential_reference.as_deref(),
         Some(reference.as_str())
     );
     assert_eq!(
-        report.groups[0].key.credential_profile.as_deref(),
+        report.groups()[0].key().credential_reference.as_deref(),
         Some(reference.as_str())
     );
 
@@ -828,9 +1162,14 @@ async fn usage_reads_report_an_over_ceiling_reference_instead_of_materializing_i
     let page = repository.calls(call_query(1, None)).await?;
     let report = repository.aggregate(all_usage_query()).await?;
 
-    assert!(page.calls[0].web_profile.starts_with("mapped:"));
-    assert_eq!(page.calls[0].credential_profile, None);
-    assert_eq!(report.groups[0].key.credential_profile, None);
+    assert!(
+        page.calls()[0]
+            .credential_profile
+            .as_str()
+            .starts_with("mapped:")
+    );
+    assert_eq!(page.calls()[0].credential_reference, None);
+    assert_eq!(report.groups()[0].key().credential_reference, None);
 
     pool.close().await;
     drop(container);
@@ -901,12 +1240,16 @@ async fn terminal_approval_judge_usage_enters_dedicated_call_evidence() -> Resul
         })
         .await?;
 
-    assert_eq!(page.calls.len(), 1);
-    assert_eq!(page.calls[0].call, judge_call);
-    assert_eq!(page.calls[0].tokens.input, Some(JUDGE_INPUT_TOKENS));
-    assert_eq!(page.calls[0].tokens.output, Some(JUDGE_OUTPUT_TOKENS));
-    assert_eq!(page.calls[0].tokens.cache_creation_input, None);
-    assert_eq!(page.calls[0].tokens.cache_read_input, None);
+    assert_eq!(page.calls().len(), 1);
+    assert_eq!(page.calls()[0].call, judge_call);
+    assert_eq!(
+        page.calls()[0].scope,
+        signalbox_application::UsageCallScope::ApprovalJudge(fixture.turn)
+    );
+    assert_eq!(page.calls()[0].tokens.input, Some(JUDGE_INPUT_TOKENS));
+    assert_eq!(page.calls()[0].tokens.output, Some(JUDGE_OUTPUT_TOKENS));
+    assert_eq!(page.calls()[0].tokens.cache_creation_input, None);
+    assert_eq!(page.calls()[0].tokens.cache_read_input, None);
 
     pool.close().await;
     drop(container);
@@ -961,13 +1304,16 @@ async fn terminal_context_compaction_usage_enters_session_level_call_evidence()
         })
         .await?;
 
-    assert_eq!(page.calls.len(), 1);
-    assert_eq!(page.calls[0].call.into_uuid(), compaction_call);
-    assert_eq!(page.calls[0].turn, None);
-    assert_eq!(page.calls[0].tokens.input, Some(17));
-    assert_eq!(page.calls[0].tokens.output, Some(5));
+    assert_eq!(page.calls().len(), 1);
+    assert_eq!(page.calls()[0].call.into_uuid(), compaction_call);
     assert_eq!(
-        page.calls[0].input_semantics,
+        page.calls()[0].scope,
+        signalbox_application::UsageCallScope::ContextCompaction
+    );
+    assert_eq!(page.calls()[0].tokens.input, Some(17));
+    assert_eq!(page.calls()[0].tokens.output, Some(5));
+    assert_eq!(
+        page.calls()[0].input_semantics,
         signalbox_application::UsageInputTokenSemantics::CacheInclusive
     );
 

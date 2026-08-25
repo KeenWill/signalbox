@@ -9,15 +9,19 @@ import {
   Outlet,
   RouterProvider,
 } from '@tanstack/react-router'
-import { StrictMode } from 'react'
+import { lazy, StrictMode, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
-import { Workspace } from './App'
+import { ProductApp } from './ProductApp'
+import { type ProductRouteId, productRoutes } from './product'
 import { defaultSearchUsageRouteState, type SearchUsageRouteState } from './SearchUsage'
-import { store } from './state'
+import { selectApp, store } from './state'
 import './app.css'
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> })
+const ScenarioWorkspace = lazy(() =>
+  import('./App').then((module) => ({ default: module.Workspace })),
+)
 
 const routeString = (value: unknown): string | undefined =>
   typeof value === 'string' ? value : undefined
@@ -60,9 +64,18 @@ const validateScenarioSearch = (
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
-  component: () => (
-    <Navigate to="/scenario/$scenarioId" params={{ scenarioId: 'streaming' }} replace />
-  ),
+  component: () => <Navigate to="/$surface" params={{ surface: 'attention' }} replace />,
+})
+const productRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/$surface',
+  component: () => {
+    const candidate = productRoute.useParams().surface
+    if (!productRoutes.some((route) => route.id === candidate)) {
+      return <Navigate to="/$surface" params={{ surface: 'attention' }} replace />
+    }
+    return <ProductApp surface={candidate as ProductRouteId} />
+  },
 })
 const scenarioRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -77,17 +90,21 @@ function ScenarioScreen() {
   const navigate = scenarioRoute.useNavigate()
   const route = { ...defaultSearchUsageRouteState, ...search }
   return (
-    <Workspace
-      key={scenarioId}
-      scenarioId={scenarioId}
-      route={route}
-      onRouteChange={(patch) =>
-        void navigate({ search: (previous) => ({ ...previous, ...patch }), replace: true })
-      }
-    />
+    <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
+      <ScenarioWorkspace
+        key={scenarioId}
+        scenarioId={scenarioId}
+        route={route}
+        onRouteChange={(patch) =>
+          void navigate({ search: (previous) => ({ ...previous, ...patch }), replace: true })
+        }
+      />
+    </Suspense>
   )
 }
-const router = createRouter({ routeTree: rootRoute.addChildren([indexRoute, scenarioRoute]) })
+const router = createRouter({
+  routeTree: rootRoute.addChildren([indexRoute, productRoute, scenarioRoute]),
+})
 // Tunable effective ceiling: retain recently visited scenario projections without growing the
 // development cache for the lifetime of the page.
 const QUERY_CACHE_GC_TIME_MS = 5 * 60_000
@@ -106,6 +123,10 @@ declare module '@tanstack/react-router' {
 
 const root = document.getElementById('root')
 if (!root) throw new Error('Missing web application root')
+
+const initialPresentation = selectApp(store.getState())
+document.documentElement.dataset.theme = initialPresentation.theme
+document.documentElement.dataset.density = initialPresentation.density
 
 createRoot(root).render(
   <StrictMode>
