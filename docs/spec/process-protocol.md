@@ -1314,29 +1314,38 @@ ordered session, whole-second held duration, and the independently failing
 release clauses. The origin is a tagged choice rather than a number that may be
 absent: a rule matching branch workflow-run completion holds its slot from a
 branch fact, which names a branch, and every other admitted origin names a pull
-request. A queued-obligation row carries obligation, rule, singleton, first and
-latest event, collapsed match count, whole-second wait duration, occupying
-dispatch and sessions, positive remaining cooldown when any, and the view's
-ready decision. The occupying dispatch is optional independently of the sessions
-it would name: a watch dispatch names its identity and its whole admitted
-session inventory, while an obligation blocked by an independently commissioned
-live session lists exactly that one session and no dispatch, because the
-obligation retains a single external blocker. Readiness is the view's whole
-decision — excluding a dispatch or external session holding the target, a parked
-obligation, and a spent attempt budget — narrowed only so that a cooldown
-expiring mid-read cannot report readiness alongside a positive remaining
-cooldown. An infinite eligibility timestamp is represented as a never-eligible
-cooldown rather than a numeric duration. A convergence row carries repository
-and pull request, head and base revisions, base branch, mergeable state, review
-decision, unresolved-thread and gating-check counts, sorted non-green check
-names, verdict, optional matching durable seal, and whole-second assessment age.
-Each non-green check name is canonical padded base64 of its exact UTF-8 bytes on
-the wire, keeping the complete admitted 10,000-name inventory below the frame
-cap even under worst-case JSON escaping. A pending-clearance row carries
-repository and pull request, current and reviewed heads, review identity,
-reviewer, and whole-second pending duration. Every duration is clamped
-nonnegative and sampled against the database transaction timestamp, not a client
-clock.
+request. A branch fact carries no pull request for a singleton to be keyed by,
+so a branch origin accompanies only the rule and repository scopes; the
+pull-request and stack scopes accompany only a pull-request origin. A
+queued-obligation row carries obligation, rule, singleton, first and latest
+event, collapsed match count, whole-second wait duration, occupying dispatch and
+sessions, positive remaining cooldown when any, and the view's ready decision.
+The occupying dispatch is optional independently of the sessions it would name:
+a watch dispatch names its identity and its whole admitted session inventory,
+while an obligation blocked by an independently commissioned live session lists
+exactly that one session and no dispatch, because the obligation retains a
+single external blocker. Readiness is the view's whole decision — excluding a
+dispatch or external session holding the target, a parked obligation, and a
+spent attempt budget — narrowed only so that a cooldown expiring mid-read cannot
+report readiness alongside a positive remaining cooldown. An infinite
+eligibility timestamp is represented as a never-eligible cooldown rather than a
+numeric duration. A convergence row carries repository and pull request, head
+and base revisions, base branch, mergeable state, review decision,
+unresolved-thread and gating-check counts, sorted non-green check names,
+verdict, optional matching durable seal, and whole-second assessment age. The
+verdict agrees with the evidence carried beside it: an assessment settles
+unconverged exactly when the pull request carries any blocker, so a converged
+verdict — internally converged or merge ready — carries no unresolved thread, no
+non-green check, a mergeable provider state, a positive gating-check count, and
+no requested change. Exactly one durable blocker, an unsettled provider
+snapshot, is not carried on the wire, so an unconverged verdict remains
+admissible beside wholly clean carried evidence. Each non-green check name is
+canonical padded base64 of its exact UTF-8 bytes on the wire, keeping the
+complete admitted 10,000-name inventory below the frame cap even under
+worst-case JSON escaping. A pending-clearance row carries repository and pull
+request, current and reviewed heads, review identity, reviewer, and whole-second
+pending duration. Every duration is clamped nonnegative and sampled against the
+database transaction timestamp, not a client clock.
 
 Identifiers are canonical UUID strings. Request identities, ordinal versions,
 indices, counts, and outbox cursors are canonical decimal strings, preserving

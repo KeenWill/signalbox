@@ -8184,7 +8184,7 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
             operator_status_text_is_valid(
                 &item.repository,
                 MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES,
-            ) && operator_status_held_slot_origin_is_valid(&item.origin)
+            ) && operator_status_held_slot_origin_is_valid(&item.origin, item.singleton_scope)
                 && operator_status_text_is_valid(
                     &item.rule_id,
                     MAX_OPERATOR_STATUS_RULE_ID_UTF8_BYTES,
@@ -8261,6 +8261,7 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
                     .non_green_gating_checks
                     .windows(2)
                     .all(|pair| pair[0] <= pair[1])
+                && operator_status_convergence_verdict_matches_evidence(item)
         }
         OperatorStatusMessage::PendingStaleReviewClearance(item) => {
             operator_status_text_is_valid(
@@ -8288,13 +8289,50 @@ fn validate_operator_status_message(message: &ServerMessage) -> Result<(), Frame
     }
 }
 
-fn operator_status_held_slot_origin_is_valid(origin: &OperatorStatusHeldSlotOrigin) -> bool {
+fn operator_status_held_slot_origin_is_valid(
+    origin: &OperatorStatusHeldSlotOrigin,
+    singleton_scope: OperatorStatusSingletonScope,
+) -> bool {
     match origin {
         OperatorStatusHeldSlotOrigin::PullRequest {
             pull_request_number,
         } => pull_request_number.value() > 0,
+        // A branch workflow-run completion names no pull request, so the
+        // singleton it takes can only be keyed by the rule or the repository.
+        // A pull-request- or stack-scoped hold would have to name a pull
+        // request the branch fact never carried, so the two fields are only
+        // separately admissible and must be validated together.
         OperatorStatusHeldSlotOrigin::Branch { branch } => {
             operator_status_text_is_valid(branch, MAX_OPERATOR_STATUS_BRANCH_UTF8_BYTES)
+                && matches!(
+                    singleton_scope,
+                    OperatorStatusSingletonScope::Rule | OperatorStatusSingletonScope::Repo
+                )
+        }
+    }
+}
+
+/// Holds the durable
+/// `repo_watch_convergence_verdict_matches_evidence` constraint on the wire.
+/// The stored assessment settles on the unconverged verdict exactly when the
+/// pull request carries at least one blocker, so either converged verdict
+/// contradicts every blocker the row carries beside it. Exactly one durable
+/// disjunct — the unsettled provider snapshot — is not carried on this wire, so
+/// the implication is only enforced in the direction the frame can prove: an
+/// unconverged verdict stays admissible against wholly clean carried evidence,
+/// while a converged verdict requires each carried condition to be clean.
+fn operator_status_convergence_verdict_matches_evidence(
+    item: &OperatorStatusPullRequestConvergenceMessage,
+) -> bool {
+    match item.verdict {
+        OperatorStatusConvergenceVerdict::NotConverged => true,
+        OperatorStatusConvergenceVerdict::InternallyConverged
+        | OperatorStatusConvergenceVerdict::MergeReady => {
+            item.unresolved_thread_count.value() == 0
+                && item.non_green_gating_checks.is_empty()
+                && item.mergeable_state == OperatorStatusMergeableState::Mergeable
+                && item.gating_check_count.value() > 0
+                && item.review_decision != OperatorStatusReviewDecision::ChangesRequested
         }
     }
 }
@@ -9958,11 +9996,20 @@ mod tests {
     }
 
     /// A rule matching branch workflow-run completion holds its singleton slot
-    /// from a branch fact, which names a branch and never a pull request.
+    /// from a branch fact, which names a branch and never a pull request. That
+    /// fact carries no pull request for a singleton to be keyed by, so a branch
+    /// origin admits only the rule and repository scopes. A pull-request- or
+    /// stack-scoped branch hold passes both field validators on its own yet
+    /// names a slot no branch workflow event could ever have taken, so the
+    /// origin and the singleton scope are validated together.
     #[test]
     fn operator_status_admits_a_branch_origin_held_slot() -> Result<(), Box<dyn std::error::Error>>
     {
-        let held = |origin| {
+        let held = |origin,
+                    singleton_scope,
+                    repository: Option<&str>,
+                    pull_request: Option<u64>,
+                    stack_root: Option<u64>| {
             ServerFrame::try_new(
                 request(1).expect("a valid request identity"),
                 ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
@@ -9972,10 +10019,10 @@ mod tests {
                         origin,
                         rule_id: String::from("review"),
                         rule_version: CanonicalU64::new(1),
-                        singleton_scope: OperatorStatusSingletonScope::Rule,
-                        singleton_repository: None,
-                        singleton_pull_request_number: None,
-                        singleton_stack_root_pull_request_number: None,
+                        singleton_scope,
+                        singleton_repository: repository.map(String::from),
+                        singleton_pull_request_number: pull_request.map(CanonicalU64::new),
+                        singleton_stack_root_pull_request_number: stack_root.map(CanonicalU64::new),
                         held_for_seconds: CanonicalU64::new(1),
                         session_ids: vec![uuid(3)],
                         blockers: Vec::new(),
@@ -9983,23 +10030,119 @@ mod tests {
                 )))),
             )
         };
+        let branch = || OperatorStatusHeldSlotOrigin::Branch {
+            branch: String::from("main"),
+        };
+        let pull_request = || OperatorStatusHeldSlotOrigin::PullRequest {
+            pull_request_number: CanonicalU64::new(41),
+        };
 
         assert!(
-            held(OperatorStatusHeldSlotOrigin::Branch {
-                branch: String::from("main"),
-            })
+            held(
+                branch(),
+                OperatorStatusSingletonScope::Rule,
+                None,
+                None,
+                None
+            )
+            .is_ok()
+        );
+        assert!(
+            held(
+                branch(),
+                OperatorStatusSingletonScope::Repo,
+                Some("example/repo"),
+                None,
+                None
+            )
             .is_ok()
         );
         assert_eq!(
-            held(OperatorStatusHeldSlotOrigin::Branch {
-                branch: String::new(),
-            }),
+            held(
+                branch(),
+                OperatorStatusSingletonScope::PullRequest,
+                Some("example/repo"),
+                Some(41),
+                None
+            ),
             Err(FrameValidationError::OperatorStatusShape)
         );
         assert_eq!(
-            held(OperatorStatusHeldSlotOrigin::PullRequest {
-                pull_request_number: CanonicalU64::new(0),
-            }),
+            held(
+                branch(),
+                OperatorStatusSingletonScope::Stack,
+                Some("example/repo"),
+                None,
+                Some(41)
+            ),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+
+        // Every admitted origin other than a branch fact names a pull request,
+        // which keys any of the four singleton scopes.
+        assert!(
+            held(
+                pull_request(),
+                OperatorStatusSingletonScope::PullRequest,
+                Some("example/repo"),
+                Some(41),
+                None
+            )
+            .is_ok()
+        );
+        assert!(
+            held(
+                pull_request(),
+                OperatorStatusSingletonScope::Stack,
+                Some("example/repo"),
+                None,
+                Some(41)
+            )
+            .is_ok()
+        );
+        assert!(
+            held(
+                pull_request(),
+                OperatorStatusSingletonScope::Rule,
+                None,
+                None,
+                None
+            )
+            .is_ok()
+        );
+        assert!(
+            held(
+                pull_request(),
+                OperatorStatusSingletonScope::Repo,
+                Some("example/repo"),
+                None,
+                None
+            )
+            .is_ok()
+        );
+
+        assert_eq!(
+            held(
+                OperatorStatusHeldSlotOrigin::Branch {
+                    branch: String::new(),
+                },
+                OperatorStatusSingletonScope::Rule,
+                None,
+                None,
+                None
+            ),
+            Err(FrameValidationError::OperatorStatusShape)
+        );
+        assert_eq!(
+            held(
+                OperatorStatusHeldSlotOrigin::PullRequest {
+                    pull_request_number: CanonicalU64::new(0),
+                },
+                OperatorStatusSingletonScope::Rule,
+                None,
+                None,
+                None
+            ),
             Err(FrameValidationError::OperatorStatusShape)
         );
         Ok(())
@@ -10030,6 +10173,202 @@ mod tests {
         );
 
         assert!(frame.is_ok());
+        Ok(())
+    }
+
+    /// A convergence row's verdict is settled by the evidence beside it. The
+    /// durable `repo_watch_convergence_verdict_matches_evidence` constraint
+    /// makes the unconverged verdict exactly the carried-blocker case, so
+    /// either converged verdict contradicts every blocker the row carries.
+    /// Exactly one durable blocker — the unsettled provider snapshot — does not
+    /// cross this wire, so an unconverged verdict stays admissible beside
+    /// wholly clean evidence while a converged verdict is refused by any
+    /// blocker beside it.
+    #[test]
+    fn operator_status_rejects_verdicts_contradicted_by_convergence_evidence()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let convergence = |verdict,
+                           mergeable_state,
+                           review_decision,
+                           unresolved_thread_count,
+                           gating_check_count,
+                           non_green_gating_checks: &[&str]| {
+            // The durable side keys the converged verdicts to the base branch
+            // as well, so each fixture names the branch its own verdict is
+            // sealed against.
+            let base_branch = match verdict {
+                OperatorStatusConvergenceVerdict::InternallyConverged => "release/1",
+                OperatorStatusConvergenceVerdict::NotConverged
+                | OperatorStatusConvergenceVerdict::MergeReady => "main",
+            };
+            ServerFrame::try_new(
+                request(1).expect("a valid request identity"),
+                ServerMessage::OperatorStatus(Box::new(
+                    OperatorStatusMessage::PullRequestConvergence(Box::new(
+                        OperatorStatusPullRequestConvergenceMessage {
+                            repository: String::from("example/repo"),
+                            pull_request_number: CanonicalU64::new(41),
+                            head_sha: String::from("1111111111111111111111111111111111111111"),
+                            base_branch: String::from(base_branch),
+                            base_revision: String::from("2222222222222222222222222222222222222222"),
+                            mergeable_state,
+                            review_decision,
+                            unresolved_thread_count: CanonicalU64::new(unresolved_thread_count),
+                            gating_check_count: CanonicalU64::new(gating_check_count),
+                            non_green_gating_checks: non_green_gating_checks
+                                .iter()
+                                .copied()
+                                .map(String::from)
+                                .collect(),
+                            verdict,
+                            seal: None,
+                            assessed_seconds_ago: CanonicalU64::new(1),
+                        },
+                    )),
+                )),
+            )
+        };
+        let converged_verdicts = [
+            OperatorStatusConvergenceVerdict::InternallyConverged,
+            OperatorStatusConvergenceVerdict::MergeReady,
+        ];
+
+        // Each converged verdict is admitted beside evidence that agrees with
+        // it: no unresolved thread, no non-green check, a mergeable provider
+        // state, at least one gating check, and no requested change.
+        for verdict in converged_verdicts {
+            assert!(
+                convergence(
+                    verdict,
+                    OperatorStatusMergeableState::Mergeable,
+                    OperatorStatusReviewDecision::Approved,
+                    0,
+                    2,
+                    &[],
+                )
+                .is_ok()
+            );
+        }
+
+        // One rejection per contradiction class: an empty gating inventory, an
+        // unresolved thread, a non-green check, each unmergeable provider
+        // state, and a requested change.
+        for verdict in converged_verdicts {
+            for (mergeable_state, review_decision, unresolved, gating_checks, non_green) in [
+                (
+                    OperatorStatusMergeableState::Mergeable,
+                    OperatorStatusReviewDecision::Approved,
+                    0,
+                    0,
+                    &[][..],
+                ),
+                (
+                    OperatorStatusMergeableState::Mergeable,
+                    OperatorStatusReviewDecision::Approved,
+                    1,
+                    2,
+                    &[],
+                ),
+                (
+                    OperatorStatusMergeableState::Mergeable,
+                    OperatorStatusReviewDecision::Approved,
+                    0,
+                    2,
+                    &["rust-checks"],
+                ),
+                (
+                    OperatorStatusMergeableState::Conflicting,
+                    OperatorStatusReviewDecision::Approved,
+                    0,
+                    2,
+                    &[],
+                ),
+                (
+                    OperatorStatusMergeableState::Unknown,
+                    OperatorStatusReviewDecision::Approved,
+                    0,
+                    2,
+                    &[],
+                ),
+                (
+                    OperatorStatusMergeableState::Mergeable,
+                    OperatorStatusReviewDecision::ChangesRequested,
+                    0,
+                    2,
+                    &[],
+                ),
+            ] {
+                assert_eq!(
+                    convergence(
+                        verdict,
+                        mergeable_state,
+                        review_decision,
+                        unresolved,
+                        gating_checks,
+                        non_green,
+                    ),
+                    Err(FrameValidationError::OperatorStatusShape)
+                );
+            }
+        }
+
+        // A review still awaiting its first decision blocks neither converged
+        // verdict, since only a requested change is a durable blocker.
+        for verdict in converged_verdicts {
+            for review_decision in [
+                OperatorStatusReviewDecision::None,
+                OperatorStatusReviewDecision::ReviewRequired,
+            ] {
+                assert!(
+                    convergence(
+                        verdict,
+                        OperatorStatusMergeableState::Mergeable,
+                        review_decision,
+                        0,
+                        2,
+                        &[],
+                    )
+                    .is_ok()
+                );
+            }
+        }
+
+        // The unconverged verdict carries its own blockers freely and stays
+        // admissible beside wholly clean evidence, because the unsettled
+        // provider snapshot that alone justifies it never crosses this wire.
+        assert!(
+            convergence(
+                OperatorStatusConvergenceVerdict::NotConverged,
+                OperatorStatusMergeableState::Mergeable,
+                OperatorStatusReviewDecision::Approved,
+                0,
+                2,
+                &[],
+            )
+            .is_ok()
+        );
+        assert!(
+            convergence(
+                OperatorStatusConvergenceVerdict::NotConverged,
+                OperatorStatusMergeableState::Conflicting,
+                OperatorStatusReviewDecision::ChangesRequested,
+                3,
+                2,
+                &["rust-checks"],
+            )
+            .is_ok()
+        );
+        assert!(
+            convergence(
+                OperatorStatusConvergenceVerdict::NotConverged,
+                OperatorStatusMergeableState::Mergeable,
+                OperatorStatusReviewDecision::Approved,
+                0,
+                0,
+                &[],
+            )
+            .is_ok()
+        );
         Ok(())
     }
 
