@@ -3947,7 +3947,7 @@ mod tests {
             local_offset: 0,
         };
 
-        let result = read_probe_local_header(&source, &NeverCancelled, &entry).await;
+        let result = read_probe_local_header(&source, &NeverCancelled, &entry, &mut 0).await;
 
         assert!(matches!(
             result,
@@ -4025,6 +4025,7 @@ mod tests {
             }],
             kinds: vec![OfficeKind::Docx],
             encrypted: false,
+            examined_bytes: 0,
         };
 
         let result = read_probe_entry(
@@ -4033,6 +4034,7 @@ mod tests {
             &inventory,
             CONTENT_TYPES,
             CONTENT_TYPES_COMPRESSED_BYTES,
+            &mut 0,
         )
         .await;
 
@@ -4058,6 +4060,7 @@ mod tests {
             }],
             kinds: vec![OfficeKind::Docx],
             encrypted: true,
+            examined_bytes: 0,
         };
 
         let entry = inventory
@@ -4215,11 +4218,12 @@ mod tests {
             entries_by_name: vec![entry],
             kinds: vec![OfficeKind::Docx],
             encrypted: false,
+            examined_bytes: 0,
         };
 
         let truncated = BytesSource(header.clone());
         assert!(
-            validate_selected_probe_entries(&truncated, &NeverCancelled, &inventory)
+            validate_selected_probe_entries(&truncated, &NeverCancelled, &inventory, &mut 0)
                 .await
                 .is_err()
         );
@@ -4228,7 +4232,7 @@ mod tests {
         complete_bytes.extend_from_slice(&[0_u8; 64]);
         let complete = BytesSource(complete_bytes);
         assert!(
-            validate_selected_probe_entries(&complete, &NeverCancelled, &inventory)
+            validate_selected_probe_entries(&complete, &NeverCancelled, &inventory, &mut 0)
                 .await
                 .is_ok()
         );

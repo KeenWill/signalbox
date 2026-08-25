@@ -365,6 +365,7 @@ impl FileMediaProcessor for SelectionProcessor {
                 SelectionProbe::ProvisionalStructural => ProcessorProbeOutput::Candidate {
                     media_type: String::from(SYNTHETIC_MEDIA_TYPE),
                     strength: ProbeStrength::ProvisionalStructuralCandidate,
+                    evidence_bytes: 4,
                 },
                 SelectionProbe::Structural => ProcessorProbeOutput::Candidate {
                     media_type: String::from(SYNTHETIC_MEDIA_TYPE),
@@ -453,6 +454,7 @@ impl FileMediaProcessor for ProvisionalCollisionProcessor {
             Ok(ProcessorProbeOutput::Candidate {
                 media_type: String::from(media_type),
                 strength: ProbeStrength::ProvisionalStructuralCandidate,
+                evidence_bytes: 4,
             })
         })
     }
