@@ -482,7 +482,9 @@ type WebTimelineToolAttemptEvidence = {
   readonly cause?: WebTimelineToolFailureCause | null;
   readonly effect_posture: WebTimelineToolEffectPosture;
   readonly failure?: WebTimelineTextExcerpt | null;
+  readonly failure_present: boolean;
   readonly result?: WebTimelineTextExcerpt | null;
+  readonly result_present: boolean;
   readonly sandbox_posture?: WebTimelineToolSandboxPosture | null;
   readonly state: WebTimelineToolState;
   readonly type: "physical_attempt";

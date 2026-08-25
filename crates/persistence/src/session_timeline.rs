@@ -1275,8 +1275,11 @@ async fn load_goal_turn_event(
             )
         })
         .transpose()?;
+    // A textless retiring event is a legitimate stored shape, so a
+    // caller-supplied `goal_text` cursor naming it is an inapplicable query,
+    // not stored corruption.
     if text.is_none() && cursor.is_some_and(|cursor| !is_item_start_cursor(cursor)) {
-        return Err(SessionTimelineCorruption::InvalidDetailCursor.into());
+        return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
     }
     let generation = nonnegative(row.try_get("generation")?, "goal generation")?;
     let event_kind: String = row.try_get("event_kind")?;
@@ -1510,6 +1513,8 @@ async fn project_tool_batch(
                 .then_some(excerpt.clone()),
             result: (requested_field == TimelineBodyField::ToolResult).then_some(excerpt.clone()),
             failure: (requested_field == TimelineBodyField::ToolFailure).then_some(excerpt),
+            has_result,
+            has_failure,
             operator_required: approval_judge_escalated
                 || approval_posture == TimelineToolApprovalPosture::Human,
             approval_posture,

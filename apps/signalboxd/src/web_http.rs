@@ -1642,6 +1642,8 @@ fn tool_attempt_dto(
                 attempt_id: web_uuid(attempt_id.into_uuid()),
                 result: attempt.result.map(text_excerpt_dto),
                 failure: attempt.failure.map(text_excerpt_dto),
+                result_present: attempt.has_result,
+                failure_present: attempt.has_failure,
                 effect_posture: match effect_posture {
                     TimelineToolEffectPosture::EffectFree => {
                         WebTimelineToolEffectPosture::EffectFree

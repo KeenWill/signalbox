@@ -2463,6 +2463,10 @@ const schemas = {
                   }
                 ]
               },
+              "failure_present": {
+                "description": "Whether the frozen transition snapshot recorded a failure payload,\nindependent of which single field this page projected.",
+                "type": "boolean"
+              },
               "result": {
                 "anyOf": [
                   {
@@ -2472,6 +2476,10 @@ const schemas = {
                     "type": "null"
                   }
                 ]
+              },
+              "result_present": {
+                "description": "Whether the frozen transition snapshot recorded a result payload,\nindependent of which single field this page projected.",
+                "type": "boolean"
               },
               "sandbox_posture": {
                 "anyOf": [
@@ -2494,6 +2502,8 @@ const schemas = {
             "required": [
               "type",
               "attempt_id",
+              "result_present",
+              "failure_present",
               "effect_posture",
               "state"
             ],
@@ -3043,9 +3053,9 @@ function pageToolContinuation(value, address, field, memberIndex, tool) {
   const sameMemberField =
     physical === null
       ? null
-      : physical.state === "completed"
+      : physical.state === "completed" && physical.result_present
         ? "tool_result"
-        : physical.state === "known_failed"
+        : physical.state === "known_failed" && physical.failure_present
           ? "tool_failure"
           : null;
   const sameMember = continuation.member_index === memberIndex;
@@ -3336,6 +3346,38 @@ function assertTimelineDetailPage(value) {
           }
           if (physical !== null) {
             const terminalFailure = physical.state === "known_failed";
+            if (physical.result_present && physical.state !== "completed") {
+              fail(
+                `${path}.body.tools[0].evidence.result_present`,
+                "set only for a completed attempt",
+              );
+            }
+            if (physical.failure_present && !terminalFailure) {
+              fail(
+                `${path}.body.tools[0].evidence.failure_present`,
+                "set only for a known_failed attempt",
+              );
+            }
+            if (
+              physical.result !== undefined &&
+              physical.result !== null &&
+              !physical.result_present
+            ) {
+              fail(
+                `${path}.body.tools[0].evidence.result_present`,
+                "set when the result payload is projected",
+              );
+            }
+            if (
+              physical.failure !== undefined &&
+              physical.failure !== null &&
+              !physical.failure_present
+            ) {
+              fail(
+                `${path}.body.tools[0].evidence.failure_present`,
+                "set when the failure payload is projected",
+              );
+            }
             if ((physical.cause !== undefined && physical.cause !== null) !== terminalFailure) {
               fail(
                 `${path}.body.tools[0].evidence.cause`,

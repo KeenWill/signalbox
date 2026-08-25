@@ -589,6 +589,52 @@ async fn input_detail_rejects_a_header_beyond_the_allocator() -> Result<(), Box<
     Ok(())
 }
 
+/// A caller-supplied `goal_text` cursor naming a textless retiring goal event
+/// is an inapplicable query answered as such, not stored corruption.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn textless_goal_retirement_cursor_is_an_invalid_query() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let identity = session(0x99d);
+    create_session(&pool, identity).await?;
+    commission_fixture_session_goal(&pool, identity, 0x0009_9d00).await?;
+    stop_fixture_session_goal(&pool, identity, 0x0009_9d40).await?;
+    let sequence: i64 = sqlx::query_scalar(
+        "SELECT event_sequence::bigint
+           FROM goal_turn_retired_outbox_event
+          WHERE session_id = $1",
+    )
+    .bind(identity.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let address = TimelineAddress::new(
+        NonZeroU64::new(u64::try_from(sequence)?).expect("outbox sequence is positive"),
+    );
+    let limits = TimelineDetailLimits::new(1, 256).expect("fixture limits are bounded");
+    let error = SessionTimelineRepository::new(pool.clone())
+        .read_item_details(
+            identity,
+            address,
+            Some(TimelineDetailCursor {
+                address,
+                field: Some(TimelineBodyField::GoalText),
+                member_index: 0,
+                offset_bytes: 1,
+            }),
+            limits,
+        )
+        .await
+        .expect_err("a textless retirement has no goal text to continue");
+    assert!(matches!(
+        error,
+        SessionTimelineRepositoryError::InvalidDetailQuery
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegation_detail_validates_body_shape_without_projecting_body_text()

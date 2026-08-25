@@ -142,6 +142,8 @@ describe('generated timeline detail decoder', () => {
                 evidence: {
                   type: 'physical_attempt',
                   attempt_id: '00000000-0000-0000-0000-000000000005',
+                  result_present: false,
+                  failure_present: false,
                   effect_posture: 'effect_free',
                   state: 'known_failed',
                   cause: 'invalid_arguments',
@@ -303,6 +305,8 @@ describe('generated timeline detail decoder', () => {
                 evidence: {
                   type: 'physical_attempt',
                   attempt_id: '00000000-0000-0000-0000-000000000005',
+                  result_present: false,
+                  failure_present: false,
                   effect_posture: 'external_effect',
                   state: 'awaiting_child',
                 },
@@ -1092,6 +1096,8 @@ describe('generated timeline detail decoder', () => {
       {
         type: 'physical_attempt',
         attempt_id: '00000000-0000-0000-0000-000000000005',
+        result_present: true,
+        failure_present: false,
         effect_posture: 'effect_free',
         state: 'completed',
       },
@@ -1112,6 +1118,8 @@ describe('generated timeline detail decoder', () => {
       {
         type: 'physical_attempt',
         attempt_id: '00000000-0000-0000-0000-000000000005',
+        result_present: true,
+        failure_present: false,
         effect_posture: 'effect_free',
         state: 'completed',
       },
@@ -1126,6 +1134,8 @@ describe('generated timeline detail decoder', () => {
       {
         type: 'physical_attempt',
         attempt_id: '00000000-0000-0000-0000-000000000005',
+        result_present: false,
+        failure_present: false,
         effect_posture: 'effect_free',
         state: 'prepared',
       },
@@ -1998,6 +2008,8 @@ describe('generated timeline detail decoder', () => {
             evidence: {
               type: 'physical_attempt',
               attempt_id: '00000000-0000-0000-0000-000000000005',
+              result_present: false,
+              failure_present: true,
               failure: {
                 text: 'boom',
                 offset_bytes: '0',
@@ -2049,6 +2061,8 @@ describe('generated timeline detail decoder', () => {
             evidence: {
               type: 'physical_attempt',
               attempt_id: '00000000-0000-0000-0000-000000000005',
+              result_present: true,
+              failure_present: false,
               result: {
                 text: 'done',
                 offset_bytes: '0',
@@ -2064,5 +2078,39 @@ describe('generated timeline detail decoder', () => {
       },
       'ambiguous for the recovery target attempt',
     )
+  })
+
+  it('rejects a failure continuation for a detail-less known failure', () => {
+    const page = completedArgumentsToolBatchPage(
+      {
+        type: 'physical_attempt',
+        attempt_id: '00000000-0000-0000-0000-000000000005',
+        result_present: false,
+        failure_present: false,
+        effect_posture: 'effect_free',
+        state: 'known_failed',
+        cause: 'execution_failed',
+      },
+      'tool_failure',
+    )
+
+    expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow('the excerpt body continuation')
+  })
+
+  it('accepts a failure continuation when the snapshot recorded a detail', () => {
+    const page = completedArgumentsToolBatchPage(
+      {
+        type: 'physical_attempt',
+        attempt_id: '00000000-0000-0000-0000-000000000005',
+        result_present: false,
+        failure_present: true,
+        effect_posture: 'effect_free',
+        state: 'known_failed',
+        cause: 'execution_failed',
+      },
+      'tool_failure',
+    )
+
+    expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
   })
 })
