@@ -104,7 +104,10 @@ describe('SameOriginProductTransport', () => {
           new Response(
             JSON.stringify({
               ...bootstrapFixture,
-              contract: { ...bootstrapFixture.contract, version: '2' },
+              contract: {
+                ...bootstrapFixture.contract,
+                version: `${bootstrapFixture.contract.version}-unsupported`,
+              },
             }),
           ),
       ),
@@ -442,7 +445,7 @@ describe('SameOriginProductTransport', () => {
         maxItems: 1,
         maxSnippetBytes: 512,
       }),
-    ).rejects.toThrow('session_id must be a string matching')
+    ).rejects.toThrow('session_id must be matching')
   })
 
   it('rejects a malformed typed source UUID', async () => {
