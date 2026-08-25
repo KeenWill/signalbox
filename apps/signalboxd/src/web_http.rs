@@ -1000,8 +1000,8 @@ async fn serve_blob(
         return not_modified_response(&etag);
     }
     let total = entry.expected().byte_length();
-    let requested_range = match single_range_header(request.headers()) {
-        Ok(range) => range.filter(|_| if_range_matches(request.headers(), &etag)),
+    let requested_range = match applicable_range_header(request.headers(), &etag) {
+        Ok(range) => range,
         Err(()) => return range_not_satisfiable(total, &etag),
     };
     let (offset, length, partial) = match requested_range {
@@ -1022,24 +1022,27 @@ async fn serve_blob(
         }
     };
     let method = request.method().clone();
+    // A head response owes the same status as the equivalent `GET`, so read
+    // admission covers both methods. The head response then releases its permit
+    // at once, because it never opens a replica or streams blob bytes.
+    let Some(streamed_length) = NonZeroU64::new(length) else {
+        return range_not_satisfiable(total, &etag);
+    };
+    let Some(permit) = try_acquire_web_blob_read_permit(Arc::clone(&state.blob_read_budget)) else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "blob_read_busy",
+            "blob read capacity is busy",
+        );
+    };
     let body = if method == Method::HEAD {
+        drop(permit);
         Body::empty()
     } else {
-        let Some(length) = NonZeroU64::new(length) else {
-            return range_not_satisfiable(total, &etag);
-        };
-        let Some(permit) = try_acquire_web_blob_read_permit(Arc::clone(&state.blob_read_budget))
-        else {
-            return application_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "blob_read_busy",
-                "blob read capacity is busy",
-            );
-        };
         let deadline = Instant::now() + Duration::from_secs(BLOB_RESPONSE_TIMEOUT_SECONDS);
         let opened = timeout_at(deadline, async {
-            if length.get() <= MAX_BLOB_RANGE_BYTES {
-                open_recorded_blob_range(runtime.registry(), &entry, offset, length).await
+            if streamed_length.get() <= MAX_BLOB_RANGE_BYTES {
+                open_recorded_blob_range(runtime.registry(), &entry, offset, streamed_length).await
             } else {
                 let mut reader = open_recorded_blob_verified(runtime.registry(), &entry).await?;
                 let skipped =
@@ -1062,7 +1065,7 @@ async fn serve_blob(
                 );
             }
         };
-        reader_body_until(reader, length.get(), permit, deadline)
+        reader_body_until(reader, streamed_length.get(), permit, deadline)
     };
     let mut response = Response::new(body);
     *response.status_mut() = if partial {
@@ -1164,6 +1167,23 @@ fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
         return Err(());
     }
     value.parse().map_err(|_| ())
+}
+
+/// Reports the `Range` field a blob response applies, once `If-Range` has decided.
+///
+/// A failed `If-Range` condition makes the whole `Range` field inapplicable, so
+/// the condition is evaluated before the field is validated. A field this
+/// endpoint would otherwise reject — repeated occurrences included — is then
+/// ignored and the full representation is served, rather than answered with
+/// `416`; `Err` is reserved for a rejectable field the condition admitted.
+fn applicable_range_header<'headers>(
+    headers: &'headers HeaderMap,
+    etag: &str,
+) -> Result<Option<&'headers HeaderValue>, ()> {
+    if !if_range_matches(headers, etag) {
+        return Ok(None);
+    }
+    single_range_header(headers)
 }
 
 fn single_range_header(headers: &HeaderMap) -> Result<Option<&HeaderValue>, ()> {
@@ -1868,6 +1888,69 @@ mod tests {
         );
 
         assert!(!super::if_range_matches(&headers, "\"matching\""));
+    }
+
+    #[test]
+    fn a_failed_if_range_condition_ignores_repeated_range_fields() {
+        // Repeated `Range` fields are rejectable on their own, but a failed
+        // `If-Range` makes the field inapplicable before that rejection can
+        // apply, so the response owes the full representation rather than
+        // `416`.
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"other\""),
+        );
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=2-3"));
+
+        assert_eq!(
+            super::applicable_range_header(&headers, "\"matching\""),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_matching_if_range_condition_still_rejects_repeated_range_fields() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"matching\""),
+        );
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=2-3"));
+
+        assert_eq!(
+            super::applicable_range_header(&headers, "\"matching\""),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn an_absent_if_range_condition_still_rejects_repeated_range_fields() {
+        let mut headers = header::HeaderMap::new();
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=2-3"));
+
+        assert_eq!(
+            super::applicable_range_header(&headers, "\"matching\""),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn a_matching_if_range_condition_applies_its_single_range_field() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"matching\""),
+        );
+        headers.insert(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+
+        assert_eq!(
+            super::applicable_range_header(&headers, "\"matching\""),
+            Ok(Some(&header::HeaderValue::from_static("bytes=0-1")))
+        );
     }
 
     #[test]
