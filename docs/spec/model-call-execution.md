@@ -1,5 +1,8 @@
 # Model-call execution
 
+The daemon-owned terminal treatment of a restart-ambiguous model call is
+verified against this PR (`agent/turn-lifecycle-hardening`).
+
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
@@ -56,9 +59,9 @@ automatic machinery. Session-delegation semantic rendering and its
 provider-neutral bridge were verified against this PR (`agent/delegation`). The
 runner-placement rendering and executable session-tool snapshot paragraphs are
 the foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests. Availability successor calls are
-the foundation proposal at the bottom of their implementing stack and become
-verified only with its child pull requests. Invariant tags cite
+verified only with those child pull requests. Availability successor calls and
+their durable provider-directed backoff are verified against this PR
+(`agent/multi-account-pools`). Invariant tags cite
 [docs/invariants.md](../invariants.md).
 
 ## Call records and lifecycle
@@ -727,34 +730,21 @@ provider cause, because no provider request was issued for it to have observed.
 A parked turn carries no terminal evidence at all: it has not terminalized, and
 is not one of this page's terminal outcomes.
 
-**Committed unimplemented functionality — pre-call pool-exhaustion failure.** No
-present domain transition, repository shape, or process event can produce this
-failure. Its implementing child must add the sealed
-`CredentialPoolExhaustedFailure` value carrying the immutable pool-policy
-identity and a complete nonempty evidence list in policy-member order. Each
-member item carries the profile reference, the one closed exclusion kind
-(`profile_quarantine`, `membership_exclusion`, `session_displacement`, or
-`chain_exclusion`), its durable record generation or predecessor-observation
-correlation, and its optional reset. A member covered by several at once selects
-one kind by the widest-scope-first precedence, and reports a reset only when
-every exclusion then active for it is of a kind that *expires* at the reset it
-reports — and then the latest of them — exactly as
+**Implemented behavior — typed pool exhaustion.** A sealed
+`CredentialPoolExhaustedModelCallTurn` carries the pool identity separately from
+the ordinary failed-turn projection. The guarded transition requires an active
+turn whose current attempt has no model call, ends that attempt `KnownFailure`,
+terminalizes the turn `Failed`, and appends the ordinary `TurnFailed { turn }`
+marker. Post-failure exhaustion instead preserves the last member's terminal
+provider evidence while returning a distinct pool-exhausted application outcome.
+Both forms are durable and cannot be reconstructed as a single account failure.
+
+**Committed unimplemented functionality — process-level exclusion evidence.**
+The richer process event at
 [process protocol](process-protocol.md#credential-pool-preparation-failure)
-requires. Reporting a reset is not sufficient, because a displacement or a
-quarantine can carry one while clearing only by another preparation or an
-operator command. It carries no provider prose or credential value. The guarded
-transition requires an active turn whose current attempt has no model call, ends
-that attempt `KnownFailure`, terminalizes the turn `Failed`, appends the
-ordinary `TurnFailed { turn }` marker to that attempt's source frontier, and
-atomically emits the typed preparation-failure event owned by
-[process protocol](process-protocol.md#credential-pool-preparation-failure).
-Partial evidence, a member outside the frozen policy, duplicate or reordered
-members, or a correlation that did not supply active exclusion evidence in the
-atomic failure commit fails closed. A later authorized clear leaves that
-historical correlation valid: reconstitution validates the retained generation
-or predecessor observation and its active-at-failure fact, not its current
-active state. Persistence owns the corresponding all-or-nothing representation
-below.
+remains absent. Its implementing child adds the complete nonempty evidence list
+in policy-member order, including exclusion generation or predecessor
+correlation and optional reset, without changing the typed domain cause above.
 
 The same child adds the selecting immutable pool-policy identity to every
 pool-selected `Prepared` call as an insert-only authorization fact beside its
@@ -956,6 +946,12 @@ persistence commits it atomically with its outbox rows
   its ended attempt remains the original `WithoutStop(Ambiguous|Lost)` evidence.
   The exact later interrupt proof is carried by the turn's reconciliation marker
   and correlated accepted successor instead of rewriting that evidence.
+  Independently, the turn-liveness runtime can spend one durably claimed
+  automatic recovery attempt on an unstopped wait. After revalidating that the
+  exact call and ended attempt still own it, the aggregate uses
+  `AutomaticModelCallRecovery { attempt }` as its typed reason and commits the
+  same equal-content frontier and reconciliation outbox record. This treatment
+  does not claim a provider result; the call remains terminal `Ambiguous`.
 
 Completion and refusal races against `StopRequested` end through their typed
 `AfterCancellation` dispositions while retaining their ordinary turn outcomes.
@@ -1022,7 +1018,8 @@ per-session locked transaction as the general scan (INV-034):
   retries preparation of that same unsent call;
 - a durable unstopped `InFlight` call with no surviving evidence ends
   `Ambiguous`, the abandoned attempt ends `Lost`, and the turn parks in
-  `awaiting_model_call_recovery`;
+  `awaiting_model_call_recovery`, where the independent bounded reconciliation
+  runtime takes responsibility after startup;
 - a durable `CancellationRequested` call reconstructs its applied interrupt,
   ends the attempt `AfterCancellation(Lost)`, and terminalizes
   `ReconciliationRequired` with that call as the exact ambiguity set.
@@ -1072,18 +1069,9 @@ prints the semantic transcript; it is deliberately not the client protocol.
   `DuplicateRiskAccepted`, replacement call, or outcome-authority transfer is
   implemented. Stop-caused ambiguity terminalizes proof-bearing reconciliation,
   but no later reconciliation workflow is implemented.
-- **Committed unimplemented functionality.** An
-  [availability successor call](#availability-successor-calls) — the `successor`
-  ending of
-  [the credential-availability machine](credential-availability.md#the-credential-availability-machine)
-  — is designed as durable evidence, but no present migration, repository
-  operation, or reconstitution path stores or recovers one, as
-  [persistence protocol](persistence-protocol.md) states under its
-  availability-successor storage contract, so predecessor lineage is not
-  presently recoverable. Once its implementing child lands that storage, the
-  chain will still be visible only after the fact: no client surface renders
-  that a successor is being selected. That transient visibility surface is
-  routed through
+- Availability-successor chains are visible only after the fact: no client
+  surface renders that a successor is being selected. That transient visibility
+  surface remains routed through
   [Model fallback and provenance](../open-questions.md#model-fallback-and-provenance).
 - Streaming deltas are collected but never delivered as transient drafts, and
   the designed early-observation pause/commit/resume path is unimplemented.
@@ -1103,11 +1091,19 @@ prints the semantic transcript; it is deliberately not the client protocol.
 - Same-incarnation retained-evidence reconciliation gets exactly one production
   pass (`reconcile_retained_once`) before fatal escalation; repeated
   same-incarnation drains are exercised only by tests.
-- The one system-prompt source is the calling turn's frozen defaults epoch: the
-  prepare transaction loads that epoch's optional bounded prompt, rendering
-  binds it onto the prepared operation, and the bridge sets the runtime
-  operation's `ModelOperation::system` field from it on every call
-  (`crates/model-runtime/src/operation.rs`), exactly or `None`
-  ([sessions-and-transcript](sessions-and-transcript.md)). Composition from
-  additional sources remains deferred under the open
+- The daemon/session system prompt remains sourced only from the calling turn's
+  frozen defaults epoch: preparation loads that optional bounded prompt and the
+  bridge sets `ModelOperation::system` from it exactly or to `None`
+  ([sessions-and-transcript](sessions-and-transcript.md)). **Committed
+  unimplemented functionality — workspace-instruction region.** The
+  instruction-admission slice adds a separate optional typed
+  `WorkspaceInstructionRegion` to `PreparedModelOperation` and carries it
+  unchanged into `ModelOperation::workspace_instructions`. Preparation rebuilds
+  it from the exact manifest-backed admitted bytes, inserts it once after system
+  policy and before conversation history, and authenticates its manifest before
+  provider spawn. It is never concatenated into `system`, converted to a user or
+  tool message, or sourced from an adapter loader. The region's exact bytes and
+  subordinate authority are owned by
+  [workspace instructions](workspace-instructions.md); richer composition of
+  other system-prompt sources remains deferred under
   [configuration categories](../open-questions.md#configuration-categories).

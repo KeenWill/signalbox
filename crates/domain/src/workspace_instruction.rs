@@ -29,6 +29,8 @@ crate::define_identity!(
 
 const MANIFEST_PREFIX: &[u8] = b"signalbox-turn-instruction-manifest-v1";
 const EMPTY_ELIGIBILITY_PREFIX: &[u8] = b"signalbox-instruction-eligibility-v1";
+const SOURCE_CONTENT_PREFIX: &[u8] = b"signalbox-instruction-source-v1";
+const ADMITTED_SET_PREFIX: &[u8] = b"signalbox-instruction-admitted-set-v1";
 const MAX_INSTRUCTION_PATH_BYTES: usize = 4096;
 const MAX_INSTRUCTION_SOURCE_PATH_BYTES: usize = MAX_INSTRUCTION_PATH_BYTES * 2 + 1;
 
@@ -37,9 +39,39 @@ const MAX_INSTRUCTION_SOURCE_PATH_BYTES: usize = MAX_INSTRUCTION_PATH_BYTES * 2 
 pub struct InstructionDigest([u8; 32]);
 
 impl InstructionDigest {
-    /// Hashes exact bytes with the version-one algorithm.
+    /// Hashes one already-canonical preimage with the version-one algorithm.
+    ///
+    /// Callers pass the complete separated representation. Content digests
+    /// carried by stored evidence have their own constructor because the spec
+    /// frames them; never hash raw source bytes through this entry point.
     pub fn sha256(bytes: &[u8]) -> Self {
         Self(Sha256::digest(bytes).into())
+    }
+
+    /// Hashes registered source bytes under the version-one source separator.
+    ///
+    /// The preimage is `signalbox-instruction-source-v1`, the eight-byte
+    /// big-endian source length, then the exact registered source bytes. The
+    /// stored `source_sha256` field name does not make this the bare SHA-256 of
+    /// those bytes; a later version changes the separator rather than the name.
+    pub fn source_content(bytes: &[u8]) -> Self {
+        let mut state = Sha256::new();
+        state.update(SOURCE_CONTENT_PREFIX);
+        state.update((bytes.len() as u64).to_be_bytes());
+        state.update(bytes);
+        Self(state.finalize().into())
+    }
+
+    /// Returns the version-one admitted-set hash of the empty admitted set.
+    ///
+    /// The empty-set vector is the separator followed by an all-zero eight-byte
+    /// record count, so this is a frozen constant rather than the separator
+    /// alone.
+    pub fn empty_admitted_set() -> Self {
+        let mut state = Sha256::new();
+        state.update(ADMITTED_SET_PREFIX);
+        state.update(0u64.to_be_bytes());
+        Self(state.finalize().into())
     }
 
     /// Reconstitutes one stored 32-byte SHA-256 value.
@@ -581,6 +613,7 @@ pub struct TurnInstructionManifest {
     session: SessionId,
     turn: TurnId,
     eligibility_hash: InstructionDigest,
+    admitted_set_hash: InstructionDigest,
     manifest_hash: InstructionDigest,
 }
 
@@ -589,6 +622,8 @@ pub struct TurnInstructionManifest {
 pub struct EmptyTurnInstructionManifestEvidence {
     /// SHA-256 of the frozen empty eligibility identity sequence.
     pub eligibility_hash: InstructionDigest,
+    /// SHA-256 of the admitted-set head this manifest snapshotted.
+    pub admitted_set_hash: InstructionDigest,
     /// SHA-256 of the complete canonical turn-start manifest representation.
     pub manifest_hash: InstructionDigest,
 }
@@ -601,11 +636,13 @@ impl TurnInstructionManifest {
         turn: TurnId,
     ) -> Self {
         let eligibility_hash = InstructionDigest::sha256(EMPTY_ELIGIBILITY_PREFIX);
-        let mut bytes = Vec::with_capacity(MANIFEST_PREFIX.len() + 80);
+        let admitted_set_hash = InstructionDigest::empty_admitted_set();
+        let mut bytes = Vec::with_capacity(MANIFEST_PREFIX.len() + 106);
         bytes.extend_from_slice(MANIFEST_PREFIX);
         bytes.extend_from_slice(session.as_uuid().as_bytes());
         bytes.extend_from_slice(turn.as_uuid().as_bytes());
         bytes.extend_from_slice(eligibility_hash.as_bytes());
+        bytes.extend_from_slice(admitted_set_hash.as_bytes());
         bytes.extend_from_slice(b"turn_start");
         let manifest_hash = InstructionDigest::sha256(&bytes);
         Self {
@@ -613,6 +650,7 @@ impl TurnInstructionManifest {
             session,
             turn,
             eligibility_hash,
+            admitted_set_hash,
             manifest_hash,
         }
     }
@@ -626,10 +664,13 @@ impl TurnInstructionManifest {
     ) -> Option<Self> {
         let EmptyTurnInstructionManifestEvidence {
             eligibility_hash,
+            admitted_set_hash,
             manifest_hash,
         } = evidence;
         let expected = Self::empty_turn_start(id, session, turn);
-        (expected.eligibility_hash == eligibility_hash && expected.manifest_hash == manifest_hash)
+        (expected.eligibility_hash == eligibility_hash
+            && expected.admitted_set_hash == admitted_set_hash
+            && expected.manifest_hash == manifest_hash)
             .then_some(expected)
     }
 
@@ -649,6 +690,10 @@ impl TurnInstructionManifest {
     pub const fn eligibility_hash(&self) -> InstructionDigest {
         self.eligibility_hash
     }
+    /// Returns the admitted-set hash of the head this manifest snapshotted.
+    pub const fn admitted_set_hash(&self) -> InstructionDigest {
+        self.admitted_set_hash
+    }
     /// Returns the canonical manifest hash.
     pub const fn manifest_hash(&self) -> InstructionDigest {
         self.manifest_hash
@@ -664,7 +709,7 @@ mod tests {
         constructor(uuid::Uuid::from_u128(value))
     }
 
-    /// INV-061: turn instruction provenance authenticates the exact turn boundary.
+    /// INV-069: turn instruction provenance authenticates the exact turn boundary.
     #[test]
     fn inv061_manifest_hash_changes_with_the_turn() {
         let first = TurnInstructionManifest::empty_turn_start(
@@ -679,6 +724,138 @@ mod tests {
         );
 
         assert_ne!(first.manifest_hash(), second.manifest_hash());
+    }
+
+    #[test]
+    fn source_content_hash_frames_the_versioned_source_preimage() {
+        let source = b"# AGENTS.md\n";
+
+        let framed = InstructionDigest::source_content(source);
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"signalbox-instruction-source-v1");
+        expected.extend_from_slice(&(source.len() as u64).to_be_bytes());
+        expected.extend_from_slice(source);
+        assert_eq!(framed, InstructionDigest::sha256(&expected));
+        assert_ne!(framed, InstructionDigest::sha256(source));
+    }
+
+    /// The length frame is what separates two sources that concatenate alike.
+    #[test]
+    fn source_content_hash_separates_a_shared_concatenation() {
+        let split = InstructionDigest::source_content(b"ab");
+        let other = InstructionDigest::source_content(b"a");
+
+        assert_ne!(split, other);
+        assert_ne!(
+            InstructionDigest::source_content(b""),
+            InstructionDigest::sha256(b"signalbox-instruction-source-v1")
+        );
+    }
+
+    #[test]
+    fn empty_admitted_set_hash_frames_an_all_zero_count() {
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"signalbox-instruction-admitted-set-v1");
+        expected.extend_from_slice(&0u64.to_be_bytes());
+
+        assert_eq!(
+            InstructionDigest::empty_admitted_set(),
+            InstructionDigest::sha256(&expected)
+        );
+        assert_ne!(
+            InstructionDigest::empty_admitted_set(),
+            InstructionDigest::sha256(b"signalbox-instruction-admitted-set-v1")
+        );
+    }
+
+    #[test]
+    fn empty_turn_start_authenticates_the_admitted_set_hash() {
+        let manifest = TurnInstructionManifest::empty_turn_start(
+            identity(1, TurnInstructionManifestId::from_uuid),
+            identity(2, SessionId::from_uuid),
+            identity(3, TurnId::from_uuid),
+        );
+
+        assert_eq!(
+            manifest.admitted_set_hash(),
+            InstructionDigest::empty_admitted_set()
+        );
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(b"signalbox-turn-instruction-manifest-v1");
+        expected.extend_from_slice(uuid::Uuid::from_u128(2).as_bytes());
+        expected.extend_from_slice(uuid::Uuid::from_u128(3).as_bytes());
+        expected.extend_from_slice(manifest.eligibility_hash().as_bytes());
+        expected.extend_from_slice(InstructionDigest::empty_admitted_set().as_bytes());
+        expected.extend_from_slice(b"turn_start");
+        assert_eq!(
+            manifest.manifest_hash(),
+            InstructionDigest::sha256(&expected)
+        );
+
+        let without_admitted_set = {
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(b"signalbox-turn-instruction-manifest-v1");
+            bytes.extend_from_slice(uuid::Uuid::from_u128(2).as_bytes());
+            bytes.extend_from_slice(uuid::Uuid::from_u128(3).as_bytes());
+            bytes.extend_from_slice(manifest.eligibility_hash().as_bytes());
+            bytes.extend_from_slice(b"turn_start");
+            InstructionDigest::sha256(&bytes)
+        };
+        assert_ne!(manifest.manifest_hash(), without_admitted_set);
+    }
+
+    #[test]
+    fn reconstitution_rejects_a_wrong_admitted_set_hash() {
+        let id = identity(1, TurnInstructionManifestId::from_uuid);
+        let session = identity(2, SessionId::from_uuid);
+        let turn = identity(3, TurnId::from_uuid);
+        let manifest = TurnInstructionManifest::empty_turn_start(id, session, turn);
+        let canonical = EmptyTurnInstructionManifestEvidence {
+            eligibility_hash: manifest.eligibility_hash(),
+            admitted_set_hash: manifest.admitted_set_hash(),
+            manifest_hash: manifest.manifest_hash(),
+        };
+
+        assert_eq!(
+            TurnInstructionManifest::reconstitute_empty_turn_start(id, session, turn, canonical),
+            Some(manifest.clone())
+        );
+
+        // The separator alone is the plausible wrong spelling: it omits the
+        // all-zero record count the empty-set vector requires.
+        let tampered = EmptyTurnInstructionManifestEvidence {
+            admitted_set_hash: InstructionDigest::sha256(b"signalbox-instruction-admitted-set-v1"),
+            ..canonical
+        };
+        assert_eq!(
+            TurnInstructionManifest::reconstitute_empty_turn_start(id, session, turn, tampered),
+            None
+        );
+
+        let zeroed = EmptyTurnInstructionManifestEvidence {
+            admitted_set_hash: InstructionDigest::from_sha256([0u8; 32]),
+            ..canonical
+        };
+        assert_eq!(
+            TurnInstructionManifest::reconstitute_empty_turn_start(id, session, turn, zeroed),
+            None
+        );
+
+        let borrowed_eligibility = EmptyTurnInstructionManifestEvidence {
+            admitted_set_hash: manifest.eligibility_hash(),
+            ..canonical
+        };
+        assert_eq!(
+            TurnInstructionManifest::reconstitute_empty_turn_start(
+                id,
+                session,
+                turn,
+                borrowed_eligibility
+            ),
+            None
+        );
     }
 
     #[test]
@@ -734,7 +911,7 @@ mod tests {
             )
             .expect("fixture source is valid"),
             source_bytes: 1,
-            source_hash: InstructionDigest::sha256(b"fixture"),
+            source_hash: InstructionDigest::source_content(b"fixture"),
             skill: Some(review_skill()),
         });
 
@@ -754,7 +931,7 @@ mod tests {
             source_path: InstructionSourcePath::try_new(root_path, source_text)
                 .expect("a short relative source retains its own budget"),
             source_bytes: 1,
-            source_hash: InstructionDigest::sha256(b"fixture"),
+            source_hash: InstructionDigest::source_content(b"fixture"),
             skill: None,
         });
 
@@ -884,7 +1061,7 @@ mod tests {
             source_path: InstructionSourcePath::try_new(root_path, source_path.to_owned())
                 .expect("fixture source is valid"),
             source_bytes: 1,
-            source_hash: InstructionDigest::sha256(b"fixture"),
+            source_hash: InstructionDigest::source_content(b"fixture"),
             skill,
         }
     }

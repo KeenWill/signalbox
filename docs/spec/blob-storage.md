@@ -27,6 +27,10 @@ bulk-ingest resource bounds are verified against this implementing change
 The terminal upload command and PostgreSQL/socket lifecycle proofs are verified
 against this implementing change (`agent/blob-storage-upload-terminal`).
 
+Bounded direct metadata and range reads, replica fallback classification,
+non-waiting process admission, and the terminal read commands are verified
+against this implementing change (`agent/blob-storage-read-wire`).
+
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
 configuration and routing, the ingest and read lifecycle, the blob wire
@@ -277,8 +281,11 @@ per-session dispatch gate remain in flight. It reacquires scheduler capacity
 before committing either the correlated result evidence or a crash-loss
 classification. A request that cannot acquire a direct-read permit returns the
 ordinary unavailable result without relinquishing its pass. At most 16 such
-tasks can wait to reacquire scheduler capacity, so slow reads cannot occupy all
-16 scheduler-pass slots and the handoff creates no unbounded waiter inventory.
+tasks can wait to reacquire scheduler capacity, independent of the configured
+scheduler-pass capacity. Because each task relinquishes its scheduler slot
+during store traversal, slow reads cannot occupy every configured scheduler-pass
+slot, and the fixed direct-read bound keeps the handoff's waiter inventory
+bounded.
 
 Attachment-preparation store traversal is bounded independently from scheduler
 passes: at most eight such traversals are active process-wide. A model-call pass
@@ -492,20 +499,11 @@ rendered frontier; a catalogued digest outside that set is unauthorized. Results
 use the existing text-only tool-result arm and never enter a provider message as
 image or document media.
 
-Content-type-aware readers are committed unimplemented functionality: no present
-surface provides one, and neither its exact inventory nor the formats it
-supports are decided. The compatibility constraint is that attachment stubs and
-the generic read family remain sufficient to add such readers without
-re-deciding visibility.
-
-Content-interpreting processor isolation is committed unimplemented
-functionality: no present decoder, parser, or renderer surface exists. The
-compatibility constraint is that every future content-interpreting reader
-executes inside strong process isolation and treats input validation as
-best-effort defense in depth. The concrete sandbox mechanism is selected by that
-implementation without weakening this posture. Why: parser hardening is an
-unending surface — a malicious payload exploiting a decoder defect must be
-contained by isolation rather than entrusted to an ever-growing validator.
+The provider-neutral reader model, stable typed-read contracts, and decided
+processor boundary are owned by
+[file and media interpretation](file-and-media.md). Attachment stubs and the
+generic read family remain the visibility and unknown-format substrate for that
+layer.
 
 ## Model-call preparation and modalities
 
@@ -573,8 +571,8 @@ new imports write only blob references.
   and the artifact lifecycle bullets in
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts);
   this page's append-only catalog is the constraint they design against.
-- The content-type-aware read-tool inventory and the concrete isolation
-  mechanism its processors use are recorded in
+- Concrete format adapters and their per-family dependency choices remain
+  deferred with
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts).
 - How a tool family's admitted result references a blob rather than embedding
   bytes, and rich image/file result-content arms, remain with

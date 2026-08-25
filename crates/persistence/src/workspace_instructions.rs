@@ -577,14 +577,17 @@ impl WorkspaceInstructionRepository {
                 (turn_instruction_manifest_id, session_id, turn_id,
                  instruction_discovery_id, boundary_kind,
                  eligibility_hash_algorithm, eligibility_hash,
+                 admitted_set_hash_algorithm, admitted_set_hash,
                  manifest_hash_algorithm, manifest_hash)
-             VALUES ($1, $2, $3, $4, 'turn_start', 'sha256_v1', $5, 'sha256_v1', $6)",
+             VALUES ($1, $2, $3, $4, 'turn_start', 'sha256_v1', $5, 'sha256_v1', $6,
+                     'sha256_v1', $7)",
         )
         .bind(manifest.id().into_uuid())
         .bind(manifest.session().into_uuid())
         .bind(manifest.turn().into_uuid())
         .bind(discovery.into_uuid())
         .bind(manifest.eligibility_hash().as_bytes().as_slice())
+        .bind(manifest.admitted_set_hash().as_bytes().as_slice())
         .bind(manifest.manifest_hash().as_bytes().as_slice())
         .execute(&mut *connection)
         .await?;
@@ -703,6 +706,7 @@ async fn load_manifest(
     let row = sqlx::query(
         "SELECT m.turn_instruction_manifest_id,
                 m.eligibility_hash_algorithm, m.eligibility_hash,
+                m.admitted_set_hash_algorithm, m.admitted_set_hash,
                 m.manifest_hash_algorithm, m.manifest_hash, d.scan_complete
            FROM turn_instruction_manifest AS m
            JOIN instruction_discovery AS d
@@ -720,6 +724,7 @@ async fn load_manifest(
     };
     let id = TurnInstructionManifestId::from_uuid(row.try_get("turn_instruction_manifest_id")?);
     if row.try_get::<String, _>("eligibility_hash_algorithm")? != "sha256_v1"
+        || row.try_get::<String, _>("admitted_set_hash_algorithm")? != "sha256_v1"
         || row.try_get::<String, _>("manifest_hash_algorithm")? != "sha256_v1"
     {
         return Err(WorkspaceInstructionRepositoryError::Corruption(
@@ -727,6 +732,7 @@ async fn load_manifest(
         ));
     }
     let eligibility_hash = digest(row.try_get("eligibility_hash")?)?;
+    let admitted_set_hash = digest(row.try_get("admitted_set_hash")?)?;
     let manifest_hash = digest(row.try_get("manifest_hash")?)?;
     let manifest = TurnInstructionManifest::reconstitute_empty_turn_start(
         id,
@@ -734,6 +740,7 @@ async fn load_manifest(
         turn,
         EmptyTurnInstructionManifestEvidence {
             eligibility_hash,
+            admitted_set_hash,
             manifest_hash,
         },
     )

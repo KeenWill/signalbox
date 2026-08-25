@@ -1,8 +1,9 @@
 //! Opt-in, content-free telemetry export for the daemon.
 //!
 //! The tracing boundary admits only audited span and event schemas. Prometheus
-//! metrics are built from closed lifecycle dispositions and never accept
-//! identifiers as labels.
+//! metrics are built from closed lifecycle dispositions. The only identity
+//! label is the scheduler's single oldest in-flight pass; replacement removes
+//! the prior series, so its cardinality remains one.
 
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -13,7 +14,7 @@ use std::{
     io::{self, Read},
     net::SocketAddr,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -32,7 +33,8 @@ use opentelemetry_sdk::{
         SpanExporter as SdkSpanExporter,
     },
 };
-use prometheus::{IntCounter, IntCounterVec, Opts, Registry, TextEncoder};
+use prometheus::{IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder};
+use signalbox_application::{SchedulerOccupancyObserver, SchedulerOldestInFlightPass};
 use signalbox_model_provider_runtime::ModelCallCauseToken;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -801,6 +803,8 @@ fn candidate_event(metadata: &Metadata<'_>) -> bool {
                 | "turn_attempt_id"
                 | "cause_code"
                 | "terminal_outcome"
+                | "tool_round_limit"
+                | "observed_tool_rounds"
         )
     })
 }
@@ -851,10 +855,27 @@ fn admitted_event_values(metadata: &Metadata<'_>, values: &RecordedValues) -> bo
                 && values.uuid("turn_id")
                 && values.closed("terminal_outcome", TURN_OUTCOMES)
         }
-        ("signalbox_application::model_execution", "turn parked awaiting user reconciliation") => {
+        (
+            "signalbox_application::model_execution",
+            "turn parked awaiting bounded reconciliation",
+        ) => {
             values.has_exact(&["message", "session_id", "turn_id"])
                 && values.uuid("session_id")
                 && values.uuid("turn_id")
+        }
+        ("signalbox_application::model_execution", "automatic tool-round limit reached") => {
+            values.has_exact(&[
+                "message",
+                "model_call_id",
+                "observed_tool_rounds",
+                "session_id",
+                "tool_round_limit",
+                "turn_id",
+            ]) && values.uuid("session_id")
+                && values.uuid("turn_id")
+                && values.uuid("model_call_id")
+                && values.unsigned("tool_round_limit")
+                && values.unsigned("observed_tool_rounds")
         }
         ("signalbox_model_provider_runtime", "model call dispatched") => {
             values.has_exact(&[
@@ -915,6 +936,11 @@ impl RecordedValues {
             .filter(|(name, _value)| name.as_str() != "message")
             .map(|(name, value)| {
                 let value = value.trim_matches('"');
+                if matches!(name.as_str(), "tool_round_limit" | "observed_tool_rounds") {
+                    let value = value.parse::<u64>().ok()?;
+                    let value = i64::try_from(value).ok()?;
+                    return Some(KeyValue::new(name.clone(), value));
+                }
                 let value = if name.ends_with("_id") {
                     uuid::Uuid::parse_str(value).ok()?.to_string()
                 } else {
@@ -936,6 +962,12 @@ impl RecordedValues {
     fn uuid(&self, name: &str) -> bool {
         self.get(name)
             .map(|value| uuid::Uuid::parse_str(value.trim_matches('"')).is_ok())
+            .unwrap_or(false)
+    }
+
+    fn unsigned(&self, name: &str) -> bool {
+        self.get(name)
+            .map(|value| value.trim_matches('"').parse::<u64>().is_ok())
             .unwrap_or(false)
     }
 
@@ -990,6 +1022,7 @@ const TURN_OUTCOMES: &[&str] = &[
     "cancelled_with_tool_response",
     "target_unavailable",
     "capability_known_failure",
+    "tool_round_limit_reached",
     "continuation_target_unavailable",
 ];
 
@@ -1028,6 +1061,10 @@ pub struct TelemetryMetrics {
     model_refused: IntCounter,
     model_cancelled: IntCounter,
     model_ambiguous: IntCounter,
+    scheduler_occupancy: IntGauge,
+    scheduler_oldest_age_seconds: IntGauge,
+    scheduler_oldest_info: IntGaugeVec,
+    scheduler_oldest: Arc<Mutex<Option<SchedulerOldestInFlightPass>>>,
 }
 
 impl TelemetryMetrics {
@@ -1055,6 +1092,24 @@ impl TelemetryMetrics {
             &["disposition"],
         )
         .map_err(|_| metrics_error())?;
+        let scheduler_occupancy = IntGauge::with_opts(Opts::new(
+            "signalbox_scheduler_passes_in_flight",
+            "Authoritative scheduler passes currently holding admission slots.",
+        ))
+        .map_err(|_| metrics_error())?;
+        let scheduler_oldest_age_seconds = IntGauge::with_opts(Opts::new(
+            "signalbox_scheduler_oldest_in_flight_pass_age_seconds",
+            "Age in seconds of the oldest authoritative scheduler pass.",
+        ))
+        .map_err(|_| metrics_error())?;
+        let scheduler_oldest_info = IntGaugeVec::new(
+            Opts::new(
+                "signalbox_scheduler_oldest_in_flight_pass_info",
+                "Identity of the oldest authoritative scheduler pass; at most one series exists.",
+            ),
+            &["session_id"],
+        )
+        .map_err(|_| metrics_error())?;
         registry
             .register(Box::new(turns_started.clone()))
             .map_err(|_| metrics_error())?;
@@ -1063,6 +1118,15 @@ impl TelemetryMetrics {
             .map_err(|_| metrics_error())?;
         registry
             .register(Box::new(model_terminal.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(scheduler_occupancy.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(scheduler_oldest_age_seconds.clone()))
+            .map_err(|_| metrics_error())?;
+        registry
+            .register(Box::new(scheduler_oldest_info.clone()))
             .map_err(|_| metrics_error())?;
         let turns_completed = metric_child(&turn_terminal, "completed")?;
         let turns_failed = metric_child(&turn_terminal, "failed")?;
@@ -1088,6 +1152,10 @@ impl TelemetryMetrics {
             model_refused,
             model_cancelled,
             model_ambiguous,
+            scheduler_occupancy,
+            scheduler_oldest_age_seconds,
+            scheduler_oldest_info,
+            scheduler_oldest: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -1118,7 +1186,40 @@ impl TelemetryMetrics {
     }
 
     pub(crate) fn render(&self) -> Result<String, prometheus::Error> {
+        let oldest = *self
+            .scheduler_oldest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.scheduler_oldest_age_seconds.set(
+            oldest
+                .map(|pass| i64::try_from(pass.age().as_secs()).unwrap_or(i64::MAX))
+                .unwrap_or(0),
+        );
         TextEncoder::new().encode_to_string(&self.registry.gather())
+    }
+}
+
+impl SchedulerOccupancyObserver for TelemetryMetrics {
+    fn observe(&self, occupancy: usize, oldest: Option<SchedulerOldestInFlightPass>) {
+        self.scheduler_occupancy
+            .set(i64::try_from(occupancy).unwrap_or(i64::MAX));
+        let mut current = self
+            .scheduler_oldest
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(previous) = *current {
+            let previous = previous.session().as_uuid().to_string();
+            let _ = self
+                .scheduler_oldest_info
+                .remove_label_values(&[previous.as_str()]);
+        }
+        if let Some(oldest) = oldest {
+            let session = oldest.session().as_uuid().to_string();
+            self.scheduler_oldest_info
+                .with_label_values(&[session.as_str()])
+                .set(1);
+        }
+        *current = oldest;
     }
 }
 
@@ -1259,6 +1360,7 @@ mod tests {
         io::Write,
         net::SocketAddr,
         sync::{Arc, Mutex},
+        time::Duration,
     };
 
     use opentelemetry::trace::TracerProvider as _;
@@ -1268,6 +1370,9 @@ mod tests {
     };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tracing_subscriber::prelude::*;
+
+    use signalbox_application::{SchedulerOccupancyObserver, SchedulerOldestInFlightPass};
+    use signalbox_domain::SessionId;
 
     use super::{
         IsolatedSpanExporter, ModelMetricDisposition, OtlpConfiguration, SdkSpanExporter,
@@ -1348,8 +1453,8 @@ mod tests {
         names
     }
 
-    fn event_names(span: &SpanData) -> Vec<String> {
-        let mut names = span.events[0]
+    fn event_names(span: &SpanData, event_index: usize) -> Vec<String> {
+        let mut names = span.events[event_index]
             .attributes
             .iter()
             .map(|attribute| attribute.key.as_str().to_owned())
@@ -1527,6 +1632,8 @@ mod tests {
 
     #[test]
     fn admitted_span_and_event_export_only_the_documented_fields() {
+        let tool_round_limit = 32_usize;
+        let observed_tool_rounds = 32_usize;
         let spans = capture_spans(|| {
             let span = tracing::info_span!(
                 target: "signalboxd::context_guard",
@@ -1542,15 +1649,24 @@ mod tests {
                 terminal_outcome = "completed",
                 "turn terminalized"
             );
+            tracing::warn!(
+                target: "signalbox_application::model_execution",
+                session_id = %SESSION_ID,
+                turn_id = %TURN_ID,
+                model_call_id = %MODEL_CALL_ID,
+                tool_round_limit,
+                observed_tool_rounds,
+                "automatic tool-round limit reached"
+            );
         });
 
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].name, "turn_work");
         assert_eq!(names(&spans[0]), vec!["session_id", "turn_id"]);
-        assert_eq!(spans[0].events.len(), 1);
+        assert_eq!(spans[0].events.len(), 2);
         assert_eq!(spans[0].events[0].name, "turn terminalized");
         assert_eq!(
-            event_names(&spans[0]),
+            event_names(&spans[0], 0),
             vec![
                 "level",
                 "session_id",
@@ -1558,6 +1674,44 @@ mod tests {
                 "terminal_outcome",
                 "turn_id"
             ]
+        );
+        assert_eq!(
+            spans[0].events[1].name,
+            "automatic tool-round limit reached"
+        );
+        assert_eq!(
+            event_names(&spans[0], 1),
+            vec![
+                "level",
+                "model_call_id",
+                "observed_tool_rounds",
+                "session_id",
+                "target",
+                "tool_round_limit",
+                "turn_id"
+            ]
+        );
+        let saturation_attributes = &spans[0].events[1].attributes;
+        assert_eq!(
+            saturation_attributes
+                .iter()
+                .find(|attribute| attribute.key.as_str() == "tool_round_limit")
+                .expect("the saturation event carries its numeric limit")
+                .value,
+            opentelemetry::Value::I64(
+                i64::try_from(tool_round_limit).expect("the fixture limit fits OTLP I64")
+            )
+        );
+        assert_eq!(
+            saturation_attributes
+                .iter()
+                .find(|attribute| attribute.key.as_str() == "observed_tool_rounds")
+                .expect("the saturation event carries its numeric observed count")
+                .value,
+            opentelemetry::Value::I64(
+                i64::try_from(observed_tool_rounds)
+                    .expect("the fixture observed count fits OTLP I64")
+            )
         );
     }
 
@@ -1767,6 +1921,32 @@ mod tests {
         assert!(!rendered.contains("model_call_id"));
         assert!(!rendered.contains(SYNTHETIC_CREDENTIAL));
         assert!(!rendered.contains(SYNTHETIC_CONTENT));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prometheus_exposes_bounded_scheduler_occupancy_and_oldest_identity() {
+        let metrics = TelemetryMetrics::new().expect("static metric descriptors are valid");
+        let session = SessionId::from_uuid(
+            uuid::Uuid::parse_str(SESSION_ID).expect("the fixture session id is valid"),
+        );
+        let oldest = SchedulerOldestInFlightPass::new(session, tokio::time::Instant::now());
+        metrics.observe(3, Some(oldest));
+        tokio::time::advance(Duration::from_secs(7)).await;
+
+        let occupied = metrics.render().expect("static registry encodes");
+
+        assert!(occupied.contains("signalbox_scheduler_passes_in_flight 3"));
+        assert!(occupied.contains("signalbox_scheduler_oldest_in_flight_pass_age_seconds 7"));
+        assert!(occupied.contains(&format!(
+            "signalbox_scheduler_oldest_in_flight_pass_info{{session_id=\"{SESSION_ID}\"}} 1"
+        )));
+
+        metrics.observe(0, None);
+        let idle = metrics.render().expect("static registry encodes");
+
+        assert!(idle.contains("signalbox_scheduler_passes_in_flight 0"));
+        assert!(idle.contains("signalbox_scheduler_oldest_in_flight_pass_age_seconds 0"));
+        assert!(!idle.contains("signalbox_scheduler_oldest_in_flight_pass_info{"));
     }
 
     #[tokio::test]

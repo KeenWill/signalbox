@@ -65,6 +65,7 @@ use signalbox_model_runtime::{
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiPreparedRequest, OpenAiRuntime};
 use signalbox_persistence::{
     ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
     process_read::{
@@ -10440,7 +10441,8 @@ impl EvalDatabase {
             .with_db_name(DATABASE_NAME)
             .with_user(DATABASE_USER)
             .with_password(DATABASE_PASSWORD)
-            .with_fsync_enabled()
+            .with_cmd(disposable_postgres_server_args())
+            .with_mount(disposable_postgres_state_tmpfs())
             .with_tag(POSTGRES_IMAGE_TAG)
             .with_labels(disposable_test_container_labels())
             .start()
@@ -11856,6 +11858,8 @@ fn turn_snapshot_reports_ambiguous_model_recovery_as_infrastructure() {
     let state = ProcessTurnState::ActiveAwaitingModelCallRecovery {
         ended_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_TURN_ATTEMPT_ID)),
         recovery_call: ModelCallId::from_uuid(Uuid::from_u128(ARBITRARY_EVAL_MODEL_CALL_ID)),
+        automatic_reconciliation_attempts: 0,
+        operator_action_required: false,
     };
 
     assert_eq!(

@@ -94,11 +94,11 @@ jobs:
         run: python3 clients/native/scripts/test_summarize_coverage.py
       - name: Build (iOS Simulator, Debug)
         run: clients/native/scripts/build-xcode.sh
-      # Runs the canonical test script with the UI-test bundle excluded. The
-      # UI and screenshot-capture suites need an interactive simulator
-      # session (and the Tart VM shards for the full device matrix), so they
-      # stay a manual/local flow via clients/native/scripts for now; the
-      # four unit-test bundles still run against a booted simulator the script
+      # Runs the canonical test script with two suites excluded. The UI-test
+      # bundle drives an interactive simulator session, so it stays a
+      # manual/local flow via clients/native/scripts for now; the in-process
+      # snapshot suite is skipped for the reason on its entry below. The four
+      # unit-test bundles still run against a booted simulator the script
       # resolves itself.
       #
       # Coverage rides along on this run rather than taking a macOS job of its
@@ -322,7 +322,7 @@ jobs:
       - name: Upload coverage reports to Codecov
         if: ${{ always() && steps.native_lcov.outputs.exported == 'true' }}
         continue-on-error: true
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5.5.5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ${{ runner.temp }}/native-coverage/lcov.info
@@ -340,13 +340,6 @@ jobs:
           fail_ci_if_error: false
       - name: Check privacy boundary
         run: clients/native/scripts/check-privacy.sh
-      - name: Check Tart scripts (dry run)
-        run: clients/native/scripts/tart/check-tart-scripts.sh
-      # Pure sha256 hashing against Screenshots/MANIFEST.sha256 — no
-      # simulator involved, so it is cheap enough to run here even though
-      # recapturing goldens is a manual flow.
-      - name: Check screenshot goldens
-        run: clients/native/scripts/check-screenshot-goldens.sh
 
   # Holds the only write token in this workflow and never builds or runs
   # anything, mirroring the token separation coverage.yml's publish-comment
@@ -471,6 +464,7 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: swift-real-daemon
+          shared-key: rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run native client against signalboxd
         run: clients/native/scripts/test-real-server-xcode.sh

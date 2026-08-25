@@ -202,6 +202,8 @@ CREATE TABLE turn_instruction_manifest (
     boundary_kind text NOT NULL,
     eligibility_hash_algorithm text NOT NULL,
     eligibility_hash bytea NOT NULL,
+    admitted_set_hash_algorithm text NOT NULL,
+    admitted_set_hash bytea NOT NULL,
     manifest_hash_algorithm text NOT NULL,
     manifest_hash bytea NOT NULL,
 
@@ -215,6 +217,8 @@ CREATE TABLE turn_instruction_manifest (
         CHECK (
             eligibility_hash_algorithm = 'sha256_v1'
             AND octet_length(eligibility_hash) = 32
+            AND admitted_set_hash_algorithm = 'sha256_v1'
+            AND octet_length(admitted_set_hash) = 32
             AND manifest_hash_algorithm = 'sha256_v1'
             AND octet_length(manifest_hash) = 32
         ),
@@ -376,11 +380,15 @@ BEGIN
     END IF;
     IF NEW.eligibility_hash <> sha256(
         convert_to('signalbox-instruction-eligibility-v1', 'UTF8')
+    ) OR NEW.admitted_set_hash <> sha256(
+        convert_to('signalbox-instruction-admitted-set-v1', 'UTF8')
+        || '\x0000000000000000'::bytea
     ) OR NEW.manifest_hash <> sha256(
         convert_to('signalbox-turn-instruction-manifest-v1', 'UTF8')
         || uuid_send(NEW.session_id)
         || uuid_send(NEW.turn_id)
         || NEW.eligibility_hash
+        || NEW.admitted_set_hash
         || convert_to(NEW.boundary_kind, 'UTF8')
     ) THEN
         RAISE EXCEPTION 'turn instruction manifest hashes are not canonical'
@@ -480,6 +488,8 @@ INSERT INTO turn_instruction_manifest (
     boundary_kind,
     eligibility_hash_algorithm,
     eligibility_hash,
+    admitted_set_hash_algorithm,
+    admitted_set_hash,
     manifest_hash_algorithm,
     manifest_hash
 )
@@ -493,10 +503,19 @@ SELECT
     sha256(convert_to('signalbox-instruction-eligibility-v1', 'UTF8')),
     'sha256_v1',
     sha256(
+        convert_to('signalbox-instruction-admitted-set-v1', 'UTF8')
+        || '\x0000000000000000'::bytea
+    ),
+    'sha256_v1',
+    sha256(
         convert_to('signalbox-turn-instruction-manifest-v1', 'UTF8')
         || uuid_send(session_id)
         || uuid_send(turn_id)
         || sha256(convert_to('signalbox-instruction-eligibility-v1', 'UTF8'))
+        || sha256(
+               convert_to('signalbox-instruction-admitted-set-v1', 'UTF8')
+               || '\x0000000000000000'::bytea
+           )
         || convert_to('turn_start', 'UTF8')
     )
   FROM turn_lifecycle AS lifecycle
