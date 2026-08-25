@@ -53,9 +53,10 @@ const REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1: &[u8] =
 /// A stream is created by the first occurrence of a recurring event on a
 /// distinct subject: a pull request's own transitions, each of its labels, each
 /// review thread, each base branch it advances onto, and each distinct
-/// reaction. Every entry costs a 32-byte stream identity and an 8-byte
-/// sequence, so this ceiling bounds one repository's frontier at roughly 40 MB
-/// of resident state and a durable frontier of the same order. That is the
+/// reaction. Every entry costs a 32-byte stream identity, an 8-byte sequence,
+/// and an 8-byte owning pull-request number, so this ceiling bounds one
+/// repository's frontier at roughly 48 MB of resident entry fields before map
+/// overhead, and a durable frontier of the same order. That is the
 /// point at which a single watched repository's identity state, rather than its
 /// event history, becomes the dominant cost of watching it, and it is far above
 /// what any real repository reaches: GitHub's largest public repositories have

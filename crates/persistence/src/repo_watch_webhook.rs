@@ -863,6 +863,29 @@ impl PostgresRepoWatchWebhookStore {
         .await?)
     }
 
+    /// How many event projections one delivery recorded.
+    ///
+    /// Primary mode records none, because its own commit is the durable row a
+    /// parity projection would otherwise stand in for. A test asserting that
+    /// reads the count through this repository rather than naming the table.
+    #[cfg(feature = "test-support")]
+    pub async fn recorded_event_projection_count(
+        &self,
+        key: RepoWatchWebhookDeliveryKey,
+    ) -> Result<u64, RepoWatchWebhookStoreError> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+               FROM repo_watch_webhook_projection
+              WHERE hook_id = $1 AND delivery_id = $2 AND projection_kind = 'event'",
+        )
+        .bind(Decimal::from(key.hook_id.get()))
+        .bind(key.delivery_id)
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(count)
+            .map_err(|_| RepoWatchWebhookStorageCorruption::InvalidReceiptSequence.into())
+    }
+
     pub async fn record_terminal(
         &self,
         key: RepoWatchWebhookDeliveryKey,

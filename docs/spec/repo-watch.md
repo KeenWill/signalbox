@@ -226,31 +226,25 @@ occurrence sequence for each recurring source-independent event stream. The
 frontier is canonical by its 32-byte stream identities, rejects duplicates and
 zero sequences, and admits at most 1,000,000 streams. That ceiling is where one
 repository's identity state, rather than its event history, becomes the dominant
-cost of watching it: each entry costs a 32-byte stream identity and an 8-byte
-sequence, so the limit bounds one frontier near 40 MB. Exceeding it fails the
-comparison, because the alternative is reusing an occurrence number and minting
-a content identity that collides with an already-durable one. Sequence
-exhaustion fails the comparison rather than wrapping. Provider-keyed immutable
-facts use sequence one without occupying frontier space. A fact counts as
-immutable only when the differ suppresses re-emission on members its stream key
-already names, so completed check runs are not among them: their conclusion can
-change under an unchanged run identity and completion generation, and they
-advance a frontier sequence like any recurring stream. Each entry also records
-the pull request owning its stream, or nothing for a repository-global stream
-such as a branch workflow run. A pull request the comparison observes as merged
-releases every stream it owns, because a merged request cannot reopen and so no
-stream it owns can state another fact; a closed but unmerged request keeps its
-sequences, because GitHub permits it to reopen and advance the same streams
-again. Releasing a stream that could still advance would reuse an occurrence
-number, so retirement is confined to that one terminal lifecycle. The cursor
-does not retain resource keys, ETags, accepted transport responses, raw provider
-payloads, or credentials. A per-repository atomic commit accepts an expected
-generation, one complete cursor candidate, and its ordered event-occurrence
-batch. It serializes competing commits, appends the cursor and every event
-together, rolls back the whole batch on failure, reports a stale generation as
-conflict, and recognizes only an exact candidate-and-occurrence replay. An
-unchanged candidate with no events does not advance the cursor; an unchanged
-candidate carrying events is rejected.
+cost of watching it: each entry costs a 32-byte stream identity, an 8-byte
+sequence, and an 8-byte owning pull-request number, so the limit bounds one
+frontier's raw entry fields near 48 MB before map and encoding overhead.
+Exceeding it fails the comparison, because the alternative is reusing an
+occurrence number and minting a content identity that collides with an
+already-durable one. Sequence exhaustion fails the comparison rather than
+wrapping. Provider-keyed immutable facts use sequence one without occupying
+frontier space. A fact counts as immutable only when the differ suppresses
+re-emission on members its stream key already names, so completed check runs are
+not among them: their conclusion can change under an unchanged run identity and
+completion generation, and they advance a frontier sequence like any recurring
+stream. The cursor does not retain resource keys, ETags, accepted transport
+responses, raw provider payloads, or credentials. A per-repository atomic commit
+accepts an expected generation, one complete cursor candidate, and its ordered
+event-occurrence batch. It serializes competing commits, appends the cursor and
+every event together, rolls back the whole batch on failure, reports a stale
+generation as conflict, and recognizes only an exact candidate-and-occurrence
+replay. An unchanged candidate with no events does not advance the cursor; an
+unchanged candidate carrying events is rejected.
 
 A commit coalesces an occurrence whose content identity is already durable for
 that repository under the same content, writing the cursor without a second row
@@ -343,18 +337,28 @@ version one alone. Exactly one content-identity version is readable once both
 have run. The durable constraint and the decoder admit version one alone, so no
 earlier event shape survives for a reader to accept.
 
-**Implemented behavior.** Frontier ownership arrives as storage version three,
-which resets the frontier the same way version two did rather than migrating the
-entries it replaces. The stream identity a version-two entry stores is a one-way
-domain-separated hash, so no migration can recover the pull request it came
-from, and decoding a version-two entry as unowned would be exactly the
-version-tolerant decoding the pre-alpha compatibility rule forbids: it would
-leave streams that can never be retired counting against the ceiling the
-retirement exists to protect. `202608250501` therefore rewrites every durable
-cursor to storage version three with an empty frontier, and the reader requires
-the ownership member on every entry. The accepted cost is one repeat
-identification pass per repository, paid on the first comparison after the
-migration, and no retirement history before it.
+**Committed unimplemented functionality.** Storage version three records the
+pull request owning each recurring stream, or null for a repository-global
+stream such as a branch workflow run. Nothing reads that member yet: it is the
+subject a future mechanism for releasing streams would have to name, and it is
+recorded now because it cannot be recovered later — a stream identity is a
+one-way domain-separated hash, so no migration can derive the pull request a
+stored entry came from. The compatibility constraint it places on future change
+is that every version-three entry carries the member, null included, and a
+reader requires it. Decoding a version-two entry as unowned instead would be the
+version-tolerant decoding the pre-alpha compatibility rule forbids, so
+`202608250501` rewrites every durable cursor to version three with an empty
+frontier, exactly as `202608150001` did for version two. The accepted cost is
+one repeat identification pass per repository, paid on the first comparison
+after the migration.
+
+No lifecycle releases a stream today, and none may be added without deciding
+which subject provably produces no further occurrence. A merged pull request is
+not one: labels change after merge, and a completed check run's conclusion can
+change under an unchanged run identity and completion generation, so both remain
+recurring streams. A released counter restarts at one, and the identity it then
+mints collides with a durable one, which commit coalescing discards. The
+1,000,000-stream ceiling is what bounds the frontier meanwhile.
 
 **Implemented behavior.** A pure differ compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities
@@ -1558,13 +1562,21 @@ generation the optimistic commit needs — an in-memory baseline advanced past t
 cursor could not supply one. A patch that duplicates state, is superseded, or
 names a fact outside the observable set records the same terminal disposition it
 records in shadow mode and writes nothing. A patch that applies is compared
-against the loaded cursor in one differ pass whose occurrences are both the
-event batch the commit writes and the projections parity records; deriving twice
-would advance the frontier twice and mint identities the committed rows do not
-carry. A delivery that names pull requests still runs the same targeted provider
-refresh, against the patched observation rather than the stored one, so a fact
-the payload supplied for an untargeted subject survives the reconciliation, and
-per-page hydration coalescing is unchanged.
+against the loaded cursor in one differ pass, and those occurrences are the
+event batch the commit writes. A delivery that names pull requests still runs
+the same targeted provider refresh, against the patched observation rather than
+the stored one, so a fact the payload supplied for an untargeted subject
+survives the reconciliation, and per-page hydration coalescing is unchanged.
+
+A primary delivery records no event projection. Parity compares projections
+against poll-produced rows, and a primary delivery's own commit is the durable
+row: projecting it as well would leave a permanent `webhook_only` row nothing
+can match, because the next poll starts from the cursor that commit already
+advanced and cannot re-derive the occurrence. The targeted queries a delivery
+issued are still recorded, and those reach the parity view as
+`not_directly_mapped`, which names no divergence. Shadow mode is what parity
+measures, so a repository that has selected primary mode contributes no new
+divergence rows to it.
 
 The commit reuses the two-step durable handoff a shadow-mode targeted refresh
 already uses: the terminal disposition and exact projections are recorded first,

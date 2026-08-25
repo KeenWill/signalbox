@@ -1,17 +1,19 @@
 -- Storage version three: a recurring stream records the pull request owning it.
 --
--- A frontier entry now carries the pull request that owns its stream, so a
--- merged pull request's label, review, thread, check, base-advance, and
--- per-kind streams are released instead of counting against the frontier
--- ceiling for the repository's lifetime. Repository-global streams, which no
--- pull request owns, store null.
+-- A frontier entry now carries the pull request that owns its stream, and a
+-- repository-global stream stores null. Nothing reads that member yet. It is
+-- recorded now because it cannot be recovered later: a stream identity is a
+-- one-way domain-separated hash, so no query can derive the pull request a
+-- stored 32-byte identity came from. No lifecycle releases a stream, and none
+-- may be added without first deciding which subject provably produces no
+-- further occurrence — a merged pull request is not one, since its labels
+-- change after merge and a completed check run's conclusion can change under an
+-- unchanged run identity and completion generation.
 --
 -- The live frontier is reset rather than migrated. Decoding a version-two entry
 -- as unowned would be version-tolerant decoding, which AGENTS.md forbids under
--- pre-alpha compatibility, and reconstructing ownership from stored entries is
--- impossible: a stream identity is a one-way domain-separated hash, so no query
--- can recover the pull request a stored 32-byte identity came from. The
--- 2026-08-25 ruling accepts the deliberate reset as the correct path.
+-- pre-alpha compatibility, and the same one-way hash rules out reconstructing
+-- ownership from what version two stored.
 --
 -- The cost is one repeat identification pass. Recurring streams restart at
 -- sequence one, so the next occurrence on a stream that already produced events

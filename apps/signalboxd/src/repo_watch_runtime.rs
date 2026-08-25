@@ -2400,20 +2400,20 @@ impl RepositoryWatchTask {
                 queried,
             } => (observation, queried),
         };
-        // A primary-mode delivery is the producer of the rows it commits, so no
-        // parity cause applies: there is no shadow baseline that could drift
-        // from the durable cursor it writes.
-        let (events, mut projections, identity_frontier) =
-            webhook_derived_occurrences(&self.repository, &baseline, &observation, None)?;
-        // Only refreshes actually sent are recorded, so neither a branch-only
-        // delivery naming no pull request nor one whose hydration this page
-        // already issued can claim a query the poller never made.
-        projections.extend(
-            issued
-                .iter()
-                .map(targeted_query_projection)
-                .collect::<Result<Vec<_>, _>>()?,
-        );
+        let (events, identity_frontier) =
+            primary_committed_occurrences(&self.repository, &baseline, &observation)?;
+        // A primary delivery records no event projection. Parity compares
+        // projections against poll-produced rows, and this delivery's own commit
+        // is the durable row; projecting it too would leave a permanent
+        // webhook_only row that no poll can ever match, since the poll starts
+        // from the cursor this commit already advanced. Only the targeted
+        // queries are recorded, and only those actually sent, so neither a
+        // branch-only delivery naming no pull request nor one whose hydration
+        // this page already issued can claim a query the poller never made.
+        let projections = issued
+            .iter()
+            .map(targeted_query_projection)
+            .collect::<Result<Vec<_>, _>>()?;
         let request = RepoWatchCommitRequest::from_webhook(
             Some(cursor.generation()),
             RepoWatchCursorCandidate::with_event_identity_frontier(
@@ -3371,23 +3371,18 @@ impl WebhookShadowBaseline {
     }
 }
 
-/// Derives one delivery's occurrences once, alongside their parity projections.
+/// Derives the occurrences one primary-mode delivery commits.
 ///
-/// Primary mode commits the occurrences and records the projections, so both
-/// have to come from a single differ pass: deriving twice would advance the
-/// frontier twice and mint event identities the committed rows do not carry.
-///
-/// The baseline is read rather than advanced, so a delivery whose disposition
-/// fails to record leaves the repository's accumulated shadow exactly as it was.
-fn webhook_derived_occurrences(
+/// Returns the event batch and the frontier it advances to. Primary mode
+/// records no event projection, so this is the only derivation the delivery
+/// performs and the committed rows are what a reader compares against.
+fn primary_committed_occurrences(
     repository: &RepositorySlug,
     baseline: &WebhookShadowBaseline,
     observation: &RepoWatchObservation,
-    cause: Option<RepoWatchWebhookParityCauseV1>,
 ) -> Result<
     (
         Vec<RepoWatchEventOccurrenceV1>,
-        Vec<RepoWatchWebhookProjection>,
         RepoWatchEventIdentityFrontierV1,
     ),
     RepositoryWatchAttemptError,
@@ -3401,35 +3396,13 @@ fn webhook_derived_occurrences(
         &mut UuidV7RepoWatchEventIdGenerator,
     )
     .map_err(|_| RepositoryWatchAttemptError::Differ)?;
-    let projections = occurrences
-        .iter()
-        // A delivery carries neither computed mergeability nor an aggregate
-        // check rollup, so an occurrence of either kind here is an artefact of
-        // rebuilding state rather than something the payload observed.
-        // Projecting it would invent a webhook-only row for a value only
-        // polling can supply.
-        .filter(|occurrence| {
-            !matches!(
-                occurrence.event().kind().name(),
-                RepoWatchEventKindNameV1::MergeableStateChanged
-                    | RepoWatchEventKindNameV1::ChecksCompleted
-            )
-        })
-        .map(|occurrence| {
-            let content_identity = occurrence.content_identity();
-            RepoWatchWebhookProjection::event(
-                content_identity,
-                occurrence.event().kind().name(),
-                content_identity.as_bytes().to_vec(),
-                cause,
-            )
-            .map_err(|_| RepositoryWatchAttemptError::Persistence)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok((occurrences, projections, identity_frontier))
+    Ok((occurrences, identity_frontier))
 }
 
 /// Derives one delivery's shadow projections and the frontier they advance to.
+///
+/// The baseline is read rather than advanced, so a delivery whose disposition
+/// fails to record leaves the repository's accumulated shadow exactly as it was.
 fn shadow_event_projections(
     repository: &RepositorySlug,
     baseline: &WebhookShadowBaseline,
@@ -3442,8 +3415,38 @@ fn shadow_event_projections(
     ),
     RepositoryWatchAttemptError,
 > {
-    let (_, projections, identity_frontier) =
-        webhook_derived_occurrences(repository, baseline, observation, cause)?;
+    let mut identity_frontier = baseline.identity_frontier.clone();
+    let projections = derive_repo_watch_events(
+        repository,
+        Some(&baseline.observation),
+        observation,
+        &mut identity_frontier,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )
+    .map_err(|_| RepositoryWatchAttemptError::Differ)?
+    .into_iter()
+    // A delivery carries neither computed mergeability nor an aggregate check
+    // rollup, so an occurrence of either kind here is an artefact of rebuilding
+    // state rather than something the payload observed. Projecting it would
+    // invent a webhook-only row for a value only polling can supply.
+    .filter(|occurrence| {
+        !matches!(
+            occurrence.event().kind().name(),
+            RepoWatchEventKindNameV1::MergeableStateChanged
+                | RepoWatchEventKindNameV1::ChecksCompleted
+        )
+    })
+    .map(|occurrence| {
+        let content_identity = occurrence.content_identity();
+        RepoWatchWebhookProjection::event(
+            content_identity,
+            occurrence.event().kind().name(),
+            content_identity.as_bytes().to_vec(),
+            cause,
+        )
+        .map_err(|_| RepositoryWatchAttemptError::Persistence)
+    })
+    .collect::<Result<Vec<_>, _>>()?;
     Ok((projections, identity_frontier))
 }
 
@@ -9980,6 +9983,14 @@ mod tests {
                 RepoWatchEventKindNameV1::ReviewSubmitted,
                 RepoWatchEventProducer::Webhook
             )]
+        );
+        // The committed row is the durable record, so a parity projection of
+        // the same occurrence would stand permanently unmatched.
+        assert_eq!(
+            webhook_store
+                .recorded_event_projection_count(admission.key())
+                .await?,
+            0
         );
         Ok(())
     }
