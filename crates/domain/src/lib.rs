@@ -45,6 +45,7 @@ mod turn_eligibility;
 mod turn_lifecycle;
 mod user_content;
 mod workspace;
+mod workspace_instruction;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
@@ -375,9 +376,10 @@ pub use turn_eligibility::{
     ActivatedAcceptedInputTurn, ActivatedDelegatedTurn, ActivatedTurn,
     ActiveTurnSchedulingReconstitutionInput, CancelledTurnExecutionReconstitutionInput,
     ConsumedSteeringInput, ConsumedSteeringReconstitutionInput,
-    ContinuationRoundReconstitutionInput, DelegatedTurnActivationInput,
-    DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegatedWakeTurnActivationInput,
-    FailedAcceptedInputTurn, FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
+    ContinuationRoundReconstitutionInput, DelegatedModelCallRecoveryReconstitutionInput,
+    DelegatedTurnActivationInput, DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState,
+    DelegatedWakeTurnActivationInput, FailedAcceptedInputTurn,
+    FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
     PreparedAcceptedInputTurnActivation, PreparedAcceptedInputTurnFailure,
     PreparedDelegatedTurnActivation, PreparedTurnActivation,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -392,6 +394,14 @@ pub use user_content::{
     NonEmptyUnicodeText, NonEmptyUnicodeTextError, NonEmptyUnicodeTextFailure, UserContent,
 };
 pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
+pub use workspace_instruction::{
+    EmptyTurnInstructionManifestEvidence, InstructionBundleId, InstructionBundleKind,
+    InstructionBundleRegistration, InstructionBundleRegistrationInput, InstructionDigest,
+    InstructionDiscoveryId, InstructionDiscoveryRootKind, InstructionPath, InstructionPathError,
+    InstructionSkillMetadata, InstructionSkillMetadataError, InstructionSkillMetadataInput,
+    InstructionSourcePath, InstructionSourcePathInterner, InstructionSourcePathPrefix,
+    TurnInstructionManifest, TurnInstructionManifestId,
+};
 
 macro_rules! define_identity {
     ($(#[$documentation:meta])* $name:ident) => {

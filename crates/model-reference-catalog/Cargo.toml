@@ -1,0 +1,20 @@
+[package]
+name = "signalbox-model-reference-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+rust_decimal = { version = "1.42.1", default-features = false, features = ["std"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.149"
+url = "2.5.8"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
