@@ -596,7 +596,8 @@ pub enum WebTimelineDetailContinuation {
 #[serde(deny_unknown_fields)]
 pub struct WebSessionTimelineDetailPage {
     pub session_id: WebSessionId,
-    #[schemars(length(max = 128))]
+    // The generator stamps `max_timeline_detail_items()` onto this field as
+    // `maxItems`; the bound lives in the application crate, not restated here.
     pub items: Vec<WebSessionTimelineDetail>,
     pub projected_body_bytes: u32,
     pub continuation: Option<WebTimelineDetailContinuation>,
@@ -871,6 +872,11 @@ pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContra
         "/$defs/WebTimelineTextExcerpt/properties/text",
         max_timeline_detail_bytes(),
     )?;
+    set_array_max_items(
+        &mut detail_schema,
+        "/properties/items",
+        u32::from(max_timeline_detail_items()),
+    )?;
     let mut attention_snapshot_schema =
         canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
     make_property_nullable(&mut attention_snapshot_schema, "continuation")?;
@@ -964,7 +970,26 @@ fn set_string_max_length(
     Ok(())
 }
 
-/// The seven canonical DTO schemas the browser artifacts are generated from.
+/// Stamps an array bound onto a generated schema from the value's owning crate.
+///
+/// Restating the ceiling as a `schemars` literal lets the generated client and
+/// the advertised bootstrap limit drift apart the moment the owner changes, so
+/// the bound is written here from the same function bootstrap reports.
+fn set_array_max_items(
+    schema: &mut Value,
+    property_pointer: &str,
+    max_items: u32,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(property_pointer)
+        .and_then(Value::as_object_mut)
+        .filter(|property| property.get("type").and_then(Value::as_str) == Some("array"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    property.insert("maxItems".to_owned(), json!(max_items));
+    Ok(())
+}
+
+/// The eight canonical DTO schemas the browser artifacts are generated from.
 ///
 /// Grouped into one value because the generated surface grows with every
 /// browser read: passing each schema positionally made the two generator

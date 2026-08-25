@@ -467,6 +467,20 @@ impl SessionTimelineReader for SessionTimelineRepository {
 
 const DETAIL_ENVELOPE_BYTES: u32 = timeline_detail_envelope_bytes();
 
+/// The widest UTF-8 encoding of a single Unicode scalar value.
+///
+/// A detail item is only admitted to a page when its body budget can carry at
+/// least this many bytes, which is what guarantees that an admitted
+/// text-bearing item always delivers at least one complete scalar. Without
+/// that headroom a page can charge the envelope, select an empty excerpt, and
+/// hand back a body continuation at the offset the caller already asked for —
+/// a cursor that never advances.
+const MAX_UTF8_SCALAR_BYTES: u32 = 4;
+
+/// The smallest page budget that can seat one text-bearing detail item and
+/// still make progress through its body.
+const DETAIL_PROGRESS_BYTES: u32 = DETAIL_ENVELOPE_BYTES + MAX_UTF8_SCALAR_BYTES;
+
 const TURN_DETAIL_ADDRESSES_SQL: &str = r#"
 WITH turn_events AS (
     SELECT event_sequence FROM input_accepted_outbox_event
@@ -631,7 +645,7 @@ async fn project_address_page(
     let mut items = Vec::with_capacity(addresses.len().min(item_limit));
     let mut continuation = None;
     for address in addresses.into_iter().take(item_limit) {
-        if remaining < DETAIL_ENVELOPE_BYTES {
+        if remaining < DETAIL_PROGRESS_BYTES {
             continuation = Some(TimelineDetailContinuation::MoreAt(address));
             break;
         }
@@ -1273,6 +1287,15 @@ fn bounded_text_excerpt(
                 .map_err(|_| SessionTimelineCorruption::DetailProjectionOverflow)?,
         )
         .ok_or(SessionTimelineCorruption::DetailProjectionOverflow)?;
+    // A continuation at the offset the caller already asked for never advances:
+    // the caller re-requests the same page forever, or treats the address as
+    // delivered and loses the body. The page budget reserves
+    // MAX_UTF8_SCALAR_BYTES per admitted item so this cannot arise from a legal
+    // read; anything that reaches it is a broken budget, so fail closed rather
+    // than hand back a cursor that cannot make progress.
+    if next_offset == response.offset_bytes && next_offset < response.total_bytes {
+        return Err(SessionTimelineCorruption::DetailProjectionOverflow.into());
+    }
     let continuation = (next_offset < response.total_bytes).then_some(TimelineBodyContinuation {
         address,
         field,
@@ -1726,6 +1749,61 @@ mod tests {
         assert_eq!(excerpt.total_bytes, 4);
         assert_eq!(continuation.offset_bytes, 2);
         assert_eq!(budget, 0);
+    }
+
+    #[test]
+    fn model_response_slice_rejects_a_zero_progress_body_cursor() {
+        let address =
+            TimelineAddress::new(NonZeroU64::new(11).expect("fixture address is positive"));
+        let response = ModelResponseSlice {
+            bytes: "abc".as_bytes().to_vec(),
+            offset_bytes: 0,
+            total_bytes: 3,
+        };
+        // An exhausted body budget would otherwise select an empty excerpt and
+        // hand back a continuation at offset 0 — the offset the caller already
+        // asked for.
+        let mut budget = 0;
+
+        assert!(matches!(
+            response_excerpt(response, address, &mut budget),
+            Err(SessionTimelineRepositoryError::Corruption(
+                SessionTimelineCorruption::DetailProjectionOverflow
+            ))
+        ));
+    }
+
+    #[test]
+    fn model_response_slice_rejects_a_budget_below_one_scalar() {
+        let address =
+            TimelineAddress::new(NonZeroU64::new(12).expect("fixture address is positive"));
+        let response = ModelResponseSlice {
+            bytes: "\u{20ac}z".as_bytes().to_vec(),
+            offset_bytes: 0,
+            total_bytes: 4,
+        };
+        // One byte cannot seat the three-byte leading scalar, so the UTF-8
+        // backoff empties the excerpt and the cursor would not advance.
+        let mut budget = 1;
+
+        assert!(matches!(
+            response_excerpt(response, address, &mut budget),
+            Err(SessionTimelineRepositoryError::Corruption(
+                SessionTimelineCorruption::DetailProjectionOverflow
+            ))
+        ));
+    }
+
+    #[test]
+    fn a_page_admits_an_item_only_with_room_for_one_scalar() {
+        // The page guard reserves the envelope plus the widest single scalar,
+        // which is what makes the two cases above unreachable from a legal read.
+        assert_eq!(
+            DETAIL_PROGRESS_BYTES,
+            DETAIL_ENVELOPE_BYTES + MAX_UTF8_SCALAR_BYTES
+        );
+        assert!(MAX_UTF8_SCALAR_BYTES as usize == "\u{10348}".len());
+        assert!(signalbox_application::min_timeline_detail_bytes() >= DETAIL_PROGRESS_BYTES);
     }
 
     #[test]
