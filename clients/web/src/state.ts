@@ -169,12 +169,15 @@ const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
   return result
 }
 
-export const store = configureStore({
-  reducer: { app: appSlice.reducer },
-  middleware: (getDefaultMiddleware) =>
-    getDefaultMiddleware().concat(traceMiddleware, preferenceMiddleware),
-  devTools: { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false },
-})
+export const createAppStore = () =>
+  configureStore({
+    reducer: { app: appSlice.reducer },
+    middleware: (getDefaultMiddleware) =>
+      getDefaultMiddleware().concat(traceMiddleware, preferenceMiddleware),
+    devTools: { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false },
+  })
+
+export const store = createAppStore()
 
 export const actions = appSlice.actions
 export type RootState = ReturnType<typeof store.getState>

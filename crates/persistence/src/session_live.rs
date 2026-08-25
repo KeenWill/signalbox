@@ -71,6 +71,10 @@ impl SessionLiveRepository {
         Self { pool }
     }
 
+    /// Reads one current projection inside a read-only repeatable-read
+    /// transaction. State a caller samples before this call is proven covered
+    /// by the returned `observed_through`; state sampled during or after the
+    /// read is not, because the transaction's snapshot predates it.
     pub async fn read_live_snapshot(
         &self,
         session: SessionId,
@@ -80,8 +84,12 @@ impl SessionLiveRepository {
             .map(|result| result.map(|(snapshot, ())| snapshot))
     }
 
-    /// Reads one snapshot and samples caller-owned state immediately after its
-    /// repeatable-read transaction completes.
+    /// Reads one snapshot and samples caller-owned state immediately after the
+    /// last read inside its repeatable-read transaction. Everything the caller
+    /// observed before the sample point precedes what the snapshot's queries
+    /// could still change, so a broadcast record counted here belongs to work
+    /// the snapshot already reflects — but its durable cursor is NOT proven
+    /// covered by `observed_through`; use a pre-call sample for that proof.
     pub async fn read_live_snapshot_at_completion<T>(
         &self,
         session: SessionId,
@@ -119,19 +127,11 @@ impl SessionLiveRepository {
             ));
         }
         let active = active_rows.first().map(decode_active).transpose()?;
-        let queued_rows = sqlx::query(
-            "SELECT turn_id
-               FROM turn_lifecycle
-              WHERE session_id = $1
-                AND state_kind = 'queued'
-                AND goal_turn_is_runtime_relevant(session_id, turn_id)
-              ORDER BY acceptance_position
-              LIMIT $2",
-        )
-        .bind(session.into_uuid())
-        .bind(i64::from(max_session_live_queued_turns()))
-        .fetch_all(&mut *transaction)
-        .await?;
+        let queued_rows = sqlx::query(QUEUED_PREVIEW_SQL)
+            .bind(session.into_uuid())
+            .bind(i64::from(max_session_live_queued_turns()))
+            .fetch_all(&mut *transaction)
+            .await?;
         let queued_turns = queued_rows
             .iter()
             .map(|row| row.try_get::<Uuid, _>("turn_id").map(TurnId::from_uuid))
@@ -204,16 +204,31 @@ SELECT lifecycle.turn_id, lifecycle.active_phase_kind,
    AND current_call.state_kind <> 'terminal'
  WHERE lifecycle.session_id = $1
    AND lifecycle.state_kind = 'active'
+   AND NOT lifecycle.delegation_runtime_terminal
    AND goal_turn_is_runtime_relevant(lifecycle.session_id, lifecycle.turn_id)
  ORDER BY lifecycle.acceptance_position
  LIMIT 2
 "#;
 
+const QUEUED_PREVIEW_SQL: &str = r#"
+SELECT turn_id
+  FROM session_live_queued_turn
+ WHERE session_id = $1
+ ORDER BY acceptance_position
+ LIMIT $2
+"#;
+
+// Reconciliation does not gate later queue admission, so the newest turn may
+// be a queued or completed successor: filter for the reconciliation-required
+// terminal shape itself instead of inspecting only the latest turn.
 const RECONCILIATION_SQL: &str = r#"
 SELECT turn_id, state_kind, terminal_disposition_kind,
        terminal_model_call_id, terminal_tool_attempt_id
   FROM turn_lifecycle
  WHERE session_id = $1
+   AND NOT delegation_runtime_terminal
+   AND state_kind = 'terminal'
+   AND terminal_disposition_kind = 'reconciliation_required'
    AND goal_turn_is_runtime_relevant(session_id, turn_id)
  ORDER BY acceptance_position DESC
  LIMIT 1

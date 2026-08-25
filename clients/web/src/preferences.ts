@@ -64,6 +64,8 @@ const isPersistedLogicalPosition = (sessionId: string, position: string): boolea
   BigInt(position) <= MAX_U64
 
 const isBoundedKeyOverride = (commandId: string, binding: string): boolean =>
+  commandId !== '__proto__' &&
+  !/^(?:0|[1-9]\d*)$/.test(commandId) &&
   isWithinUtf8ByteLimit(commandId, MAX_KEY_OVERRIDE_KEY_BYTES) &&
   isWithinUtf8ByteLimit(binding, MAX_KEY_OVERRIDE_VALUE_BYTES)
 

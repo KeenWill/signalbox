@@ -109,6 +109,22 @@ test("generated live decoder bounds retained queued turns", () => {
   );
 });
 
+test("generated live decoder requires a positive observation cursor", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "0",
+        active: null,
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /matching/,
+  );
+});
+
 test("generated live decoder correlates queued preview with its count", () => {
   assert.throws(
     () =>
@@ -164,7 +180,7 @@ test("generated live decoder rejects queued identities occupying current state",
   );
 });
 
-test("generated live decoder validates identities and active-state correlation", () => {
+test("generated live decoder validates identities", () => {
   assert.throws(
     () =>
       decodeWebSessionLiveSnapshot({
@@ -178,6 +194,9 @@ test("generated live decoder validates identities and active-state correlation",
       }),
     /matching/,
   );
+});
+
+test("generated live decoder rejects simultaneous active and reconciliation states", () => {
   assert.throws(
     () =>
       decodeWebSessionLiveSnapshot({
@@ -200,16 +219,61 @@ test("generated live decoder validates identities and active-state correlation",
   );
 });
 
-test("generated live decoder treats omitted optional state as absent", () => {
-  const snapshot = decodeWebSessionLiveSnapshot({
+test("generated live decoder requires explicit nullable state fields", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+      }),
+    /must be present/,
+  );
+  const explicit = decodeWebSessionLiveSnapshot({
     session_id: "00000000-0000-0000-0000-000000000991",
     observed_through: "7",
+    active: null,
     queued_turn_count: "0",
     queued_turn_ids: [],
+    reconciliation: null,
+    runner: null,
   });
+  assert.equal(explicit.active, null);
+  assert.equal(explicit.reconciliation, null);
+  assert.equal(explicit.runner, null);
+});
 
-  assert.equal(snapshot.active, undefined);
-  assert.equal(snapshot.reconciliation, undefined);
+test("generated live decoder requires an explicit running model call", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveSnapshot({
+        session_id: "00000000-0000-0000-0000-000000000991",
+        observed_through: "7",
+        active: {
+          turn_id: "00000000-0000-0000-0000-000000000992",
+          state: { kind: "running" },
+        },
+        queued_turn_count: "0",
+        queued_turn_ids: [],
+        reconciliation: null,
+        runner: null,
+      }),
+    /one recognized variant/,
+  );
+  const idle = decodeWebSessionLiveSnapshot({
+    session_id: "00000000-0000-0000-0000-000000000991",
+    observed_through: "7",
+    active: {
+      turn_id: "00000000-0000-0000-0000-000000000992",
+      state: { kind: "running", model_call_id: null },
+    },
+    queued_turn_count: "0",
+    queued_turn_ids: [],
+    reconciliation: null,
+    runner: null,
+  });
+  assert.equal(idle.active.state.model_call_id, null);
 });
 
 test("generated live decoder rejects malformed runner correlations", () => {
@@ -322,6 +386,55 @@ test("generated live stream decoder correlates durable cursor and address", () =
       }),
     /equal to cursor/,
   );
+});
+
+test("generated live stream decoder bounds provider text fragments", () => {
+  const admitted = decodeWebSessionLiveStreamEvent({
+    kind: "provider_text_delta",
+    turn_id: "00000000-0000-0000-0000-000000000992",
+    model_call_id: "00000000-0000-0000-0000-000000000993",
+    part_index: 0,
+    content: "x".repeat(8192),
+  });
+  assert.equal(admitted.content.length, 8192);
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "provider_text_delta",
+        turn_id: "00000000-0000-0000-0000-000000000992",
+        model_call_id: "00000000-0000-0000-0000-000000000993",
+        part_index: 0,
+        content: "x".repeat(8193),
+      }),
+    /at most 8192 UTF-8 bytes/,
+  );
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "provider_text_delta",
+        turn_id: "00000000-0000-0000-0000-000000000992",
+        model_call_id: "00000000-0000-0000-0000-000000000993",
+        part_index: 0,
+        content: "\u{20AC}".repeat(2731),
+      }),
+    /at most 8192 UTF-8 bytes/,
+  );
+});
+
+test("generated live stream decoder requires a positive resynchronization cursor", () => {
+  assert.throws(
+    () =>
+      decodeWebSessionLiveStreamEvent({
+        kind: "resync_required",
+        cursor: "0",
+      }),
+    /one recognized variant/,
+  );
+  const resync = decodeWebSessionLiveStreamEvent({
+    kind: "resync_required",
+    cursor: "7",
+  });
+  assert.equal(resync.cursor, "7");
 });
 
 test("generated error decoder preserves the transport application boundary", () => {
@@ -481,6 +594,62 @@ test("generated attention decoder validates decimals and identities", () => {
   );
 });
 
+test("generated attention decoder requires the nullable current turn field", () => {
+  const withoutCurrentTurn = attentionSummary();
+  delete withoutCurrentTurn.current_turn_id;
+
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({ summaries: [withoutCurrentTurn] }),
+      ),
+    /current_turn_id must be present/,
+  );
+});
+
+test("generated attention decoder requires identities for turn-backed states", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ state: "active" })],
+        }),
+      ),
+    /current_turn_id must be a turn identity for state active/,
+  );
+});
+
+test("generated attention decoder rejects totals below the returned page", () => {
+  assert.throws(
+    () => decodeWebAttentionSnapshot(attentionSnapshot({ total: "0" })),
+    /total must be at least the number of returned summaries/,
+  );
+});
+
+test("generated attention decoder rejects contradictory title truncation", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ title_truncated: true })],
+        }),
+      ),
+    /title_truncated must be false when title_summary is null/,
+  );
+});
+
+test("generated attention decoder rejects unpaired text surrogates", () => {
+  assert.throws(
+    () =>
+      decodeWebAttentionSnapshot(
+        attentionSnapshot({
+          summaries: [attentionSummary({ title_summary: "\ud800" })],
+        }),
+      ),
+    /well-formed Unicode text/,
+  );
+});
+
 test("generated attention decoder rejects unknown envelope fields", () => {
   assert.throws(
     () =>
@@ -519,12 +688,30 @@ test("generated attention decoder requires the continuation field", () => {
 test("generated attention decoder enforces collection and scalar bounds", () => {
   assert.throws(
     () =>
+      decodeWebAttentionStreamEvent({
+        kind: "update",
+        cursor: "1",
+        summaries: [],
+      }),
+    /one recognized variant/,
+  );
+  assert.throws(
+    () =>
       decodeWebAttentionSnapshot(
         attentionSnapshot({
           summaries: Array.from({ length: 33 }, () => attentionSummary()),
         }),
       ),
     /at most 16 items/,
+  );
+  assert.throws(
+    () =>
+      decodeWebAttentionStreamEvent({
+        kind: "update",
+        cursor: "1",
+        summaries: Array.from({ length: 17 }, () => attentionSummary()),
+      }),
+    /one recognized variant/,
   );
   assert.throws(
     () =>

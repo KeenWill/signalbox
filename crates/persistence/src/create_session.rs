@@ -225,6 +225,7 @@ impl CreateSessionRepository {
             Some(
                 CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -274,6 +275,7 @@ impl CreateSessionRepository {
                     | CommandKind::ReplaceSessionMetadata
                     | CommandKind::SubmitInput
                     | CommandKind::DecideToolRequest
+                    | CommandKind::OverrideDeniedToolRequest
                     | CommandKind::ReviewWorkflow
                     | CommandKind::ReviewOrchestration
                     | CommandKind::CompactSession
@@ -331,6 +333,7 @@ impl CreateSessionRepository {
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession

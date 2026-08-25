@@ -486,7 +486,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   useEffect(() => {
     document.title = `${surfaceCopy[surface].title} · Signalbox`
     return () => {
-      document.title = 'Signalbox scenarios'
+      document.title = 'Signalbox'
     }
   }, [surface])
 

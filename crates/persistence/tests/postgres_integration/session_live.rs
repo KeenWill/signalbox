@@ -2,7 +2,8 @@
 
 use crate::*;
 use signalbox_application::{
-    SessionLiveActiveState, SessionLiveActiveTurn, max_session_live_queued_turns,
+    SessionLiveActiveState, SessionLiveActiveTurn, SessionLiveReconciliation,
+    max_session_live_queued_turns,
 };
 use signalbox_persistence::session_live::{SessionLiveRepository, SessionLiveRepositoryError};
 
@@ -43,6 +44,29 @@ async fn queue_fixture_turns(
         turns.push(turn);
     }
     Ok(turns)
+}
+
+/// Recomputes the queue preview from the backfill predicate the migration
+/// seeds `session_live_queued_turn` with, so a goal-event trigger that
+/// diverges from that one definition fails here instead of surfacing as a
+/// count/preview mismatch that fails a live read closed.
+async fn backfilled_live_queue(
+    pool: &PgPool,
+    session: SessionId,
+) -> Result<Vec<TurnId>, Box<dyn Error>> {
+    let turns: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND state_kind = 'queued'
+            AND NOT delegation_runtime_terminal
+            AND goal_turn_is_runtime_relevant(session_id, turn_id)
+          ORDER BY acceptance_position",
+    )
+    .bind(session.into_uuid())
+    .fetch_all(pool)
+    .await?;
+    Ok(turns.into_iter().map(TurnId::from_uuid).collect())
 }
 
 fn corruption_field(error: SessionLiveRepositoryError) -> Option<&'static str> {
@@ -167,6 +191,139 @@ async fn live_snapshot_caps_the_queue_preview() -> Result<(), Box<dyn Error>> {
     assert_eq!(snapshot.queued_turn_count, 33);
     assert_eq!(snapshot.queued_turns.len(), preview_limit);
     assert_eq!(snapshot.queued_turns, turns[..preview_limit]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A queued successor must not hide the latest outstanding terminal
+/// reconciliation: reconciliation does not gate later queue admission, so the
+/// projection filters for the reconciliation-required terminal shape instead
+/// of inspecting only the turn with the greatest acceptance position.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn live_snapshot_reports_reconciliation_behind_a_queued_successor()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let parked =
+        crate::model_call_execution_and_recovery::park_restart_ambiguity(&pool, 0xD7_0000).await?;
+    let reconciliation = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let batch = reconciliation.claim_due().await?;
+    let outcome = reconciliation.reconcile(batch.claimed()[0]).await?;
+    assert_eq!(outcome, ModelCallReconciliationOutcome::Reconciled);
+    let successor = TurnId::from_uuid(Uuid::from_u128(0xD7_1003));
+    let queued = SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                0xD7_1001,
+                parked.session.into_uuid().as_u128(),
+                "successor queued behind the reconciliation",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xD7_1002)),
+            Some(successor),
+        )
+        .await?;
+    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(_),
+    )) = queued
+    else {
+        return Err("the successor input was not queued".into());
+    };
+    let snapshot = SessionLiveRepository::new(pool.clone())
+        .read_live_snapshot(parked.session)
+        .await?
+        .expect("the reconciliation-parked session has a live snapshot");
+
+    assert_eq!(snapshot.active, None);
+    assert_eq!(snapshot.queued_turns, [successor]);
+    assert_eq!(
+        snapshot.reconciliation,
+        Some(SessionLiveReconciliation::ModelCall {
+            turn: parked.turn,
+            call: parked.call,
+        })
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A delegation termination cascade marks a turn logically terminal while its
+/// underlying `state_kind` deliberately stays `active`, so the live current
+/// projection must exclude it exactly as the timeline-fact and scheduler
+/// predicates do — otherwise a later active turn makes two selected rows and
+/// every live read fails with an active-cardinality corruption.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn live_snapshot_excludes_a_delegation_terminated_active_turn() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_live_session(&pool).await?;
+    submit_first_live_turn(&pool, session).await?;
+    activate_first_live_turn(&pool, session).await?;
+    // A real release runs through the delegation termination cascade with its
+    // logical-terminal proof rows; this narrows the fixture to the released
+    // runtime slot itself, as the runner-protocol release test does.
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET origin_kind = 'delegation', origin_accepted_input_id = NULL,
+                delegation_runtime_terminal = true
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(&pool)
+        .await?;
+    let snapshot = SessionLiveRepository::new(pool.clone())
+        .read_live_snapshot(session)
+        .await?
+        .expect("the terminated session still has a live snapshot");
+
+    assert_eq!(snapshot.active, None);
+    assert_eq!(snapshot.queued_turn_count, 0);
+    assert_eq!(snapshot.reconciliation, None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Goal events reconcile the live queue preview relation through the same
+/// runtime-relevance predicate that recomputes `queued_turn_count`, so a
+/// retiring event can never leave the preview holding more rows than the
+/// exact count, which a live read would fail closed on.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn goal_transitions_keep_the_live_queue_preview_reconciled() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = create_live_session(&pool).await?;
+    commission_fixture_session_goal(&pool, session, LIVE_SEED + 0x2000).await?;
+    let commissioned = SessionLiveRepository::new(pool.clone())
+        .read_live_snapshot(session)
+        .await?
+        .expect("the commissioned session has a live snapshot");
+    let commissioned_backfill = backfilled_live_queue(&pool, session).await?;
+    stop_fixture_session_goal(&pool, session, LIVE_SEED + 0x2100).await?;
+    let stopped = SessionLiveRepository::new(pool.clone())
+        .read_live_snapshot(session)
+        .await?
+        .expect("the stopped session has a live snapshot");
+    let stopped_backfill = backfilled_live_queue(&pool, session).await?;
+
+    assert_eq!(commissioned.queued_turn_count, 1);
+    assert_eq!(commissioned.queued_turns, commissioned_backfill);
+    assert_eq!(stopped.queued_turn_count, 0);
+    assert_eq!(stopped.queued_turns, stopped_backfill);
+    assert_eq!(stopped.queued_turns, []);
 
     pool.close().await;
     drop(container);

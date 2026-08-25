@@ -47,7 +47,12 @@ current-head authentication is additionally verified against the parent slice
 (`agent/scoped-visibility`). The read-scope enforcement and process surface are
 verified against this PR (`agent/scoped-visibility-wiring`).
 Defaults-replacement settings admission and its locked expected-epoch handoff
-are verified against this PR (`agent/model-settings-execution`).
+are verified against this PR (`agent/model-settings-execution`). The
+automatic-reconciliation child outcome — the failed result carrying the
+`ChildResultUnavailable` reason and the exact reconciled child turn that the
+daemon's durable attempt seals for a parent whose delegated call the provider
+can never settle — is verified against this PR
+(`agent/turn-lifecycle-hardening`).
 
 ## Session identity and creation provenance
 
@@ -646,7 +651,7 @@ launder invalid durable state into valid-looking domain values.
 ## Bounded browser session catalog
 
 `GET /api/sessions` is the one fleet-wide session chooser and attention read
-model. It returns at most 32 rows from one read-only repeatable-read snapshot,
+model. It returns at most 16 rows from one read-only repeatable-read snapshot,
 the exact filtered total, and the durable attention-journal cursor. The total
 counts filtered session and metadata rows; it never scans transcript or timeline
 records. Each row carries session identity, a title summary of at most 128
@@ -680,25 +685,34 @@ model-call recovery, tool recovery, or runner recovery state, the exact queued
 turn count, the earliest 32 queued turn identities, any current terminal
 reconciliation operation, and current runner placement and connection health.
 The queue count and preview are distinct, so a large queue never makes snapshot
-memory proportional to retained work. The read uses existing lifecycle,
-timeline-fact, runner, and outbox records and adds no durable projection.
+memory proportional to retained work. An incrementally maintained current-queue
+relation keeps preview reads independent of retired goal history; the remaining
+state comes from lifecycle, timeline-fact, runner, and outbox records.
 
 `GET /api/sessions/{session_id}/follow` subscribes to the daemon's single
 64-record browser monitor fanout before reading that snapshot, then emits the
 snapshot as its first NDJSON item. Durable updates above the snapshot cursor are
 observed in global sequence order and an update for the selected session is
 emitted as its stable timeline address and closed event category. Updates for
-other sessions advance the observed cursor without opening another stream. Thus
-the catalog never follows every listed session; only the open workspace uses
-this route.
+other sessions advance the observed cursor without opening another stream. The
+committed browser policy is for only the open workspace to use this route, but
+that client behavior is not yet implemented: no present browser surface selects
+an open workspace or prevents following any listed session.
 
 Already-redacted provider text deltas are ephemeral presentation, carry no
-durable cursor, and are split at UTF-8 boundaries below the NDJSON item ceiling.
-Deltas already queued when the repeatable-read snapshot completes are discarded.
-Falling behind the monitor emits one `resync_required` item and ends the
-response. A client resynchronizes by replacing all transient presentation with a
-fresh bounded live snapshot and resumes durable history above its cursor; it
-does not reload the historical transcript.
+durable cursor, and are split at UTF-8 boundaries at most 8,192 bytes long — a
+bound the contract crate owns and the generated decoder enforces. Deltas already
+queued when the repeatable-read snapshot completes are discarded, since one
+raced against the snapshot's own reads may describe a call the snapshot already
+shows terminal and nothing later would clear it. Lag absorption uses the earlier
+boundary: only a lag confined to the records queued before the snapshot was
+established — each proven covered by the snapshot cursor — is absorbed silently.
+Falling behind past them, or a monitor queue that reaches its bounded capacity
+while retained fragment text is still draining, emits one `resync_required`
+item, whose cursor is always positive, and ends the response. A client
+resynchronizes by replacing all transient presentation with a fresh bounded live
+snapshot and resumes durable history above its cursor; it does not reload the
+historical transcript.
 
 ## Bounded browser session timeline
 
@@ -1212,7 +1226,13 @@ carry the exact terminal child turn. Returned content is derived only from the
 proof-bearing completed call; independently supplied text cannot authorize a
 result. A completed turn with empty or oversized returned text records the
 distinct `ChildResultUnavailable` reason. Reconciliation-required work is not
-terminal delegation evidence and produces no outcome. **Committed unimplemented
+terminal delegation evidence on its own and produces no outcome while its
+ambiguity stands. Automatic reconciliation is the exception: the daemon's
+durable attempt seals the child as a failed result carrying that same
+`ChildResultUnavailable` reason and the exact reconciled child turn, in the
+transaction that commits the terminal transition, so a parent waiting on a call
+whose provider outcome can never be established is woken by evidence rather than
+left waiting on a turn that has already ended. **Committed unimplemented
 functionality.** Durable terminal-result reconstitution is not exposed by this
 foundation slice; the persistence slice must consume a sealed reconstituted
 ended-call/turn projection rather than accepting parallel raw identities or

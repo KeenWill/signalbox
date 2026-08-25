@@ -381,6 +381,7 @@ impl ImportedSessionRepository {
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -430,6 +431,7 @@ async fn existing_outcome(
         | CommandKind::ReplaceSessionMetadata
         | CommandKind::SubmitInput
         | CommandKind::DecideToolRequest
+        | CommandKind::OverrideDeniedToolRequest
         | CommandKind::ReviewWorkflow
         | CommandKind::ReviewOrchestration
         | CommandKind::CompactSession

@@ -35,9 +35,9 @@ use signalbox_application::{
     AttentionSummary, SessionLiveActiveState, SessionLiveReconciliation,
     SessionLiveRunnerConnectionHealth, SessionLiveRunnerState, SessionLiveSnapshot,
     SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress,
-    TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits,
-    max_attention_goal_summary_characters, max_attention_snapshot_items,
-    max_attention_title_characters,
+    TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits, max_attention_filter_tags,
+    max_attention_filter_utf8_bytes, max_attention_goal_summary_characters,
+    max_attention_snapshot_items, max_attention_title_characters,
 };
 use signalbox_domain::SessionId;
 use signalbox_persistence::attention::{AttentionRepository, AttentionRepositoryError};
@@ -46,16 +46,17 @@ use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
 use signalbox_web_contract::{
-    MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
-    WebAttentionAction, WebAttentionActivity, WebAttentionActivityKind, WebAttentionBlockedReason,
-    WebAttentionContinuation, WebAttentionGoalBlock, WebAttentionJudgeFacts, WebAttentionSnapshot,
-    WebAttentionSort, WebAttentionState, WebAttentionStreamEvent, WebAttentionSummary,
-    WebContractBootstrap, WebContractExample, WebLiveResourceId, WebPositiveU64, WebSessionId,
-    WebSessionLiveActiveState, WebSessionLiveActiveTurn, WebSessionLiveReconciliation,
-    WebSessionLiveRunner, WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot,
-    WebSessionLiveStreamEvent, WebSessionTimelineDescriptor, WebSessionTimelineEventKind,
-    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
-    WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence, WebTurnId, WebU64,
+    MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES, WebApiError,
+    WebApiErrorKind, WebApiErrorResponse, WebAttentionAction, WebAttentionActivity,
+    WebAttentionActivityKind, WebAttentionBlockedReason, WebAttentionContinuation,
+    WebAttentionGoalBlock, WebAttentionJudgeFacts, WebAttentionSnapshot, WebAttentionSort,
+    WebAttentionState, WebAttentionStreamEvent, WebAttentionSummary, WebContractBootstrap,
+    WebContractExample, WebLiveResourceId, WebPositiveU64, WebSessionId, WebSessionLiveActiveState,
+    WebSessionLiveActiveTurn, WebSessionLiveReconciliation, WebSessionLiveRunner,
+    WebSessionLiveRunnerConnectionHealth, WebSessionLiveSnapshot, WebSessionLiveStreamEvent,
+    WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
+    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebTimelineEventSequence, WebTurnId, WebU64,
 };
 use sqlx::{PgPool, types::Uuid};
 use tokio::{net::TcpListener, sync::watch};
@@ -75,8 +76,6 @@ pub const DEFAULT_WEB_BIND_ADDRESS: SocketAddr =
 const JSON_CONTENT_TYPE: &str = "application/json";
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
 const HTTP_DEFAULT_PORT: u16 = 80;
-// numeric-bound: hard safety - leaves room for worst-case JSON escaping and the event envelope
-const MAX_WEB_PROVIDER_TEXT_FRAGMENT_BYTES: usize = 8_192;
 
 /// Deployment-owned browser listener and production assets configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -288,32 +287,29 @@ impl WebHttpRuntime {
     }
 
     /// Serves until shutdown, then cancels requests by dropping their futures.
-    pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<(), WebHttpRuntimeError> {
+    pub async fn run(self, shutdown: watch::Receiver<bool>) -> Result<(), WebHttpRuntimeError> {
         let Self {
             listener,
             router,
             stream_shutdown,
         } = self;
-        let shutdown_requested = async move {
-            if *shutdown.borrow() {
-                if let Some(stream_shutdown) = stream_shutdown.as_ref() {
-                    let _ = stream_shutdown.send(true);
-                }
-                return;
-            }
-            while shutdown.changed().await.is_ok() {
-                if *shutdown.borrow() {
-                    if let Some(stream_shutdown) = stream_shutdown.as_ref() {
-                        let _ = stream_shutdown.send(true);
-                    }
-                    return;
-                }
-            }
-        };
+        let shutdown_requested = relay_http_shutdown(shutdown, stream_shutdown);
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_requested)
             .await
             .map_err(|_| WebHttpRuntimeError::Serve)
+    }
+}
+
+async fn relay_http_shutdown(
+    mut shutdown: watch::Receiver<bool>,
+    stream_shutdown: Option<watch::Sender<bool>>,
+) {
+    if !*shutdown.borrow() {
+        while shutdown.changed().await.is_ok() && !*shutdown.borrow() {}
+    }
+    if let Some(stream_shutdown) = stream_shutdown {
+        let _ = stream_shutdown.send(true);
     }
 }
 
@@ -322,8 +318,9 @@ pub fn production_router(
     asset_root: Option<PathBuf>,
     pool: Option<PgPool>,
     monitor: Option<ProcessMonitor>,
+    shutdown: Option<watch::Receiver<bool>>,
 ) -> Router {
-    production_router_with_monitor(asset_root, pool, monitor, None)
+    production_router_with_monitor(asset_root, pool, monitor, shutdown)
 }
 
 fn production_router_with_monitor(
@@ -697,7 +694,10 @@ async fn session_live_snapshot(
         return live_projection_unavailable();
     };
     match repository.read_live_snapshot(session).await {
-        Ok(Some(snapshot)) => Json(live_snapshot_dto(snapshot)).into_response(),
+        Ok(Some(snapshot)) => match live_snapshot_dto(snapshot) {
+            Some(snapshot) => Json(snapshot).into_response(),
+            None => live_projection_corruption(),
+        },
         Ok(None) => application_error(
             StatusCode::NOT_FOUND,
             "session_not_found",
@@ -728,6 +728,18 @@ async fn session_live_follow(
     // Subscribe before the repeatable-read snapshot so every update after its
     // cursor is either observed or converted into an explicit resync.
     let subscription = monitor.subscribe();
+    // Sample the queue before the snapshot below establishes its repeatable
+    // read: a record already queued here was broadcast only after its durable
+    // cursor committed, so the later snapshot observes that cursor and the
+    // record is proven covered. A record queued after this sample may carry a
+    // cursor above the snapshot, so a lag reaching past this count must
+    // resynchronize rather than be absorbed silently.
+    let covered_at_snapshot = subscription.queued_len();
+    // Provider drafts use the opposite boundary: a delta broadcast before the
+    // snapshot's own reads finished may describe a call the snapshot already
+    // shows terminal, and no later durable record would clear it, so drafts
+    // queued through the snapshot's completion are discarded rather than
+    // emitted.
     let snapshot = match repository
         .read_live_snapshot_at_completion(session, || subscription.queued_len())
         .await
@@ -743,16 +755,22 @@ async fn session_live_follow(
         Err(error) => return live_projection_error(error),
     };
     let (snapshot, queued_at_snapshot) = snapshot;
-    let observed_through = snapshot.observed_through;
+    let Some(observed_through) = std::num::NonZeroU64::new(snapshot.observed_through) else {
+        return live_projection_corruption();
+    };
     let mut pending = VecDeque::new();
+    let Some(snapshot) = live_snapshot_dto(snapshot) else {
+        return live_projection_corruption();
+    };
     pending.push_back(WebSessionLiveStreamEvent::Snapshot {
-        snapshot: Box::new(live_snapshot_dto(snapshot)),
+        snapshot: Box::new(snapshot),
     });
     let source = stream::unfold(
         LiveFollowState {
             subscription,
             session,
             observed_through,
+            covered_at_snapshot,
             queued_at_snapshot,
             pending,
             provider_fragment: None,
@@ -767,7 +785,13 @@ async fn session_live_follow(
 struct LiveFollowState {
     subscription: crate::ProcessMonitorSubscription,
     session: SessionId,
-    observed_through: u64,
+    observed_through: std::num::NonZeroU64,
+    /// Records queued before the snapshot was established: each is proven
+    /// covered by the snapshot cursor, so a lag confined to them is silent.
+    covered_at_snapshot: usize,
+    /// Records queued through the snapshot's completion: a provider draft
+    /// among them may precede state the snapshot already shows, so it is
+    /// discarded.
     queued_at_snapshot: usize,
     pending: VecDeque<WebSessionLiveStreamEvent>,
     provider_fragment: Option<PendingProviderTextDelta>,
@@ -800,21 +824,40 @@ impl PendingProviderTextDelta {
 async fn live_follow_next(
     mut state: LiveFollowState,
 ) -> Option<(WebSessionLiveStreamEvent, LiveFollowState)> {
+    // A closed channel is a shutdown request from an embedded caller that
+    // dropped its sender, and it must stop the pending-event and retained
+    // fragment fast paths below too: provider delta text has no size bound,
+    // so draining a retained fragment for a slow client would otherwise keep
+    // graceful shutdown waiting arbitrarily long.
     if state
         .shutdown
         .as_ref()
-        .is_some_and(|shutdown| *shutdown.borrow())
+        .is_some_and(|shutdown| *shutdown.borrow() || shutdown.has_changed().is_err())
     {
         return None;
     }
     if let Some(event) = state.pending.pop_front() {
         return Some((event, state));
     }
-    if let Some(mut fragment) = state.provider_fragment.take()
-        && let Some(event) = fragment.next_event()
-    {
-        state.provider_fragment = Some(fragment);
-        return Some((event, state));
+    if let Some(mut fragment) = state.provider_fragment.take() {
+        // The monitor is only polled once the retained text drains, and lag
+        // is only detectable at that poll, so a saturated queue must end
+        // incremental delivery here: draining the rest of an unbounded
+        // provider response first would keep emitting stale presentation the
+        // contract says a full follower queue stops.
+        if state.subscription.is_saturated() {
+            state.ended = true;
+            return Some((
+                WebSessionLiveStreamEvent::ResyncRequired {
+                    cursor: WebPositiveU64::from_nonzero(state.observed_through),
+                },
+                state,
+            ));
+        }
+        if let Some(event) = fragment.next_event() {
+            state.provider_fragment = Some(fragment);
+            return Some((event, state));
+        }
     }
     if state.ended {
         return None;
@@ -826,22 +869,24 @@ async fn live_follow_next(
         } {
             Ok(update) => update,
             Err(ProcessMonitorReceiveError::Lagged(skipped))
-                if skipped <= state.queued_at_snapshot =>
+                if skipped <= state.covered_at_snapshot =>
             {
-                state.queued_at_snapshot -= skipped;
+                state.covered_at_snapshot -= skipped;
+                state.queued_at_snapshot = state.queued_at_snapshot.saturating_sub(skipped);
                 continue;
             }
             Err(ProcessMonitorReceiveError::Lagged(_)) => {
                 state.ended = true;
                 return Some((
                     WebSessionLiveStreamEvent::ResyncRequired {
-                        cursor: WebU64::from_u64(state.observed_through),
+                        cursor: WebPositiveU64::from_nonzero(state.observed_through),
                     },
                     state,
                 ));
             }
             Err(ProcessMonitorReceiveError::Closed) => return None,
         };
+        state.covered_at_snapshot = state.covered_at_snapshot.saturating_sub(1);
         let queued_at_snapshot = if state.queued_at_snapshot == 0 {
             false
         } else {
@@ -854,22 +899,19 @@ async fn live_follow_next(
                 session,
                 kind,
             } => {
-                if cursor <= state.observed_through {
+                // A cursor above the positive observed cursor is itself
+                // positive, so the observed cursor stays provably positive
+                // and the resynchronization cursor is always a valid durable
+                // position.
+                let Some(sequence) = std::num::NonZeroU64::new(cursor)
+                    .filter(|sequence| sequence.get() > state.observed_through.get())
+                else {
                     continue;
-                }
-                state.observed_through = cursor;
+                };
+                state.observed_through = sequence;
                 if session != state.session {
                     continue;
                 }
-                let Some(sequence) = std::num::NonZeroU64::new(cursor) else {
-                    state.ended = true;
-                    return Some((
-                        WebSessionLiveStreamEvent::ResyncRequired {
-                            cursor: WebU64::from_u64(state.observed_through),
-                        },
-                        state,
-                    ));
-                };
                 return Some((
                     WebSessionLiveStreamEvent::Durable {
                         cursor: WebU64::from_u64(cursor),
@@ -920,7 +962,10 @@ async fn live_follow_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
             return;
         }
     }
-    std::future::pending::<()>().await;
+    // The last shutdown sender was dropped. An embedded caller that hands
+    // `production_router` a receiver and then closes the channel is requesting
+    // shutdown, so the stream ends instead of holding the connection open
+    // through graceful shutdown forever.
 }
 
 fn next_web_text_fragment(
@@ -948,13 +993,12 @@ fn next_web_text_fragment(
     Some(fragment)
 }
 
-fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
-    WebSessionLiveSnapshot {
-        session_id: WebSessionId::from_uuid_bytes(snapshot.session.into_uuid().into_bytes()),
-        observed_through: WebU64::from_u64(snapshot.observed_through),
-        active: snapshot.active.map(|active| WebSessionLiveActiveTurn {
-            turn_id: WebTurnId::from_uuid_bytes(active.turn.into_uuid().into_bytes()),
-            state: match active.state {
+fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> Option<WebSessionLiveSnapshot> {
+    let observed_through = std::num::NonZeroU64::new(snapshot.observed_through)?;
+    let active = snapshot
+        .active
+        .map(|active| {
+            let state = match active.state {
                 SessionLiveActiveState::Running { model_call } => {
                     WebSessionLiveActiveState::Running {
                         model_call_id: model_call.map(|call| {
@@ -998,38 +1042,29 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                     placement_revision,
                 } => WebSessionLiveActiveState::AwaitingRunnerRecovery {
                     runner_id: WebLiveResourceId::from_uuid_bytes(runner.into_uuid().into_bytes()),
-                    placement_revision: WebPositiveU64::from_u64(placement_revision),
+                    placement_revision: WebPositiveU64::from_nonzero(
+                        std::num::NonZeroU64::new(placement_revision).ok_or(())?,
+                    ),
                 },
-            },
-        }),
-        queued_turn_count: WebU64::from_u64(snapshot.queued_turn_count),
-        queued_turn_ids: snapshot
-            .queued_turns
-            .into_iter()
-            .map(|turn| WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()))
-            .collect(),
-        reconciliation: snapshot
-            .reconciliation
-            .map(|reconciliation| match reconciliation {
-                SessionLiveReconciliation::ModelCall { turn, call } => {
-                    WebSessionLiveReconciliation::ModelCall {
-                        turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
-                        model_call_id: WebLiveResourceId::from_uuid_bytes(
-                            call.into_uuid().into_bytes(),
-                        ),
-                    }
-                }
-                SessionLiveReconciliation::ToolAttempt { turn, attempt } => {
-                    WebSessionLiveReconciliation::ToolAttempt {
-                        turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
-                        tool_attempt_id: WebLiveResourceId::from_uuid_bytes(
-                            attempt.into_uuid().into_bytes(),
-                        ),
-                    }
-                }
-            }),
-        runner: snapshot.runner.and_then(|runner| {
-            let placement_revision = WebPositiveU64::from_u64(runner.placement_revision);
+            };
+            Ok::<WebSessionLiveActiveTurn, ()>(WebSessionLiveActiveTurn {
+                turn_id: WebTurnId::from_uuid_bytes(active.turn.into_uuid().into_bytes()),
+                state,
+            })
+        })
+        .transpose()
+        .ok()?;
+    let runner = snapshot
+        .runner
+        .map(|runner| {
+            let placement_revision = WebPositiveU64::from_nonzero(
+                std::num::NonZeroU64::new(runner.placement_revision).ok_or(())?,
+            );
+            Ok::<_, ()>((runner, placement_revision))
+        })
+        .transpose()
+        .ok()?
+        .and_then(|(runner, placement_revision)| {
             match (runner.state, runner.runner, runner.connection_health) {
                 (SessionLiveRunnerState::Unpinned, None, None) => {
                     Some(WebSessionLiveRunner::Unpinned { placement_revision })
@@ -1082,8 +1117,47 @@ fn live_snapshot_dto(snapshot: SessionLiveSnapshot) -> WebSessionLiveSnapshot {
                 }
                 _ => None,
             }
-        }),
-    }
+        });
+    Some(WebSessionLiveSnapshot {
+        session_id: WebSessionId::from_uuid_bytes(snapshot.session.into_uuid().into_bytes()),
+        observed_through: WebPositiveU64::from_nonzero(observed_through),
+        active,
+        queued_turn_count: WebU64::from_u64(snapshot.queued_turn_count),
+        queued_turn_ids: snapshot
+            .queued_turns
+            .into_iter()
+            .map(|turn| WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()))
+            .collect(),
+        reconciliation: snapshot
+            .reconciliation
+            .map(|reconciliation| match reconciliation {
+                SessionLiveReconciliation::ModelCall { turn, call } => {
+                    WebSessionLiveReconciliation::ModelCall {
+                        turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
+                        model_call_id: WebLiveResourceId::from_uuid_bytes(
+                            call.into_uuid().into_bytes(),
+                        ),
+                    }
+                }
+                SessionLiveReconciliation::ToolAttempt { turn, attempt } => {
+                    WebSessionLiveReconciliation::ToolAttempt {
+                        turn_id: WebTurnId::from_uuid_bytes(turn.into_uuid().into_bytes()),
+                        tool_attempt_id: WebLiveResourceId::from_uuid_bytes(
+                            attempt.into_uuid().into_bytes(),
+                        ),
+                    }
+                }
+            }),
+        runner,
+    })
+}
+
+fn live_projection_corruption() -> Response {
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "session_live_projection_corrupt",
+        "the durable live session projection contains invalid positive values",
+    )
 }
 
 fn live_projection_unavailable() -> Response {
@@ -1143,17 +1217,38 @@ async fn attention_snapshot(
 
 fn parse_attention_snapshot_query(raw: Option<&str>) -> Result<AttentionSnapshotQuery, ()> {
     let mut query = AttentionSnapshotQuery::default();
-    for (key, value) in url::form_urlencoded::parse(raw.unwrap_or_default().as_bytes()) {
-        match key.as_ref() {
-            "search" => set_once(&mut query.search, value.into_owned())?,
-            "required_tag" => query.required_tag.push(value.into_owned()),
-            "include_archived" => set_once(&mut query.include_archived, value.into_owned())?,
-            "sort" => set_once(&mut query.sort, value.into_owned())?,
-            "after_session_id" => set_once(&mut query.after_session_id, value.into_owned())?,
-            "after_activity_unix_microseconds" => set_once(
-                &mut query.after_activity_unix_microseconds,
-                value.into_owned(),
-            )?,
+    let mut filter_bytes = 0_usize;
+    for pair in raw.unwrap_or_default().split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        let key = decode_query_component(key)?;
+        let value = decode_query_component(value)?;
+        match key.as_str() {
+            "search" => {
+                filter_bytes = filter_bytes.checked_add(value.len()).ok_or(())?;
+                if filter_bytes > usize::from(max_attention_filter_utf8_bytes()) {
+                    return Err(());
+                }
+                set_once(&mut query.search, value)?;
+            }
+            "required_tag" => {
+                if query.required_tag.len() >= usize::from(max_attention_filter_tags()) {
+                    return Err(());
+                }
+                filter_bytes = filter_bytes.checked_add(value.len()).ok_or(())?;
+                if filter_bytes > usize::from(max_attention_filter_utf8_bytes()) {
+                    return Err(());
+                }
+                query.required_tag.push(value);
+            }
+            "include_archived" => set_once(&mut query.include_archived, value)?,
+            "sort" => set_once(&mut query.sort, value)?,
+            "after_session_id" => set_once(&mut query.after_session_id, value)?,
+            "after_activity_unix_microseconds" => {
+                set_once(&mut query.after_activity_unix_microseconds, value)?;
+            }
             _ => return Err(()),
         }
     }
@@ -1165,6 +1260,71 @@ fn set_once(target: &mut Option<String>, value: String) -> Result<(), ()> {
         return Err(());
     }
     Ok(())
+}
+
+/// Strict `application/x-www-form-urlencoded` component decoding: `+` is a
+/// space, `%XX` escapes must be complete hex pairs, and the decoded bytes must
+/// be valid UTF-8. A lossy decoder would silently rewrite invalid bytes to
+/// U+FFFD and execute a different exact filter than the caller sent.
+fn decode_query_component(raw: &str) -> Result<String, ()> {
+    let bytes = raw.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'+' => {
+                decoded.push(b' ');
+                index += 1;
+            }
+            b'%' => {
+                let high = bytes.get(index + 1).copied().and_then(hex_digit_value);
+                let low = bytes.get(index + 2).copied().and_then(hex_digit_value);
+                let (Some(high), Some(low)) = (high, low) else {
+                    return Err(());
+                };
+                decoded.push(high * 16 + low);
+                index += 3;
+            }
+            byte => {
+                decoded.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(decoded).map_err(|_| ())
+}
+
+const fn hex_digit_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Accepts only the canonical unsigned decimal spelling the contract emits:
+/// digits only, no sign, and no leading zero. `u64::from_str` alone would
+/// admit `+1` and `01` as extra wire spellings of one typed keyset.
+fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(());
+    }
+    if value != "0" && value.starts_with('0') {
+        return Err(());
+    }
+    value.parse::<u64>().map_err(|_| ())
+}
+
+/// Accepts only the canonical lowercase hyphenated UUID spelling the contract
+/// emits; the permissive UUID parser would also admit uppercase, braced,
+/// simple, and URN spellings of the same keyset session.
+fn parse_canonical_session_id(value: &str) -> Result<SessionId, ()> {
+    let parsed = value.parse::<Uuid>().map_err(|_| ())?;
+    if value != parsed.hyphenated().to_string() {
+        return Err(());
+    }
+    Ok(SessionId::from_uuid(parsed))
 }
 
 fn parse_attention_query(query: AttentionSnapshotQuery) -> Result<AttentionQuery, ()> {
@@ -1180,14 +1340,12 @@ fn parse_attention_query(query: AttentionSnapshotQuery) -> Result<AttentionQuery
     };
     let after_session = query
         .after_session_id
-        .map(|value| value.parse::<Uuid>().map(SessionId::from_uuid))
-        .transpose()
-        .map_err(|_| ())?;
+        .map(|value| parse_canonical_session_id(&value))
+        .transpose()?;
     let after_activity_micros = query
         .after_activity_unix_microseconds
-        .map(|value| value.parse::<u64>())
-        .transpose()
-        .map_err(|_| ())?;
+        .map(|value| parse_canonical_u64(&value))
+        .transpose()?;
     if after_activity_micros.is_some_and(|value| {
         sqlx::types::time::OffsetDateTime::from_unix_timestamp_nanos(i128::from(value) * 1_000)
             .is_err()
@@ -1257,7 +1415,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
             cursor,
             AttentionFollowDisposition::Continue,
         ),
-        |(repository, mut pending, cursor, disposition)| async move {
+        |(repository, mut pending, mut cursor, disposition)| async move {
             if let Some((event, emitted_cursor)) = pending.pop_front() {
                 return Some((
                     event,
@@ -1275,7 +1433,12 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
             loop {
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 match repository.changes_after(cursor).await {
-                    Ok(AttentionChanges::Updated { summaries, .. }) if summaries.is_empty() => {}
+                    Ok(AttentionChanges::Updated {
+                        cursor: next,
+                        summaries,
+                    }) if summaries.is_empty() => {
+                        cursor = next;
+                    }
                     Ok(AttentionChanges::Updated {
                         cursor: next,
                         summaries,
@@ -1423,7 +1586,9 @@ fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummar
                 return Err(());
             }
             Ok(WebAttentionGoalBlock {
-                generation: WebU64::from_u64(goal.generation),
+                generation: WebPositiveU64::from_nonzero(
+                    std::num::NonZeroU64::new(goal.generation).ok_or(())?,
+                ),
                 reason: match goal.reason {
                     AttentionBlockedReason::UserInputRequired => {
                         WebAttentionBlockedReason::UserInputRequired
@@ -1819,13 +1984,14 @@ mod tests {
         AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
         AttentionContinuation, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts,
         AttentionSnapshot, AttentionSort, AttentionState, AttentionSummary,
-        max_attention_change_items, max_attention_goal_summary_characters,
-        max_attention_snapshot_items, max_attention_title_characters,
+        max_attention_change_items, max_attention_filter_utf8_bytes,
+        max_attention_goal_summary_characters, max_attention_snapshot_items,
+        max_attention_title_characters,
     };
     use signalbox_domain::{ModelCallId, SessionId, TurnId};
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebAttentionStreamEvent, WebContractBootstrap,
-        WebContractExample, WebLiveResourceId, WebSessionLiveStreamEvent,
+        WebContractExample, WebLiveResourceId, WebPositiveU64, WebSessionLiveStreamEvent,
         WebSessionTimelineEventKind, WebTimelineAddress, WebTimelineEventSequence, WebTurnId,
         WebU64,
     };
@@ -1874,7 +2040,9 @@ mod tests {
         LiveFollowState {
             subscription: monitor.subscribe(),
             session: live_session(),
-            observed_through,
+            observed_through: std::num::NonZeroU64::new(observed_through)
+                .expect("test snapshot cursors are positive"),
+            covered_at_snapshot: queued_at_snapshot,
             queued_at_snapshot,
             pending: std::collections::VecDeque::new(),
             provider_fragment: None,
@@ -1949,6 +2117,7 @@ mod tests {
             part_index: 0,
             text: Arc::from("stale draft"),
         });
+        state.covered_at_snapshot = state.subscription.queued_len();
         state.queued_at_snapshot = state.subscription.queued_len();
         monitor.publish_for_test(ProcessMonitorUpdate::Durable {
             cursor: 8,
@@ -1989,7 +2158,9 @@ mod tests {
         assert_eq!(
             event,
             WebSessionLiveStreamEvent::ResyncRequired {
-                cursor: WebU64::from_u64(7),
+                cursor: WebPositiveU64::from_nonzero(
+                    std::num::NonZeroU64::new(7).expect("the fixture cursor is positive"),
+                ),
             }
         );
     }
@@ -2004,6 +2175,47 @@ mod tests {
             call: live_call(),
             part_index: 0,
             text: Arc::from("stale draft"),
+        });
+        state.covered_at_snapshot = state.subscription.queued_len();
+        state.queued_at_snapshot = state.subscription.queued_len();
+        monitor.publish_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnCompleted,
+        });
+        let (event, _) = live_follow_next(state)
+            .await
+            .expect("the post-snapshot durable event is delivered");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::Durable {
+                cursor: WebU64::from_u64(8),
+                address: WebTimelineAddress {
+                    event_sequence: WebTimelineEventSequence::from_nonzero(
+                        std::num::NonZeroU64::new(8).expect("the fixture cursor is positive"),
+                    ),
+                },
+                event_kind: WebSessionTimelineEventKind::TurnCompleted,
+            }
+        );
+    }
+
+    /// A draft broadcast after the coverage sample but before the snapshot's
+    /// reads finished may describe a call the snapshot already shows terminal,
+    /// and no later durable record clears it, so the completion boundary
+    /// discards it while the earlier coverage bound governs lag absorption.
+    #[tokio::test]
+    async fn live_follow_discards_a_draft_raced_between_sample_and_snapshot() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        state.covered_at_snapshot = state.subscription.queued_len();
+        monitor.publish_for_test(ProcessMonitorUpdate::ProviderTextDelta {
+            session: live_session(),
+            turn: live_turn(),
+            call: live_call(),
+            part_index: 0,
+            text: Arc::from("raced draft"),
         });
         state.queued_at_snapshot = state.subscription.queued_len();
         monitor.publish_for_test(ProcessMonitorUpdate::Durable {
@@ -2027,6 +2239,42 @@ mod tests {
                 event_kind: WebSessionTimelineEventKind::TurnCompleted,
             }
         );
+    }
+
+    /// Lag is only detectable at a monitor poll, so a saturated queue ends
+    /// incremental delivery instead of draining the rest of an unbounded
+    /// provider response first.
+    #[tokio::test]
+    async fn live_follow_resyncs_a_saturated_monitor_before_draining_fragments() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        state.provider_fragment = Some(super::PendingProviderTextDelta {
+            turn_id: WebTurnId::from_uuid_bytes(live_turn().into_uuid().into_bytes()),
+            model_call_id: WebLiveResourceId::from_uuid_bytes(live_call().into_uuid().into_bytes()),
+            part_index: 0,
+            text: Arc::from("retained draft"),
+            offset: 0,
+            emitted_empty: false,
+        });
+        monitor.fill_for_test(ProcessMonitorUpdate::Durable {
+            cursor: 8,
+            session: live_session(),
+            kind: signalbox_application::SessionTimelineEventKind::TurnActivated,
+        });
+        let (event, state) = live_follow_next(state)
+            .await
+            .expect("saturation produces one explicit terminal event");
+
+        assert_eq!(
+            event,
+            WebSessionLiveStreamEvent::ResyncRequired {
+                cursor: WebPositiveU64::from_nonzero(
+                    std::num::NonZeroU64::new(7).expect("the fixture cursor is positive"),
+                ),
+            }
+        );
+        assert!(state.ended);
+        assert!(state.provider_fragment.is_none());
     }
 
     #[tokio::test]
@@ -2074,6 +2322,67 @@ mod tests {
             .expect("shutdown ends the follow stream promptly");
 
         assert!(event.is_none());
+    }
+
+    /// An embedded `production_router` caller that drops its last shutdown
+    /// sender is requesting shutdown, so an open follow stream ends instead of
+    /// blocking graceful shutdown behind a permanently pending future.
+    #[tokio::test]
+    async fn live_follow_ends_when_the_shutdown_sender_is_dropped() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        state.shutdown = Some(shutdown);
+        drop(shutdown_sender);
+
+        let event = tokio::time::timeout(Duration::from_secs(1), live_follow_next(state))
+            .await
+            .expect("a closed shutdown channel ends the follow stream promptly");
+
+        assert!(event.is_none());
+    }
+
+    /// The retained-fragment fast path returns before the monitor is polled,
+    /// so it must observe channel closure itself: provider delta text has no
+    /// size bound, and draining it for a slow client would otherwise keep
+    /// graceful shutdown waiting arbitrarily long.
+    #[tokio::test]
+    async fn live_follow_stops_draining_a_retained_fragment_on_closed_shutdown() {
+        let monitor = ProcessMonitor::test_channel();
+        let mut state = live_follow_state(&monitor, 7, 0);
+        state.provider_fragment = Some(super::PendingProviderTextDelta {
+            turn_id: WebTurnId::from_uuid_bytes(live_turn().into_uuid().into_bytes()),
+            model_call_id: WebLiveResourceId::from_uuid_bytes(live_call().into_uuid().into_bytes()),
+            part_index: 0,
+            text: Arc::from("retained draft"),
+            offset: 0,
+            emitted_empty: false,
+        });
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        state.shutdown = Some(shutdown);
+        drop(shutdown_sender);
+
+        let event = tokio::time::timeout(Duration::from_secs(1), live_follow_next(state))
+            .await
+            .expect("a closed shutdown channel preempts retained fragments promptly");
+
+        assert!(event.is_none());
+    }
+
+    #[tokio::test]
+    async fn closing_http_shutdown_sender_signals_follow_streams() {
+        let (shutdown_sender, shutdown) = watch::channel(false);
+        let (stream_shutdown, mut follow_shutdown) = watch::channel(false);
+        let relay = tokio::spawn(super::relay_http_shutdown(shutdown, Some(stream_shutdown)));
+        drop(shutdown_sender);
+
+        tokio::time::timeout(Duration::from_secs(1), follow_shutdown.changed())
+            .await
+            .expect("closing the HTTP shutdown sender signals follow streams promptly")
+            .expect("the follow shutdown sender remains live through notification");
+        relay.await.expect("the shutdown relay joins");
+
+        assert!(*follow_shutdown.borrow());
     }
 
     #[test]
@@ -2167,7 +2476,7 @@ mod tests {
             .expect("the static index exists");
         let runtime = WebHttpRuntime::bind_router(
             loopback_ephemeral(),
-            production_router(Some(assets.path().to_path_buf()), None, None),
+            production_router(Some(assets.path().to_path_buf()), None, None, None),
         )
         .await
         .expect("the production test server binds");
@@ -2405,7 +2714,7 @@ mod tests {
         let request = Request::get("/api/not-a-route")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(Some(assets.path().to_path_buf()), None, None)
+        let response = production_router(Some(assets.path().to_path_buf()), None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2425,7 +2734,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None)
+        let response = production_router(None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2446,7 +2755,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None)
+        let response = production_router(None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2464,7 +2773,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None)
+        let response = production_router(None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2475,6 +2784,84 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["kind"], "transport");
         assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    /// Drives a session read at the loopback gate and reports only the status.
+    ///
+    /// The query is deliberately malformed, which separates the gate from
+    /// everything behind it: `FORBIDDEN` means the gate rejected the
+    /// authority, while `BAD_REQUEST` comes from the handler and is therefore
+    /// reachable only once the gate has admitted the request.
+    async fn session_read_status_for_host(host: &str) -> StatusCode {
+        let request = Request::get(
+            "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?max_items=nope",
+        )
+        .header(header::HOST, host)
+        .body(Body::empty())
+        .expect("the request is valid");
+        production_router(None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn session_reads_admit_loopback_authorities_including_ip_literals() {
+        // `127.0.0.1` is the daemon's own DEFAULT_WEB_BIND_ADDRESS, so a
+        // regression that tightened this branch would 403 the default
+        // deployment. `[::1]` exercises the bracket strip that precedes the
+        // parse, and `127.5.6.7` covers the whole 127.0.0.0/8 loopback range
+        // rather than only the canonical address.
+        for host in [
+            "localhost",
+            "localhost:37231",
+            "LocalHost",
+            "127.0.0.1",
+            "127.0.0.1:37231",
+            "127.5.6.7",
+            "[::1]",
+            "[::1]:37231",
+        ] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::BAD_REQUEST,
+                "`{host}` is a loopback authority and must reach the handler",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_non_loopback_ip_literal_authorities() {
+        // Every authority here parses as an address, so `is_loopback` — not
+        // the `parse::<IpAddr>()` that already turns hostnames away — is what
+        // has to reject them. A regression that loosened the branch to accept
+        // any parseable address would expose session history to any host that
+        // can reach the port.
+        for host in [
+            "10.0.0.5",
+            "10.0.0.5:37231",
+            "192.168.1.20",
+            "[2001:db8::1]",
+            "[2001:db8::1]:37231",
+        ] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "`{host}` parses as a non-loopback address and must be rejected",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_authorities_that_are_neither_localhost_nor_literals() {
+        for host in ["attacker.example", "localhost.attacker.example"] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "`{host}` is neither localhost nor a loopback literal",
+            );
+        }
     }
 
     #[test]
@@ -2494,7 +2881,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None)
+        let response = production_router(None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2513,6 +2900,71 @@ mod tests {
                 .expect("repeated exact tags are one bounded catalog filter");
 
         assert_eq!(query.required_tag, ["rust", "postgres"]);
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_the_ninth_tag_while_decoding() {
+        let raw = concat!(
+            "required_tag=one&required_tag=two&required_tag=three",
+            "&required_tag=four&required_tag=five&required_tag=six",
+            "&required_tag=seven&required_tag=eight&required_tag=nine"
+        );
+
+        assert!(super::parse_attention_snapshot_query(Some(raw)).is_err());
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_excess_filter_bytes_while_decoding() {
+        let raw = format!(
+            "search={}",
+            "x".repeat(usize::from(max_attention_filter_utf8_bytes()) + 1)
+        );
+
+        assert!(super::parse_attention_snapshot_query(Some(&raw)).is_err());
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_noncanonical_activity_cursors() {
+        for cursor in ["01", "+1", " 1", "1_0"] {
+            let identity_query = super::parse_attention_snapshot_query(Some(&format!(
+                "sort=last_activity_descending\
+                 &after_session_id=00000000-0000-0000-0000-000000000001\
+                 &after_activity_unix_microseconds={cursor}"
+            )))
+            .expect("the query shape itself decodes");
+
+            assert!(super::parse_attention_query(identity_query).is_err());
+        }
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_noncanonical_session_cursors() {
+        let identity_query = super::parse_attention_snapshot_query(Some(
+            "sort=session_identity_ascending\
+             &after_session_id=00000000-0000-0000-0000-0000000000AB",
+        ))
+        .expect("the query shape itself decodes");
+
+        assert!(super::parse_attention_query(identity_query).is_err());
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_invalid_percent_encoded_utf8() {
+        assert!(super::parse_attention_snapshot_query(Some("search=%FF")).is_err());
+    }
+
+    #[test]
+    fn session_catalog_query_rejects_incomplete_percent_escapes() {
+        assert!(super::parse_attention_snapshot_query(Some("search=%F")).is_err());
+        assert!(super::parse_attention_snapshot_query(Some("search=%zz")).is_err());
+    }
+
+    #[test]
+    fn session_catalog_query_decodes_escapes_and_plus_exactly() {
+        let query = super::parse_attention_snapshot_query(Some("search=a+b%2Bc%C3%A9"))
+            .expect("valid percent-encoded UTF-8 decodes");
+
+        assert_eq!(query.search.as_deref(), Some("a b+c\u{e9}"));
     }
 
     #[test]
@@ -2549,7 +3001,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None)
+        let response = production_router(None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");

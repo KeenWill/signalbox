@@ -56,6 +56,11 @@ pub enum GoalCommandHandlingOutcome {
     /// The expected lineage head no longer held under the session lock, so
     /// nothing was applied and the identity remains unspent.
     LineageMoved,
+    /// Another live commissioned session owns the same pull-request target.
+    TargetBusy {
+        /// The competing live session.
+        session: SessionId,
+    },
 }
 
 /// Result of a scheduler- or model-provenance transition.
@@ -262,6 +267,17 @@ impl GoalRepository {
             transaction.rollback().await?;
             return Ok(outcome);
         }
+        if command.action().starts_pursuit()
+            && let Some(session) =
+                crate::commissioned_dispatch::lock_competing_pull_request_session(
+                    &mut transaction,
+                    command.session(),
+                )
+                .await?
+        {
+            transaction.rollback().await?;
+            return Ok(GoalCommandHandlingOutcome::TargetBusy { session });
+        }
 
         let claimed = sqlx::query(
             "INSERT INTO durable_command
@@ -466,6 +482,7 @@ impl GoalRepository {
                 | CommandKind::ReplaceSessionMetadata
                 | CommandKind::SubmitInput
                 | CommandKind::DecideToolRequest
+                | CommandKind::OverrideDeniedToolRequest
                 | CommandKind::ReviewWorkflow
                 | CommandKind::ReviewOrchestration
                 | CommandKind::CompactSession
@@ -690,6 +707,23 @@ impl GoalRepository {
         };
         let event = latest_event(&goal)?;
         insert_event(&mut transaction, session, &event).await?;
+        // A blocked or achieved transition retires the generation's queued
+        // turns from the live-queue projection and the timeline work facts,
+        // so the change must reach the process monitor as a durable outbox
+        // event: an open follow stream otherwise retains the old queue state
+        // with no cursor advance to force a resynchronization.
+        if let Some(retired) =
+            retired_queued_goal_turn_without_outbox(&mut transaction, session).await?
+        {
+            outbox::append(
+                &mut transaction,
+                OutboxEvent::GoalTurnRetired {
+                    session,
+                    turn: retired,
+                },
+            )
+            .await?;
+        }
         commit(transaction).await?;
         Ok(GoalTransitionOutcome::Applied(event))
     }
@@ -734,6 +768,19 @@ pub(crate) async fn block_execution_failure_locked(
     };
     let event = latest_event(&transitioned)?;
     insert_event(connection, session, &event).await?;
+    // Same monitor-visibility requirement as `handle_system_transition`: a
+    // blocked transition that retires a queued turn from the live projection
+    // must surface as a durable outbox event.
+    if let Some(retired) = retired_queued_goal_turn_without_outbox(connection, session).await? {
+        outbox::append(
+            connection,
+            OutboxEvent::GoalTurnRetired {
+                session,
+                turn: retired,
+            },
+        )
+        .await?;
+    }
     Ok(GoalTransitionOutcome::Applied(event))
 }
 
@@ -1248,6 +1295,7 @@ async fn existing_or_conflicting(
         | CommandKind::ReplaceSessionMetadata
         | CommandKind::SubmitInput
         | CommandKind::DecideToolRequest
+        | CommandKind::OverrideDeniedToolRequest
         | CommandKind::ReviewWorkflow
         | CommandKind::ReviewOrchestration
         | CommandKind::CompactSession

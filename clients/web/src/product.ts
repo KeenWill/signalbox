@@ -129,7 +129,6 @@ export class SameOriginProductTransport implements ProductTransport {
     try {
       return decodeWebContractBootstrap(JSON.parse(body))
     } catch (error) {
-      if (error instanceof BootstrapContractError) throw error
       throw new BootstrapContractError('bootstrap response violates the web contract', {
         cause: error,
       })
