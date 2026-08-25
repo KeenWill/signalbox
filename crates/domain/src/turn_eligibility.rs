@@ -25,7 +25,8 @@ use crate::{
     AcceptedInputQueueOrderError, AcceptedInputQueuePriority, AcceptedInputQueueWork,
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
     AppliedInterruptCommandResult, AttemptEnd, CancellationStopDisposition, ChildWait,
-    ContextFrontierId, CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest,
+    ContextFrontierId, ContextFrontierProjection, ContextFrontierProjectionFailure,
+    CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest,
     DirectModelSelection, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
     ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration,
     ReconstitutedImportedSession, ReconstitutedModelCall,
@@ -2420,10 +2421,23 @@ impl AcceptedInputSchedulingProjection {
     /// Returns accepted-input origins retained by the exact base from which
     /// the earliest queued turn would be rendered.
     ///
-    /// This is absent while a turn is active or when no queued turn exists.
-    /// It excludes the queued turn's own origin; callers can append queued
-    /// origins in [`Self::turns`] order to project each eventual frontier.
-    pub fn earliest_queued_rendered_base_origins(&self) -> Option<Vec<AcceptedInputId>> {
+    /// The base is reported as the model would see it: when it carries a
+    /// context summary, the entries that summary hides are not retained
+    /// origins, exactly as the live-execution path projects its own frontier
+    /// before collecting origins. Counting hidden origins here would sum
+    /// attachments no render ever clones, and a submission whose visible
+    /// frontier fits the byte bound would be durably rejected because a
+    /// summarized-away one did not.
+    ///
+    /// The outer absence means a turn is active or no queued turn exists. The
+    /// inner failure means the base's own summary range is unprojectable, a
+    /// durable corruption the caller must surface rather than read as an empty
+    /// base. It excludes the queued turn's own origin; callers can append
+    /// queued origins in [`Self::turns`] order to project each eventual
+    /// frontier.
+    pub fn earliest_queued_rendered_base_origins(
+        &self,
+    ) -> Option<Result<Vec<AcceptedInputId>, ContextFrontierProjectionFailure>> {
         if self.active_turn().is_some() {
             return None;
         }
@@ -2456,9 +2470,17 @@ impl AcceptedInputSchedulingProjection {
                 .filter(|latest| terminal.is_semantic_prefix_of(latest))
                 .or(Some(terminal))
         };
+        let mut complete_entries = Vec::new();
+        for reference in base.into_iter().flat_map(|base| base.ordered_entries()) {
+            complete_entries.push(self.semantic_entries.get(&reference)?.clone());
+        }
+        let projection = match ContextFrontierProjection::from_complete_entries(&complete_entries) {
+            Ok(projection) => projection,
+            Err(failure) => return Some(Err(failure)),
+        };
         let mut origins = Vec::new();
         let mut distinct = BTreeSet::new();
-        for reference in base.into_iter().flat_map(|base| base.ordered_entries()) {
+        for reference in projection.ordered_entries() {
             let accepted_input = match self.semantic_entries.get(&reference)?.payload() {
                 SemanticTranscriptEntryPayload::OriginAcceptedInput { accepted_input }
                 | SemanticTranscriptEntryPayload::SteeringAcceptedInput {
@@ -2483,7 +2505,7 @@ impl AcceptedInputSchedulingProjection {
                 origins.push(accepted_input);
             }
         }
-        Some(origins)
+        Some(Ok(origins))
     }
 
     /// Borrows one complete resolved snapshot from this checked projection.

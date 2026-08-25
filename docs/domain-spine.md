@@ -3568,7 +3568,7 @@ impl AcceptedInputSchedulingProjection {
         -> Option<&AcceptedInputTurnSchedulingProjection>;
     pub fn earliest_queued_rendered_base_origins(
         &self,
-    ) -> Option<Vec<AcceptedInputId>>;
+    ) -> Option<Result<Vec<AcceptedInputId>, ContextFrontierProjectionFailure>>;
     pub fn resolved_snapshot(
         &self,
         snapshot: ContextFrontierId,

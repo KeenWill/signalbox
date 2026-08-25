@@ -1785,6 +1785,10 @@ async fn prospective_attachment_frontier_exceeds_bound(
         Err(ModelCallRepositoryError::NoLiveExecution) => (
             scheduling
                 .earliest_queued_rendered_base_origins()
+                .transpose()
+                .map_err(|_| {
+                    SubmitInputCorruption::Inconsistent("prospective attachment context projection")
+                })?
                 .unwrap_or_default(),
             false,
         ),
