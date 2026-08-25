@@ -3,8 +3,7 @@ use std::{error::Error, fmt, future::Future, pin::Pin};
 use crate::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileReaderName,
     FileReaderProviderName, FileReaderRevision, FileUse, ProcessorProbeOutput, ProcessorReadOutput,
-    ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode, ValidatedFile,
-    VerifiedBlobSource,
+    ProcessorValidationOutput, ReadViewName, ReaderIdentity, ReasonCode, VerifiedBlobSource,
 };
 
 // numeric-bound: ceiling - bounds retained model-facing view-description memory
@@ -18,6 +17,8 @@ const MAX_VIEW_DESCRIPTION_BYTES: usize = 512;
 pub enum ProbeStrength {
     /// Caller declaration nominates a provider but is not evidence.
     DeclaredCandidate,
+    /// A bounded complete prefix is provisional until full validation.
+    ProvisionalStructuralCandidate,
     /// Bounded structure suggests a candidate requiring full validation.
     StructuralCandidate,
     /// A format-owned signature identifies a candidate.
@@ -33,19 +34,27 @@ pub struct ProbeDeclaration {
     cumulative_bytes: u64,
 }
 
+/// Labeled fields for one finite probe envelope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProbeDeclarationInput {
+    /// Maximum prefix bytes available to the probe.
+    pub prefix_bytes: u64,
+    /// Maximum suffix bytes available to the probe.
+    pub suffix_bytes: u64,
+    /// Maximum exact range requests available to the probe.
+    pub range_count: u32,
+    /// Maximum cumulative bytes available to the probe.
+    pub cumulative_bytes: u64,
+}
+
 impl ProbeDeclaration {
-    /// Declares one finite probe envelope. Registry construction checks ceilings.
-    pub const fn new(
-        prefix_bytes: u64,
-        suffix_bytes: u64,
-        range_count: u32,
-        cumulative_bytes: u64,
-    ) -> Self {
+    /// Declares one finite probe envelope from labeled fields.
+    pub const fn new(input: ProbeDeclarationInput) -> Self {
         Self {
-            prefix_bytes,
-            suffix_bytes,
-            range_count,
-            cumulative_bytes,
+            prefix_bytes: input.prefix_bytes,
+            suffix_bytes: input.suffix_bytes,
+            range_count: input.range_count,
+            cumulative_bytes: input.cumulative_bytes,
         }
     }
 
@@ -395,12 +404,20 @@ pub struct FileMediaProviderValidationRequest {
 /// Provider request to interpret one validated file through one view.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileMediaProviderReadRequest {
-    /// Registry-produced validation evidence.
-    pub file: ValidatedFile,
+    /// Exact semantic use whose bytes the registry validated.
+    pub source: FileUse,
+    /// Registry-selected canonical media type.
+    pub detected_media_type: CanonicalMediaType,
+    /// Registry-admitted validation evidence.
+    pub validation: crate::ValidationEvidence,
+    /// Registry-sanitized provider metadata.
+    pub metadata: crate::BoundedMetadata,
     /// Exact provider-owned view.
     pub view: ReadViewName,
     /// Closed initial-options or continuation input.
     pub input: crate::FileReadInput,
+    /// Maximum entries the registry may admit in any structured container.
+    pub maximum_container_entries: u64,
 }
 
 /// Adapter-owned execution failure inside an isolated worker.

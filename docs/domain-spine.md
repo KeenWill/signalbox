@@ -5888,6 +5888,124 @@ impl WorkspaceRecord {
 }
 ```
 
+## domain: workspace_instruction
+
+```rust
+pub struct InstructionDiscoveryId(Uuid);
+pub struct InstructionBundleId(Uuid);
+pub struct TurnInstructionManifestId(Uuid);
+
+pub struct InstructionDigest([u8; 32]);
+impl InstructionDigest {
+    pub fn sha256(bytes: &[u8]) -> Self;
+    pub fn source_content(bytes: &[u8]) -> Self;
+    pub fn empty_admitted_set() -> Self;
+    pub const fn from_sha256(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+
+pub struct InstructionPath { /* private */ }
+impl InstructionPath {
+    pub fn try_new(value: String) -> Result<Self, InstructionPathError>;
+    pub fn as_str(&self) -> &str;
+}
+pub struct InstructionSourcePathInterner { /* private */ }
+impl InstructionSourcePathInterner {
+    pub const fn new() -> Self;
+    pub fn root_prefix(root_path: InstructionPath) -> InstructionSourcePathPrefix;
+    pub fn append_prefix(
+        &mut self,
+        prefix: &InstructionSourcePathPrefix,
+        component: &str,
+    ) -> Result<InstructionSourcePathPrefix, InstructionPathError>;
+}
+pub struct InstructionSourcePathPrefix { /* private */ }
+pub struct InstructionSourcePath { /* private */ }
+impl InstructionSourcePath {
+    pub fn try_new(
+        root_path: InstructionPath,
+        value: String,
+    ) -> Result<Self, InstructionPathError>;
+    pub fn try_new_under(
+        interner: &mut InstructionSourcePathInterner,
+        directory: &InstructionSourcePathPrefix,
+        source_name: &str,
+    ) -> Result<Self, InstructionPathError>;
+    pub fn try_new_in(
+        interner: &mut InstructionSourcePathInterner,
+        root_path: InstructionPath,
+        value: String,
+    ) -> Result<Self, InstructionPathError>;
+    pub fn absolute_path(&self) -> String;
+    pub fn relative_path(&self) -> String;
+}
+pub enum InstructionPathError {
+    Empty,
+    ContainsNull,
+    TooLong,
+    NotAbsolute,
+    NotCanonical,
+}
+pub enum InstructionDiscoveryRootKind { Workspace, Configured }
+pub enum InstructionBundleKind { AgentDocument, AgentSkill }
+
+pub struct InstructionSkillMetadataInput {
+    pub name: String,
+    pub description: String,
+    pub parent_directory: String,
+}
+pub struct InstructionSkillMetadata { /* private */ }
+impl InstructionSkillMetadata {
+    pub fn try_new(
+        input: InstructionSkillMetadataInput,
+    ) -> Result<Self, InstructionSkillMetadataError>;
+    // accessors: name(), description()
+}
+pub enum InstructionSkillMetadataError {
+    InvalidName,
+    InvalidDescription,
+    ParentMismatch,
+}
+
+pub struct InstructionBundleRegistrationInput {
+    pub kind: InstructionBundleKind,
+    pub root_kind: InstructionDiscoveryRootKind,
+    pub root_path: InstructionPath,
+    pub source_path: InstructionSourcePath,
+    pub source_bytes: u64,
+    pub source_hash: InstructionDigest,
+    pub skill: Option<InstructionSkillMetadata>,
+}
+pub struct InstructionBundleRegistration { /* private */ }
+impl InstructionBundleRegistration {
+    pub fn new(input: InstructionBundleRegistrationInput) -> Option<Self>;
+    // accessors: kind(), root_kind(), root_path(), source_path(),
+    // relative_source_path(), agent_document_scope(), source_bytes(), source_hash(), skill()
+}
+
+pub struct EmptyTurnInstructionManifestEvidence {
+    pub eligibility_hash: InstructionDigest,
+    pub admitted_set_hash: InstructionDigest,
+    pub manifest_hash: InstructionDigest,
+}
+pub struct TurnInstructionManifest { /* private */ }
+impl TurnInstructionManifest {
+    pub fn empty_turn_start(
+        id: TurnInstructionManifestId,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Self;
+    pub fn reconstitute_empty_turn_start(
+        id: TurnInstructionManifestId,
+        session: SessionId,
+        turn: TurnId,
+        evidence: EmptyTurnInstructionManifestEvidence,
+    ) -> Option<Self>;
+    // accessors: id(), session(), turn(), eligibility_hash(), admitted_set_hash(),
+    // manifest_hash()
+}
+```
+
 ## application: approval_judge
 
 ```rust
@@ -7737,6 +7855,21 @@ impl RepoWatchConvergenceAssessment {
 
 pub struct RepoWatchConvergenceAssessmentError;
 
+pub struct RepoWatchStaleReviewClearanceCandidate { /* private */ }
+impl RepoWatchStaleReviewClearanceCandidate {
+    pub fn review_node_id_is_valid(value: &str) -> bool;
+    pub fn try_new(
+        assessment: &RepoWatchConvergenceAssessment,
+        review_node_id: String,
+        reviewer: RepoWatchAuthorLogin,
+        reviewed_head_sha: CommitSha,
+    ) -> Result<Self, RepoWatchStaleReviewClearanceCandidateError>;
+    // accessors: number(), current_head_sha(), review_node_id(), reviewer(),
+    // reviewed_head_sha()
+}
+
+pub struct RepoWatchStaleReviewClearanceCandidateError;
+
 pub enum RepoWatchThreadState {
     Open,
     Resolved,
@@ -8784,6 +8917,42 @@ impl<Lister: SessionMetadataLister> ListSessionMetadataService<Lister> {
         query: SessionMetadataListQuery,
     ) -> Result<Lister::Page, Lister::Error>;
 }
+```
+
+## application: workspace_instructions
+
+```rust
+pub struct InstructionDiscoveryRoot { /* private */ }
+impl InstructionDiscoveryRoot {
+    pub const fn new(kind: InstructionDiscoveryRootKind, path: InstructionPath) -> Self;
+    // accessors: kind(), path()
+}
+pub enum InstructionDiscoveryFindingKind {
+    RootUnavailable,
+    EntryUnreadable,
+    NonUtf8SourcePath,
+    NonUtf8Source,
+    InvalidSkill,
+    LimitReached(InstructionDiscoveryLimitKind),
+}
+pub enum InstructionDiscoveryLimitKind {
+    ClassifiedEntries,
+    Findings,
+    CandidateSourceBytes,
+    ElapsedTime,
+}
+pub struct InstructionDiscoveryFinding { /* private */ }
+impl InstructionDiscoveryFinding {
+    // accessors: path(), kind()
+}
+pub struct InstructionDiscoverySnapshot { /* private */ }
+impl InstructionDiscoverySnapshot {
+    // accessors: roots(), bundles(), findings(), limit_set_version(),
+    // classified_entries(), candidate_source_bytes(), elapsed_millis(), is_complete()
+}
+pub fn discover_workspace_instructions(
+    roots: Vec<InstructionDiscoveryRoot>,
+) -> InstructionDiscoverySnapshot;
 ```
 
 ## application: operator_failure
@@ -11654,7 +11823,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                               |
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
-| **signalbox-domain total**                         | **815 (+12 free fn)**            |
+| domain: workspace_instruction                      | 18                               |
+| **signalbox-domain total**                         | **833 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
@@ -11671,7 +11841,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
 | application: convergence_reconciliation            | 6 (+1 free fn)                   |
-| application: repo_watch                            | 43 (+2 free fn) (incl. 4 traits) |
+| application: repo_watch                            | 45 (+2 free fn) (incl. 4 traits) |
 | application: repo_watch_webhook                    | 18 (+2 free fn)                  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
@@ -11684,4 +11854,5 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 13                               |
-| **signalbox-application total**                    | **355 (+14 free fn)**            |
+| application: workspace_instructions                | 5 (+1 free fn)                   |
+| **signalbox-application total**                    | **362 (+15 free fn)**            |
