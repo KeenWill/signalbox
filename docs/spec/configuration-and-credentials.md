@@ -1,7 +1,12 @@
 # Configuration and credentials
 
+The model-call recovery telemetry vocabulary is re-verified against this PR
+(`agent/turn-lifecycle-hardening`).
+
 The browser HTTP listener, same-origin static assets, and generated contract
-bootstrap are verified against this PR (`agent/web-http-transport`).
+bootstrap are verified against this PR (`agent/web-http-transport`). The
+composed bounded session descriptor and historical-window routes are verified
+against this PR (`agent/web-session-timeline`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -44,6 +49,10 @@ this PR (`agent/adapter-model-catalogs`).
 The blob catalog and input-modality grammar below are the foundation proposal
 from PR #553 (`agent/blob-storage-foundation`) and become verified with its
 implementing child stack.
+
+The configured workspace-instruction root grammar below is the foundation
+proposal from PR #796 (`agent/agent-docs-skills-spec`) and becomes verified with
+its first implementing child, PR #798 (`agent/agent-docs-skills-foundation`).
 
 The runtime-bridge invalid-schema diagnostic fields and redaction boundary are
 verified against this PR (`agent/tool-evals-mcp`).
@@ -153,9 +162,10 @@ stated where each is owned.
   configuration failure. Otherwise the runner socket uses the same private-node
   discipline but has an independent lock, identity, vocabulary, and listener.
 - `SIGNALBOX_WEB_BIND` — optional browser HTTP socket address. Absence binds
-  `127.0.0.1:37231`, keeping the listener on loopback; an explicit valid socket
-  address is the deployment's opt-in override. An invalid or non-Unicode value
-  fails the `Configuration` phase without logging the value.
+  `127.0.0.1:37231`, keeping the listener on loopback. Explicit addresses must
+  also be loopback because these routes have no application authentication; an
+  invalid, non-Unicode, or non-loopback value fails the `Configuration` phase
+  without logging the value.
 - `SIGNALBOX_WEB_ASSET_ROOT` — optional path to a static production web build.
   An explicitly empty path fails the `Configuration` phase. When absent, non-API
   paths return `404 Not Found`; when present, the daemon serves files from that
@@ -167,16 +177,25 @@ The browser application and `/api/**` share the configured listener and origin.
 API routing takes precedence over static files: an unknown `/api/**` path
 returns a structured API `404` and never the web application's `index.html`. The
 daemon does not emit permissive CORS headers and adds no account, login,
-bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. Those
-deployment boundaries remain outside Signalbox.
+bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
+listener therefore rejects non-loopback binds; any future remote deployment
+requires an explicit authentication and transport-security design first.
+Unauthenticated session descriptor and timeline reads additionally require a
+loopback `Host` authority: `localhost` or an IPv4 or IPv6 loopback address, with
+an optional port. Another authority receives a structured `403 Forbidden`
+transport error with code `non_loopback_host_rejected` before session data is
+read.
 
-`GET /api/bootstrap` is the production browser API in this foundation slice. It
-returns the exact contract family `signalbox.web-http`, version `1`, the
-`bounded_json`, `same_origin_json_mutations`, and `ndjson_streaming`
-capabilities, and the effective 65,536-byte JSON-body and NDJSON-item hard
+`GET /api/bootstrap` describes the production browser contract. It returns the
+exact contract family `signalbox.web-http`, version `1`, the `bounded_json`,
+`same_origin_json_mutations`, and `ndjson_streaming` capabilities, the
+`bounded_session_timeline` capability, the effective 65,536-byte JSON-body and
+NDJSON-item hard ceilings, and the 256-item and 65,536-projected-byte timeline
 ceilings. The generated browser decoder rejects an unknown field, wrong shape,
 different family, or different version rather than interpreting it as the local
-process protocol. No process-protocol frame is a browser DTO.
+process protocol. No process-protocol frame is a browser DTO. The descriptor and
+historical-window route shapes and semantics are owned by
+[Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline).
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and
@@ -363,7 +382,7 @@ rate-limited and a transient failure does not stop later scrapes.
 SIGNALBOX_PROMETHEUS_BIND=127.0.0.1:9464
 ```
 
-The initial registry contains exactly three metric names:
+The registry contains exactly six metric names:
 
 - `signalbox_turns_started_total`, with no labels, counts durable turn
   activations. An operator graphs it as the workload-rate denominator and
@@ -376,18 +395,23 @@ The initial registry contains exactly three metric names:
   values are `completed`, `known_failed`, `refused`, `cancelled`, and
   `ambiguous`, counts durable terminal model calls. It separates provider-call
   health and refusal from ambiguity that requires recovery handling.
+- `signalbox_scheduler_passes_in_flight`, with no labels, reports current
+  authoritative scheduler-pass occupancy.
+- `signalbox_scheduler_oldest_in_flight_pass_age_seconds`, with no labels,
+  reports the oldest admitted pass's age at scrape time.
+- `signalbox_scheduler_oldest_in_flight_pass_info{session_id}` reports the
+  daemon-minted session UUID of that oldest pass. It has zero or one series and
+  removes the former label value when the oldest pass changes.
 
-All label children are allocated from those closed enums at registry
-construction. The metric API accepts no string, session id, turn id, model-call
-id, prompt, completion, or tool value. The source is the already-committed typed
-outbox transition, and content-bearing input events are ignored. The dispatcher
-retains only the last observed durable sequence, so a retry of that sequence is
-not counted twice and deduplication has constant memory. Metric help and type
-lines are fixed strings; sample values are counters. There are no tool,
-scheduler, queue-depth, or database-duration metrics in this initial surface:
-the daemon-owned durable transition path can state the three metrics above
-without inventing an inexact observation or instrumenting an adapter or another
-crate's boundary.
+All closed-enum label children are allocated at registry construction. The only
+identity label is the scheduler oldest-pass `session_id`; the metric API accepts
+no turn id, model-call id, prompt, completion, or tool value. The terminal
+metric source is the already-committed typed outbox transition, and
+content-bearing input events are ignored. The dispatcher retains only the last
+observed durable sequence, so a retry of that sequence is not counted twice and
+deduplication has constant memory. Metric help and type lines are fixed strings;
+sample values are counters or gauges. There are no tool, queue-depth, or
+database-duration metrics in this surface.
 
 The complete OTLP record inventory is:
 
@@ -409,7 +433,7 @@ The complete OTLP record inventory is:
   not added.
 - Event name `turn activated`, with `session_id` and `turn_id`;
   `turn terminalized`, with those ids and the closed `terminal_outcome`;
-  `turn parked awaiting user reconciliation`, with those ids;
+  `turn parked awaiting bounded reconciliation`, with those ids;
   `model call dispatched`, with `session_id`, `turn_id`, `model_call_id`, and
   `turn_attempt_id`; and the event names
   `model runtime reported a trustworthy capability-preparation failure`,
@@ -563,12 +587,15 @@ fail-closed:
   `version = 1` fails startup.
 - At least one `[[adapter_mappings]]` entry is required. Each entry gives one
   exact `model_family`, the build-provided `adapter`, and the non-secret
-  `credential_pool` whose members may authenticate that family. The pool must
-  name one declared `[[credential_pools]]` entry, and every member of that pool
-  must carry the mapping's adapter. Duplicate families, an adapter this daemon
-  build does not provide, an undeclared pool, and an adapter disagreement
-  between a mapping and its pool are typed startup failures. Nothing is inferred
-  from model spelling.
+  `credential_pool` whose members may authenticate that family. Those three are
+  the whole of the implemented entry: the workspace-instruction capability
+  fields are specified only in their committed-unimplemented block below, since
+  no present parser admits them and an operator writing them here would receive
+  an unknown-field startup failure. The pool must name one declared
+  `[[credential_pools]]` entry, and every member of that pool must carry the
+  mapping's adapter. Duplicate families, an adapter this daemon build does not
+  provide, an undeclared pool, and an adapter disagreement between a mapping and
+  its pool are typed startup failures. Nothing is inferred from model spelling.
 - At least one `[[credential_profiles]]` entry is required. Each exact `name`
   carries the build-provided `adapter` it authenticates, one closed
   `billing_kind` (`api_metered` or `subscription`), and one closed `delivery`
@@ -626,6 +653,107 @@ combination masked by the selected profile. The precedence and durable
 provenance of these layers are owned by
 [Model and session settings](model-session-settings.md).
 
+### Workspace-instruction roots
+
+The optional `[workspace_instructions]` table owns the explicitly registered
+daemon directories used by
+[workspace-instruction discovery](workspace-instructions.md#discovery). Its
+exact version-one grammar is:
+
+```toml
+[workspace_instructions]
+version = 1
+registered_roots = ["/absolute/canonical/path"]
+```
+
+An absent table means no configured roots. When present, `version` and
+`registered_roots` are required and no other field is admitted. The array has at
+most 64 distinct strings. Each string must be a nonempty, absolute, lexically
+canonical UTF-8 path of at most 4,096 bytes with no NUL: it begins with `/`,
+followed by one or more nonempty components separated by single `/` characters,
+and no component is `.` or `..`. Thus the filesystem root itself and a trailing
+separator are not admitted. Equal canonical strings are duplicates and fail
+startup. A wrong version, wrong type, relative or noncanonical path, duplicate,
+excess entry, and unknown field are typed configuration failures.
+
+Configuration validation does not require a registered root to exist or be
+readable. Discovery reports a typed root-unavailable finding instead, so an
+operator can provision the path after validating the static file without an
+unavailable directory masquerading as an empty successful scan. The catalog is
+read once at daemon startup; changing it requires a restart and never rewrites
+an earlier discovery snapshot.
+
+**Committed unimplemented functionality — configured-root identities.** A
+configured root carries two distinct identities, because one value cannot serve
+both purposes without leaking.
+
+`ConfiguredInstructionRootId` is the template-selector identity. Its value is
+SHA-256 over literal UTF-8 `signalbox-configured-instruction-root-v1`, followed
+by the canonical path as an unsigned 64-bit big-endian byte length and that many
+exact UTF-8 bytes, displayed as 64 lowercase hexadecimal characters. Deriving it
+from the path is what lets a template distinguish two configured roots with the
+same root-relative bundle path without placing an absolute daemon path in the
+selector, and what keeps a template's content digest reproducible from
+configuration alone. It is daemon- and template-side only and never reaches a
+model or a provider.
+
+The provider-safe root reference is the identity a model may see, and it is
+therefore not derived from the path. A public unkeyed path hash is not
+provider-safe at all: a reader who guesses a conventional home or checkout
+directory can hash candidates and compare them against the reference exposed by
+`instructions_list` and every configured-root wrapper, recovering usernames and
+repository layout the reference was supposed to withhold. It is therefore
+operator-assigned. The slice extends `[workspace_instructions]` so that an entry
+of `registered_roots` may be written as a table with exactly `path`, validated
+as the string form is today, and `provider_reference`: exactly 64 lowercase
+hexadecimal characters naming 32 opaque bytes, which the operator generates
+randomly once and then keeps stable, since provider-visible ordering and
+rendered wrapper bytes depend on it. Startup rejects a missing reference, a
+duplicate across roots, and one equal to any root's
+`ConfiguredInstructionRootId`, which would reintroduce the derivation it exists
+to avoid. Randomness is not verifiable, so those rejections catch the
+distinguishable mistakes and the grammar states the requirement plainly for the
+rest.
+
+Those checks compare values within one configuration, which is not enough on its
+own: the same path restarted with a different reference keeps its path-derived
+`ConfiguredInstructionRootId` while durable registrations and their alias
+records still hold the old reference, so reuse would either leave two aliases
+for one selector identity or silently swap the value that determines catalog
+order, wrapper bytes, eligibility hashes, and scopes. The daemon therefore
+persists the association from each root's `ConfiguredInstructionRootId` to its
+provider-safe reference, and startup rejects a configuration presenting a known
+root with a different reference before discovery or registration reuse runs. A
+reference is stable for the life of a root's stored evidence; changing one means
+retiring that root's registrations, not editing a value the durable rows already
+name.
+
+The association is a reservation in both directions, and for as long as any
+stored evidence names it. A reference retired with its root is not free for
+another: were root A removed and its former reference later assigned to root B,
+the within-configuration duplicate check would pass and so would the forward
+association, since B has its own `ConfiguredInstructionRootId` — while durable
+aliases and authority-qualified eligibility entries written for A still carry
+that reference. Authority-qualified pairs would become ambiguous, and
+root-removal revalidation would read B's live reference as authority to reread
+A's path. Startup therefore rejects a reference that retained evidence still
+names when it is offered for any root other than the one owning the persisted
+association, and the reservation is released only when the last of that evidence
+is gone. The exception for the owning root is not a weakening: re-presenting its
+own reference is what an ordinary restart does, and is exactly the stability the
+rule above demands, so rejecting it would stop configured-root discovery from
+surviving its first restart. What the reservation forbids is a reference moving
+to a different root while evidence written under the first still names it. No
+present parser admits the table form; the bare-string form above is what this
+build accepts, and a root without a reference cannot become provider-visible.
+
+No present configuration, template, or runtime surface materializes either
+identity. Both belong to the registration slice rather than to the later
+eligibility slice, because registration's alias records already carry a root's
+provider-safe reference: a registration child that could not materialize these
+would have to emit alias records without their authority reference and backfill
+them later.
+
 Each `[[models]]` record declares its capability surface with
 `reasoning_levels`, `fast_mode`, `service_tiers`, and `input_modalities`.
 `input_modalities` is a nonempty array from the closed set `text`, `image`, and
@@ -656,6 +784,27 @@ explicit mapping table during startup, so an adapter cannot silently drop a
 configured setting. Input guarding, output reservation, and post-response usage
 enforcement use the effective serving record's limits for that enabled call
 rather than the selectable source record's limits.
+
+**Committed unimplemented functionality — workspace-instruction capability.**
+The instruction-admission slice extends every `[[models]]` and
+`[[serving_targets]]` record with an all-or-none pair:
+`workspace_instruction_transport = "typed_system"` and
+`workspace_instruction_capacity_bytes`, a positive `u32` measured over the exact
+serialized `WorkspaceInstructionRegion` bytes. Omission of both means
+unsupported; supplying only one, another transport spelling, or a capacity below
+the fixed 65,536-byte version-one region ceiling is a typed startup failure. The
+effective serving record, including an alternate fast target, is authoritative
+for a call. Its adapter mapping must declare support for the same typed-system
+transport and at least that byte capacity, or startup rejects the configuration.
+Context-window tokens are an independent limit and are never converted into this
+byte value. Each `[[adapter_mappings]]` entry accepts those same two optional
+all-or-none fields in addition to its three implemented keys. The mapping's
+capacity is the adapter implementation's maximum exact serialized region bytes
+for that family; it must be at least 65,536 and at least every model or serving
+target in the family. A mapping omitting the pair can map only targets that also
+omit it. These declarations are static adapter capability, not values inferred
+from model token windows. No present parser or adapter exposes these fields
+until the admission slice lands.
 
 The conversation-import bound was verified against PR #401
 (`agent/import-chunks-protocol`). The optional `[conversation_import]` table has
@@ -781,6 +930,18 @@ fails closed. This decides the sessions whose binding is still open; a session
 that already bound the configured root is governed by the recorded-binding rule
 below instead.
 
+**Committed unimplemented functionality — pre-activation instruction binding.**
+A session template carrying a `workspace` instruction selector makes workspace
+binding a prerequisite to that session's first turn activation. The daemon uses
+this section's same configured-versus-derived resolution, misprovisioning
+refusal, identity checks, and sticky process-lifetime binding; after the binding
+is established, instruction discovery and selector resolution run against that
+bound root before activation can freeze eligibility. It does not probe and scan
+a candidate pathname while leaving the binding open. No present template field
+or session-creation path requests this eager binding; the eligibility slice that
+adds workspace selectors must compose it with the existing binding
+implementation rather than create a second resolver.
+
 The derived parent is classified the same way and before the session's own
 directory, because it is the one intermediate component this derivation
 introduces and every no-follow open after it declines to follow only the
@@ -867,6 +1028,26 @@ The record holds one session identity, one discriminant, and those identities,
 so it is kept apart from the descriptor-holding composition and is never
 evicted. A daemon restart clears it, after which a removed directory again reads
 as unprovisioned.
+
+**Committed unimplemented functionality — instruction-selector binding.** A
+session carrying a workspace instruction selector extends that process-lifetime
+record with durable pre-activation correlation. Its instruction-eligibility
+initialization records the selector-set hash, complete discovery identity,
+resolved workspace root path, and the exact worktree and `.git` filesystem
+identities captured above. After the scan, one session-scheduler transaction
+revalidates the live process binding against that evidence, installs the initial
+allow-list, copies it into the first turn's eligibility snapshot, and activates
+that turn. The transaction commits all three state changes or none, so no crash
+can leave installed identities awaiting an unrelated later activation.
+
+After restart, an already-active first turn may proceed only after the binding
+resolver reconstructs its process record by comparing the current path with the
+durable correlation. Missing or different filesystem identities fail closed;
+recovery neither rescans selectors nor substitutes newly registered bundle
+identities. Configured-root-only selectors carry no workspace correlation but
+use the same atomic install-and-activate transition. No present template field
+or activation path supplies this behavior; it is admitted only with the future
+eligibility-control child.
 
 A derived root is opened, layout-checked, and supervisor-bound the first time
 that session invokes a workspace-root-bound tool, not at startup, because no
@@ -1733,11 +1914,13 @@ restore.
 
 ## Credential pools and selection
 
-This build maps a model family to exactly one credential pool. Each
+This build maps a model family to exactly one credential pool. Each implemented
 `[[adapter_mappings]]` entry accepts exactly `model_family`, `adapter`, and
-`credential_pool` and rejects every other key
-(`apps/signalboxd/src/configuration.rs:706`). The pool must name one declared
-`[[credential_pools]]` entry whose adapter agrees with the mapping's.
+`credential_pool`; the committed workspace-instruction slice also accepts
+exactly the all-or-none transport and byte-capacity pair defined in
+[model capability configuration](#model-selection-validation). Every other key
+is rejected (`apps/signalboxd/src/configuration.rs:706`). The pool must name one
+declared `[[credential_pools]]` entry whose adapter agrees with the mapping's.
 
 Selection happens for each model-call availability chain. Configuration parsing
 still derives the session's initial preferred reference, while preparation loads
@@ -2202,6 +2385,57 @@ Each template table carries exactly:
 - `dangerous_tool_auto_approval` — the required Boolean encoding of the complete
   `Disabled`/`ApproveAll` blanket.
 
+**Committed unimplemented functionality — template instruction selectors.** The
+eligibility-control child extends an ordinary template with one optional
+`instruction_selectors` array containing at most 256 inline tables. Each table
+has exactly `root`, `source_path`, `kind`, and `source_sha256`, plus
+`configured_root_id` exactly when `root = "configured"`. `root` is `"workspace"`
+or `"configured"`; the configured identity and source hash are 64 lowercase
+hexadecimal characters encoding 32 bytes; `kind` is `"agent_document"` or
+`"agent_skill"`; and `source_path` is 1 through 4,096 UTF-8 bytes of nonempty
+normal components separated by single `/` characters, with no leading or
+trailing slash or U+0000. The configured identity is the path-derived
+`ConfiguredInstructionRootId` above. An absent or empty array means no selector
+and therefore no eligible bundle.
+
+The loader rejects duplicate selectors and canonicalizes them by root
+(`workspace` first), configured-root digest bytes when present, raw UTF-8 source
+path bytes, kind (`agent_document` first), then source-hash bytes. The immutable
+resolved template bundle retains that ordered sequence, and session creation
+copies it unchanged as unresolved eligibility input.
+
+Content-digest version three is selected by the template's parsed shape, not by
+whether its selector sequence turned out to be nonempty. A template whose
+`instruction_selectors` key is present uses version three, including when the
+array is explicitly empty, in which case it writes a selector count of zero and
+no records. A template with no `instruction_selectors` key keeps version two
+unchanged, which is what stops every existing selector-free template from
+changing digest. Generated review templates carry no such key and therefore stay
+on version two; their earlier description as carrying an empty sequence
+described the resolved bundle, not the digest input. Absent and explicitly empty
+are thus deliberately different digests for the same effective eligibility,
+because the digest authenticates what the template document said rather than
+what it amounted to.
+
+Version three retains the version-two frames below except that its first frame
+is `signalbox/session-template/content-digest/v3`; after the model-settings
+digest it writes the selector count as eight unsigned big-endian bytes, then
+each canonical selector record. Every variable-length field in a record is
+length-framed, and the fixed-width ones are written raw, so the record is
+uniquely decodable and two implementations cannot hash one selector differently.
+In order: the length-framed root spelling; for `configured` only, the 32 raw
+configured-root digest bytes; the length-framed exact source-path bytes; the
+length-framed kind spelling; and the 32 raw expected source-hash bytes. A length
+frame is eight unsigned big-endian bytes followed by exactly that many bytes,
+matching the selector count above and the frames version two already uses; raw
+concatenation is not an admissible reading of any of the three variable-length
+fields. Thus templates that differ only in selectors have different provenance.
+Generated review templates carry the empty resolved sequence and no
+`instruction_selectors` key, so they keep the version-two digest. No present
+parser admits `instruction_selectors`, no resolved bundle retains it, and the
+implemented version-two digest and stable vector below remain unchanged until
+that child lands.
+
 An inline prompt is the exact TOML string value. A prompt-file reference is
 either a relative path resolved from the template document's parent directory,
 or `$HOME/` followed by a relative suffix resolved from the process's `HOME` at
@@ -2301,6 +2535,36 @@ credential presence is never consulted (INV-008):
   alias catalog to the acceptance transaction. These model-selection freeze
   semantics are this page's material; the surrounding input-delivery lifecycle
   is [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md) scope.
+  **Committed unimplemented functionality — retained-region acceptance check.**
+  No present surface admits a workspace-instruction region, so no present
+  acceptance transaction performs the check described in the rest of this
+  bullet; it is recorded because it constrains what the implementing child may
+  do, and the paragraph below states a requirement on that child rather than
+  current behavior. Once workspace-instruction admission exists, every
+  origin-creating acceptance transaction resolves the frozen selection against
+  the live immutable catalog and rejects the origin before freezing it when the
+  target that will actually serve the turn lacks typed-system transport or byte
+  capacity for the session's complete retained region. The check belongs to
+  origin acceptance as such, not to `SubmitInput`: goal attach, goal resume, and
+  scheduler continuation mint accepted origins without a `SubmitInput` call, and
+  an origin minted by any of them would otherwise freeze an incapable target and
+  fail before provider spawn — precisely the restart-after-retargeting case this
+  check exists to prevent. That is also what
+  [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
+  already promises for every later origin, and the two now agree. The subject of
+  that check is the effective serving record the frozen settings select, not the
+  named direct model: when the frozen overlay enables fast mode on a model whose
+  `fast_mode` is `alternate_target`, the check is applied to the
+  `fast_target_id` serving record that execution will pin, and to its adapter
+  mapping. Each serving target declares transport and capacity independently, so
+  validating only the direct target would admit an input that fails later,
+  before provider spawn. Where the frozen settings leave the effective record
+  undetermined at acceptance, every record the frozen selection may still pin
+  must satisfy the check. This check runs even when no defaults replacement
+  occurred, so restart or configuration retargeting cannot strand an admitted
+  session. A direct selection receives the same check against the serving record
+  its own frozen settings select. The typed rejection accepts no input, creates
+  no turn, and changes neither defaults nor admissions.
 - **At execution.** When the attempt pins its target, the frozen selection is
   resolved against the `ModelTargetCatalog`. An unresolvable selection fails the
   turn as a known failure before any model call exists; a credential or send

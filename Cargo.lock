@@ -157,6 +157,7 @@ checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
  "bytes",
+ "form_urlencoded",
  "futures-util",
  "http",
  "http-body",
@@ -172,6 +173,7 @@ dependencies = [
  "serde_core",
  "serde_json",
  "serde_path_to_error",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tower",
@@ -1186,7 +1188,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3255,7 +3257,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3312,7 +3314,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3836,6 +3838,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-file-media-provider-runtime"
+version = "0.0.0"
+dependencies = [
+ "signalbox-domain",
+ "signalbox-file-media-runtime",
+ "signalbox-tools-file-media",
+]
+
+[[package]]
+name = "signalbox-file-media-runtime"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "signalbox-model-provider-runtime"
 version = "0.0.0"
 dependencies = [
@@ -3848,6 +3867,17 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "signalbox-model-reference-catalog"
+version = "0.0.0"
+dependencies = [
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "url",
 ]
 
 [[package]]
@@ -4097,6 +4127,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-tools-file-media"
+version = "0.0.0"
+dependencies = [
+ "schemars 1.2.2",
+ "serde",
+ "serde_json",
+ "serde_stacker",
+ "signalbox-application",
+ "signalbox-domain",
+ "signalbox-file-media-runtime",
+ "signalbox-tool-contract",
+]
+
+[[package]]
 name = "signalbox-tools-git"
 version = "0.0.0"
 dependencies = [
@@ -4221,6 +4265,7 @@ dependencies = [
  "schemars 1.2.2",
  "serde",
  "serde_json",
+ "signalbox-application",
 ]
 
 [[package]]
@@ -4759,7 +4804,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -4812,7 +4857,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix 1.1.4",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -5632,7 +5677,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
