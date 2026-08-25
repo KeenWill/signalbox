@@ -462,6 +462,35 @@ async fn transition_detail_freezes_attempt_state_before_later_resolution()
         ))
     );
 
+    // Following the advertised result cursor serves the snapshotted result
+    // text, not the live row's cleared value.
+    let result_page = repository
+        .read_item_details(
+            fixture.session,
+            address,
+            Some(TimelineDetailCursor {
+                address,
+                field: Some(TimelineBodyField::ToolResult),
+                member_index: 0,
+                offset_bytes: 0,
+            }),
+            TimelineDetailLimits::new(1, 512).expect("fixture limits are bounded"),
+        )
+        .await?
+        .expect("the frozen result cursor stays followable");
+    let SessionTimelineDetailBody::ToolBatch {
+        tools: result_tools,
+        ..
+    } = &result_page.items[0].body
+    else {
+        panic!("the result cursor projects a tool-batch body");
+    };
+    let frozen_result = result_tools[0]
+        .result
+        .as_ref()
+        .expect("the frozen result text is projected");
+    assert_eq!(frozen_result.text, "2026-07-26T12:00:00Z");
+
     let stale_failure_cursor = repository
         .read_item_details(
             fixture.session,

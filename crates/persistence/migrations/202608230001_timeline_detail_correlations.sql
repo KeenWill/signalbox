@@ -32,6 +32,13 @@ ALTER TABLE tool_batch_transition_outbox_event
     ADD CONSTRAINT tool_batch_transition_outbox_event_session_key
         UNIQUE (event_sequence, session_id);
 
+-- A frozen member row correlates its attempt to its exact request, so a
+-- mixed-provenance member fails at insertion instead of projecting one
+-- request's text with another attempt's evidence.
+ALTER TABLE tool_attempt
+    ADD CONSTRAINT tool_attempt_attempt_request_key
+        UNIQUE (attempt_id, request_id);
+
 CREATE TABLE tool_batch_transition_detail_member (
     event_sequence numeric(20, 0) NOT NULL,
     session_id uuid NOT NULL,
@@ -46,6 +53,9 @@ CREATE TABLE tool_batch_transition_detail_member (
     attempt_error_kind text,
     attempt_has_result boolean,
     attempt_has_failure boolean,
+    attempt_sandbox_posture text,
+    attempt_result_text text,
+    attempt_error_detail text,
 
     CONSTRAINT tool_batch_transition_detail_member_pk
         PRIMARY KEY (event_sequence, member_kind, member_index),
@@ -68,12 +78,19 @@ CREATE TABLE tool_batch_transition_detail_member (
                         AND attempt_error_kind IS NULL
                         AND attempt_has_result IS NULL
                         AND attempt_has_failure IS NULL
+                        AND attempt_sandbox_posture IS NULL
+                        AND attempt_result_text IS NULL
+                        AND attempt_error_detail IS NULL
                     )
                     OR (
                         attempt_id IS NOT NULL
                         AND attempt_state_kind IS NOT NULL
                         AND attempt_has_result IS NOT NULL
                         AND attempt_has_failure IS NOT NULL
+                        AND attempt_has_result =
+                            (attempt_result_text IS NOT NULL)
+                        AND attempt_has_failure =
+                            (attempt_error_detail IS NOT NULL)
                     )
                 )
             )
@@ -88,7 +105,15 @@ CREATE TABLE tool_batch_transition_detail_member (
                 AND attempt_error_kind IS NULL
                 AND attempt_has_result IS NULL
                 AND attempt_has_failure IS NULL
+                AND attempt_sandbox_posture IS NULL
+                AND attempt_result_text IS NULL
+                AND attempt_error_detail IS NULL
             )
+        ),
+    CONSTRAINT tool_batch_transition_detail_member_sandbox_closed
+        CHECK (
+            attempt_sandbox_posture IS NULL
+            OR attempt_sandbox_posture IN ('unsandboxed', 'sandboxed')
         ),
     CONSTRAINT tool_batch_transition_detail_member_attempt_state_closed
         CHECK (
@@ -126,14 +151,14 @@ CREATE TABLE tool_batch_transition_detail_member (
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT tool_batch_transition_detail_member_request_fk
-        FOREIGN KEY (request_id)
-        REFERENCES tool_request (request_id)
+        FOREIGN KEY (request_id, session_id)
+        REFERENCES tool_request (request_id, session_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,
     CONSTRAINT tool_batch_transition_detail_member_attempt_fk
-        FOREIGN KEY (attempt_id)
-        REFERENCES tool_attempt (attempt_id)
+        FOREIGN KEY (attempt_id, request_id)
+        REFERENCES tool_attempt (attempt_id, request_id)
         ON UPDATE RESTRICT
         ON DELETE RESTRICT
         DEFERRABLE INITIALLY DEFERRED,

@@ -1406,7 +1406,9 @@ async fn project_tool_batch(
         "WITH selected_member AS (
             SELECT request_id, attempt_id, approval_judge_escalated,
                    attempt_state_kind, attempt_terminal_disposition_kind,
-                   attempt_error_kind, attempt_has_result, attempt_has_failure
+                   attempt_error_kind, attempt_has_result, attempt_has_failure,
+                   attempt_sandbox_posture, attempt_result_text,
+                   attempt_error_detail
               FROM tool_batch_transition_detail_member
              WHERE event_sequence = $1
                AND member_kind = 'tool'
@@ -1415,12 +1417,8 @@ async fn project_tool_batch(
         SELECT request.request_id, request.tool_name,
                 CASE $3::text
                     WHEN 'tool_arguments' THEN request.arguments_text
-                    WHEN 'tool_result' THEN CASE
-                        WHEN selected.attempt_has_result THEN attempt.result_text
-                    END
-                    WHEN 'tool_failure' THEN CASE
-                        WHEN selected.attempt_has_failure THEN attempt.error_detail
-                    END
+                    WHEN 'tool_result' THEN selected.attempt_result_text
+                    WHEN 'tool_failure' THEN selected.attempt_error_detail
                 END AS selected_body,
                 request.approval_posture, selected.attempt_id,
                 attempt.effect_class,
@@ -1442,22 +1440,7 @@ async fn project_tool_batch(
                      WHERE goal.event_sequence = $1
                        AND goal.member_kind = 'goal'
                 ) AS has_goal_events,
-                (
-                    SELECT CASE placement.requested_sandbox_profile
-                        WHEN 'ambient' THEN 'unsandboxed'
-                        WHEN 'workspace_restricted' THEN 'sandboxed'
-                    END
-                      FROM runner_physical_attempt_lease_binding AS physical_binding
-                      JOIN runner_lease_generation AS lease
-                        ON lease.lease_id = physical_binding.lease_id
-                       AND lease.attempt_id = physical_binding.attempt_id
-                      JOIN runner_session_placement_record AS placement
-                        ON placement.session_id = lease.session_id
-                       AND placement.event_ordinal = lease.placement_event_ordinal
-                     WHERE physical_binding.attempt_id = attempt.attempt_id
-                     ORDER BY lease.generation DESC
-                     LIMIT 1
-                ) AS sandbox_posture,
+                selected.attempt_sandbox_posture AS sandbox_posture,
                 selected.approval_judge_escalated AS judge_escalated
            FROM selected_member AS selected
            JOIN tool_request AS request
@@ -1700,10 +1683,13 @@ fn project_tool_goal(
     ),
     SessionTimelineRepositoryError,
 > {
+    // A textless goal event (`user_stopped`, or `resumed` without guidance) is
+    // a legitimate stored shape, so a `goal_text` cursor naming it is a
+    // caller-supplied inapplicable query, not stored corruption.
     let raw_text = row
         .text
         .as_deref()
-        .ok_or(SessionTimelineCorruption::InvalidDetailCursor)?;
+        .ok_or(SessionTimelineRepositoryError::InvalidDetailQuery)?;
     let text = excerpt_text(
         raw_text,
         address,
