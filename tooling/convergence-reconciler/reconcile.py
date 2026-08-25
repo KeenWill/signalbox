@@ -142,6 +142,10 @@ FIX_DISPOSITION = re.compile(
     r"^fixed in commits?\s+`?([0-9a-f]{7,40})`?", re.IGNORECASE
 )
 ESCALATION_DISPOSITION = "escalated without disposition"
+CODEX_REVIEW_COMMAND = re.compile(r"@codex review(?![\w-])")
+EXECUTABLE_COMMENT_DIRECTIVE = re.compile(
+    r"^#!|^#.*coding[:=]\s*[-_.a-zA-Z0-9]+"
+)
 INFORMATIONAL_REVIEW_COMMENT = re.compile(
     r"^(?:question|informational|note)\b", re.IGNORECASE
 )
@@ -1118,7 +1122,7 @@ def comment_effective_at(comment: dict[str, Any]) -> str | None:
 def is_codex_review_request(comment: dict[str, Any], head_oid: str) -> bool:
     body = comment.get("body") or ""
     requests_review = any(
-        line.strip().casefold().startswith("@codex review")
+        CODEX_REVIEW_COMMAND.match(line.strip().casefold())
         for line in body.splitlines()
     )
     return (
@@ -1212,6 +1216,15 @@ def comment_only_patch(file: dict[str, Any]) -> bool:
         meaningful_rows = {
             row for row in changed_rows if source[row - 1].strip()
         }
+        # Shebangs and PEP 263 encoding cookies tokenize as comments but change
+        # runtime behaviour, so they never qualify for the comment-only
+        # exemption. Patch hunks carry no absolute line numbers, so any changed
+        # row that looks like such a directive is rejected conservatively.
+        if any(
+            EXECUTABLE_COMMENT_DIRECTIVE.match(source[row - 1].strip())
+            for row in meaningful_rows
+        ):
+            return False, True
         return meaningful_rows <= comment_rows, True
 
     added_ok, added = side_is_comment_only("+")
@@ -1350,9 +1363,10 @@ def normalize_review_threads(
         )
         disposition_at = max(
             (
-                comment["createdAt"]
+                effective_at
                 for comment, kind in zip(author_replies, dispositions)
-                if kind is not None and isinstance(comment.get("createdAt"), str)
+                for effective_at in [comment_effective_at(comment)]
+                if kind is not None and effective_at is not None
             ),
             default=None,
         )
@@ -1381,9 +1395,10 @@ def normalize_review_threads(
         if informational and informational_answers:
             disposition_at = max(
                 (
-                    comment["createdAt"]
+                    effective_at
                     for comment in informational_answers
-                    if isinstance(comment.get("createdAt"), str)
+                    for effective_at in [comment_effective_at(comment)]
+                    if effective_at is not None
                 ),
                 default=None,
             )

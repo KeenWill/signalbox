@@ -18,6 +18,7 @@ from reconcile import (
     comment_only_patch,
     configured_path,
     evaluate_convergence,
+    is_codex_review_request,
     load_state,
     meaningful_line_count,
     normalize_pull_request,
@@ -758,6 +759,30 @@ class GitHubGraphQLTests(unittest.TestCase):
 
         self.assertFalse(comment_only_patch(changed_file))
 
+    def test_python_encoding_cookie_change_is_not_comment_only(self) -> None:
+        changed_file = {
+            "filename": "tool.py",
+            "patch": (
+                "@@ -1 +1 @@\n"
+                "-# -*- coding: utf-8 -*-\n"
+                "+# -*- coding: latin-1 -*-"
+            ),
+        }
+
+        self.assertFalse(comment_only_patch(changed_file))
+
+    def test_python_shebang_change_is_not_comment_only(self) -> None:
+        changed_file = {
+            "filename": "tool.py",
+            "patch": (
+                "@@ -1 +1 @@\n"
+                "-#!/usr/bin/env python3\n"
+                "+#!/usr/bin/env python2"
+            ),
+        }
+
+        self.assertFalse(comment_only_patch(changed_file))
+
     def test_python_hunk_content_that_looks_like_a_header_is_not_comment_only(
         self,
     ) -> None:
@@ -1397,6 +1422,57 @@ class GitHubGraphQLTests(unittest.TestCase):
                     "reviewIds": [],
                 }
             ],
+        )
+
+    def test_exact_codex_review_command_is_a_review_request(self) -> None:
+        head = "a" * 40
+        comment = {
+            "authorAssociation": "OWNER",
+            "body": f"@codex review the current head `{head}`",
+        }
+
+        self.assertTrue(is_codex_review_request(comment, head))
+
+    def test_codex_review_command_typos_are_not_review_requests(self) -> None:
+        head = "a" * 40
+        for body in (
+            f"@codex reviewer {head}",
+            f"@codex review-later {head}",
+            f"@codex reviews {head}",
+        ):
+            with self.subTest(body=body):
+                comment = {"authorAssociation": "OWNER", "body": body}
+
+                self.assertFalse(is_codex_review_request(comment, head))
+
+    def test_edited_disposition_uses_the_effective_edit_time(self) -> None:
+        threads = [
+            {
+                "isResolved": True,
+                "comments": {
+                    "nodes": [
+                        {
+                            "author": {"login": "reviewer"},
+                            "body": "Finding",
+                            "createdAt": "2026-01-01T00:00:00Z",
+                        },
+                        {
+                            "author": {"login": "owner"},
+                            "authorAssociation": "OWNER",
+                            "body": "Declined: not applicable.",
+                            "createdAt": "2026-01-02T00:00:00Z",
+                            "lastEditedAt": "2026-01-09T00:00:00Z",
+                        },
+                    ]
+                },
+            }
+        ]
+
+        normalized = normalize_review_threads(threads, "owner")
+
+        self.assertEqual(normalized[0]["dispositionKind"], "declined")
+        self.assertEqual(
+            normalized[0]["dispositionAt"], "2026-01-09T00:00:00Z"
         )
 
     def test_escalation_marker_is_a_terminal_open_disposition(self) -> None:
