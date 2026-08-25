@@ -7,6 +7,7 @@ use std::{
     os::unix::ffi::OsStrExt as _,
     path::{Path, PathBuf},
     process::ExitCode,
+    time::Duration,
 };
 
 use arguments::{
@@ -17,9 +18,10 @@ use arguments::{
 use connection::ProcessClient;
 use error::ClientError;
 use presentation::{
-    BlobUploadPresentation, ChildResultPresentation, ConversationRow, ImportedEntryRow, Output,
-    SessionAwaitRegisteredPresentation, SessionMessageSentPresentation, SessionMetadataRow,
-    SessionSpawnedPresentation, SnapshotSelection,
+    BlobUploadPresentation, ChildResultPresentation, ConversationRow, ImportedEntryRow,
+    OperatorStatusPresentationCounts, Output, SessionAwaitRegisteredPresentation,
+    SessionMessageSentPresentation, SessionMetadataRow, SessionSpawnedPresentation,
+    SnapshotSelection,
 };
 use rustix::{
     fd::OwnedFd,
@@ -36,11 +38,11 @@ use signalbox_process_protocol::{
     GoalHistoryEvent, GoalLifecycleState, InputContent, InputDelivery, MAX_BLOB_CHUNK_BYTES,
     MAX_BLOB_READ_BYTES, MAX_CONTENT_FRAGMENT_BYTES, MAX_CONVERSATION_IMPORT_CHUNK_BYTES,
     MAX_FRAME_BYTES, MAX_SYSTEM_PROMPT_UTF8_BYTES, ModelCallDisposition, ModelCallState,
-    ModelSelection, ModelSettingsOverlay, ProtocolVersion, RejectionDetail, RequestId,
-    ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
-    ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationState, ReviewPassLifecycle,
-    ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
+    ModelSelection, ModelSettingsOverlay, OperatorStatusMessage, ProtocolVersion, RejectionDetail,
+    RequestId, ReviewConcernTerminalOutcome, ReviewFindingEvent, ReviewFindingInput,
+    ReviewFindingStatus, ReviewImportTerminalOutcome, ReviewJudgmentEffectTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationState,
+    ReviewPassLifecycle, ReviewPassSnapshot, ReviewPassTerminalOutcome, ReviewPublicationOutcome,
     ReviewPublicationTerminalOutcome, ReviewRepairOutcome, ReviewRepairTerminalOutcome,
     ReviewRunSnapshot, RunnerConnectionHealth, RunnerProjection, RunnerProjectionState,
     RunnerStateTransitionState, ServerFrame, ServerMessage, SessionEvent, SessionPlacement,
@@ -75,6 +77,14 @@ const MAX_METADATA_PAGE_SIZE: u64 = 100;
 /// Largest finding inventory one review run can own.
 // numeric-bound: ceiling - protects memory and writes from runaway model findings
 const MAX_REVIEW_FINDINGS_PER_RUN: u64 = 32;
+/// Maximum time a terminal follower waits before rereading recovery state.
+// numeric-bound: interval - exposes reconciliation exhaustion without busy polling
+#[cfg(not(test))]
+const FOLLOW_RECOVERY_REFETCH_INTERVAL: Duration = Duration::from_secs(30);
+/// Short equivalent used by deterministic socket tests.
+// numeric-bound: interval - keeps follower refetch tests bounded
+#[cfg(test)]
+const FOLLOW_RECOVERY_REFETCH_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -368,6 +378,7 @@ fn delegation_rejection_matches(
         | RejectionDetail::SessionPlacementVersionExhausted { .. }
         | RejectionDetail::GoalCommandRejected { .. }
         | RejectionDetail::ActiveTurnPresent { .. }
+        | RejectionDetail::CommissionTargetBusy { .. }
         | RejectionDetail::ActiveTurnMismatch { .. }
         | RejectionDetail::NoActiveTurn { .. }
         | RejectionDetail::TurnNotAwaitingReconciliation { .. }
@@ -474,6 +485,7 @@ fn classify_delegation_response(message: ServerMessage) -> DelegationResponse {
         | ServerMessage::SessionsStart {}
         | ServerMessage::SessionSummary { .. }
         | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::OperatorStatus(..)
         | ServerMessage::TemplatesStart {}
         | ServerMessage::TemplateSummary { .. }
         | ServerMessage::TemplatesEnd { .. }
@@ -581,6 +593,7 @@ fn classify_conversation_import_response(message: ServerMessage) -> Conversation
         | ServerMessage::SessionsStart {}
         | ServerMessage::SessionSummary { .. }
         | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::OperatorStatus(..)
         | ServerMessage::TemplatesStart {}
         | ServerMessage::TemplateSummary { .. }
         | ServerMessage::TemplatesEnd { .. }
@@ -696,6 +709,7 @@ fn classify_blob_upload_response(message: ServerMessage) -> BlobUploadResponse {
         | ServerMessage::SessionsStart {}
         | ServerMessage::SessionSummary { .. }
         | ServerMessage::SessionsEnd { .. }
+        | ServerMessage::OperatorStatus(..)
         | ServerMessage::TemplatesStart {}
         | ServerMessage::TemplateSummary { .. }
         | ServerMessage::TemplatesEnd { .. }
@@ -894,6 +908,7 @@ async fn execute(
         | Command::Session(_)
         | Command::Goal(_)
         | Command::Imported { .. }
+        | Command::Status
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -919,6 +934,7 @@ async fn execute(
         | Command::Session(_)
         | Command::Goal(_)
         | Command::Imported { .. }
+        | Command::Status
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -952,6 +968,7 @@ async fn execute(
         | Command::Compact { .. }
         | Command::Session(_)
         | Command::Goal(_)
+        | Command::Status
         | Command::List
         | Command::Templates
         | Command::Search(_)
@@ -1058,6 +1075,7 @@ async fn execute(
         } => imported(&mut client, &mut output, imported_conversation_id).await,
         Command::Session(command) => session_delegation(&mut client, &mut output, command).await,
         Command::Goal(command) => goal(&mut client, &mut output, command).await,
+        Command::Status => status(&mut client, &mut output).await,
         Command::List => list(&mut client, &mut output).await,
         Command::Templates => list_templates(&mut client, &mut output).await,
         Command::Search(page) => search(&mut client, &mut output, page).await,
@@ -4288,9 +4306,31 @@ async fn await_turn_terminal(
             return Ok(terminal);
         }
         queued_turn_recovery(&mut snapshot, turn_id)?;
+        let mut poll_automatic_recovery =
+            automatic_model_call_recovery_pending(&mut snapshot, turn_id)?;
         let mut observed_cursor = snapshot.cursor();
         loop {
-            match connection.message().await? {
+            let message = if poll_automatic_recovery {
+                match tokio::time::timeout(FOLLOW_RECOVERY_REFETCH_INTERVAL, connection.message())
+                    .await
+                {
+                    Ok(message) => message?,
+                    Err(_) => {
+                        let mut refreshed = transcript(client, session_id).await?;
+                        let refreshed_state = refreshed.turn_state(turn_id)?;
+                        if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
+                            return Ok(terminal);
+                        }
+                        queued_turn_recovery(&mut refreshed, turn_id)?;
+                        poll_automatic_recovery =
+                            automatic_model_call_recovery_pending(&mut refreshed, turn_id)?;
+                        continue;
+                    }
+                }
+            } else {
+                connection.message().await?
+            };
+            match message {
                 ServerMessage::SessionEvent {
                     cursor,
                     session_id: event_session,
@@ -4310,6 +4350,11 @@ async fn await_turn_terminal(
                             return Ok(terminal);
                         }
                         queued_turn_recovery(&mut refreshed, turn_id)?;
+                        poll_automatic_recovery =
+                            automatic_model_call_recovery_pending(&mut refreshed, turn_id)?;
+                        if poll_automatic_recovery {
+                            continue;
+                        }
                         if !runner_recovery_transition(&event) {
                             return Err(ClientError::Protocol(
                                 "a recovery event did not produce recovery or terminal state",
@@ -4322,6 +4367,8 @@ async fn await_turn_terminal(
                         if let Some(terminal) = terminal_snapshot_state(refreshed_state.as_ref())? {
                             return Ok(terminal);
                         }
+                        poll_automatic_recovery =
+                            automatic_model_call_recovery_pending(&mut refreshed, turn_id)?;
                     }
                     if session_recovery_transition(&event) {
                         let mut refreshed = transcript(client, session_id).await?;
@@ -4330,6 +4377,8 @@ async fn await_turn_terminal(
                             return Ok(terminal);
                         }
                         queued_turn_recovery(&mut refreshed, turn_id)?;
+                        poll_automatic_recovery =
+                            automatic_model_call_recovery_pending(&mut refreshed, turn_id)?;
                     }
                 }
                 ServerMessage::ProviderTextDelta {
@@ -4353,6 +4402,39 @@ async fn await_turn_terminal(
             }
         }
     }
+}
+
+fn automatic_model_call_recovery_pending(
+    snapshot: &mut TranscriptSnapshot,
+    selected_turn: CanonicalUuid,
+) -> Result<bool, ClientError> {
+    let selected_state = snapshot
+        .turn_state(selected_turn)?
+        .ok_or(ClientError::Protocol(
+            "follow snapshot omitted the submitted turn",
+        ))?;
+    if matches!(
+        selected_state,
+        TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: false,
+            ..
+        }
+    ) {
+        return Ok(true);
+    }
+    if !matches!(selected_state, TurnState::Queued { .. }) {
+        return Ok(false);
+    }
+    let Some(active_turn) = snapshot.active_turn()? else {
+        return Ok(false);
+    };
+    Ok(matches!(
+        snapshot.turn_state(active_turn)?,
+        Some(TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: false,
+            ..
+        })
+    ))
 }
 
 fn queued_turn_recovery(
@@ -4381,8 +4463,15 @@ fn queued_turn_recovery(
 
 fn blocker_recovery_snapshot_state(state: &TurnState) -> Result<(), ClientError> {
     match state {
-        TurnState::ActiveAwaitingModelCallRecovery { .. }
+        TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: true,
+            ..
+        }
         | TurnState::ActiveAwaitingToolRecovery { .. } => Err(ClientError::TurnRecoveryRequired),
+        TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: false,
+            ..
+        } => Ok(()),
         TurnState::ActiveAwaitingRunnerRecovery { .. } => Err(ClientError::RunnerRecoveryRequired),
         TurnState::Queued { .. }
         | TurnState::QueuedDelegated { .. }
@@ -4511,10 +4600,17 @@ fn terminal_snapshot_state(state: Option<&TurnState>) -> Result<Option<TurnTermi
             | TurnState::ActiveAwaitingToolApproval { .. }
             | TurnState::ActiveAwaitingChild { .. },
         ) => Ok(None),
-        Some(
-            TurnState::ActiveAwaitingModelCallRecovery { .. }
-            | TurnState::ActiveAwaitingToolRecovery { .. },
-        ) => Err(ClientError::TurnRecoveryRequired),
+        Some(TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: true,
+            ..
+        })
+        | Some(TurnState::ActiveAwaitingToolRecovery { .. }) => {
+            Err(ClientError::TurnRecoveryRequired)
+        }
+        Some(TurnState::ActiveAwaitingModelCallRecovery {
+            operator_action_required: false,
+            ..
+        }) => Ok(None),
         Some(TurnState::ActiveAwaitingRunnerRecovery { .. }) => {
             Err(ClientError::RunnerRecoveryRequired)
         }
@@ -4772,6 +4868,128 @@ fn write_assistant_texts(
         }
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord)]
+enum OperatorStatusPhase {
+    HeldSlots,
+    QueuedObligations,
+    PullRequestConvergences,
+    PendingStaleReviewClearances,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct OperatorStatusCounts {
+    held_slots: u64,
+    queued_obligations: u64,
+    pull_request_convergences: u64,
+    pending_stale_review_clearances: u64,
+}
+
+async fn status(client: &mut ProcessClient, output: &mut Output<'_>) -> Result<(), ClientError> {
+    let mut connection = client.request(ClientRequest::ReadOperatorStatus {}).await?;
+    match connection.message().await? {
+        ServerMessage::OperatorStatus(message)
+            if matches!(message.as_ref(), OperatorStatusMessage::Start {}) => {}
+        ServerMessage::Error {
+            code,
+            message,
+            detail,
+        } => return Err(ClientError::remote(code, message, detail)),
+        _ => {
+            return Err(ClientError::Protocol(
+                "operator status did not begin with its start frame",
+            ));
+        }
+    }
+    let mut spool = tempfile::tempfile()?;
+    let mut phase = OperatorStatusPhase::HeldSlots;
+    let mut counts = OperatorStatusCounts::default();
+    loop {
+        let frame = connection.frame().await?;
+        let item_phase = match frame.message() {
+            ServerMessage::OperatorStatus(message) => match message.as_ref() {
+                OperatorStatusMessage::HeldSlot(_) => {
+                    counts.held_slots = status_increment(counts.held_slots)?;
+                    Some(OperatorStatusPhase::HeldSlots)
+                }
+                OperatorStatusMessage::QueuedObligation(_) => {
+                    counts.queued_obligations = status_increment(counts.queued_obligations)?;
+                    Some(OperatorStatusPhase::QueuedObligations)
+                }
+                OperatorStatusMessage::PullRequestConvergence(_) => {
+                    counts.pull_request_convergences =
+                        status_increment(counts.pull_request_convergences)?;
+                    Some(OperatorStatusPhase::PullRequestConvergences)
+                }
+                OperatorStatusMessage::PendingStaleReviewClearance(_) => {
+                    counts.pending_stale_review_clearances =
+                        status_increment(counts.pending_stale_review_clearances)?;
+                    Some(OperatorStatusPhase::PendingStaleReviewClearances)
+                }
+                OperatorStatusMessage::End(item)
+                    if counts
+                        == (OperatorStatusCounts {
+                            held_slots: item.held_slot_count.value(),
+                            queued_obligations: item.queued_obligation_count.value(),
+                            pull_request_convergences: item.pull_request_convergence_count.value(),
+                            pending_stale_review_clearances: item
+                                .pending_stale_review_clearance_count
+                                .value(),
+                        }) =>
+                {
+                    break;
+                }
+                OperatorStatusMessage::Start {} | OperatorStatusMessage::End(_) => {
+                    return Err(ClientError::Protocol(
+                        "operator status sequence or count was invalid",
+                    ));
+                }
+            },
+            ServerMessage::Error {
+                code,
+                message,
+                detail,
+            } => return Err(ClientError::remote(*code, message.clone(), *detail)),
+            _ => {
+                return Err(ClientError::Protocol(
+                    "operator status sequence or count was invalid",
+                ));
+            }
+        };
+        let Some(item_phase) = item_phase else {
+            return Err(ClientError::Protocol(
+                "operator status sequence was invalid",
+            ));
+        };
+        if item_phase < phase {
+            return Err(ClientError::Protocol(
+                "operator status sections were out of order",
+            ));
+        }
+        phase = item_phase;
+        spool.write_all(&encode_server_line(&frame)?)?;
+    }
+    output.operator_status_counts(OperatorStatusPresentationCounts {
+        held_slots: counts.held_slots,
+        queued_obligations: counts.queued_obligations,
+        pull_request_convergences: counts.pull_request_convergences,
+        pending_stale_review_clearances: counts.pending_stale_review_clearances,
+    })?;
+    spool.seek(SeekFrom::Start(0))?;
+    let mut reader = BufReader::new(spool);
+    let mut line = Vec::new();
+    while reader.read_until(b'\n', &mut line)? != 0 {
+        output.operator_status_item(decode_server_line(&line)?.message())?;
+        line.clear();
+    }
+    Ok(output.operator_status_model_usage_omitted()?)
+}
+
+fn status_increment(value: u64) -> Result<u64, ClientError> {
+    value
+        .checked_add(1)
+        .ok_or(ClientError::Protocol("operator status count overflowed"))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6770,10 +6988,24 @@ mod tests {
     }
 
     #[test]
-    fn send_fails_explicitly_when_model_call_recovery_is_required() {
+    fn send_waits_while_automatic_model_call_recovery_owns_the_decision() {
         let state = TurnState::ActiveAwaitingModelCallRecovery {
             ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
             recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            automatic_reconciliation_attempts: CanonicalU64::new(0),
+            operator_action_required: false,
+        };
+
+        assert!(matches!(terminal_snapshot_state(Some(&state)), Ok(None)));
+    }
+
+    #[test]
+    fn send_fails_when_model_call_recovery_requires_operator_action() {
+        let state = TurnState::ActiveAwaitingModelCallRecovery {
+            ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(1)),
+            recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(2)),
+            automatic_reconciliation_attempts: CanonicalU64::new(5),
+            operator_action_required: true,
         };
 
         assert!(matches!(
@@ -6976,9 +7208,36 @@ mod tests {
                 TurnState::ActiveAwaitingModelCallRecovery {
                     ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(8)),
                     recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(9)),
+                    automatic_reconciliation_attempts: CanonicalU64::new(0),
+                    operator_action_required: false,
                 },
             )?;
             refresh_writer.write_all(&refreshed).await?;
+
+            let (exhausted_stream, mut exhausted_writer) = listener.accept().await?.0.into_split();
+            let mut exhausted_reader = BufReader::new(exhausted_stream);
+            let mut exhausted_line = Vec::new();
+            exhausted_reader
+                .read_until(b'\n', &mut exhausted_line)
+                .await?;
+            let exhausted_request =
+                decode_client_line(&exhausted_line).map_err(io::Error::other)?;
+            assert_eq!(
+                exhausted_request.request(),
+                &ClientRequest::ReadTranscript { session_id }
+            );
+            let exhausted = snapshot(
+                exhausted_request.version(),
+                exhausted_request.request_id(),
+                1,
+                TurnState::ActiveAwaitingModelCallRecovery {
+                    ended_attempt_id: CanonicalUuid::from_uuid(Uuid::from_u128(8)),
+                    recovery_model_call_id: CanonicalUuid::from_uuid(Uuid::from_u128(9)),
+                    automatic_reconciliation_attempts: CanonicalU64::new(5),
+                    operator_action_required: true,
+                },
+            )?;
+            exhausted_writer.write_all(&exhausted).await?;
             Ok::<(), io::Error>(())
         });
 
@@ -6986,6 +7245,140 @@ mod tests {
         let result = await_turn_terminal(&mut client, session_id, queued_turn_id).await;
 
         assert!(matches!(result, Err(ClientError::TurnRecoveryRequired)));
+        server.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn selected_send_polls_after_an_automatic_recovery_transition()
+    -> Result<(), Box<dyn Error>> {
+        let directory = tempfile::tempdir()?;
+        let socket = directory.path().join("client.sock");
+        let listener = UnixListener::bind(&socket)?;
+        let session_id = CanonicalUuid::from_uuid(Uuid::from_u128(1));
+        let turn_id = CanonicalUuid::from_uuid(Uuid::from_u128(2));
+        let attempt_id = CanonicalUuid::from_uuid(Uuid::from_u128(3));
+        let model_call_id = CanonicalUuid::from_uuid(Uuid::from_u128(4));
+        let server = tokio::spawn(async move {
+            let snapshot = |version, request_id, cursor, state| -> io::Result<Vec<u8>> {
+                let frame = |message| {
+                    ServerFrame::try_new_for_version(version, request_id, message)
+                        .map_err(io::Error::other)
+                };
+                let mut response =
+                    encode_server_line(&frame(ServerMessage::TranscriptSnapshotStart {
+                        session_id,
+                        cursor: CanonicalU64::new(cursor),
+                        runner: None,
+                    })?)
+                    .map_err(io::Error::other)?;
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptTurn {
+                        turn_id,
+                        acceptance_position: CanonicalU64::new(1),
+                        model_settings: None,
+                        state,
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptModelCallsEnd {
+                        model_call_count: CanonicalU64::new(0),
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                response.extend_from_slice(
+                    &encode_server_line(&frame(ServerMessage::TranscriptSnapshotEnd {
+                        session_id,
+                        cursor: CanonicalU64::new(cursor),
+                        turn_count: CanonicalU64::new(1),
+                        entry_count: CanonicalU64::new(0),
+                    })?)
+                    .map_err(io::Error::other)?,
+                );
+                Ok(response)
+            };
+
+            let (stream, mut writer) = listener.accept().await?.0.into_split();
+            let mut reader = BufReader::new(stream);
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await?;
+            let follow_request = decode_client_line(&line).map_err(io::Error::other)?;
+            let mut initial = snapshot(
+                follow_request.version(),
+                follow_request.request_id(),
+                0,
+                TurnState::ActiveRunning {
+                    current_attempt_id: attempt_id,
+                    current_model_call: None,
+                },
+            )?;
+            initial.extend_from_slice(
+                &encode_server_line(
+                    &ServerFrame::try_new_for_version(
+                        follow_request.version(),
+                        follow_request.request_id(),
+                        ServerMessage::SessionEvent {
+                            cursor: CanonicalU64::new(1),
+                            session_id,
+                            event: SessionEvent::ModelCallTransition {
+                                turn_id,
+                                model_call_id,
+                                state: ModelCallState::Terminal {
+                                    disposition: ModelCallDisposition::Ambiguous,
+                                },
+                            },
+                        },
+                    )
+                    .map_err(io::Error::other)?,
+                )
+                .map_err(io::Error::other)?,
+            );
+            writer.write_all(&initial).await?;
+
+            let (refresh_stream, mut refresh_writer) = listener.accept().await?.0.into_split();
+            let mut refresh_reader = BufReader::new(refresh_stream);
+            let mut refresh_line = Vec::new();
+            refresh_reader.read_until(b'\n', &mut refresh_line).await?;
+            let refresh_request = decode_client_line(&refresh_line).map_err(io::Error::other)?;
+            refresh_writer
+                .write_all(&snapshot(
+                    refresh_request.version(),
+                    refresh_request.request_id(),
+                    1,
+                    TurnState::ActiveAwaitingModelCallRecovery {
+                        ended_attempt_id: attempt_id,
+                        recovery_model_call_id: model_call_id,
+                        automatic_reconciliation_attempts: CanonicalU64::new(0),
+                        operator_action_required: false,
+                    },
+                )?)
+                .await?;
+
+            let (poll_stream, mut poll_writer) = listener.accept().await?.0.into_split();
+            let mut poll_reader = BufReader::new(poll_stream);
+            let mut poll_line = Vec::new();
+            poll_reader.read_until(b'\n', &mut poll_line).await?;
+            let poll_request = decode_client_line(&poll_line).map_err(io::Error::other)?;
+            poll_writer
+                .write_all(&snapshot(
+                    poll_request.version(),
+                    poll_request.request_id(),
+                    1,
+                    TurnState::ReconciliationRequired {
+                        terminal_frontier_id: CanonicalUuid::from_uuid(Uuid::from_u128(5)),
+                        terminal_attempt_id: attempt_id,
+                        terminal_model_call_id: model_call_id,
+                    },
+                )?)
+                .await?;
+            Ok::<(), io::Error>(())
+        });
+
+        let mut client = ProcessClient::new(socket);
+        let terminal = await_turn_terminal(&mut client, session_id, turn_id).await?;
+
+        assert_eq!(terminal, TurnTerminal::ReconciliationRequired);
         server.await??;
         Ok(())
     }

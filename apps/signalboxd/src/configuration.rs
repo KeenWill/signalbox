@@ -16,16 +16,17 @@ use rust_decimal::Decimal;
 use signalbox_application::scheduler_pass_admission_cap;
 use signalbox_domain::{
     AnthropicServiceTier, BranchName, CheckConclusion, CodexCliServiceTier, DirectModelSelection,
-    FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, LabelName, MergeableState,
-    ModelAlias, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
-    ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence, ModelTargetCatalog,
-    ModelTargetDefinition, OpenAiServiceTier, ProviderModelIdentity, ReasoningLevel,
-    RepoWatchAuthorLogin, RepoWatchEventKindNameV1, RepoWatchLabelMatcher,
-    RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion,
-    RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration, RepositorySlug,
-    ResolvedProviderTarget, ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
-    ToolName, UnsupportedModelSetting, ValidatedModelSettings,
+    FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, InstructionPath, LabelName,
+    MergeableState, ModelAlias, ModelCapabilities, ModelCapabilityCatalog,
+    ModelCapabilityDefinition, ModelSelectionRequest, ModelSettingsOverlay,
+    ModelSettingsPrecedence, ModelTargetCatalog, ModelTargetDefinition, OpenAiServiceTier,
+    ProviderModelIdentity, PullRequestNumber, ReasoningLevel, RepoWatchAuthorLogin,
+    RepoWatchEventKindNameV1, RepoWatchLabelMatcher, RepoWatchLabelMatcherInput,
+    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchTemplateContextDeclaration, RepositorySlug, ResolvedProviderTarget, ServiceTier,
+    SessionTemplateName, SettingOverlay, ToolApprovalPosture, ToolName, UnsupportedModelSetting,
+    ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -175,7 +176,7 @@ impl ModelAdapter {
         match self {
             Self::Anthropic | Self::OpenAi => matches!(delivery, "file"),
             Self::ClaudeCli => matches!(delivery, "ambient" | "file"),
-            Self::CodexCli => matches!(delivery, "ambient"),
+            Self::CodexCli => matches!(delivery, "ambient" | "codex_home"),
         }
     }
 
@@ -433,6 +434,19 @@ pub struct DaemonToolConfiguration {
     exec_supervisor_executable: PathBuf,
 }
 
+/// Explicit non-workspace instruction roots registered by deployment configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceInstructionConfiguration {
+    roots: Box<[InstructionPath]>,
+}
+
+impl WorkspaceInstructionConfiguration {
+    /// Returns explicit roots in deterministic configuration order.
+    pub fn roots(&self) -> &[InstructionPath] {
+        &self.roots
+    }
+}
+
 impl DaemonToolConfiguration {
     /// Absolute root pinned into both workspace tool families.
     pub fn workspace_root(&self) -> &Path {
@@ -468,6 +482,12 @@ pub const DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES: usize = 256 * 1024 * 102
 
 const MAX_WATCHED_REPOSITORIES: usize = 128;
 const MAX_SIGNAL_REVIEWERS: usize = 128;
+// numeric-bound: ceiling - limits credentialed census work retained by one daemon tick
+const MAX_CONVERGENCE_SWEEP_TARGETS: usize = 256;
+// numeric-bound: ceiling - prevents an enabled target from remaining unobserved for too long
+pub const MAX_CONVERGENCE_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
+// numeric-bound: ceiling - bounds starvation after a dispatch that made no durable progress
+pub const MAX_CONVERGENCE_SWEEP_COOL_OFF: Duration = Duration::from_secs(1_800);
 
 /// Loopback-only reference address selected when the webhook listener table
 /// omits `bind_address`.
@@ -529,6 +549,7 @@ pub struct WatchedRepositoryConfiguration {
     poll_interval: Duration,
     credential_file: PathBuf,
     webhook: Option<WatchedRepositoryWebhookConfiguration>,
+    convergence_pull_requests: Box<[PullRequestNumber]>,
 }
 
 impl WatchedRepositoryConfiguration {
@@ -557,6 +578,11 @@ impl WatchedRepositoryConfiguration {
         self.webhook.as_ref()
     }
 
+    /// Returns the explicit operator-owned convergence throttle for this repository.
+    pub fn convergence_pull_requests(&self) -> &[PullRequestNumber] {
+        &self.convergence_pull_requests
+    }
+
     /// Returns the non-secret reference used to resolve this repository's
     /// webhook secret, if webhook delivery is enabled for it.
     pub fn webhook_secret_reference(&self) -> Option<CredentialReference> {
@@ -577,6 +603,7 @@ impl fmt::Debug for WatchedRepositoryConfiguration {
             .field("poll_interval", &self.poll_interval)
             .field("credential_file", &"[REDACTED REFERENCE]")
             .field("webhook", &self.webhook)
+            .field("convergence_pull_requests", &self.convergence_pull_requests)
             .finish()
     }
 }
@@ -588,6 +615,30 @@ pub struct RepositoryWatchConfiguration {
     repositories: Box<[WatchedRepositoryConfiguration]>,
     rules: Box<[RepoWatchRule]>,
     webhook: Option<RepositoryWatchWebhookConfiguration>,
+    convergence_sweep: Option<ConvergenceSweepConfiguration>,
+}
+
+/// Daemon-native convergence sweep policy, enabled only with explicit targets.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConvergenceSweepConfiguration {
+    template: SessionTemplateName,
+    interval: Duration,
+    cool_off: Duration,
+}
+
+impl ConvergenceSweepConfiguration {
+    /// Returns the fenced session template used for review-response work.
+    pub const fn template(&self) -> &SessionTemplateName {
+        &self.template
+    }
+    /// Returns the census interval, never above its hard ceiling.
+    pub const fn interval(&self) -> Duration {
+        self.interval
+    }
+    /// Returns the per-pull-request dispatch cool-off, never above its hard ceiling.
+    pub const fn cool_off(&self) -> Duration {
+        self.cool_off
+    }
 }
 
 impl RepositoryWatchConfiguration {
@@ -610,6 +661,30 @@ impl RepositoryWatchConfiguration {
     /// intake is disabled.
     pub const fn webhook(&self) -> Option<&RepositoryWatchWebhookConfiguration> {
         self.webhook.as_ref()
+    }
+
+    /// Returns enabled convergence reconciliation policy, if explicitly configured.
+    pub const fn convergence_sweep(&self) -> Option<&ConvergenceSweepConfiguration> {
+        self.convergence_sweep.as_ref()
+    }
+
+    /// Validates the convergence template against the immutable session-template catalog.
+    pub fn validate_convergence_template<'a>(
+        &self,
+        templates: impl Iterator<Item = &'a SessionTemplateName>,
+    ) -> Result<(), HubModelConfigurationError> {
+        let Some(policy) = self.convergence_sweep() else {
+            return Ok(());
+        };
+        if templates.into_iter().any(|name| name == policy.template()) {
+            Ok(())
+        } else {
+            Err(
+                HubModelConfigurationError::UnknownConvergenceSweepTemplate {
+                    template: policy.template().as_str().to_owned(),
+                },
+            )
+        }
     }
 
     /// Validates every rule against the immutable session-template catalog.
@@ -668,6 +743,7 @@ pub struct HubModelConfiguration {
     approval_judge_selection: Option<DirectModelSelection>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
+    workspace_instructions: WorkspaceInstructionConfiguration,
     scheduler_max_in_flight_passes: Option<usize>,
 }
 
@@ -712,6 +788,7 @@ impl HubModelConfiguration {
                 "approval_judge",
                 "repository_watch",
                 "blob_storage",
+                "workspace_instructions",
                 "scheduler",
             ],
         )?;
@@ -806,6 +883,8 @@ impl HubModelConfiguration {
             .get("repository_watch")
             .map(parse_repository_watch_configuration)
             .transpose()?;
+        let workspace_instructions =
+            parse_workspace_instruction_configuration(document.get("workspace_instructions"))?;
         let models = document
             .get("models")
             .and_then(|item| item.as_array_of_tables())
@@ -870,21 +949,9 @@ impl HubModelConfiguration {
                     continue;
                 }
             };
-            // Codex still carries one credential reference into its runtime,
-            // so two families preferring different profiles cannot both be
-            // served. Claude now receives the complete adapter-scoped catalog
-            // and resolves each operation's pinned reference, so differing
-            // preferences are admitted; the retained value is only the
-            // runtime's default for an operation that pins nothing.
-            if adapter == ModelAdapter::CodexCli
-                && adapter_profile
-                    .as_ref()
-                    .is_some_and(|profile| profile != &credential_profile)
-            {
-                return Err(
-                    HubModelConfigurationError::ConflictingAdapterCredentialProfiles { adapter },
-                );
-            }
+            // CLI runtimes receive their complete adapter-scoped delivery
+            // catalogs. The retained value is only the default for an ambient
+            // operation that pins no catalog member.
             adapter_profile.get_or_insert_with(|| Arc::clone(&credential_profile));
             let entry = AdapterMapping {
                 adapter,
@@ -1331,6 +1398,7 @@ impl HubModelConfiguration {
             approval_judge_selection,
             repository_watch,
             blob_storage,
+            workspace_instructions,
             scheduler_max_in_flight_passes,
         })
     }
@@ -1588,6 +1656,14 @@ impl HubModelConfiguration {
                     configuration.working_directory.clone(),
                     CredentialReference::new(credential_profile),
                 );
+                runtime_configuration = runtime_configuration.with_credential_homes(
+                    self.credential_profiles.values().filter_map(|profile| {
+                        let CredentialDelivery::CodexHome { path, .. } = profile.delivery() else {
+                            return None;
+                        };
+                        Some((CredentialReference::new(profile.name()), path.to_path_buf()))
+                    }),
+                );
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
                 CodexCliRuntime::new(runtime_configuration)
             })
@@ -1712,6 +1788,11 @@ impl HubModelConfiguration {
         self.daemon_tools.as_ref()
     }
 
+    /// Returns explicit roots whose content is discoverable but not eligible by default.
+    pub const fn workspace_instructions(&self) -> &WorkspaceInstructionConfiguration {
+        &self.workspace_instructions
+    }
+
     /// Reports whether the configuration contains one direct selection key.
     pub fn contains_selection(&self, selection: DirectModelSelection) -> bool {
         self.direct_selections.contains(&selection)
@@ -1756,6 +1837,47 @@ pub(crate) fn checked_in_example_configuration()
     ))
 }
 
+fn parse_workspace_instruction_configuration(
+    item: Option<&Item>,
+) -> Result<WorkspaceInstructionConfiguration, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(WorkspaceInstructionConfiguration {
+            roots: Box::new([]),
+        });
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+    reject_unknown_fields(table, &["version", "registered_roots"])
+        .map_err(|_| HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+    if table.get("version").and_then(Item::as_integer) != Some(1) {
+        return Err(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration);
+    }
+    let values = table
+        .get("registered_roots")
+        .and_then(Item::as_array)
+        .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+    if values.len() > 64 {
+        return Err(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration);
+    }
+    let mut roots = Vec::with_capacity(values.len());
+    let mut unique = BTreeSet::new();
+    for value in values {
+        let value = value
+            .as_str()
+            .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+        let root = InstructionPath::try_new(value.to_owned())
+            .map_err(|_| HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+        if !unique.insert(root.clone()) {
+            return Err(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration);
+        }
+        roots.push(root);
+    }
+    Ok(WorkspaceInstructionConfiguration {
+        roots: roots.into_boxed_slice(),
+    })
+}
+
 fn parse_repository_watch_configuration(
     item: &Item,
 ) -> Result<RepositoryWatchConfiguration, HubModelConfigurationError> {
@@ -1770,6 +1892,7 @@ fn parse_repository_watch_configuration(
             "repositories",
             "rules",
             "webhook",
+            "convergence_sweep",
         ],
     )
     .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
@@ -1801,6 +1924,7 @@ fn parse_repository_watch_configuration(
     signal_reviewers.sort();
 
     let webhook = parse_repository_watch_webhook_configuration(table.get("webhook"))?;
+    let convergence_sweep = parse_convergence_sweep_configuration(table.get("convergence_sweep"))?;
 
     let repository_tables = table
         .get("repositories")
@@ -1823,6 +1947,7 @@ fn parse_repository_watch_configuration(
                 "credential_file",
                 "webhook_hook_id",
                 "webhook_secret_file",
+                "convergence_pull_requests",
             ],
         )
         .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
@@ -1903,11 +2028,14 @@ fn parse_repository_watch_configuration(
                 return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
             }
         };
+        let convergence_pull_requests =
+            parse_convergence_pull_requests(repository.get("convergence_pull_requests"))?;
         repositories.push(WatchedRepositoryConfiguration {
             repository: repository_slug,
             poll_interval: Duration::from_secs(interval),
             credential_file,
             webhook: repository_webhook,
+            convergence_pull_requests: convergence_pull_requests.into_boxed_slice(),
         });
     }
     if webhook.is_some() != (webhook_repository_count > 0) {
@@ -1915,12 +2043,88 @@ fn parse_repository_watch_configuration(
     }
     repositories.sort_by(|left, right| left.repository.cmp(&right.repository));
     let rules = parse_repository_watch_rules(table)?;
+    let convergence_target_count = repositories
+        .iter()
+        .map(|repository| repository.convergence_pull_requests.len())
+        .sum::<usize>();
+    if convergence_target_count > MAX_CONVERGENCE_SWEEP_TARGETS
+        || (convergence_target_count == 0) != convergence_sweep.is_none()
+    {
+        return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+    }
     Ok(RepositoryWatchConfiguration {
         signal_reviewers: signal_reviewers.into_boxed_slice(),
         repositories: repositories.into_boxed_slice(),
         rules: rules.into_boxed_slice(),
         webhook,
+        convergence_sweep,
     })
+}
+
+fn parse_convergence_sweep_configuration(
+    item: Option<&Item>,
+) -> Result<Option<ConvergenceSweepConfiguration>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(None);
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    reject_unknown_fields(table, &["template", "interval_seconds", "cool_off_seconds"])
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    let template = SessionTemplateName::try_new(required_string(table, "template")?.to_owned())
+        .map_err(|_| HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    let interval =
+        bounded_positive_duration(table, "interval_seconds", MAX_CONVERGENCE_SWEEP_INTERVAL)?;
+    let cool_off =
+        bounded_positive_duration(table, "cool_off_seconds", MAX_CONVERGENCE_SWEEP_COOL_OFF)?;
+    Ok(Some(ConvergenceSweepConfiguration {
+        template,
+        interval,
+        cool_off,
+    }))
+}
+
+fn bounded_positive_duration(
+    table: &Table,
+    field: &str,
+    ceiling: Duration,
+) -> Result<Duration, HubModelConfigurationError> {
+    table
+        .get(field)
+        .and_then(Item::as_integer)
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_secs)
+        .filter(|value| *value <= ceiling)
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+}
+
+fn parse_convergence_pull_requests(
+    item: Option<&Item>,
+) -> Result<Vec<PullRequestNumber>, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(Vec::new());
+    };
+    let values = item
+        .as_array()
+        .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+    let mut parsed = Vec::with_capacity(values.len());
+    for value in values {
+        let number = value
+            .as_integer()
+            .and_then(|value| u64::try_from(value).ok())
+            .and_then(NonZeroU64::new)
+            .filter(|value| value.get() <= i32::MAX as u64)
+            .map(PullRequestNumber::new)
+            .ok_or(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)?;
+        if parsed.contains(&number) {
+            return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
+        }
+        parsed.push(number);
+    }
+    parsed.sort();
+    Ok(parsed)
 }
 
 fn parse_repository_watch_webhook_configuration(
@@ -2727,9 +2931,11 @@ fn validate_github_tool_mapping(mapping: &Table) -> Result<(), HubModelConfigura
 }
 
 fn validate_workspace_tool_mapping(mapping: &Table) -> Result<(), HubModelConfigurationError> {
-    let root = Path::new(required_string(mapping, "workspace_root")?);
+    let root_value = required_string(mapping, "workspace_root")?;
+    let root = Path::new(root_value);
     if required_string(mapping, "adapter")? != "local"
         || !root.is_absolute()
+        || InstructionPath::try_new(root_value.to_owned()).is_err()
         || mapping.get("credential_profile").is_some()
         || mapping.get("egress_policy").is_some()
     {
@@ -3245,6 +3451,13 @@ pub enum HubModelConfigurationError {
     /// A credential profile named no delivery, or its delivery's own fields
     /// were absent or malformed.
     InvalidCredentialDelivery,
+    /// One member's Codex home failed path/directory admission.
+    InvalidCredentialHome {
+        /// Non-secret profile reference identifying the failed member.
+        credential_profile: Arc<str>,
+        /// Closed startup failure class; never path or auth material.
+        failure: crate::credential_pools::CredentialHomeAdmissionFailure,
+    },
     /// A credential profile named a delivery its adapter does not admit.
     UnsupportedCredentialDelivery {
         /// Build-provided adapter whose admitted deliveries were checked.
@@ -3405,6 +3618,13 @@ pub enum HubModelConfigurationError {
     InvalidWebFetchPolicy,
     /// The optional version-one repository-watch section was malformed.
     InvalidRepositoryWatchConfiguration,
+    /// The optional version-one workspace-instruction section was malformed.
+    InvalidWorkspaceInstructionConfiguration,
+    /// The convergence sweep names no loaded session template.
+    UnknownConvergenceSweepTemplate {
+        /// Exact missing template name.
+        template: String,
+    },
     /// One structured repository-watch rule failed closed validation.
     InvalidRepositoryWatchRule {
         /// Stable operator-assigned rule identity.
@@ -3449,6 +3669,26 @@ impl fmt::Display for HubModelConfigurationError {
                 "model configuration contains invalid repository-watch rule `{rule}`: {reason}"
             );
         }
+        if let Self::UnknownConvergenceSweepTemplate { template } = self {
+            return write!(
+                formatter,
+                "model configuration names unknown convergence template `{template}`"
+            );
+        }
+        // Startup telemetry formats this value, so the failing member and the
+        // closed admission cause must both survive. The path never appears, as
+        // `configuration-and-credentials.md#the-codex_home-delivery` requires.
+        if let Self::InvalidCredentialHome {
+            credential_profile,
+            failure,
+        } = self
+        {
+            return write!(
+                formatter,
+                "model configuration credential profile `{credential_profile}` names an unavailable Codex credential home: {}",
+                failure.cause()
+            );
+        }
         formatter.write_str(match self {
             Self::Read => "model configuration file could not be read",
             Self::InvalidDocument => "model configuration is not valid TOML",
@@ -3478,6 +3718,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidCredentialDelivery => {
                 "model configuration contains an invalid credential delivery"
+            }
+            Self::InvalidCredentialHome { .. } => {
+                "model configuration contains an unavailable Codex credential home"
             }
             Self::UnsupportedCredentialDelivery { .. } => {
                 "model configuration names a credential delivery its adapter does not admit"
@@ -3596,6 +3839,12 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidRepositoryWatchConfiguration => {
                 "model configuration contains invalid repository-watch settings"
+            }
+            Self::InvalidWorkspaceInstructionConfiguration => {
+                "model configuration contains invalid workspace-instruction settings"
+            }
+            Self::UnknownConvergenceSweepTemplate { .. } => {
+                "model configuration names an unknown convergence template"
             }
             Self::InvalidRepositoryWatchRule { .. } => {
                 "model configuration contains an invalid repository-watch rule"
@@ -3779,7 +4028,7 @@ mod tests {
     use signalbox_domain::{
         AnthropicServiceTier, DirectModelSelection, FastMode, FastModeOverlay, MergeableState,
         ModelAlias, ModelSelectionRequest, ModelSettingSource, ModelSettingsOverlay,
-        ReasoningLevel, RepoWatchDispatchContextShape, RepoWatchEventKindNameV1,
+        PullRequestNumber, ReasoningLevel, RepoWatchDispatchContextShape, RepoWatchEventKindNameV1,
         RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
         ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
     };
@@ -3800,6 +4049,7 @@ mod tests {
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
         DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS, FileCredentialAccess, HubModelConfiguration,
         HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
+        MAX_CONVERGENCE_SWEEP_COOL_OFF, MAX_CONVERGENCE_SWEEP_INTERVAL,
         MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage, UnknownSessionModel,
         absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference,
         scheduler_pass_admission_cap, validate_alias_count, validate_model_count,
@@ -3859,6 +4109,7 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const WILDCARD_WATCH_WEBHOOK_PATH: &str = "/github/*rest";
     const WATCH_INTERVAL_SECONDS: u64 = 90;
     const SECOND_WATCH_INTERVAL_SECONDS: u64 = 120;
+    const CONVERGENCE_PULL_REQUEST: u64 = 892;
     const SIGNAL_REVIEWER: &str = "signal-reviewer";
     const SECOND_SIGNAL_REVIEWER: &str = "review-bot[bot]";
     const GIT_AUTHOR_NAME: &str = "Signalbox Daemon";
@@ -3875,6 +4126,7 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const EAGER_WATCH_RULE_ID: &str = "merge-forward-on-base-advance";
     const EAGER_WATCH_HEAD_PATTERN: &str = "^agent/.+$";
     const WATCH_TEMPLATE: &str = "merge-forward";
+    const REGISTERED_INSTRUCTION_ROOT: &str = "/srv/signalbox/instruction-library";
     const CONFIGURATION: &str = r#"
 version = 1
 
@@ -4206,6 +4458,26 @@ credential_file = "{SECOND_WATCH_CREDENTIAL_FILE}"
         )
     }
 
+    fn configuration_with_convergence_sweep() -> String {
+        format!(
+            r#"{}
+
+[repository_watch.convergence_sweep]
+template = "{WATCH_TEMPLATE}"
+interval_seconds = {}
+cool_off_seconds = {}
+"#,
+            configuration_with_repository_watch().replace(
+                &format!("repository = \"{PROVIDER_WATCH_REPOSITORY}\""),
+                &format!(
+                    "repository = \"{PROVIDER_WATCH_REPOSITORY}\"\nconvergence_pull_requests = [{CONVERGENCE_PULL_REQUEST}]"
+                ),
+            ),
+            MAX_CONVERGENCE_SWEEP_INTERVAL.as_secs(),
+            MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs(),
+        )
+    }
+
     fn configuration_with_repository_watch_webhook_entry() -> String {
         configuration_with_repository_watch().replace(
             &format!("credential_file = \"{WATCH_CREDENTIAL_FILE}\""),
@@ -4303,7 +4575,6 @@ template = "{WATCH_TEMPLATE}"
                 .expect("configured judge fixture UUID is valid"),
         )
     }
-
     #[test]
     fn configured_tool_postures_are_typed() {
         let configured = HubModelConfiguration::parse(&format!(
@@ -4328,7 +4599,6 @@ template = "{WATCH_TEMPLATE}"
         assert_eq!(postures[2].0.as_str(), WEB_FETCH_NAME);
         assert_eq!(postures[2].1, ToolApprovalPosture::Human);
     }
-
     #[test]
     fn configured_judge_selection_is_typed() {
         let configured = HubModelConfiguration::parse(&format!(
@@ -4863,6 +5133,137 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             [MergeableState::Conflicting]
         );
         assert_eq!(rule.actions()[0].template().as_str(), WATCH_TEMPLATE);
+    }
+
+    #[test]
+    fn repository_watch_parses_the_explicit_convergence_sweep() {
+        let configured = HubModelConfiguration::parse(&configuration_with_convergence_sweep())
+            .expect("convergence sweep fixture is valid");
+        let watch = configured
+            .repository_watch()
+            .expect("fixture configures repository watch");
+        let policy = watch
+            .convergence_sweep()
+            .expect("fixture enables convergence reconciliation");
+        let repository = watch
+            .repositories()
+            .iter()
+            .find(|entry| {
+                entry.repository().as_str() == PROVIDER_WATCH_REPOSITORY.to_ascii_lowercase()
+            })
+            .expect("fixture repository is retained");
+        let pull_request = PullRequestNumber::new(
+            NonZeroU64::new(CONVERGENCE_PULL_REQUEST).expect("fixture number is positive"),
+        );
+
+        assert_eq!(policy.template().as_str(), WATCH_TEMPLATE);
+        assert_eq!(policy.interval(), MAX_CONVERGENCE_SWEEP_INTERVAL);
+        assert_eq!(policy.cool_off(), MAX_CONVERGENCE_SWEEP_COOL_OFF);
+        assert_eq!(repository.convergence_pull_requests(), [pull_request]);
+    }
+
+    #[test]
+    fn repository_watch_rejects_an_unknown_convergence_template() {
+        let configured = HubModelConfiguration::parse(&configuration_with_convergence_sweep())
+            .expect("convergence sweep fixture is valid");
+        let watch = configured
+            .repository_watch()
+            .expect("fixture configures repository watch");
+        let available = SessionTemplateName::try_new(String::from("another-template"))
+            .expect("available template fixture is valid");
+
+        assert_eq!(
+            watch.validate_convergence_template(std::iter::once(&available)),
+            Err(
+                HubModelConfigurationError::UnknownConvergenceSweepTemplate {
+                    template: String::from(WATCH_TEMPLATE),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_convergence_policy_without_targets() {
+        let configured = configuration_with_convergence_sweep().replace(
+            &format!("convergence_pull_requests = [{CONVERGENCE_PULL_REQUEST}]\n"),
+            "",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_convergence_targets_without_policy() {
+        let policy = format!(
+            r#"
+[repository_watch.convergence_sweep]
+template = "{WATCH_TEMPLATE}"
+interval_seconds = {}
+cool_off_seconds = {}
+"#,
+            MAX_CONVERGENCE_SWEEP_INTERVAL.as_secs(),
+            MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs(),
+        );
+        let configured = configuration_with_convergence_sweep().replace(&policy, "");
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_convergence_interval_above_its_ceiling() {
+        let configured = configuration_with_convergence_sweep().replace(
+            &format!(
+                "interval_seconds = {}",
+                MAX_CONVERGENCE_SWEEP_INTERVAL.as_secs()
+            ),
+            &format!(
+                "interval_seconds = {}",
+                MAX_CONVERGENCE_SWEEP_INTERVAL.as_secs() + 1
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_convergence_cool_off_above_its_ceiling() {
+        let configured = configuration_with_convergence_sweep().replace(
+            &format!(
+                "cool_off_seconds = {}",
+                MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs()
+            ),
+            &format!(
+                "cool_off_seconds = {}",
+                MAX_CONVERGENCE_SWEEP_COOL_OFF.as_secs() + 1
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_rejects_a_convergence_pull_request_above_graphql_int() {
+        let configured = configuration_with_convergence_sweep().replace(
+            &format!("convergence_pull_requests = [{CONVERGENCE_PULL_REQUEST}]"),
+            &format!("convergence_pull_requests = [{}]", i64::from(i32::MAX) + 1),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
     }
 
     #[test]
@@ -5869,6 +6270,27 @@ context_window_tokens = 200000
     }
 
     #[test]
+    fn tool_mapping_registry_rejects_noncanonical_workspace_root_spellings() {
+        let trailing_separator = CONFIGURATION.replace(
+            "workspace_root = \"/srv/signalbox/workspace\"",
+            "workspace_root = \"/srv/signalbox/workspace/\"",
+        );
+        let dot_component = CONFIGURATION.replace(
+            "workspace_root = \"/srv/signalbox/workspace\"",
+            "workspace_root = \"/srv/signalbox/./workspace\"",
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&trailing_separator).err(),
+            Some(HubModelConfigurationError::InvalidToolMappings)
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&dot_component).err(),
+            Some(HubModelConfigurationError::InvalidToolMappings)
+        );
+    }
+
+    #[test]
     fn tool_mapping_registry_requires_git_identity() {
         let missing = CONFIGURATION.replace(
             "[git_identity]\nauthor_name = \"Signalbox Daemon\"\nauthor_email = \"signalbox@example.test\"\n\n",
@@ -6688,25 +7110,104 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
     }
 
     #[test]
-    fn configuration_rejects_a_delivery_this_build_supplies_no_surface_for() {
+    fn configuration_admits_an_existing_nonempty_credential_home() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-a");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
         let credential_home = CONFIGURATION.replace(
             "delivery = \"ambient\"",
-            "delivery = \"codex_home\"\ncodex_home = \"/var/lib/signalbox/codex/account-a\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = {:?}",
+                home.to_string_lossy()
+            ),
+        );
+
+        let parsed = HubModelConfiguration::parse(&credential_home)
+            .expect("existing nonempty synthetic home is admitted");
+        assert_eq!(
+            parsed
+                .credential_profile(CODEX_SUBSCRIPTION_PROFILE)
+                .expect("Codex profile remains present")
+                .delivery()
+                .path(),
+            Some(&home)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_relative_credential_home_with_a_typed_member_error() {
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            "delivery = \"codex_home\"\ncodex_home = \"relative/account-a\"",
         );
 
         assert_eq!(
             HubModelConfiguration::parse(&credential_home).err(),
-            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
-                delivery: Arc::from("codex_home"),
+            Some(HubModelConfigurationError::InvalidCredentialHome {
+                credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
+                failure: crate::CredentialHomeAdmissionFailure::InvalidPath,
             })
         );
     }
 
     #[test]
-    fn configuration_validates_an_undelivered_credential_home_before_refusing_it() {
+    fn configuration_rejects_a_missing_credential_home_with_a_typed_member_error() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let missing = temporary.path().join("missing-account");
         let credential_home = CONFIGURATION.replace(
             "delivery = \"ambient\"",
-            "delivery = \"codex_home\"\ncodex_home = \"relative/account-a\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = {:?}",
+                missing.to_string_lossy()
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::InvalidCredentialHome {
+                credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
+                failure: crate::CredentialHomeAdmissionFailure::MissingOrNotDirectory,
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_empty_credential_home_with_a_typed_member_error() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let empty = temporary.path().join("empty-account");
+        std::fs::create_dir(&empty).expect("empty synthetic home is created");
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = {:?}",
+                empty.to_string_lossy()
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::InvalidCredentialHome {
+                credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
+                failure: crate::CredentialHomeAdmissionFailure::EmptyDirectory,
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_credential_home_concurrency_bound_until_reservations_exist() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-a");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = {:?}\nmax_concurrent_invocations = {MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS}",
+                home.to_string_lossy()
+            ),
         );
 
         assert_eq!(
@@ -6716,31 +7217,17 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
     }
 
     #[test]
-    fn configuration_admits_the_largest_credential_home_concurrency_bound() {
-        // The bound is capped because a contended wait durably names every live
-        // reservation holding it. At the cap the grammar admits the field, so
-        // the profile reaches its undelivered refusal rather than a range one.
-        let credential_home = CONFIGURATION.replace(
-            "delivery = \"ambient\"",
-            &format!(
-                "delivery = \"codex_home\"\ncodex_home = \"/srv/account-a\"\nmax_concurrent_invocations = {MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS}"
-            ),
-        );
-
-        assert_eq!(
-            HubModelConfiguration::parse(&credential_home).err(),
-            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
-                delivery: Arc::from("codex_home"),
-            })
-        );
-    }
-
-    #[test]
     fn configuration_rejects_a_credential_home_concurrency_bound_past_its_cap() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-a");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
         let credential_home = CONFIGURATION.replace(
             "delivery = \"ambient\"",
             &format!(
-                "delivery = \"codex_home\"\ncodex_home = \"/srv/account-a\"\nmax_concurrent_invocations = {}",
+                "delivery = \"codex_home\"\ncodex_home = {:?}\nmax_concurrent_invocations = {}",
+                home.to_string_lossy(),
                 MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS + 1
             ),
         );
@@ -6761,7 +7248,10 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
 
         assert_eq!(
             HubModelConfiguration::parse(&credential_home).err(),
-            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+            Some(HubModelConfigurationError::InvalidCredentialHome {
+                credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
+                failure: crate::CredentialHomeAdmissionFailure::InvalidPath,
+            })
         );
     }
 
@@ -7206,6 +7696,122 @@ delivery = "ambient""#,
         assert_eq!(
             HubModelConfiguration::parse(&duplicate_ambient).err(),
             Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_mixed_ambient_and_home_delivery_for_codex() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-b");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
+        let mixed_delivery = CONFIGURATION.replace(
+            r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            &format!(
+                r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_profiles]]
+name = "codex-subscription-overflow"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "codex_home"
+codex_home = {:?}"#,
+                home.to_string_lossy()
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&mixed_delivery).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_mixed_home_and_ambient_delivery_for_codex_in_reverse_order() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-b");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
+        let mixed_delivery = CONFIGURATION.replace(
+            r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            &format!(
+                r#"[[credential_profiles]]
+name = "codex-subscription-overflow"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "codex_home"
+codex_home = {:?}
+
+[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+                home.to_string_lossy()
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&mixed_delivery).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_admits_a_claude_ambient_profile_declared_before_a_codex_home() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-b");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
+        // The Claude `ambient` profile precedes the Codex home in table order,
+        // which is the arrangement an adapter-blind conflict scan rejects.
+        let cross_adapter = CONFIGURATION.replace(
+            r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            &format!(
+                r#"[[credential_profiles]]
+name = "claude-subscription-primary"
+adapter = "claude_cli"
+billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "codex_home"
+codex_home = {:?}"#,
+                home.to_string_lossy()
+            ),
+        );
+
+        let parsed = HubModelConfiguration::parse(&cross_adapter)
+            .expect("a Claude ambient profile does not contest a Codex credential home");
+        assert_eq!(
+            parsed
+                .credential_profile(CODEX_SUBSCRIPTION_PROFILE)
+                .expect("Codex profile remains present")
+                .delivery()
+                .path(),
+            Some(&home)
         );
     }
 
@@ -7771,6 +8377,38 @@ context_window_tokens = 200000
         assert_eq!(
             HubModelConfiguration::parse(&dangling).err(),
             Some(HubModelConfigurationError::DanglingAlias)
+        );
+    }
+
+    #[test]
+    fn configuration_admits_explicit_workspace_instruction_roots() {
+        let configured = format!(
+            "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = [\"{REGISTERED_INSTRUCTION_ROOT}\"]\n"
+        );
+        let configuration = HubModelConfiguration::parse(&configured)
+            .expect("one canonical explicit instruction root is admitted");
+        assert_eq!(configuration.workspace_instructions().roots().len(), 1);
+        assert_eq!(
+            configuration.workspace_instructions().roots()[0].as_str(),
+            REGISTERED_INSTRUCTION_ROOT
+        );
+    }
+
+    #[test]
+    fn configuration_defaults_instruction_roots_to_empty() {
+        let configuration = HubModelConfiguration::parse(CONFIGURATION)
+            .expect("the base fixture omits explicit instruction roots");
+        assert!(configuration.workspace_instructions().roots().is_empty());
+    }
+
+    #[test]
+    fn configuration_rejects_relative_instruction_roots() {
+        let relative = format!(
+            "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = [\"relative/root\"]\n"
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&relative).err(),
+            Some(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)
         );
     }
 
