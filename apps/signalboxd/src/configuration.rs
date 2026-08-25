@@ -1909,14 +1909,21 @@ fn parse_repository_watch_configuration(
                     return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
                 }
                 credential_file_references.push(resolved_secret_file);
-                let mode = match mode.and_then(Item::as_str).unwrap_or("shadow") {
-                    "shadow" => RepositoryWatchWebhookMode::Shadow,
-                    "primary" => RepositoryWatchWebhookMode::Primary,
-                    _ => {
-                        return Err(
-                            HubModelConfigurationError::InvalidRepositoryWatchConfiguration,
-                        );
-                    }
+                // Only an absent key defaults. A present item of any other TOML
+                // type is malformed configuration, not an omission, so it is
+                // refused rather than silently selecting the shadow rollout
+                // mode a deployment did not ask for.
+                let mode = match mode {
+                    None => RepositoryWatchWebhookMode::Shadow,
+                    Some(item) => match item.as_str() {
+                        Some("shadow") => RepositoryWatchWebhookMode::Shadow,
+                        Some("primary") => RepositoryWatchWebhookMode::Primary,
+                        Some(_) | None => {
+                            return Err(
+                                HubModelConfigurationError::InvalidRepositoryWatchConfiguration,
+                            );
+                        }
+                    },
                 };
                 webhook_repository_count += 1;
                 Some(WatchedRepositoryWebhookConfiguration {
@@ -4606,6 +4613,42 @@ selection_id = "10000000-0000-4000-8000-000000000001"
             .expect("the first repository configures webhook intake");
 
         assert_eq!(webhook.mode(), RepositoryWatchWebhookMode::Primary);
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_non_string_mode() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\""),
+            &format!("webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\"\nwebhook_mode = true"),
+        );
+
+        let Err(error) = HubModelConfiguration::parse(&configured) else {
+            panic!("a non-string webhook mode must be rejected")
+        };
+
+        assert_eq!(
+            error,
+            HubModelConfigurationError::InvalidRepositoryWatchConfiguration
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_an_unknown_mode() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\""),
+            &format!(
+                "webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\"\nwebhook_mode = \"authoritative\""
+            ),
+        );
+
+        let Err(error) = HubModelConfiguration::parse(&configured) else {
+            panic!("an unknown webhook mode must be rejected")
+        };
+
+        assert_eq!(
+            error,
+            HubModelConfigurationError::InvalidRepositoryWatchConfiguration
+        );
     }
 
     #[test]

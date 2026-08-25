@@ -501,7 +501,12 @@ pub enum RepoWatchConvergenceVerdict {
 }
 
 const MERGE_READY_BASE_BRANCH: &str = "main";
+// Matches the storage ceiling the convergence assessment columns enforce in
+// 202608140101_repo_watch_convergence.sql, so an assessment this crate admits is
+// one the store accepts rather than one it rejects at write time.
+// numeric-bound: ceiling - protects against unbounded retained provider evidence
 const MAX_REPO_WATCH_CONVERGENCE_ITEMS: usize = 10_000;
+// numeric-bound: ceiling - protects against unbounded retained provider evidence
 const MAX_REPO_WATCH_GATING_CHECK_COUNT: u64 = 10_000;
 
 /// Field-labeled construction input for one exact-head convergence assessment.

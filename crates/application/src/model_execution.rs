@@ -5340,12 +5340,12 @@ mod tests {
         assert!(retained.is_none());
     }
 
-    /// S15 / INV-061: a turn that reaches the automatic tool-round limit closes
+    /// S15 / INV-071: a turn that reaches the automatic tool-round limit closes
     /// with its distinct terminal reason before provider entry. This prevents
     /// a runaway paid provider loop without misreporting saturation as a
     /// capability failure.
     #[tokio::test]
-    async fn s15_inv061_tool_round_limit_fires_before_provider_entry() {
+    async fn s15_inv071_tool_round_limit_fires_before_provider_entry() {
         let (request, tool_entries, failed) =
             tool_round_saturated_fixture(MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN);
         let session = request.session();

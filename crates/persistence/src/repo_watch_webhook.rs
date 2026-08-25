@@ -736,7 +736,7 @@ impl PostgresRepoWatchWebhookStore {
         key: RepoWatchWebhookDeliveryKey,
     ) -> Result<Option<RecordedRepoWatchWebhookDisposition>, RepoWatchWebhookStoreError> {
         let row = sqlx::query_as::<_, RecordedDispositionRow>(
-            "SELECT disposition, outcome_code
+            "SELECT disposition, outcome_code, resulting_cursor_generation
                FROM repo_watch_webhook_disposition
               WHERE hook_id = $1 AND delivery_id = $2",
         )
@@ -747,8 +747,18 @@ impl PostgresRepoWatchWebhookStore {
         let Some(row) = row else {
             return Ok(None);
         };
-        let disposition = crate::mapping::repo_watch_webhook_disposition_from_str(&row.disposition)
-            .ok_or(RepoWatchWebhookStorageCorruption::InvalidDisposition)?;
+        let resulting_cursor_generation = match row.resulting_cursor_generation {
+            None => None,
+            Some(stored) => Some(
+                RepoWatchCursorGeneration::try_from_stored(stored)
+                    .map_err(|_| RepoWatchWebhookStorageCorruption::InvalidDisposition)?,
+            ),
+        };
+        let disposition = crate::mapping::repo_watch_webhook_disposition_from_str(
+            &row.disposition,
+            resulting_cursor_generation,
+        )
+        .ok_or(RepoWatchWebhookStorageCorruption::InvalidDisposition)?;
         Ok(Some(RecordedRepoWatchWebhookDisposition {
             disposition,
             outcome_code: row.outcome_code,
@@ -1034,6 +1044,7 @@ struct PendingReceiptRow {
 struct RecordedDispositionRow {
     disposition: String,
     outcome_code: Option<String>,
+    resulting_cursor_generation: Option<i64>,
 }
 
 #[derive(sqlx::FromRow)]

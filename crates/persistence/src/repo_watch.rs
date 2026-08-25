@@ -76,7 +76,7 @@ impl RepoWatchCursorGeneration {
         self.0.get()
     }
 
-    fn try_from_stored(value: i64) -> Result<Self, RepoWatchPersistenceCorruption> {
+    pub(crate) fn try_from_stored(value: i64) -> Result<Self, RepoWatchPersistenceCorruption> {
         let value = u64::try_from(value)
             .ok()
             .and_then(NonZeroU64::new)

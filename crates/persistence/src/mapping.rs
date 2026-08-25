@@ -2,6 +2,7 @@
 
 use std::{error::Error, fmt};
 
+use crate::repo_watch::RepoWatchCursorGeneration;
 use crate::repo_watch_webhook::RepoWatchWebhookDisposition;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
@@ -394,16 +395,26 @@ pub(crate) const fn repo_watch_webhook_disposition_to_str(
 
 /// Paired with the encoder above so a renamed or added disposition cannot
 /// update the writer while leaving a reader interpreting the old spelling.
+///
+/// `resulting_cursor_generation` is the durable column the committed spelling
+/// pairs with under
+/// `repo_watch_webhook_disposition_committed_generation_check`: exactly the
+/// committed spelling carries one, and every other spelling carries none. The
+/// decoder enforces that pairing rather than trusting it, so a row whose
+/// spelling and generation disagree decodes as corruption instead of as a
+/// disposition the writer never recorded.
 #[cfg(feature = "test-support")]
 pub(crate) fn repo_watch_webhook_disposition_from_str(
     value: &str,
+    resulting_cursor_generation: Option<RepoWatchCursorGeneration>,
 ) -> Option<RepoWatchWebhookDisposition> {
-    match value {
-        "projected" => Some(RepoWatchWebhookDisposition::Projected),
-        "duplicate_state" => Some(RepoWatchWebhookDisposition::DuplicateState),
-        "superseded" => Some(RepoWatchWebhookDisposition::Superseded),
-        "ignored" => Some(RepoWatchWebhookDisposition::Ignored),
-        "quarantined" => Some(RepoWatchWebhookDisposition::Quarantined),
+    match (value, resulting_cursor_generation) {
+        ("projected", None) => Some(RepoWatchWebhookDisposition::Projected),
+        ("committed", Some(generation)) => Some(RepoWatchWebhookDisposition::Committed(generation)),
+        ("duplicate_state", None) => Some(RepoWatchWebhookDisposition::DuplicateState),
+        ("superseded", None) => Some(RepoWatchWebhookDisposition::Superseded),
+        ("ignored", None) => Some(RepoWatchWebhookDisposition::Ignored),
+        ("quarantined", None) => Some(RepoWatchWebhookDisposition::Quarantined),
         _ => None,
     }
 }
