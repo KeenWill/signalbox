@@ -382,6 +382,35 @@ const bodyContinuations = (value: unknown): TimelineBodyCursor[] => {
   return 'address' in candidate && 'field' in candidate ? [candidate, ...nested] : nested
 }
 
+const excerptTotalAtContinuation = (
+  value: unknown,
+  continuation: TimelineBodyCursor,
+): string | undefined => {
+  if (value === null || typeof value !== 'object') return undefined
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const total = excerptTotalAtContinuation(entry, continuation)
+      if (total !== undefined) return total
+    }
+    return undefined
+  }
+  const record = value as Record<string, unknown>
+  if (
+    typeof record.total_bytes === 'string' &&
+    record.continuation !== null &&
+    typeof record.continuation === 'object' &&
+    !Array.isArray(record.continuation) &&
+    sameBodyContinuation(record.continuation as TimelineBodyCursor, continuation)
+  ) {
+    return record.total_bytes
+  }
+  for (const entry of Object.values(record)) {
+    const total = excerptTotalAtContinuation(entry, continuation)
+    if (total !== undefined) return total
+  }
+  return undefined
+}
+
 const excerptStartsAtCursor = (
   value: unknown,
   cursor: TimelineBodyCursor,
@@ -473,8 +502,8 @@ const isCanonicalCrossFieldContinuation = (
     }
     if (!physical) return false
     return continuation.field === 'tool_result'
-      ? physical.state === 'completed' && physical.failure == null
-      : physical.state === 'known_failed' && physical.result == null
+      ? physical.state === 'completed' && physical.result_present && physical.failure == null
+      : physical.state === 'known_failed' && physical.failure_present && physical.result == null
   }
   if (continuation.field === 'tool_arguments') {
     return continuation.member_index === currentMember + 1
@@ -499,8 +528,8 @@ const requiresTerminalToolContinuation = (
     return false
   }
   return (
-    (evidence.state === 'completed' && evidence.result == null) ||
-    (evidence.state === 'known_failed' && evidence.failure == null)
+    (evidence.state === 'completed' && evidence.result_present && evidence.result == null) ||
+    (evidence.state === 'known_failed' && evidence.failure_present && evidence.failure == null)
   )
 }
 
@@ -640,6 +669,7 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     limits: SessionDetailLimits,
     cursor?: TimelineDetailCursor,
     signal?: AbortSignal,
+    priorPage?: WebSessionTimelineDetailPage,
   ): Promise<WebSessionTimelineDetailPage> {
     if (!this.detailAvailable) {
       throw new TypeError('bounded session timeline detail capability is unavailable')
@@ -684,6 +714,24 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
           !bodyPageStartsAtCursor(item.body, requestedBodyCursor)
         ) {
           throw new TypeError('timeline detail page does not start at its request cursor')
+        }
+        // The body is immutable, so a same-field continuation page must
+        // advertise the same total as the excerpt that produced the cursor.
+        const priorTotal = priorPage?.items
+          .map((priorItem) => excerptTotalAtContinuation(priorItem.body, requestedBodyCursor))
+          .find((total) => total !== undefined)
+        if (priorTotal !== undefined) {
+          const excerpt = bodyExcerptAtCursor(item.body, requestedBodyCursor)
+          const advertisedTotal =
+            excerpt !== null && typeof excerpt === 'object' && !Array.isArray(excerpt)
+              ? (excerpt as { total_bytes?: unknown }).total_bytes
+              : undefined
+          if (
+            typeof advertisedTotal !== 'string' ||
+            decimalU64(advertisedTotal) !== decimalU64(priorTotal)
+          ) {
+            throw new TypeError('timeline detail continuation changed its advertised total')
+          }
         }
       } else {
         const initial = initialBodyCursor(address, item.body)

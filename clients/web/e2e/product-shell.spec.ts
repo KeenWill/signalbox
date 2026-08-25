@@ -71,6 +71,8 @@ const sessionWorkspaceFixture = {
                   state: 'completed',
                   effect_posture: 'effect_free',
                   sandbox_posture: 'sandboxed',
+                  result_present: true,
+                  failure_present: false,
                   result: null,
                   failure: null,
                   cause: null,
@@ -122,6 +124,8 @@ const sessionWorkspaceFixture = {
                   state: 'completed',
                   effect_posture: 'effect_free',
                   sandbox_posture: 'sandboxed',
+                  result_present: true,
+                  failure_present: false,
                   result: {
                     text: toolResult,
                     offset_bytes: '0',

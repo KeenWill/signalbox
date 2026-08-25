@@ -894,6 +894,8 @@ describe('generated timeline detail decoder', () => {
                   state: 'completed',
                   effect_posture: 'effect_free',
                   sandbox_posture: 'sandboxed',
+                  result_present: true,
+                  failure_present: false,
                   result: excerpt,
                 },
               },
@@ -907,7 +909,7 @@ describe('generated timeline detail decoder', () => {
     }
 
     expect(() => decodeWebSessionTimelineDetailPage(page)).toThrow(
-      'timeline_detail_page.items[0].body.tools[0] must be at most one projected text field',
+      'timeline_detail_page.items[0].body.tools[0] must be exactly one projected text field',
     )
   })
 

@@ -1755,6 +1755,8 @@ describe('BoundedSessionHistory', () => {
                   state: 'completed',
                   effect_posture: 'effect_free',
                   sandbox_posture: null,
+                  result_present: true,
+                  failure_present: false,
                   result: null,
                   failure: null,
                   cause: null,
@@ -1810,6 +1812,8 @@ describe('BoundedSessionHistory', () => {
                   state: 'completed',
                   effect_posture: 'effect_free',
                   sandbox_posture: null,
+                  result_present: true,
+                  failure_present: false,
                   result: null,
                   failure: null,
                   cause: null,
@@ -2009,6 +2013,69 @@ describe('BoundedSessionHistory', () => {
     await expect(
       source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 }),
     ).rejects.toThrow('the excerpt body continuation')
+  })
+
+  it('rejects a continuation page whose advertised total drifted from its prior page', async () => {
+    const continuation = {
+      address: { event_sequence: '41' },
+      field: 'input_text',
+      member_index: 0,
+      offset_bytes: '5',
+    } as const
+    const firstPage = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'hello', offset_bytes: '0', total_bytes: '11', continuation },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 5,
+      continuation: { type: 'more_body', body: continuation },
+    }
+    const driftedPage = {
+      session_id: sessionId,
+      items: [
+        {
+          address: { event_sequence: '41' },
+          kind: 'input_accepted',
+          body: {
+            type: 'user_input',
+            turn_id: '00000000-0000-0000-0000-000000000041',
+            text: { text: 'wor', offset_bytes: '5', total_bytes: '8', continuation: null },
+            attachments: [],
+          },
+          projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 3,
+        },
+      ],
+      projected_body_bytes: TIMELINE_DETAIL_BODY_ENVELOPE_BYTES + 3,
+      continuation: null,
+    }
+    const request = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify(timelineBootstrap)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(firstPage)))
+      .mockResolvedValueOnce(new Response(JSON.stringify(driftedPage)))
+    const source = await HttpSessionTimelineSource.connect(request)
+    const priorPage = await source.readItemDetail(sessionId, '41', { maxItems: 1, maxBytes: 1024 })
+
+    await expect(
+      source.readItemDetail(
+        sessionId,
+        '41',
+        { maxItems: 1, maxBytes: 1024 },
+        { type: 'more_body', body: continuation },
+        undefined,
+        priorPage,
+      ),
+    ).rejects.toThrow('timeline detail continuation changed its advertised total')
   })
 
   it('rejects a body-page continuation when no excerpt continues', async () => {

@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { type ReactNode, useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useRef, useState } from 'react'
 import type {
   WebSessionTimelineDetailPage,
   WebSessionTimelineWindow,
@@ -96,6 +96,13 @@ const compatibleDelegationOutcome = (detail: DelegationDetail): boolean => {
     (detail.outcome === 'child_cancelled' &&
       detail.reason === 'parent_cancelled_with_descendants' &&
       parentProvenance) ||
+    // A bound relationship carries its own termination policy, so a cascade
+    // disposition may map a parent stop to a child cancel and vice versa.
+    (detail.type === 'child_lifecycle_disposition' &&
+      (detail.outcome === 'child_stopped' || detail.outcome === 'child_cancelled') &&
+      (detail.reason === 'parent_stopped_with_descendants' ||
+        detail.reason === 'parent_cancelled_with_descendants') &&
+      parentProvenance) ||
     ((detail.outcome === 'continue_running' || detail.outcome === 'already_terminal') &&
       (detail.reason === 'parent_stopped_with_descendants' ||
         detail.reason === 'parent_cancelled_with_descendants') &&
@@ -173,11 +180,29 @@ export const isCompatibleDetailBody = (
           ? delegationWakeKinds.has(body.detail.type)
           : false
     if (!subtypeMatches || !compatibleDelegationOutcome(body.detail)) return false
-    if ('child_session_id' in body.detail && body.detail.child_session_id === sessionId)
+    // A descendant cascade also addresses the terminalization to the child's
+    // own timeline (see validate_delegation_session_event in
+    // crates/process-protocol); that row carries the commanding parent's
+    // cascade provenance, so the provenance session must name a different
+    // session. Every other self-referencing delegation record stays rejected.
+    const childAddressedCascade =
+      body.detail.type === 'child_lifecycle_disposition' &&
+      body.detail.child_session_id === sessionId &&
+      (body.detail.outcome === 'child_stopped' || body.detail.outcome === 'child_cancelled') &&
+      (body.detail.provenance.type === 'parent_turn_command' ||
+        body.detail.provenance.type === 'parent_goal_command') &&
+      body.detail.provenance.session_id !== sessionId
+    if (
+      'child_session_id' in body.detail &&
+      body.detail.child_session_id === sessionId &&
+      !childAddressedCascade
+    ) {
       return false
+    }
     if (body.detail.type === 'child_lifecycle_disposition' || body.detail.type === 'child_result') {
-      const provenanceSessionMatches =
-        body.detail.provenance.type === 'child_turn'
+      const provenanceSessionMatches = childAddressedCascade
+        ? true
+        : body.detail.provenance.type === 'child_turn'
           ? body.detail.provenance.session_id === body.detail.child_session_id
           : sessionId === undefined || body.detail.provenance.session_id === sessionId
       if (!provenanceSessionMatches) return false
@@ -745,6 +770,9 @@ export function SessionItemDetail({
 }) {
   const [cursor, setCursor] = useState<NonNullable<WebSessionTimelineDetailPage['continuation']>>()
   const [restoreSummaryOnCompletion, setRestoreSummaryOnCompletion] = useState(false)
+  // Retains the page that produced the active continuation so the model can
+  // verify the immutable body advertises one stable total across chunks.
+  const priorPageRef = useRef<WebSessionTimelineDetailPage | undefined>(undefined)
   const detail = useQuery({
     queryKey: ['production', 'session-item-detail', sessionId, item.address.event_sequence, cursor],
     queryFn: ({ signal }) =>
@@ -754,10 +782,15 @@ export function SessionItemDetail({
         { maxItems: DETAIL_PAGE_ITEMS, maxBytes: DETAIL_PAGE_BYTES },
         cursor,
         signal,
+        priorPageRef.current,
       ),
     gcTime: 0,
     placeholderData: (previous) => previous,
   })
+
+  useEffect(() => {
+    if (detail.data) priorPageRef.current = detail.data
+  }, [detail.data])
 
   useEffect(() => {
     if (!restoreSummaryOnCompletion || detail.isFetching) return

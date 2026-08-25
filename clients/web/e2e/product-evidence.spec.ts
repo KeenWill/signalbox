@@ -1,29 +1,11 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { webContractBootstrapFixture } from '../src/product.fixture'
 
 interface RouteEvidence {
   path: string
   title: string
   snapshot: string
 }
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    bounded_session_timeline: true,
-    bounded_session_timeline_detail: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: {
-    max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 262_144,
-    max_timeline_detail_items: 128,
-    max_timeline_detail_bytes: 65_536,
-    max_timeline_window_items: 256,
-    max_timeline_window_bytes: 65_536,
-  },
-} as const
 
 const toolEvidenceArguments = '{"path":"docs/spec/sessions-and-transcript.md"}'
 const toolEvidenceResult = 'Read 64 bounded lines from the owning contract.'
@@ -70,6 +52,8 @@ const sessionEvidenceFixture = {
                 state: 'completed',
                 effect_posture: 'effect_free',
                 sandbox_posture: 'sandboxed',
+                result_present: true,
+                failure_present: false,
                 result: null,
                 failure: null,
                 cause: null,
@@ -121,6 +105,8 @@ const sessionEvidenceFixture = {
                 state: 'completed',
                 effect_posture: 'effect_free',
                 sandbox_posture: 'sandboxed',
+                result_present: true,
+                failure_present: false,
                 result: {
                   text: toolEvidenceResult,
                   offset_bytes: '0',
@@ -201,7 +187,7 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
 }
 
 const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  page.route('**/api/bootstrap', (route) => route.fulfill({ json: webContractBootstrapFixture }))
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }

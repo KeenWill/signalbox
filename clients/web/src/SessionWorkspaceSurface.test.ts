@@ -301,6 +301,49 @@ describe('Session Workspace projection', () => {
       ),
     ).toBe(false)
     expect(
+      isCompatibleDetailBody(
+        'delegation_update',
+        {
+          ...childDisposition,
+          detail: {
+            ...childDisposition.detail,
+            outcome: 'child_stopped',
+            reason: 'parent_stopped_with_descendants',
+            provenance: {
+              type: 'parent_turn_command',
+              session_id: '00000000-0000-0000-0000-000000000001',
+              turn_id: '00000000-0000-0000-0000-000000000044',
+              command_id: '00000000-0000-0000-0000-000000000045',
+            },
+          },
+        },
+        delegation.detail.child_session_id,
+      ),
+    ).toBe(true)
+    expect(
+      isCompatibleDetailBody(
+        'delegation_update',
+        {
+          ...childDisposition,
+          detail: {
+            ...childDisposition.detail,
+            outcome: 'child_stopped',
+            reason: 'parent_stopped_with_descendants',
+            provenance: {
+              type: 'parent_turn_command',
+              session_id: delegation.detail.child_session_id,
+              turn_id: '00000000-0000-0000-0000-000000000044',
+              command_id: '00000000-0000-0000-0000-000000000045',
+            },
+          },
+        },
+        delegation.detail.child_session_id,
+      ),
+    ).toBe(false)
+    expect(
+      isCompatibleDetailBody('delegation_update', delegation, delegation.detail.child_session_id),
+    ).toBe(false)
+    expect(
       isCompatibleDetailBody('delegation_update', {
         ...delegation,
         detail: {
@@ -450,6 +493,8 @@ describe('Session Workspace projection', () => {
               attempt_id: '00000000-0000-0000-0000-000000000044',
               state: 'completed',
               effect_posture: 'effect_free',
+              result_present: false,
+              failure_present: false,
               cause: 'execution_failed',
             },
           },
@@ -472,6 +517,8 @@ describe('Session Workspace projection', () => {
               attempt_id: '00000000-0000-0000-0000-000000000044',
               state: 'completed',
               effect_posture: 'effect_free',
+              result_present: false,
+              failure_present: false,
               cause: 'execution_failed',
             },
           },
@@ -492,6 +539,8 @@ describe('Session Workspace projection', () => {
         state: 'known_failed',
         effect_posture: 'effect_free',
         sandbox_posture: 'sandboxed',
+        result_present: false,
+        failure_present: true,
         failure: { text: 'failed', offset_bytes: '0', total_bytes: '6' },
         cause: 'execution_failed',
       },

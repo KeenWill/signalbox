@@ -143,12 +143,24 @@ export function SessionWorkspaceSurface({
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set())
   const pendingBoundaryFocus = useRef<'first' | 'latest' | null>(null)
   const focusedTimelineId = useRef<string | null>(null)
+  // One bounded history per opened session: reusing the instance across anchor
+  // changes and refetches keeps its append-only descriptor checks and
+  // conflicting-address detection effective for the whole workspace read.
+  const historyRef = useRef<{
+    sessionId: string
+    source: HttpSessionTimelineSource
+    history: BoundedSessionHistory
+  } | null>(null)
   const sessionCapabilitiesAvailable = hasUsableSessionTimeline(bootstrap)
   const session = useQuery({
     queryKey: ['production', 'session-workspace', sessionId, manualAnchor, restorePosition],
     queryFn: async ({ signal }) => {
-      const source = await HttpSessionTimelineSource.connect(window.fetch.bind(window), signal)
-      const history = new BoundedSessionHistory(sessionId ?? '', source)
+      const retained = historyRef.current?.sessionId === sessionId ? historyRef.current : null
+      const source =
+        retained?.source ??
+        (await HttpSessionTimelineSource.connect(window.fetch.bind(window), signal))
+      const history = retained?.history ?? new BoundedSessionHistory(sessionId ?? '', source)
+      historyRef.current = { sessionId: sessionId ?? '', source, history }
       const descriptor = await history.describe(signal)
       const active = BigInt(descriptor.work.active_turn_count) !== BigInt(0)
       const anchor: SessionWindowAnchor =
@@ -214,10 +226,13 @@ export function SessionWorkspaceSurface({
       const refetchCurrentAnchor = sameSessionWindowAnchor(manualAnchor, anchor)
       setManualAnchor(anchor)
       setExpanded(new Set())
-      dispatch(actions.timelineSelected(null))
+      // The prior selection is preserved until the requested window succeeds:
+      // a failed request keeps the retained window and its selection intact,
+      // and a successful one re-homes the selection through the projection
+      // and boundary effects below.
       if (refetchCurrentAnchor) void refetchSession()
     },
-    [dispatch, manualAnchor, refetchSession],
+    [manualAnchor, refetchSession],
   )
   const openTimelineWindow = useCallback(
     (anchor: 'first' | 'latest') => {
