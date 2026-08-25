@@ -48,16 +48,19 @@ pub(crate) async fn probe(
                 let Ok(offset) = u64::try_from(tag_end) else {
                     return Ok(ProcessorProbeOutput::NoMatch);
                 };
-                let Ok(footer) = source
+                let Some(remaining) = source.byte_length().get().checked_sub(offset) else {
+                    return Ok(ProcessorProbeOutput::NoMatch);
+                };
+                if remaining < 10 {
+                    return Ok(ProcessorProbeOutput::NoMatch);
+                }
+                source
                     .read_range(
                         offset,
                         NonZeroU64::new(10).ok_or(FileMediaProviderFailure::Failed)?,
                     )
                     .await
-                else {
-                    return Ok(ProcessorProbeOutput::NoMatch);
-                };
-                footer
+                    .map_err(|_| FileMediaProviderFailure::Failed)?
             };
             if !valid_id3_footer(Id3Footer {
                 header: &prefix[..10],

@@ -236,6 +236,24 @@ pub(crate) fn mp3_with_long_id3_tag() -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(tagged)
 }
 
+/// Builds a valid MP3 whose ID3v2.4 footer sits past the bounded probe prefix.
+///
+/// Returns the bytes and the exact offset of the footer's own range request.
+pub(crate) fn mp3_with_id3v24_footer_past_the_probe_prefix()
+-> Result<(Vec<u8>, u64), Box<dyn Error>> {
+    let encoded = mp3(8_000, 800)?;
+    let audio = encoded.get(10..).ok_or("missing MP3 audio")?;
+    let tag_length = 128_usize;
+    let header = *b"ID3\x04\x00\x10\x00\x00\x01\x00";
+    let mut tagged = header.to_vec();
+    tagged.resize(10 + tag_length, 0);
+    let footer_offset = tagged.len();
+    tagged.extend_from_slice(b"3DI");
+    tagged.extend_from_slice(&header[3..10]);
+    tagged.extend_from_slice(audio);
+    Ok((tagged, u64::try_from(footer_offset)?))
+}
+
 pub(crate) fn mp3_with_id3_header(fixture: Id3HeaderFixture) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut bytes = mp3(8_000, 800)?;
     bytes[3] = fixture.major;

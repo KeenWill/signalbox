@@ -228,6 +228,28 @@ async fn mp3_probe_rejects_an_invalid_id3v24_footer() -> Result<(), Box<dyn Erro
 }
 
 #[tokio::test]
+async fn mp3_probe_reads_an_id3v24_footer_past_the_probe_prefix() -> Result<(), Box<dyn Error>> {
+    let (bytes, _) = fixtures::mp3_with_id3v24_footer_past_the_probe_prefix()?;
+    let source = MemorySource::new(bytes);
+
+    let inspection = support::inspect(&source, "audio/mpeg").await?;
+    support::assert_validated_media(inspection, "audio/mpeg");
+    Ok(())
+}
+
+#[tokio::test]
+async fn mp3_probe_propagates_an_unreadable_id3v24_footer() -> Result<(), Box<dyn Error>> {
+    let (bytes, footer_offset) = fixtures::mp3_with_id3v24_footer_past_the_probe_prefix()?;
+    let source = MemorySource::unavailable_at(bytes, footer_offset);
+
+    assert_eq!(
+        support::inspect_failure(&source, "audio/mpeg").await?,
+        Some(signalbox_file_media_runtime::FileMediaFailure::ProcessorFailed)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn mp3_rejects_an_empty_advertised_id3v24_extended_header() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::mp3_with_empty_id3v24_extended_header()?);
 

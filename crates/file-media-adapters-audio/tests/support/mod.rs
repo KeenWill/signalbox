@@ -15,12 +15,22 @@ use signalbox_file_media_runtime::{
 
 pub(crate) struct MemorySource {
     bytes: Arc<[u8]>,
+    unavailable_offset: Option<u64>,
 }
 
 impl MemorySource {
     pub(crate) fn new(bytes: Vec<u8>) -> Self {
         Self {
             bytes: Arc::from(bytes),
+            unavailable_offset: None,
+        }
+    }
+
+    /// Builds a source whose in-bounds range at `offset` reports a verified-source failure.
+    pub(crate) fn unavailable_at(bytes: Vec<u8>, offset: u64) -> Self {
+        Self {
+            bytes: Arc::from(bytes),
+            unavailable_offset: Some(offset),
         }
     }
 
@@ -46,6 +56,9 @@ impl VerifiedBlobSource for MemorySource {
 
     fn read_range(&self, offset: u64, length: NonZeroU64) -> SourceReadFuture<'_> {
         Box::pin(async move {
+            if self.unavailable_offset == Some(offset) {
+                return Err(SourceReadError::Unavailable);
+            }
             let start = usize::try_from(offset).map_err(|_| SourceReadError::RangeOutOfBounds)?;
             let requested =
                 usize::try_from(length.get()).map_err(|_| SourceReadError::RangeOutOfBounds)?;
@@ -168,6 +181,25 @@ pub(crate) async fn inspect(
             &NeverCancelled,
         )
         .await?)
+}
+
+/// Inspects a source and returns the registry-visible failure, if any.
+pub(crate) async fn inspect_failure(
+    source: &MemorySource,
+    media_type: &str,
+) -> Result<Option<FileMediaFailure>, Box<dyn Error>> {
+    Ok(registry()?
+        .inspect(
+            &DirectProcessor::provider(),
+            InspectionRequest {
+                source: source.file_use(media_type)?,
+                visible_part: None,
+            },
+            source,
+            &NeverCancelled,
+        )
+        .await
+        .err())
 }
 
 pub(crate) async fn inspect_sandboxed(
