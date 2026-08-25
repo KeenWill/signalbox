@@ -983,6 +983,7 @@ impl PostgresModelCallRepository {
                         &failed,
                         ProviderReportedTokenUsage::unreported(),
                         None,
+                        None,
                     )
                     .await?;
                     return Ok((
@@ -1393,12 +1394,9 @@ impl PostgresModelCallRepository {
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
                 None,
+                attachment_failure,
             )
             .await?;
-            if let Some(failure) = attachment_failure {
-                persist_attachment_preparation_failure(&mut transaction, session, call, failure)
-                    .await?;
-            }
             Ok(failed)
         }
         .await;
@@ -2402,6 +2400,7 @@ where
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
                 None,
+                None,
             )
             .await?;
             return Ok(PrepareToolContinuationOutcome::TargetUnavailable(Box::new(
@@ -2530,6 +2529,7 @@ where
         connection,
         &failed,
         ProviderReportedTokenUsage::unreported(),
+        None,
         None,
     )
     .await?;
@@ -6303,6 +6303,7 @@ async fn persist_terminal_outcome_with_usage(
                 failed,
                 usage,
                 provider_failure_cause,
+                None,
             )
             .await
         }
@@ -6340,50 +6341,43 @@ async fn persist_failed_with_delegated_child_result(
     failed: &FailedModelCallTurn,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    attachment_failure: Option<AttachmentPreparationFailure>,
 ) -> Result<(), ModelCallRepositoryError> {
     lock_delegated_child_result_frontier(connection, failed.session(), failed.turn()).await?;
-    persist_failed(connection, failed, usage, provider_failure_cause).await?;
+    persist_failed(
+        connection,
+        failed,
+        usage,
+        provider_failure_cause,
+        attachment_failure,
+    )
+    .await?;
     persist_delegated_child_result(connection, &DelegationOutcome::from_failed_child(failed)).await
 }
 
-async fn persist_attachment_preparation_failure(
-    connection: &mut PgConnection,
-    session: SessionId,
-    call: ModelCallId,
+/// Encodes the durable evidence a definitive attachment-preparation failure
+/// carries into the statement that terminalizes its call.
+///
+/// `model_call_changes_are_guarded` raises on every update whose OLD row is
+/// already terminal, so this evidence is only writable by the same
+/// Prepared-to-terminal `UPDATE` that closes the call; a follow-up statement
+/// would abort the whole failure transaction and leave the call open.
+/// `Unavailable` is retryable and so never terminalizes a prepared call.
+fn encode_attachment_preparation_failure(
     failure: AttachmentPreparationFailure,
-) -> Result<(), ModelCallRepositoryError> {
-    let (cause, maximum_bytes) = match failure {
+) -> Result<(&'static str, Option<Decimal>), ModelCallRepositoryError> {
+    match failure {
         AttachmentPreparationFailure::TooLarge { maximum_bytes } => {
-            ("too_large", Some(Decimal::from(maximum_bytes)))
+            Ok(("too_large", Some(Decimal::from(maximum_bytes))))
         }
-        AttachmentPreparationFailure::Missing => ("missing", None),
-        AttachmentPreparationFailure::Corrupt => ("corrupt", None),
+        AttachmentPreparationFailure::Missing => Ok(("missing", None)),
+        AttachmentPreparationFailure::Corrupt => Ok(("corrupt", None)),
         AttachmentPreparationFailure::Unavailable => {
-            return Err(ModelCallRepositoryError::InvalidTransition(
+            Err(ModelCallRepositoryError::InvalidTransition(
                 "retryable attachment unavailability cannot terminalize a prepared call",
-            ));
+            ))
         }
-    };
-    let rows = sqlx::query(
-        "UPDATE model_call
-            SET terminal_attachment_preparation_failure_cause = $1,
-                terminal_attachment_preparation_failure_maximum_bytes = $2
-          WHERE model_call_id = $3
-            AND session_id = $4
-            AND state_kind = 'terminal'
-            AND terminal_disposition_kind = 'known_failed'
-            AND terminal_provider_failure_cause IS NULL
-            AND terminal_attachment_preparation_failure_cause IS NULL
-            AND terminal_attachment_preparation_failure_maximum_bytes IS NULL",
-    )
-    .bind(cause)
-    .bind(maximum_bytes)
-    .bind(call.into_uuid())
-    .bind(session_id_to_uuid(session))
-    .execute(&mut *connection)
-    .await?
-    .rows_affected();
-    require_single(rows, "terminal attachment-preparation failure cause")
+    }
 }
 
 async fn lock_delegated_child_result_frontier(
@@ -6992,6 +6986,7 @@ async fn persist_availability_successor(
         successor.predecessor_call(),
         usage,
         Some(cause),
+        None,
     )
     .await?;
     persist_ended_attempt(
@@ -7098,6 +7093,7 @@ async fn persist_credential_pool_exhaustion(
         connection,
         exhausted.failed(),
         ProviderReportedTokenUsage::unreported(),
+        None,
         None,
     )
     .await?;
@@ -7555,6 +7551,7 @@ async fn persist_failed(
     failed: &FailedModelCallTurn,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    attachment_failure: Option<AttachmentPreparationFailure>,
 ) -> Result<(), ModelCallRepositoryError> {
     if let Some(call) = failed.call() {
         persist_ended_call_with_provider_failure_cause(
@@ -7564,8 +7561,14 @@ async fn persist_failed(
             call,
             usage,
             provider_failure_cause,
+            attachment_failure,
         )
         .await?;
+    } else if attachment_failure.is_some() {
+        return Err(ModelCallCorruption::Inconsistent(
+            "attachment-preparation failure without a model call",
+        )
+        .into());
     }
     persist_ended_attempt(
         connection,
@@ -8028,8 +8031,10 @@ async fn persist_ended_call(
     call: &signalbox_domain::EndedModelCall,
     usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call_with_provider_failure_cause(connection, session, turn, call, usage, None)
-        .await
+    persist_ended_call_with_provider_failure_cause(
+        connection, session, turn, call, usage, None, None,
+    )
+    .await
 }
 
 async fn persist_ended_call_with_provider_failure_cause(
@@ -8039,8 +8044,12 @@ async fn persist_ended_call_with_provider_failure_cause(
     call: &signalbox_domain::EndedModelCall,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    attachment_failure: Option<AttachmentPreparationFailure>,
 ) -> Result<(), ModelCallRepositoryError> {
     let usage = encode_token_usage(usage);
+    let attachment_failure = attachment_failure
+        .map(encode_attachment_preparation_failure)
+        .transpose()?;
     let rows = sqlx::query(
         "UPDATE model_call
             SET state_kind = 'terminal',
@@ -8049,11 +8058,13 @@ async fn persist_ended_call_with_provider_failure_cause(
                 usage_output_tokens = $3,
                 usage_cache_creation_input_tokens = $4,
                 usage_cache_read_input_tokens = $5,
-                terminal_provider_failure_cause = $6
-          WHERE model_call_id = $7
-            AND turn_id = $8
-            AND session_id = $9
-            AND turn_attempt_id = $10
+                terminal_provider_failure_cause = $6,
+                terminal_attachment_preparation_failure_cause = $7,
+                terminal_attachment_preparation_failure_maximum_bytes = $8
+          WHERE model_call_id = $9
+            AND turn_id = $10
+            AND session_id = $11
+            AND turn_attempt_id = $12
             AND state_kind <> 'terminal'
             AND terminal_disposition_kind IS NULL",
     )
@@ -8063,6 +8074,8 @@ async fn persist_ended_call_with_provider_failure_cause(
     .bind(usage.cache_creation_input_tokens)
     .bind(usage.cache_read_input_tokens)
     .bind(provider_failure_cause.map(encode_provider_failure_cause))
+    .bind(attachment_failure.map(|(cause, _)| cause))
+    .bind(attachment_failure.and_then(|(_, maximum_bytes)| maximum_bytes))
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(turn))
     .bind(session_id_to_uuid(session))

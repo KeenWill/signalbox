@@ -38,11 +38,11 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    ApprovalJudgeCompletionIdentities, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
-    ClassifyOperatorFailure, CommitModelCallObservationTransaction, CompiledTool,
-    CompiledToolCatalog, CorrelatedDurableChildWait, CreateSessionError, CreateSessionOutcome,
-    CreateSessionRequest, CreateSessionService, EligibilityNudge, EligibilityNudgeOutcome,
-    EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
+    ApprovalJudgeCompletionIdentities, AttachmentPreparationFailure, AuthorizeModelCallOutcome,
+    AuthorizeModelCallTransaction, ClassifyOperatorFailure, CommitModelCallObservationTransaction,
+    CompiledTool, CompiledToolCatalog, CorrelatedDurableChildWait, CreateSessionError,
+    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, EligibilityNudge,
+    EligibilityNudgeOutcome, EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
     ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
     ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
     ModelCallObservationCommitOutcome, ModelConversationMessage, OperatorFailureClass,
