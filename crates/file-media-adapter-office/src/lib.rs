@@ -309,6 +309,10 @@ fn reader_declaration(
             range_count: 16,
             cumulative_bytes: VALIDATION_SOURCE_BYTES,
         }),
+        validation: signalbox_file_media_runtime::ValidationDeclaration::new(
+            VALIDATION_SOURCE_BYTES,
+            signalbox_file_media_runtime::MAX_VALIDATION_RANGES,
+        ),
         views: vec![text_view, metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,

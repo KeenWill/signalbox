@@ -9,6 +9,7 @@ mod lock_inventory;
 mod model_settings_resolution;
 
 pub mod approval_judge;
+pub mod approval_judge_eval;
 pub mod attention;
 pub mod blob;
 pub mod blob_derivation;
