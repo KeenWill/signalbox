@@ -3568,11 +3568,19 @@ function assertSchema(root, schema, value, path) {
       return;
     }
     const concrete = schema.type.filter((candidate) => candidate !== "null");
+    // JSON Schema names the integral type "integer" while `typeof` reports
+    // every JavaScript number as "number", so an ["integer", "null"] property
+    // matches only through that spelling.
     const actual = Array.isArray(value) ? "array" : typeof value;
-    if (!concrete.includes(actual)) {
+    const selected = concrete.includes(actual)
+      ? actual
+      : actual === "number" && concrete.includes("integer")
+        ? "integer"
+        : undefined;
+    if (selected === undefined) {
       fail(path, concrete.join(" or "));
     }
-    assertSchema(root, { ...schema, type: actual }, value, path);
+    assertSchema(root, { ...schema, type: selected }, value, path);
     return;
   }
   if (schema.type === "object") {
