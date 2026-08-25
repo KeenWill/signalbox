@@ -1,7 +1,7 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { Command as IconCommandGlyph, Menu, Moon, PanelLeftClose, Rows3, Sun } from 'lucide-react'
+import { Menu } from 'lucide-react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   type CommandContext,
@@ -18,7 +18,6 @@ import type {
   WebImportedSessionRelationship,
   WebImportFormat,
 } from '../generated/web-contract.mjs'
-import { ProductNavigation } from '../ProductApp'
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
 import { selectApp, store, useAppSelector } from '../state'
@@ -64,7 +63,21 @@ const byteLabel = (bytes: number): string => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }
 
-export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: boolean }) {
+export function ImportsWorkspace({
+  api,
+  scenario,
+  presentation = 'standalone',
+  onCommandContext,
+  onNavigationDisabledChange,
+}: {
+  api: ImportApi
+  scenario: boolean
+  // `standalone` renders this surface's own navigation, header, and overlays. `product` mounts the
+  // same surface inside the product shell, which already owns that chrome and the command registry.
+  presentation?: 'standalone' | 'product'
+  onCommandContext?: (context: CommandContext | null) => void
+  onNavigationDisabledChange?: (disabled: boolean) => void
+}) {
   const queryClient = useQueryClient()
   const navigate = useNavigate()
   const app = useAppSelector(selectApp)
@@ -101,6 +114,11 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
   })
   const [retainedStorageFailed, setRetainedStorageFailed] = useState(false)
   const hasRetainedCommand = pendingCommand !== null
+
+  useEffect(() => {
+    onNavigationDisabledChange?.(hasRetainedCommand)
+    return () => onNavigationDisabledChange?.(false)
+  }, [hasRetainedCommand, onNavigationDisabledChange])
 
   const listRequest = useMemo(
     () => ({
@@ -290,14 +308,25 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
       selectedFrontier?.imported_entry_id,
     ],
   )
+  useEffect(() => {
+    onCommandContext?.(commandContext)
+    return () => onCommandContext?.(null)
+  }, [commandContext, onCommandContext])
+  // The product shell registers every product command itself, so publishing the surface context is
+  // the whole seam there. Registering these bindings again would advance the selection twice.
   useHotkeys(
-    [...surfaceHotkeyBindings, ...importHotkeyBindings].map((binding) => ({
-      hotkey: binding.hotkey,
-      callback: () => invokeCommand(binding.commandId, commandContext),
-    })),
+    (presentation === 'standalone' ? [...surfaceHotkeyBindings, ...importHotkeyBindings] : []).map(
+      (binding) => ({
+        hotkey: binding.hotkey,
+        callback: () => invokeCommand(binding.commandId, commandContext),
+      }),
+    ),
   )
   useHotkeySequences(
-    [...surfaceHotkeySequenceBindings, ...importHotkeySequenceBindings].map((binding) => ({
+    (presentation === 'standalone'
+      ? [...surfaceHotkeySequenceBindings, ...importHotkeySequenceBindings]
+      : []
+    ).map((binding) => ({
       sequence: binding.sequence,
       callback: () => invokeCommand(binding.commandId, commandContext),
     })),
@@ -415,66 +444,36 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
 
   return (
     <>
-      <div className="imports-shell">
-        <aside className="navigation-pane imports-navigation">
-          {scenario ? (
-            <ScenarioNavigation activeId="imports" disabled={hasRetainedCommand} />
-          ) : (
-            <ProductNavigation
-              active="imports"
-              context={commandContext}
+      <div className={`imports-shell imports-shell-${presentation}`}>
+        {presentation === 'standalone' && (
+          <aside className="navigation-pane imports-navigation">
+            <ScenarioNavigation
+              activeId={scenario ? 'imports' : 'production-imports'}
               disabled={hasRetainedCommand}
             />
-          )}
-        </aside>
-        <main className="imports-workspace">
-          <header className="imports-header">
-            <IconCommand
-              id="navigation.open"
-              context={commandContext}
-              label={scenario ? 'Open scenarios' : 'Open navigation'}
-              className="icon-button imports-mobile-navigation"
-            >
-              <Menu />
-            </IconCommand>
-            <div>
-              <span className="eyebrow">Immutable imported evidence</span>
-              <h1>Imports</h1>
-            </div>
-            <span className="window-count">100-row keyset pages · 101-entry windows</span>
-            {scenario ? null : (
-              <div className="toolbar" role="toolbar" aria-label="Application controls">
-                <IconCommand
-                  id="density.toggle"
-                  context={commandContext}
-                  label={`Use ${app.density === 'compact' ? 'comfortable' : 'compact'} density`}
-                >
-                  <Rows3 />
-                </IconCommand>
-                <IconCommand
-                  id="layout.toggle"
-                  context={commandContext}
-                  label={`Switch to ${app.layout === 'focus' ? 'workbench' : 'focus'} layout`}
-                >
-                  <PanelLeftClose />
-                </IconCommand>
-                <IconCommand
-                  id="theme.toggle"
-                  context={commandContext}
-                  label={`Use ${app.theme === 'dark' ? 'light' : 'dark'} theme`}
-                >
-                  {app.theme === 'dark' ? <Sun /> : <Moon />}
-                </IconCommand>
-                <IconCommand
-                  id="palette.open"
-                  context={commandContext}
-                  label="Open command palette"
-                >
-                  <IconCommandGlyph />
-                </IconCommand>
+          </aside>
+        )}
+        <div
+          className={`imports-workspace imports-workspace-${presentation}`}
+          role={presentation === 'standalone' ? 'main' : undefined}
+        >
+          {presentation === 'standalone' && (
+            <header className="imports-header">
+              <IconCommand
+                id="navigation.open"
+                context={commandContext}
+                label="Open scenarios"
+                className="icon-button imports-mobile-navigation"
+              >
+                <Menu />
+              </IconCommand>
+              <div>
+                <span className="eyebrow">Immutable imported evidence</span>
+                <h1>Imports</h1>
               </div>
-            )}
-          </header>
+              <span className="window-count">100-row keyset pages · 101-entry windows</span>
+            </header>
+          )}
           <section className="imports-catalog" aria-labelledby="imports-catalog-heading">
             <header className="section-header imports-catalog-header">
               <div>
@@ -792,24 +791,16 @@ export function ImportsWorkspace({ api, scenario }: { api: ImportApi; scenario: 
               </div>
             </div>
           </section>
-        </main>
+        </div>
       </div>
-      <OverlaySurfaces
-        context={commandContext}
-        activeId={scenario ? 'imports' : 'production-imports'}
-        importsSurface
-        navigationDisabled={hasRetainedCommand}
-        navigationContent={
-          scenario ? undefined : (
-            <ProductNavigation
-              active="imports"
-              context={commandContext}
-              disabled={hasRetainedCommand}
-              onActivate={() => invokeCommand('surface.escape', commandContext)}
-            />
-          )
-        }
-      />
+      {presentation === 'standalone' && (
+        <OverlaySurfaces
+          context={commandContext}
+          activeId={scenario ? 'imports' : 'production-imports'}
+          importsSurface
+          navigationDisabled={hasRetainedCommand}
+        />
+      )}
     </>
   )
 }

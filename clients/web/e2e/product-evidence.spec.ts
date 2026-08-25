@@ -1,5 +1,6 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
+import { useDeterministicImportApi } from './import-api-fixture'
 
 interface RouteEvidence {
   path: string
@@ -91,6 +92,8 @@ const useDeterministicSession = (page: Page) =>
 const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
+  // Only the Imports route reads this adapter; every other route ignores it.
+  await useDeterministicImportApi(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(evidence.path)
   await expect(page.getByRole('heading', { name: evidence.title, level: 1 })).toBeVisible()

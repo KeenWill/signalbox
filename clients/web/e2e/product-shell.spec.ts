@@ -1,5 +1,12 @@
 import { expect, type Page, test } from '@playwright/test'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
+import { useDeterministicImportApi } from './import-api-fixture'
+
+const importsProductFixture = {
+  path: '/imports',
+  loadedImports: '100',
+  latestLoadedPosition: '51',
+} as const
 
 const sessionWorkspaceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
@@ -604,4 +611,291 @@ test('closes phone navigation after selecting a route', async ({ page }) => {
   await expect(page).toHaveURL(/\/sessions$/)
   await expect(navigation).toBeHidden()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('mounts Imports inside the product shell without a second navigation or header', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  await expect(page.getByRole('heading', { name: 'Imports', level: 1 })).toBeVisible()
+  await expect(page.locator('.product-shell')).toHaveCount(1)
+  await expect(page.locator('.imports-shell-product')).toHaveCount(1)
+  await expect(page.locator('.imports-navigation')).toHaveCount(0)
+  await expect(page.locator('.imports-header')).toHaveCount(0)
+  await expect(page.getByRole('main')).toHaveCount(1)
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toHaveAttribute(
+    'data-total-loaded',
+    importsProductFixture.loadedImports,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('operates the bounded Imports surface and leaves through one command palette', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  const importRows = page.getByRole('rowgroup', { name: 'Imported conversation rows' })
+  await expect(importRows).toHaveAttribute('data-total-loaded', importsProductFixture.loadedImports)
+  expect(await page.evaluate(() => window.__SIGNALBOX_DIAGNOSTICS__)).toBeUndefined()
+  const entries = page.getByRole('listbox', { name: 'Imported source entries' })
+  await entries.focus()
+  await entries.press('End')
+  await expect(entries.getByRole('option', { selected: true })).toHaveAttribute(
+    'aria-posinset',
+    importsProductFixture.latestLoadedPosition,
+  )
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toHaveCount(1)
+  await page.getByRole('button', { name: /Go to Settings/ }).click()
+  await expect(page).toHaveURL(/\/settings$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('withholds Imports until bootstrap admission succeeds', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let importRequests = 0
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ status: 503, body: 'temporarily unavailable' }),
+  )
+  await page.route('**/api/imports/**', (route) => {
+    importRequests += 1
+    return route.abort()
+  })
+  await page.goto(importsProductFixture.path)
+
+  await expect(
+    page.getByRole('heading', {
+      name: 'Imports are unavailable until bootstrap admission succeeds',
+    }),
+  ).toBeVisible()
+  await expect(page.getByText('Transport unavailable')).toBeVisible()
+  await expect(page.locator('.imports-shell-product')).toHaveCount(0)
+  expect(importRequests).toBe(0)
+  expect(problems.pageErrors).toEqual([])
+})
+
+test('mounts Imports after the daemon contract recovers', async ({ page }) => {
+  const problems = watchBrowser(page)
+  let attempts = 0
+  await page.route('**/api/bootstrap', (route) => {
+    attempts += 1
+    if (attempts === 1) {
+      return route.fulfill({ status: 503, body: 'temporarily unavailable' })
+    }
+    return route.fulfill({ json: bootstrapFixture })
+  })
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  await expect(page.getByText('Transport unavailable')).toBeVisible()
+  await page.getByRole('button', { name: 'Retry contract' }).click()
+
+  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  expect(attempts).toBe(2)
+  expect(problems.pageErrors).toEqual([])
+})
+
+test('serves exact source-session searches through the deterministic adapter', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  const rows = page.getByRole('rowgroup', { name: 'Imported conversation rows' })
+  await expect(rows).toHaveAttribute('data-total-loaded', importsProductFixture.loadedImports)
+  await page
+    .getByRole('textbox', { name: 'Filter imports by exact source session evidence' })
+    .fill('source-session-0')
+  await page.getByRole('checkbox', { name: 'Use exact source session filter' }).check()
+
+  await expect(rows).toHaveAttribute('data-total-loaded', '1')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('lights up the imports command family only on the Imports surface', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await expect(palette.getByRole('button', { name: /Select next imported frontier/ })).toBeVisible()
+  await palette.getByRole('button', { name: /Go to Sessions/ }).click()
+  await expect(page).toHaveURL(/\/sessions$/)
+
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(palette.getByRole('button', { name: /Select next imported frontier/ })).toHaveCount(
+    0,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('suspends Imports hotkeys while the palette owns keyboard scope', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  // An open palette hides the rest of the page from the accessibility tree, so address the list
+  // structurally rather than by role.
+  const entries = page.locator('[aria-label="Imported source entries"]')
+  await entries.focus()
+  const initialSelection = await entries.getAttribute('aria-activedescendant')
+  expect(initialSelection).not.toBeNull()
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await expect(page.getByRole('dialog', { name: 'Command palette' })).toBeVisible()
+  await page.keyboard.press('j')
+  await expect(entries).toHaveAttribute('aria-activedescendant', initialSelection ?? '')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('advances the imported frontier exactly once per product hotkey', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+
+  const entries = page.getByRole('listbox', { name: 'Imported source entries' })
+  await entries.focus()
+  await expect(entries.getByRole('option', { selected: true })).toHaveAttribute(
+    'aria-posinset',
+    '1',
+  )
+  await page.keyboard.press('j')
+  await expect(entries.getByRole('option', { selected: true })).toHaveAttribute(
+    'aria-posinset',
+    '2',
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('applies product presentation controls to the mounted Imports surface', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.goto(importsProductFixture.path)
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Use comfortable density' }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-density', 'comfortable')
+  await page.getByRole('button', { name: 'Use light theme' }).click()
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light')
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('scrolls short Imports workbenches instead of clipping the inspector', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.setViewportSize({ width: 1200, height: 560 })
+  await page.goto(importsProductFixture.path)
+
+  const main = page.locator('.product-main-imports')
+  await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
+  expect(await main.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
+  await main.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+  })
+  await expect(page.getByRole('heading', { name: 'Import inspector' })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('switches Imports layout before the product pane clips', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.setViewportSize({ width: 920, height: 844 })
+  await page.goto(importsProductFixture.path)
+
+  const workspace = page.locator('.imports-workspace-product')
+  await expect(workspace).toBeVisible()
+  expect(await workspace.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+    true,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('stacks Imports from the available product pane width', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.addInitScript(() => {
+    localStorage.setItem(
+      'signalbox.web.preferences.v1',
+      JSON.stringify({
+        layout: 'workbench',
+        density: 'compact',
+        detail: 'condensed',
+        theme: 'dark',
+        paneSizes: { navigation: 360, inspector: 480 },
+      }),
+    )
+  })
+  await page.setViewportSize({ width: 1280, height: 844 })
+  await page.goto(importsProductFixture.path)
+
+  const workspace = page.locator('.imports-workspace-product')
+  const inspectorBody = page.locator('.import-inspector-body')
+  await expect(workspace).toBeVisible()
+  await expect(inspectorBody).toHaveCSS('grid-template-columns', /^(?!.* ).+$/)
+  expect(await workspace.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(
+    true,
+  )
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('locks product navigation while an ambiguous continuation command is retained', async ({
+  page,
+}) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await useDeterministicImportApi(page)
+  await page.route('**/api/imports/*/continuations', (route) =>
+    route.fulfill({
+      status: 503,
+      json: {
+        error: {
+          kind: 'application',
+          code: 'continuation_commit_ambiguous',
+          message: 'The commit outcome is ambiguous.',
+        },
+      },
+    }),
+  )
+  await page.goto(importsProductFixture.path)
+
+  await page
+    .getByRole('textbox', { name: 'Initial model selection UUID' })
+    .fill('00000000-0000-7000-8000-000000000777')
+  await page.getByRole('button', { name: 'Resume' }).click()
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+
+  const settingsLink = page.getByRole('link', { name: /Settings/ })
+  await expect(settingsLink).toHaveAttribute('aria-disabled', 'true')
+  await settingsLink.click({ force: true })
+  await expect(page).toHaveURL(/\/imports$/)
+  await page.keyboard.press('g')
+  await page.keyboard.press(',')
+  await expect(page).toHaveURL(/\/imports$/)
+  await expect(page.getByRole('button', { name: 'Retry exact command' })).toBeVisible()
+  const expectedResourceError =
+    'Failed to load resource: the server responded with a status of 503 (Service Unavailable)'
+  expect(problems.pageErrors).toEqual([])
+  expect(problems.consoleErrors.every((error) => error === expectedResourceError)).toBe(true)
 })
