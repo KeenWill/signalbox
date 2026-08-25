@@ -452,21 +452,29 @@ query($id: ID!, $after: String!) {
                     thread["dispositionKind"] = None
                     continue
                 if fixing_commit not in validity:
-                    comparison = self.execute_rest(
-                        f"repos/{self.owner}/{self.name}/compare/"
-                        f"{fixing_commit}...{pull_request['head_oid']}"
-                    )
-                    base_commit = comparison.get("base_commit")
-                    head_commit = comparison.get("head_commit")
-                    merge_base = comparison.get("merge_base_commit")
-                    validity[fixing_commit] = (
-                        comparison.get("status") in {"ahead", "identical"}
-                        and isinstance(base_commit, dict)
-                        and isinstance(head_commit, dict)
-                        and isinstance(merge_base, dict)
-                        and base_commit.get("sha") == merge_base.get("sha")
-                        and head_commit.get("sha") == pull_request["head_oid"]
-                    )
+                    try:
+                        comparison = self.execute_rest(
+                            f"repos/{self.owner}/{self.name}/compare/"
+                            f"{fixing_commit}...{pull_request['head_oid']}"
+                        )
+                    except GitHubNotFoundError:
+                        # A nonexistent or mistyped commit hash in a "Fixed in
+                        # commit ..." reply is an invalid disposition, not a
+                        # tick-aborting failure: mark it undispositioned like
+                        # any other unverifiable fixing commit.
+                        validity[fixing_commit] = False
+                    else:
+                        base_commit = comparison.get("base_commit")
+                        head_commit = comparison.get("head_commit")
+                        merge_base = comparison.get("merge_base_commit")
+                        validity[fixing_commit] = (
+                            comparison.get("status") in {"ahead", "identical"}
+                            and isinstance(base_commit, dict)
+                            and isinstance(head_commit, dict)
+                            and isinstance(merge_base, dict)
+                            and base_commit.get("sha") == merge_base.get("sha")
+                            and head_commit.get("sha") == pull_request["head_oid"]
+                        )
                 if not validity[fixing_commit]:
                     thread["isDispositioned"] = False
                     thread["dispositionKind"] = None
@@ -480,6 +488,7 @@ query($id: ID!, $after: String!) {
             reviews = pull_request.pop("_reviews")
             quiet_oids: list[str] = []
             observed_codex_reviews: dict[str, str] = {}
+            live_codex_review_oids: dict[str, str] = {}
             authenticated_review_ids: dict[str, str] = {}
             for review in reviews:
                 commit = review.get("commit")
@@ -512,13 +521,21 @@ query($id: ID!, $after: String!) {
                     )
                 ]
                 review_id = review.get("id")
-                if (
+                is_live_codex_review = (
                     author_login(review) is not None
                     and author_login(review).casefold()
                     == CODEX_REVIEWER_LOGIN.casefold()
                     and isinstance(review_id, str)
-                    and request_times
-                ):
+                )
+                if is_live_codex_review:
+                    # Tracks every live (non-dismissed, not stale-body) Codex
+                    # review regardless of whether a qualifying request was
+                    # found this tick, so a previously authenticated review
+                    # can be reconfirmed even when gating checks were rerun
+                    # (and so now postdate the original request) on the same,
+                    # unchanged head.
+                    live_codex_review_oids[review_id] = reviewed_oid
+                if is_live_codex_review and request_times:
                     observed_codex_reviews[review_id] = reviewed_oid
                 review_threads = [
                     thread
@@ -554,6 +571,7 @@ query($id: ID!, $after: String!) {
             pull_request["authenticated_quiet_review_oids"] = quiet_oids
             pull_request["authenticated_review_ids"] = authenticated_review_ids
             pull_request["observed_codex_reviews"] = observed_codex_reviews
+            pull_request["live_codex_review_oids"] = live_codex_review_oids
             pull_request["_codex_reviews"] = [
                 review
                 for review in reviews
@@ -571,14 +589,35 @@ query($id: ID!, $after: String!) {
             record = pull_request["_persisted_record"]
             persisted_head = record.get("authenticated_review_head")
             persisted_review_id = record.get("authenticated_review_id")
-            review_still_valid = (
-                isinstance(persisted_review_id, str)
-                and pull_request["observed_codex_reviews"].get(
-                    persisted_review_id
-                )
+            live_codex_review_oids = pull_request.pop("live_codex_review_oids", {})
+            gating_checks = [
+                check
+                for check in pull_request.get("checks", [])
+                if not is_non_gating_check(check)
+            ]
+            checks_currently_green = pull_request.get(
+                "check_rollup_state"
+            ) is not None and all(
+                check_is_green(check) for check in gating_checks
+            )
+            # A rerun of gating checks on the same, unchanged head advances
+            # those checks' completion timestamps, so the fresh recomputation
+            # in `_finalize_review_evidence` can stop finding a qualifying
+            # request for an already-authenticated review even though nothing
+            # meaningful changed. Reconfirm the persisted review directly
+            # against the live (non-dismissed) review set and the checks'
+            # current state rather than losing the evidence outright.
+            review_still_valid = isinstance(persisted_review_id, str) and (
+                record.get("authenticated_review_body") == pull_request["body"]
+            ) and (
+                pull_request["observed_codex_reviews"].get(persisted_review_id)
                 == persisted_head
-                and record.get("authenticated_review_body")
-                == pull_request["body"]
+                or (
+                    persisted_head == pull_request["head_oid"]
+                    and live_codex_review_oids.get(persisted_review_id)
+                    == persisted_head
+                    and checks_currently_green
+                )
             )
             if (
                 review_still_valid

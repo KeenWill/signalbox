@@ -579,6 +579,111 @@ class GitHubGraphQLTests(unittest.TestCase):
         self.assertEqual(pull_request["authenticated_quiet_review_oids"], [])
         self.assertEqual(pull_request["quiet_review_head_oids"], [])
 
+    def test_persisted_review_survives_same_head_check_rerun(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "_persisted_record": {
+                "authenticated_review_head": "head",
+                "authenticated_review_id": "review-a",
+                "authenticated_review_body": "description",
+            },
+            "head_oid": "head",
+            "body": "description",
+            "authenticated_quiet_review_oids": [],
+            "authenticated_review_ids": {},
+            # A rerun of gating checks advances their completedAt past the
+            # original request, so the fresh recomputation this tick no
+            # longer finds a qualifying request for review-a.
+            "observed_codex_reviews": {},
+            "live_codex_review_oids": {"review-a": "head"},
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "required build",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            ],
+            "check_rollup_state": "SUCCESS",
+            "quiet_review_head_oids": [],
+        }
+
+        client._restore_persisted_review_evidence([pull_request])
+
+        self.assertEqual(
+            pull_request["authenticated_quiet_review_oids"], ["head"]
+        )
+        self.assertEqual(pull_request["quiet_review_head_oids"], ["head"])
+        self.assertEqual(
+            pull_request["authenticated_review_ids"]["head"], "review-a"
+        )
+
+    def test_persisted_review_not_restored_when_no_longer_live(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "_persisted_record": {
+                "authenticated_review_head": "head",
+                "authenticated_review_id": "review-a",
+                "authenticated_review_body": "description",
+            },
+            "head_oid": "head",
+            "body": "description",
+            "authenticated_quiet_review_oids": [],
+            "authenticated_review_ids": {},
+            "observed_codex_reviews": {},
+            # review-a is no longer a live Codex review (e.g. dismissed),
+            # so a check rerun on the same head must not resurrect it.
+            "live_codex_review_oids": {},
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "required build",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                }
+            ],
+            "check_rollup_state": "SUCCESS",
+            "quiet_review_head_oids": [],
+        }
+
+        client._restore_persisted_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["authenticated_quiet_review_oids"], [])
+        self.assertEqual(pull_request["quiet_review_head_oids"], [])
+
+    def test_persisted_review_not_restored_when_rerun_checks_still_failing(
+        self,
+    ) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "_persisted_record": {
+                "authenticated_review_head": "head",
+                "authenticated_review_id": "review-a",
+                "authenticated_review_body": "description",
+            },
+            "head_oid": "head",
+            "body": "description",
+            "authenticated_quiet_review_oids": [],
+            "authenticated_review_ids": {},
+            "observed_codex_reviews": {},
+            "live_codex_review_oids": {"review-a": "head"},
+            "checks": [
+                {
+                    "__typename": "CheckRun",
+                    "name": "required build",
+                    "status": "COMPLETED",
+                    "conclusion": "FAILURE",
+                }
+            ],
+            "check_rollup_state": "FAILURE",
+            "quiet_review_head_oids": [],
+        }
+
+        client._restore_persisted_review_evidence([pull_request])
+
+        self.assertEqual(pull_request["authenticated_quiet_review_oids"], [])
+        self.assertEqual(pull_request["quiet_review_head_oids"], [])
+
     def test_material_base_forward_resets_escalation_wave_count(self) -> None:
         client = GitHubGraphQL("OWNER/REPOSITORY", 12)
         reviews = [
@@ -715,6 +820,70 @@ class GitHubGraphQLTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "unavailable"):
                 client._validate_fixing_commits([pull_request])
+
+    def test_missing_fixing_commit_is_invalid_disposition_not_snapshot_abort(
+        self,
+    ) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "head_oid": "head",
+            "review_threads": [
+                {
+                    "dispositionKind": "fixed",
+                    "fixingCommit": "nonexistentcommit",
+                    "isDispositioned": True,
+                }
+            ],
+        }
+        with mock.patch.object(
+            client,
+            "execute_rest",
+            side_effect=GitHubNotFoundError("gh REST request failed: not found"),
+        ):
+            client._validate_fixing_commits([pull_request])
+
+        thread = pull_request["review_threads"][0]
+        self.assertFalse(thread["isDispositioned"])
+        self.assertIsNone(thread["dispositionKind"])
+        self.assertIsNone(thread["fixingCommit"])
+
+    def test_one_missing_fixing_commit_does_not_abort_other_threads(self) -> None:
+        client = GitHubGraphQL("OWNER/REPOSITORY", 12)
+        pull_request = {
+            "head_oid": "head",
+            "review_threads": [
+                {
+                    "dispositionKind": "fixed",
+                    "fixingCommit": "nonexistentcommit",
+                    "isDispositioned": True,
+                },
+                {
+                    "dispositionKind": "fixed",
+                    "fixingCommit": "realcommit",
+                    "isDispositioned": True,
+                },
+            ],
+        }
+
+        def fake_execute_rest(path: str):
+            if "nonexistentcommit" in path:
+                raise GitHubNotFoundError("gh REST request failed: not found")
+            return {
+                "status": "ahead",
+                "base_commit": {"sha": "merge-base"},
+                "head_commit": {"sha": "head"},
+                "merge_base_commit": {"sha": "merge-base"},
+            }
+
+        with mock.patch.object(
+            client, "execute_rest", side_effect=fake_execute_rest
+        ):
+            client._validate_fixing_commits([pull_request])
+
+        invalid_thread, valid_thread = pull_request["review_threads"]
+        self.assertFalse(invalid_thread["isDispositioned"])
+        self.assertTrue(valid_thread["isDispositioned"])
+        self.assertEqual(valid_thread["dispositionKind"], "fixed")
 
     def test_non_python_c_header_is_not_comment_only(self) -> None:
         changed_file = {
