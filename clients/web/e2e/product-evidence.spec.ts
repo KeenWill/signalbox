@@ -1,29 +1,11 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 
 interface RouteEvidence {
   path: string
   title: string
   snapshot: string
 }
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '2' },
-  capabilities: {
-    bounded_json: true,
-    bounded_session_timeline: true,
-    blob_derivations: true,
-    image_derivatives: true,
-    immutable_blob_content: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: {
-    max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 65_536,
-    max_timeline_window_items: 256,
-    max_timeline_window_bytes: 65_536,
-  },
-} as const
 
 const sessionEvidenceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
@@ -96,7 +78,7 @@ const useDeterministicSession = (page: Page) =>
         sizes: {
           item_count: sessionEvidenceFixture.itemCount,
           projected_text_bytes: '48000000',
-          projected_structured_bytes: '96000000',
+          projected_structured_bytes: '78000000',
           referenced_blob_count: '24000',
           referenced_blob_bytes: '96000000000',
         },

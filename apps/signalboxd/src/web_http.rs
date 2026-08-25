@@ -24,8 +24,8 @@ use axum::{
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{
-            ACCEPT_RANGES, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
-            CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH, IF_RANGE, ORIGIN, RANGE,
+            ACCEPT_RANGES, ALLOW, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH,
+            CONTENT_RANGE, CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH, IF_RANGE, ORIGIN, RANGE,
             X_CONTENT_TYPE_OPTIONS,
         },
     },
@@ -37,7 +37,7 @@ use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
     SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress,
-    TimelineWindowAnchor, TimelineWindowLimits,
+    TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits,
 };
 use signalbox_blob_store::MAX_BLOB_RANGE_BYTES;
 use signalbox_domain::{BlobDerivation, BlobDerivationProducer, BlobDigest, SessionId};
@@ -47,9 +47,10 @@ use signalbox_persistence::session_timeline::{
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
     WebBlobAvailableView, WebBlobDerivation, WebBlobDerivationProducer, WebBlobDescriptor,
-    WebBlobViewKind, WebContractBootstrap, WebContractExample, WebSessionTimelineDescriptor,
-    WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebBlobViewKind, WebContractBootstrap, WebContractExample, WebSessionId,
+    WebSessionTimelineDescriptor, WebSessionTimelineEventKind, WebSessionTimelineItem,
+    WebSessionTimelineSizeFacts, WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebTimelineEventSequence, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{
@@ -62,9 +63,10 @@ use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 
 use crate::{
-    WebBlobRuntime, WebImageDerivativeKind,
+    HubModelConfiguration, WebBlobRuntime, WebImageDerivativeKind,
     blob_read_runtime::{open_recorded_blob_range, open_recorded_blob_verified},
     web_blob_runtime::WebBlobRuntimeError,
+    web_imports,
 };
 
 /// Optional deployment override for the browser listener.
@@ -76,6 +78,7 @@ pub const DEFAULT_WEB_BIND_ADDRESS: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 37_231);
 
 const JSON_CONTENT_TYPE: &str = "application/json";
+const TEXT_CONTENT_TYPE: &str = "text/plain";
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
 const HTTP_DEFAULT_PORT: u16 = 80;
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
@@ -88,7 +91,6 @@ const BLOB_RESPONSE_TIMEOUT_SECONDS: u64 = 120;
 struct WebHttpState {
     blobs: Option<WebBlobRuntime>,
     blob_read_budget: Arc<Semaphore>,
-    timeline: Option<SessionTimelineRepository>,
 }
 
 /// Deployment-owned browser listener and production assets configuration.
@@ -119,9 +121,7 @@ impl WebHttpConfiguration {
                 .parse()
                 .map_err(|_| WebHttpConfigurationError::InvalidBindAddress)?,
         };
-        if !bind_address.ip().is_loopback() {
-            return Err(WebHttpConfigurationError::NonLoopbackBindAddress);
-        }
+        validate_loopback_bind_address(bind_address)?;
         let asset_root = match asset_root {
             None => None,
             Some(value) if value.is_empty() => {
@@ -135,14 +135,12 @@ impl WebHttpConfiguration {
         })
     }
 
-    /// Creates explicit loopback configuration for an embedded production server.
+    /// Creates explicit loopback-only configuration for a deterministic or embedded server.
     pub fn new(
         bind_address: SocketAddr,
         asset_root: Option<PathBuf>,
     ) -> Result<Self, WebHttpConfigurationError> {
-        if !bind_address.ip().is_loopback() {
-            return Err(WebHttpConfigurationError::NonLoopbackBindAddress);
-        }
+        validate_loopback_bind_address(bind_address)?;
         Ok(Self {
             bind_address,
             asset_root,
@@ -159,6 +157,16 @@ impl WebHttpConfiguration {
     #[must_use]
     pub fn asset_root(&self) -> Option<&PathBuf> {
         self.asset_root.as_ref()
+    }
+}
+
+fn validate_loopback_bind_address(
+    bind_address: SocketAddr,
+) -> Result<(), WebHttpConfigurationError> {
+    if bind_address.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(WebHttpConfigurationError::NonLoopbackBindAddress)
     }
 }
 
@@ -233,10 +241,16 @@ impl WebHttpRuntime {
     /// Binds the production same-origin router.
     pub async fn bind(
         configuration: WebHttpConfiguration,
+        pool: PgPool,
         blobs: Option<WebBlobRuntime>,
-        pool: Option<PgPool>,
+        model_configuration: HubModelConfiguration,
     ) -> Result<Self, WebHttpRuntimeError> {
-        let router = production_router(configuration.asset_root, blobs, pool);
+        let router = production_router(
+            configuration.asset_root,
+            Some(pool),
+            blobs,
+            Some(model_configuration),
+        );
         Self::bind_router(configuration.bind_address, router).await
     }
 
@@ -280,11 +294,33 @@ impl WebHttpRuntime {
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
 pub fn production_router(
     asset_root: Option<PathBuf>,
-    blobs: Option<WebBlobRuntime>,
     pool: Option<PgPool>,
+    blobs: Option<WebBlobRuntime>,
+    model_configuration: Option<HubModelConfiguration>,
 ) -> Router {
-    let api = Router::new()
-        .route("/bootstrap", get(contract_bootstrap))
+    let http_state = WebHttpState {
+        blobs,
+        blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
+    };
+    let session_reads = Router::new()
+        .route("/sessions/{session_id}", get(session_descriptor))
+        .route(
+            "/sessions/{session_id}/timeline",
+            get(session_timeline_window),
+        )
+        .route_layer(middleware::from_fn(validate_loopback_host))
+        .with_state(WebApiState {
+            timeline: pool.clone().map(SessionTimelineRepository::new),
+        });
+    // Every route that reads session-attached content sits behind the
+    // loopback authority gate. Blob descriptors and bytes are reachable by
+    // digest alone and a descriptor read can start isolated derivation work,
+    // so they belong here for the same reason the session reads do: the
+    // listener is unauthenticated, and a rebound origin must not reach blob
+    // content or trigger derivations with an attacker's authority.
+    // `/bootstrap` stays outside the gate because it carries only the static
+    // contract description and no session or blob data.
+    let blob_reads = Router::new()
         .route(
             "/blobs/{digest}/descriptor",
             get(blob_descriptor).head(blob_descriptor_head),
@@ -297,26 +333,41 @@ pub fn production_router(
             "/blobs/{digest}/download",
             get(blob_download).head(blob_download),
         )
-        .route("/sessions/{session_id}", get(session_descriptor))
-        .route(
-            "/sessions/{session_id}/timeline",
-            get(session_timeline_window),
-        )
-        .fallback(api_not_found)
-        .with_state(WebHttpState {
-            blobs,
-            blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
-            timeline: pool.map(SessionTimelineRepository::new),
-        });
+        .route_layer(middleware::from_fn(validate_loopback_host))
+        .with_state(http_state.clone());
+    let api = Router::new()
+        .route("/bootstrap", get(contract_bootstrap))
+        .with_state(http_state)
+        .merge(session_reads)
+        .merge(blob_reads);
+    // Imported-conversation reads need both a pool and hub model settings; the
+    // bootstrap and session surfaces stay routable without either.
+    let api = match (pool, model_configuration) {
+        (Some(pool), Some(model_configuration)) => {
+            api.nest("/imports", web_imports::router(pool, model_configuration))
+        }
+        _ => api,
+    };
+    let api = api.fallback(api_not_found);
+    same_origin_router(asset_root, api)
+}
+
+fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
     let router = Router::new().nest("/api", api);
-    match asset_root {
+    let router = match asset_root {
         Some(root) => router.fallback_service(
             ServeDir::new(root.clone())
                 .append_index_html_on_directories(true)
                 .fallback(ServeFile::new(root.join("index.html"))),
         ),
         None => router.fallback(static_assets_not_configured),
-    }
+    };
+    router.layer(middleware::from_fn(validate_loopback_host))
+}
+
+#[derive(Clone, Debug)]
+struct WebApiState {
+    timeline: Option<SessionTimelineRepository>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -370,7 +421,7 @@ impl SessionTimelineRequestError {
 }
 
 async fn session_descriptor(
-    State(state): State<WebHttpState>,
+    State(state): State<WebApiState>,
     Path(session_id): Path<String>,
 ) -> Response {
     let Some(repository) = state.timeline else {
@@ -399,7 +450,7 @@ async fn session_descriptor(
 }
 
 async fn session_timeline_window(
-    State(state): State<WebHttpState>,
+    State(state): State<WebApiState>,
     Path(session_id): Path<String>,
     query: Result<Query<TimelineWindowQuery>, QueryRejection>,
 ) -> Response {
@@ -506,7 +557,7 @@ fn parse_window_anchor(
 
 fn address_dto(address: TimelineAddress) -> WebTimelineAddress {
     WebTimelineAddress {
-        event_sequence: address.sequence().get().to_string(),
+        event_sequence: WebTimelineEventSequence::from_nonzero(address.sequence()),
     }
 }
 
@@ -520,35 +571,37 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
-        session_id: descriptor.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_uuid_bytes(*descriptor.session.into_uuid().as_bytes()),
         sizes: WebSessionTimelineSizeFacts {
-            item_count: descriptor.sizes.item_count.to_string(),
-            projected_text_bytes: descriptor.sizes.projected_text_bytes.to_string(),
-            projected_structured_bytes: descriptor.sizes.projected_structured_bytes.to_string(),
-            referenced_blob_count: descriptor.sizes.referenced_blob_count.to_string(),
-            referenced_blob_bytes: descriptor.sizes.referenced_blob_bytes.to_string(),
+            item_count: WebU64::from_u64(descriptor.sizes.item_count),
+            projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
+            projected_structured_bytes: WebU64::from_u64(
+                descriptor.sizes.projected_structured_bytes,
+            ),
+            referenced_blob_count: WebU64::from_u64(descriptor.sizes.referenced_blob_count),
+            referenced_blob_bytes: WebU64::from_u64(descriptor.sizes.referenced_blob_bytes),
         },
         first_address: address_dto(first_address),
         latest_address: address_dto(latest_address),
         work: WebSessionWorkFacts {
-            active_turn_count: descriptor.work.active_turn_count.to_string(),
-            queued_turn_count: descriptor.work.queued_turn_count.to_string(),
+            active_turn_count: WebU64::from_u64(descriptor.work.active_turn_count),
+            queued_turn_count: WebU64::from_u64(descriptor.work.queued_turn_count),
         },
-        observed_through: descriptor.observed_through.to_string(),
+        observed_through: WebU64::from_u64(descriptor.observed_through),
     })
 }
 
 fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
-    let continuation_before = window
-        .has_more_before
-        .then(|| window.items.first().map(|item| address_dto(item.address)))
-        .flatten();
-    let continuation_after = window
-        .has_more_after
-        .then(|| window.items.last().map(|item| address_dto(item.address)))
-        .flatten();
+    let continuation_before = match window.continuation_before {
+        TimelineContinuation::Exhausted => None,
+        TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
+    };
+    let continuation_after = match window.continuation_after {
+        TimelineContinuation::Exhausted => None,
+        TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
+    };
     WebSessionTimelineWindow {
-        session_id: window.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_uuid_bytes(*window.session.into_uuid().as_bytes()),
         items: window
             .items
             .into_iter()
@@ -630,12 +683,13 @@ async fn contract_bootstrap(State(state): State<WebHttpState>) -> Json<WebContra
     Json(WebContractBootstrap::for_runtime(
         state.blobs.is_some(),
         image_derivatives,
-        state.timeline.is_some(),
     ))
 }
 
 async fn deterministic_contract_bootstrap() -> Json<WebContractBootstrap> {
-    Json(WebContractBootstrap::current())
+    let mut bootstrap = WebContractBootstrap::current();
+    bootstrap.capabilities.bounded_session_timeline = false;
+    Json(bootstrap)
 }
 
 #[derive(Debug, Deserialize)]
@@ -735,11 +789,13 @@ async fn blob_descriptor(
 }
 
 async fn blob_descriptor_head() -> Response {
-    transport_error(
+    let mut response = transport_error(
         StatusCode::METHOD_NOT_ALLOWED,
         "descriptor_method_not_allowed",
         "blob descriptors are available through GET",
-    )
+    );
+    insert_header(response.headers_mut(), ALLOW, String::from("GET"));
+    response
 }
 
 async fn append_image_derivative_view(
@@ -944,8 +1000,8 @@ async fn serve_blob(
         return not_modified_response(&etag);
     }
     let total = entry.expected().byte_length();
-    let requested_range = match single_range_header(request.headers()) {
-        Ok(range) => range.filter(|_| if_range_matches(request.headers(), &etag)),
+    let requested_range = match applicable_range_header(request.headers(), &etag) {
+        Ok(range) => range,
         Err(()) => return range_not_satisfiable(total, &etag),
     };
     let (offset, length, partial) = match requested_range {
@@ -966,24 +1022,27 @@ async fn serve_blob(
         }
     };
     let method = request.method().clone();
+    // A head response owes the same status as the equivalent `GET`, so read
+    // admission covers both methods. The head response then releases its permit
+    // at once, because it never opens a replica or streams blob bytes.
+    let Some(streamed_length) = NonZeroU64::new(length) else {
+        return range_not_satisfiable(total, &etag);
+    };
+    let Some(permit) = try_acquire_web_blob_read_permit(Arc::clone(&state.blob_read_budget)) else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "blob_read_busy",
+            "blob read capacity is busy",
+        );
+    };
     let body = if method == Method::HEAD {
+        drop(permit);
         Body::empty()
     } else {
-        let Some(length) = NonZeroU64::new(length) else {
-            return range_not_satisfiable(total, &etag);
-        };
-        let Some(permit) = try_acquire_web_blob_read_permit(Arc::clone(&state.blob_read_budget))
-        else {
-            return application_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "blob_read_busy",
-                "blob read capacity is busy",
-            );
-        };
         let deadline = Instant::now() + Duration::from_secs(BLOB_RESPONSE_TIMEOUT_SECONDS);
         let opened = timeout_at(deadline, async {
-            if length.get() <= MAX_BLOB_RANGE_BYTES {
-                open_recorded_blob_range(runtime.registry(), &entry, offset, length).await
+            if streamed_length.get() <= MAX_BLOB_RANGE_BYTES {
+                open_recorded_blob_range(runtime.registry(), &entry, offset, streamed_length).await
             } else {
                 let mut reader = open_recorded_blob_verified(runtime.registry(), &entry).await?;
                 let skipped =
@@ -1006,7 +1065,7 @@ async fn serve_blob(
                 );
             }
         };
-        reader_body_until(reader, length.get(), permit, deadline)
+        reader_body_until(reader, streamed_length.get(), permit, deadline)
     };
     let mut response = Response::new(body);
     *response.status_mut() = if partial {
@@ -1108,6 +1167,23 @@ fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
         return Err(());
     }
     value.parse().map_err(|_| ())
+}
+
+/// Reports the `Range` field a blob response applies, once `If-Range` has decided.
+///
+/// A failed `If-Range` condition makes the whole `Range` field inapplicable, so
+/// the condition is evaluated before the field is validated. A field this
+/// endpoint would otherwise reject — repeated occurrences included — is then
+/// ignored and the full representation is served, rather than answered with
+/// `416`; `Err` is reserved for a rejectable field the condition admitted.
+fn applicable_range_header<'headers>(
+    headers: &'headers HeaderMap,
+    etag: &str,
+) -> Result<Option<&'headers HeaderValue>, ()> {
+    if !if_range_matches(headers, etag) {
+        return Ok(None);
+    }
+    single_range_header(headers)
 }
 
 fn single_range_header(headers: &HeaderMap) -> Result<Option<&HeaderValue>, ()> {
@@ -1370,6 +1446,37 @@ where
     })
 }
 
+/// Decodes one UTF-8 request body after enforcing a caller-owned byte ceiling.
+pub(crate) async fn decode_bounded_utf8(
+    request: Request,
+    maximum_bytes: usize,
+) -> Result<String, Response> {
+    let bytes = to_bytes(request.into_body(), maximum_bytes)
+        .await
+        .map_err(|error| {
+            if error_chain_contains_length_limit(&error) {
+                transport_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "text_body_too_large",
+                    "text request body exceeds the configured import limit",
+                )
+            } else {
+                transport_error(
+                    StatusCode::BAD_REQUEST,
+                    "text_body_read_failed",
+                    "text request body could not be read",
+                )
+            }
+        })?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| {
+        transport_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_utf8",
+            "request body is not valid UTF-8",
+        )
+    })
+}
+
 fn error_chain_contains_length_limit(error: &axum::Error) -> bool {
     let mut current: Option<&(dyn Error + 'static)> = Some(error);
     while let Some(error) = current {
@@ -1450,7 +1557,7 @@ impl io::Write for NdjsonItemWriter {
     }
 }
 
-async fn validate_json_mutation(request: Request, next: Next) -> Response {
+pub(crate) async fn validate_json_mutation(request: Request, next: Next) -> Response {
     if request.method() != Method::POST {
         return transport_error(
             StatusCode::METHOD_NOT_ALLOWED,
@@ -1475,12 +1582,77 @@ async fn validate_json_mutation(request: Request, next: Next) -> Response {
     next.run(request).await
 }
 
+pub(crate) async fn validate_text_mutation(request: Request, next: Next) -> Response {
+    if request.method() != Method::POST {
+        return transport_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "mutation_method_not_allowed",
+            "browser mutations use POST",
+        );
+    }
+    if !has_content_type(request.headers(), TEXT_CONTENT_TYPE) {
+        return transport_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "text_content_type_required",
+            "exact import searches require text/plain",
+        );
+    }
+    if validate_supplied_origin(request.headers()).is_err() {
+        return transport_error(
+            StatusCode::FORBIDDEN,
+            "cross_origin_mutation_rejected",
+            "mutation origin does not match request authority",
+        );
+    }
+    next.run(request).await
+}
+
+async fn validate_loopback_host(request: Request, next: Next) -> Response {
+    if !has_loopback_host(request.headers(), request.uri()) {
+        return transport_error(
+            StatusCode::FORBIDDEN,
+            "non_loopback_host_rejected",
+            "browser requests require a loopback request authority",
+        );
+    }
+    next.run(request).await
+}
+
+fn has_loopback_host(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
+    headers
+        .get(HOST)
+        .and_then(|host| host.to_str().ok())
+        .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
+        .or_else(|| uri.authority().cloned())
+        .is_some_and(|authority| is_loopback_authority(&authority))
+}
+
+fn is_loopback_authority(authority: &axum::http::uri::Authority) -> bool {
+    let host = normalized_authority_host(authority);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn normalized_authority_host(authority: &axum::http::uri::Authority) -> &str {
+    normalized_host(authority.host())
+}
+
+fn normalized_host(host: &str) -> &str {
+    host.trim_start_matches('[').trim_end_matches(']')
+}
+
 fn has_json_content_type(headers: &HeaderMap) -> bool {
+    has_content_type(headers, JSON_CONTENT_TYPE)
+}
+
+fn has_content_type(headers: &HeaderMap, expected: &str) -> bool {
     headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(JSON_CONTENT_TYPE))
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1506,10 +1678,9 @@ fn validate_supplied_origin(headers: &HeaderMap) -> Result<(), OriginValidationE
         .and_then(|host| host.parse::<axum::http::uri::Authority>().ok());
     let matching = origin.zip(authority).is_some_and(|(origin, authority)| {
         let authority_port = authority.port_u16().unwrap_or(HTTP_DEFAULT_PORT);
-        origin
-            .host_str()
-            .is_some_and(|host| host.eq_ignore_ascii_case(authority.host()))
-            && origin.port_or_known_default() == Some(authority_port)
+        origin.host_str().is_some_and(|host| {
+            normalized_host(host).eq_ignore_ascii_case(normalized_authority_host(&authority))
+        }) && origin.port_or_known_default() == Some(authority_port)
     });
     if matching {
         Ok(())
@@ -1518,11 +1689,19 @@ fn validate_supplied_origin(headers: &HeaderMap) -> Result<(), OriginValidationE
     }
 }
 
-fn transport_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+pub(crate) fn transport_error(
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+) -> Response {
     api_error(status, WebApiErrorKind::Transport, code, message)
 }
 
-fn application_error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
+pub(crate) fn application_error(
+    status: StatusCode,
+    code: &'static str,
+    message: &'static str,
+) -> Response {
     api_error(status, WebApiErrorKind::Application, code, message)
 }
 
@@ -1579,10 +1758,28 @@ mod tests {
 
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, WebHttpConfiguration,
-        WebHttpConfigurationError, WebHttpRuntime, content_disposition, deterministic_test_router,
-        if_none_match, ndjson_response, parse_byte_range, production_router, reader_body_until,
-        single_range_header, try_acquire_web_blob_read_permit,
+        WebHttpConfigurationError, WebHttpRuntime, blob_descriptor_head, content_disposition,
+        deterministic_test_router, if_none_match, ndjson_response, parse_byte_range,
+        production_router, reader_body_until, single_range_header,
+        try_acquire_web_blob_read_permit,
     };
+
+    /// A descriptor method rejection must name the method clients can use.
+    #[tokio::test]
+    async fn descriptor_method_rejection_advertises_get() {
+        let response = blob_descriptor_head().await;
+        let status = response.status();
+        let allow = response
+            .headers()
+            .get(header::ALLOW)
+            .expect("the rejection advertises an allowed method")
+            .to_str()
+            .expect("the allowed method is ASCII")
+            .to_owned();
+
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(allow, "GET");
+    }
 
     fn loopback_ephemeral() -> SocketAddr {
         "127.0.0.1:0"
@@ -1694,6 +1891,69 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_if_range_condition_ignores_repeated_range_fields() {
+        // Repeated `Range` fields are rejectable on their own, but a failed
+        // `If-Range` makes the field inapplicable before that rejection can
+        // apply, so the response owes the full representation rather than
+        // `416`.
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"other\""),
+        );
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=2-3"));
+
+        assert_eq!(
+            super::applicable_range_header(&headers, "\"matching\""),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_matching_if_range_condition_still_rejects_repeated_range_fields() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"matching\""),
+        );
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=2-3"));
+
+        assert_eq!(
+            super::applicable_range_header(&headers, "\"matching\""),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn an_absent_if_range_condition_still_rejects_repeated_range_fields() {
+        let mut headers = header::HeaderMap::new();
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=2-3"));
+
+        assert_eq!(
+            super::applicable_range_header(&headers, "\"matching\""),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn a_matching_if_range_condition_applies_its_single_range_field() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"matching\""),
+        );
+        headers.insert(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+
+        assert_eq!(
+            super::applicable_range_header(&headers, "\"matching\""),
+            Ok(Some(&header::HeaderValue::from_static("bytes=0-1")))
+        );
+    }
+
+    #[test]
     fn web_blob_read_budget_rejects_without_waiting_and_recovers_on_drop() {
         let budget = Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS));
         let held = Arc::clone(&budget)
@@ -1785,20 +2045,24 @@ mod tests {
     }
 
     #[test]
-    fn non_loopback_bind_is_rejected_without_authentication() {
+    fn non_loopback_bind_fails_closed() {
         let error = WebHttpConfiguration::from_values(Some(OsString::from("0.0.0.0:8080")), None)
-            .expect_err("unauthenticated browser routes remain loopback-only");
+            .expect_err("the unauthenticated browser surface remains loopback-only");
 
         assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindAddress);
+        assert_eq!(
+            error.to_string(),
+            "setting SIGNALBOX_WEB_BIND must use a loopback address"
+        );
     }
 
     #[test]
-    fn explicit_non_loopback_configuration_is_rejected() {
-        let bind_address = "0.0.0.0:8080"
+    fn explicit_constructor_rejects_non_loopback_bind() {
+        let bind_address: SocketAddr = "0.0.0.0:8080"
             .parse()
             .expect("the fixture address is valid");
         let error = WebHttpConfiguration::new(bind_address, None)
-            .expect_err("every production configuration remains loopback-only");
+            .expect_err("every production configuration path remains loopback-only");
 
         assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindAddress);
     }
@@ -1822,11 +2086,9 @@ mod tests {
         let assets = tempfile::tempdir().expect("the static asset directory exists");
         std::fs::write(assets.path().join("index.html"), STATIC_INDEX)
             .expect("the static index exists");
-        let runtime = WebHttpRuntime::bind(
-            WebHttpConfiguration::new(loopback_ephemeral(), Some(assets.path().to_path_buf()))
-                .expect("the loopback browser configuration is valid"),
-            None,
-            None,
+        let runtime = WebHttpRuntime::bind_router(
+            loopback_ephemeral(),
+            production_router(Some(assets.path().to_path_buf()), None, None, None),
         )
         .await
         .expect("the production test server binds");
@@ -1863,19 +2125,17 @@ mod tests {
                 .expect("fixture URL is valid")
                 .origin()
         );
-        assert_eq!(
-            decoded,
-            WebContractBootstrap::for_runtime(false, false, false)
-        );
+        assert_eq!(decoded, WebContractBootstrap::for_runtime(false, false));
         assert_eq!(runtime_outcome, Ok(()));
     }
 
     #[tokio::test]
     async fn malformed_blob_query_is_a_structured_transport_error() {
         let request = Request::get("/api/blobs/not-a-digest/descriptor")
+            .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None)
+        let response = production_router(None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -1893,9 +2153,10 @@ mod tests {
         let request = Request::head(
             "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/descriptor",
         )
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None)
+        let response = production_router(None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -1908,6 +2169,28 @@ mod tests {
         let request = Request::post("/api/test/mutate")
             .header(header::HOST, "signalbox.test")
             .header(header::ORIGIN, "http://signalbox.test")
+            .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .body(Body::from(
+                serde_json::to_vec(&example()).expect("the fixture serializes"),
+            ))
+            .expect("the request is valid");
+        let response = deterministic_test_router()
+            .oneshot(request)
+            .await
+            .expect("the deterministic router responds");
+        let status = response.status();
+        let decoded: WebContractExample = serde_json::from_slice(&response_body(response).await)
+            .expect("the response is the example DTO");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(decoded, example());
+    }
+
+    #[tokio::test]
+    async fn mutation_with_matching_ipv6_origin_round_trips_bounded_json() {
+        let request = Request::post("/api/test/mutate")
+            .header(header::HOST, "[::1]:37231")
+            .header(header::ORIGIN, "http://[::1]:37231")
             .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
             .body(Body::from(
                 serde_json::to_vec(&example()).expect("the fixture serializes"),
@@ -2080,9 +2363,10 @@ mod tests {
         std::fs::write(assets.path().join("index.html"), "static fallback")
             .expect("the static index exists");
         let request = Request::get("/api/not-a-route")
+            .header(header::HOST, "127.0.0.1")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(Some(assets.path().to_path_buf()), None, None)
+        let response = production_router(Some(assets.path().to_path_buf()), None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2095,13 +2379,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_router_rejects_non_loopback_hostnames() {
+        let request = Request::get("/api/bootstrap")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value =
+            serde_json::from_slice(&response_body(response).await).expect("the rejection is JSON");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    #[test]
+    fn loopback_host_accepts_localhost_and_uri_authority() {
+        let localhost = Request::get("/api/bootstrap")
+            .header(header::HOST, "localhost:37231")
+            .body(Body::empty())
+            .expect("the localhost request is valid");
+        let authority = Request::get("http://127.0.0.1:37231/api/bootstrap")
+            .body(Body::empty())
+            .expect("the authority request is valid");
+
+        assert!(super::has_loopback_host(
+            localhost.headers(),
+            localhost.uri()
+        ));
+        assert!(super::has_loopback_host(
+            authority.headers(),
+            authority.uri()
+        ));
+    }
+
+    #[tokio::test]
     async fn malformed_timeline_query_uses_the_structured_error_envelope() {
         let request = Request::get(
             "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?max_items=nope",
         )
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None)
+        let response = production_router(None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2119,9 +2442,10 @@ mod tests {
         let request = Request::get(
             "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?anchor=first&max_items=1",
         )
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None)
+        let response = production_router(None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2131,6 +2455,158 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(body["error"]["code"], "invalid_timeline_limits");
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_non_loopback_host_authorities() {
+        let request = Request::get("/api/sessions/00000000-0000-0000-0000-000000000991")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["kind"], "transport");
+        assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    /// Drives a session read at the loopback gate and reports only the status.
+    ///
+    /// The query is deliberately malformed, which separates the gate from
+    /// everything behind it: `FORBIDDEN` means the gate rejected the
+    /// authority, while `BAD_REQUEST` comes from the handler and is therefore
+    /// reachable only once the gate has admitted the request.
+    async fn session_read_status_for_host(host: &str) -> StatusCode {
+        let request = Request::get(
+            "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?max_items=nope",
+        )
+        .header(header::HOST, host)
+        .body(Body::empty())
+        .expect("the request is valid");
+        production_router(None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn session_reads_admit_loopback_authorities_including_ip_literals() {
+        // `127.0.0.1` is the daemon's own DEFAULT_WEB_BIND_ADDRESS, so a
+        // regression that tightened this branch would 403 the default
+        // deployment. `[::1]` exercises the bracket strip that precedes the
+        // parse, and `127.5.6.7` covers the whole 127.0.0.0/8 loopback range
+        // rather than only the canonical address.
+        for host in [
+            "localhost",
+            "localhost:37231",
+            "LocalHost",
+            "127.0.0.1",
+            "127.0.0.1:37231",
+            "127.5.6.7",
+            "[::1]",
+            "[::1]:37231",
+        ] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::BAD_REQUEST,
+                "`{host}` is a loopback authority and must reach the handler",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_non_loopback_ip_literal_authorities() {
+        // Every authority here parses as an address, so `is_loopback` — not
+        // the `parse::<IpAddr>()` that already turns hostnames away — is what
+        // has to reject them. A regression that loosened the branch to accept
+        // any parseable address would expose session history to any host that
+        // can reach the port.
+        for host in [
+            "10.0.0.5",
+            "10.0.0.5:37231",
+            "192.168.1.20",
+            "[2001:db8::1]",
+            "[2001:db8::1]:37231",
+        ] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "`{host}` parses as a non-loopback address and must be rejected",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_authorities_that_are_neither_localhost_nor_literals() {
+        for host in ["attacker.example", "localhost.attacker.example"] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "`{host}` is neither localhost nor a loopback literal",
+            );
+        }
+    }
+
+    const BLOB_READ_PATHS: [&str; 3] = [
+        "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/descriptor?media_type=image/png",
+        "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/content/image-png",
+        "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/download?media_type=image/png",
+    ];
+
+    /// Drives a blob read at the loopback gate and reports only the status.
+    ///
+    /// Each path is otherwise valid — a well-formed digest, and a
+    /// `media_type` query where the route requires one — so a `FORBIDDEN`
+    /// can only come from the gate, never from the handler behind it.
+    async fn blob_read_status_for_host(path: &str, host: &str) -> StatusCode {
+        let request = Request::get(path)
+            .header(header::HOST, host)
+            .body(Body::empty())
+            .expect("the request is valid");
+        production_router(None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn blob_reads_reject_non_loopback_host_authorities() {
+        // Mirrors `session_reads_reject_non_loopback_host_authorities`: the
+        // descriptor, content, and download routes were registered outside
+        // the guarded router and had to be moved into it too, since a
+        // rebound origin that knows a digest could otherwise read blob
+        // bytes, or start image derivation work, with an attacker's
+        // authority.
+        for path in BLOB_READ_PATHS {
+            assert_eq!(
+                blob_read_status_for_host(path, "attacker.example").await,
+                StatusCode::FORBIDDEN,
+                "`{path}` must reject a non-loopback authority",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn blob_reads_admit_loopback_host_authorities() {
+        // A regression that moved the guard without preserving admission
+        // would 403 legitimate same-origin blob reads; each path here must
+        // reach its handler and fail only because no blob runtime is
+        // configured in this fixture.
+        for path in BLOB_READ_PATHS {
+            assert_eq!(
+                blob_read_status_for_host(path, "localhost").await,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "`{path}` is a loopback authority and must reach the handler",
+            );
+        }
     }
 
     #[test]

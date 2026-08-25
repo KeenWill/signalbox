@@ -9,16 +9,30 @@ export interface CommandContext {
   artifactPreviewIds: readonly string[]
   artifactOriginalIds: readonly string[]
   artifactSelectionTarget?: string
+  paneSize?: number
+  sessionId?: string
+  timelineWindowAvailable?: boolean
   focusTimeline: () => void
-  openFirstTimelineWindow?: () => void
-  openLatestTimelineWindow?: () => void
-  onTimelineSelected?: (eventSequence: string) => void
+  importEntryIds?: readonly string[]
+  selectedImportEntry?: string | null
+  requestedImportEntry?: string
+  selectImportEntry?: (id: string) => void
+  canSelectImportEntry?: boolean
+  canContinueImport?: boolean
+  continueImport?: (relationship: 'resume' | 'fork') => void
+  canRetryImport?: boolean
+  retryImport?: () => void
+  canAbandonImport?: boolean
+  abandonImport?: () => void
+  loadTimelineWindow?: (anchor: 'first' | 'latest') => void
   navigate?: (path: string) => void
-  navigateScenario?: () => void
+  openSession?: (sessionId: string) => void
+  toggleTimelineExpansion?: () => void
 }
 
 export interface CommandBinding {
   label: string
+  scope?: 'workspace' | 'imports'
   registration?:
     | { kind: 'hotkey'; hotkey: RegisterableHotkey }
     | { kind: 'sequence'; sequence: HotkeySequence }
@@ -28,26 +42,19 @@ interface CommandDefinitionShape {
   id: string
   title: string
   description: string
-  category: 'Navigate' | 'View' | 'Surface' | 'Artifact'
+  category: 'Navigate' | 'View' | 'Surface' | 'Artifact' | 'Imports'
   bindings: readonly CommandBinding[]
   available: (context: CommandContext) => boolean
   run: (context: CommandContext) => void
 }
 
 const always = () => true
-const selectTimeline = (context: CommandContext, eventSequence: string | undefined): void => {
-  const selected = eventSequence ?? null
-  context.dispatch(actions.timelineSelected(selected))
-  if (selected !== null) context.onTimelineSelected?.(selected)
-}
 const selectedArtifact = (context: CommandContext) => context.getState().app.selectedArtifact
 const hasSelectedArtifactPreview = (context: CommandContext) => {
   const id = selectedArtifact(context)
   return id !== null && context.artifactPreviewIds.includes(id)
 }
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
-const scenarioNavigation = (context: CommandContext) => context.navigateScenario !== undefined
-const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
 export const commandRegistry = [
   {
     id: 'artifact.select',
@@ -133,7 +140,7 @@ export const commandRegistry = [
   {
     id: 'navigate.sessions',
     title: 'Go to Sessions',
-    description: 'Open the bounded session index.',
+    description: 'Open the bounded session workspace.',
     category: 'Navigate',
     bindings: [{ label: 'g s', registration: { kind: 'sequence', sequence: ['G', 'S'] } }],
     available: productNavigation,
@@ -203,15 +210,6 @@ export const commandRegistry = [
     run: (context) => context.navigate?.('/settings'),
   },
   {
-    id: 'navigate.scenario',
-    title: 'Open Scenario studio',
-    description: 'Open the deterministic scenario workspace.',
-    category: 'Navigate',
-    bindings: [],
-    available: scenarioNavigation,
-    run: (context) => context.navigateScenario?.(),
-  },
-  {
     id: 'palette.open',
     title: 'Open command palette',
     description: 'Browse every available application command.',
@@ -231,8 +229,8 @@ export const commandRegistry = [
   },
   {
     id: 'navigation.open',
-    title: 'Open navigation',
-    description: 'Open navigation for the current application surface.',
+    title: 'Open scenario navigation',
+    description: 'Choose a deterministic development scenario.',
     category: 'Surface',
     bindings: [],
     available: always,
@@ -265,7 +263,7 @@ export const commandRegistry = [
       const currentIndex = context.timelineIds.indexOf(current ?? '')
       const nextIndex =
         currentIndex < 0 ? 0 : Math.min(currentIndex + 1, context.timelineIds.length - 1)
-      selectTimeline(context, context.timelineIds[nextIndex])
+      context.dispatch(actions.timelineSelected(context.timelineIds[nextIndex] ?? null))
     },
   },
   {
@@ -279,40 +277,180 @@ export const commandRegistry = [
       const current = context.getState().app.selectedTimeline
       const currentIndex = Math.max(context.timelineIds.indexOf(current ?? ''), 0)
       const previousIndex = Math.max(currentIndex - 1, 0)
-      selectTimeline(context, context.timelineIds[previousIndex])
+      context.dispatch(actions.timelineSelected(context.timelineIds[previousIndex] ?? null))
     },
   },
   {
+    id: 'selection.toggleExpansion',
+    title: 'Toggle selected timeline item detail',
+    description: 'Expand or collapse the selected timeline item.',
+    category: 'View',
+    bindings: [{ label: 'Enter / Space' }],
+    available: (context) =>
+      context.getState().app.selectedTimeline !== null &&
+      context.timelineIds.includes(context.getState().app.selectedTimeline ?? '') &&
+      context.toggleTimelineExpansion !== undefined,
+    run: (context) => context.toggleTimelineExpansion?.(),
+  },
+  {
     id: 'selection.first',
-    title: 'Select first loaded item',
-    description: 'Move to the earliest item in the loaded cursor window.',
+    title: 'Go to first timeline item',
+    description: 'Load the first timeline window or select its first loaded item.',
     category: 'Navigate',
     bindings: [
       { label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } },
       { label: 'Home' },
     ],
     available: (context) =>
-      context.openFirstTimelineWindow !== undefined || context.timelineIds.length > 0,
+      context.timelineIds.length > 0 || context.timelineWindowAvailable === true,
     run: (context) => {
-      if (context.openFirstTimelineWindow) context.openFirstTimelineWindow()
-      else selectTimeline(context, context.timelineIds[0])
+      if (context.loadTimelineWindow) context.loadTimelineWindow('first')
+      else context.dispatch(actions.timelineSelected(context.timelineIds[0] ?? null))
     },
   },
   {
     id: 'selection.last',
-    title: 'Select latest loaded item',
-    description: 'Move to the latest item in the loaded cursor window.',
+    title: 'Go to latest timeline item',
+    description: 'Load the latest timeline window or select its latest loaded item.',
     category: 'Navigate',
     bindings: [
       { label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } },
       { label: 'End' },
     ],
     available: (context) =>
-      context.openLatestTimelineWindow !== undefined || context.timelineIds.length > 0,
+      context.timelineIds.length > 0 || context.timelineWindowAvailable === true,
     run: (context) => {
-      if (context.openLatestTimelineWindow) context.openLatestTimelineWindow()
-      else selectTimeline(context, context.timelineIds.at(-1))
+      if (context.loadTimelineWindow) context.loadTimelineWindow('latest')
+      else context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null))
     },
+  },
+  {
+    id: 'imports.entry.select',
+    title: 'Select imported frontier',
+    description: 'Select the requested immutable imported entry.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      context.requestedImportEntry !== undefined &&
+      context.selectImportEntry !== undefined,
+    run: (context) => context.selectImportEntry?.(context.requestedImportEntry ?? ''),
+  },
+  {
+    id: 'imports.entry.next',
+    title: 'Select next imported frontier',
+    description: 'Move toward the latest entry in the loaded import window.',
+    category: 'Imports',
+    bindings: [
+      { label: 'j', scope: 'imports', registration: { kind: 'hotkey', hotkey: 'J' } },
+      { label: 'ArrowDown', scope: 'imports' },
+    ],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
+    run: (context) => {
+      const ids = context.importEntryIds ?? []
+      const currentIndex = ids.indexOf(context.selectedImportEntry ?? '')
+      const nextIndex = currentIndex < 0 ? 0 : Math.min(currentIndex + 1, ids.length - 1)
+      context.selectImportEntry?.(ids[nextIndex] ?? '')
+    },
+  },
+  {
+    id: 'imports.entry.previous',
+    title: 'Select previous imported frontier',
+    description: 'Move toward the first entry in the loaded import window.',
+    category: 'Imports',
+    bindings: [
+      { label: 'k', scope: 'imports', registration: { kind: 'hotkey', hotkey: 'K' } },
+      { label: 'ArrowUp', scope: 'imports' },
+    ],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
+    run: (context) => {
+      const ids = context.importEntryIds ?? []
+      const currentIndex = Math.max(ids.indexOf(context.selectedImportEntry ?? ''), 0)
+      context.selectImportEntry?.(ids[Math.max(currentIndex - 1, 0)] ?? '')
+    },
+  },
+  {
+    id: 'imports.entry.first',
+    title: 'Select first loaded imported frontier',
+    description: 'Move to the earliest entry in the loaded import window.',
+    category: 'Imports',
+    bindings: [
+      {
+        label: 'g g',
+        scope: 'imports',
+        registration: { kind: 'sequence', sequence: ['G', 'G'] },
+      },
+      { label: 'Home', scope: 'imports' },
+    ],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
+    run: (context) => context.selectImportEntry?.(context.importEntryIds?.[0] ?? ''),
+  },
+  {
+    id: 'imports.entry.last',
+    title: 'Select latest loaded imported frontier',
+    description: 'Move to the latest entry in the loaded import window.',
+    category: 'Imports',
+    bindings: [
+      {
+        label: 'G',
+        scope: 'imports',
+        registration: { kind: 'hotkey', hotkey: 'Shift+G' },
+      },
+      { label: 'End', scope: 'imports' },
+    ],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
+    run: (context) => context.selectImportEntry?.(context.importEntryIds?.at(-1) ?? ''),
+  },
+  {
+    id: 'imports.continue.resume',
+    title: 'Resume from imported frontier',
+    description: 'Create a native session by resuming the selected imported frontier.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canContinueImport === true && context.continueImport !== undefined,
+    run: (context) => context.continueImport?.('resume'),
+  },
+  {
+    id: 'imports.continue.fork',
+    title: 'Fork from imported frontier',
+    description: 'Create a native session by forking the selected imported frontier.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canContinueImport === true && context.continueImport !== undefined,
+    run: (context) => context.continueImport?.('fork'),
+  },
+  {
+    id: 'imports.continue.retry',
+    title: 'Retry exact imported continuation',
+    description: 'Replay the retained imported-continuation command without changing its payload.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) => context.canRetryImport === true && context.retryImport !== undefined,
+    run: (context) => context.retryImport?.(),
+  },
+  {
+    id: 'imports.continue.abandon',
+    title: 'Abandon exact imported continuation',
+    description: 'Discard the retained imported-continuation command after explicit confirmation.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canAbandonImport === true && context.abandonImport !== undefined,
+    run: (context) => context.abandonImport?.(),
   },
   {
     id: 'layout.toggle',
@@ -357,7 +495,7 @@ export const commandRegistry = [
     description: 'Show every supported timeline record.',
     category: 'View',
     bindings: [],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.detailSet('full')),
   },
   {
@@ -366,7 +504,7 @@ export const commandRegistry = [
     description: 'Keep origins, tools, progress, warnings, and results compact.',
     category: 'View',
     bindings: [],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.detailSet('condensed')),
   },
   {
@@ -375,8 +513,63 @@ export const commandRegistry = [
     description: 'Emphasize origins and durable results.',
     category: 'View',
     bindings: [],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.detailSet('results')),
+  },
+  {
+    id: 'preferences.reset',
+    title: 'Restore preference defaults',
+    description: 'Restore browser-local workstation preferences to their defaults.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.preferencesReset()),
+  },
+  {
+    id: 'session.open',
+    title: 'Open session workspace',
+    description: 'Open a bounded workspace for an exact session identity.',
+    category: 'Navigate',
+    bindings: [],
+    available: (context) => context.sessionId !== undefined && context.openSession !== undefined,
+    run: (context) => {
+      if (context.sessionId === undefined) return
+      context.openSession?.(context.sessionId)
+    },
+  },
+  {
+    id: 'pane.navigation.resize',
+    title: 'Resize navigation pane',
+    description: 'Set the browser-local Workbench navigation pane width.',
+    category: 'View',
+    bindings: [],
+    available: (context) => context.paneSize !== undefined,
+    run: (context) => {
+      if (context.paneSize === undefined) return
+      context.dispatch(
+        actions.paneSizesSet({
+          ...context.getState().app.paneSizes,
+          navigation: context.paneSize,
+        }),
+      )
+    },
+  },
+  {
+    id: 'pane.inspector.resize',
+    title: 'Resize inspector pane',
+    description: 'Set the browser-local Workbench inspector pane width.',
+    category: 'View',
+    bindings: [],
+    available: (context) => context.paneSize !== undefined,
+    run: (context) => {
+      if (context.paneSize === undefined) return
+      context.dispatch(
+        actions.paneSizesSet({
+          ...context.getState().app.paneSizes,
+          inspector: context.paneSize,
+        }),
+      )
+    },
   },
 ] as const satisfies readonly CommandDefinitionShape[]
 
@@ -386,7 +579,7 @@ export type CommandId = CommandDefinition['id']
 export const globalHotkeyBindings = commandRegistry.flatMap((command) => {
   const bindings: readonly CommandBinding[] = command.bindings
   return bindings.flatMap((binding) =>
-    binding.registration?.kind === 'hotkey'
+    binding.scope !== 'imports' && binding.registration?.kind === 'hotkey'
       ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
       : [],
   )
@@ -395,7 +588,43 @@ export const globalHotkeyBindings = commandRegistry.flatMap((command) => {
 export const globalHotkeySequenceBindings = commandRegistry.flatMap((command) => {
   const bindings: readonly CommandBinding[] = command.bindings
   return bindings.flatMap((binding) =>
-    binding.registration?.kind === 'sequence'
+    binding.scope !== 'imports' && binding.registration?.kind === 'sequence'
+      ? [{ commandId: command.id, sequence: binding.registration.sequence }]
+      : [],
+  )
+})
+
+export const importHotkeyBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    binding.scope === 'imports' && binding.registration?.kind === 'hotkey'
+      ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
+      : [],
+  )
+})
+
+export const importHotkeySequenceBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    binding.scope === 'imports' && binding.registration?.kind === 'sequence'
+      ? [{ commandId: command.id, sequence: binding.registration.sequence }]
+      : [],
+  )
+})
+
+export const surfaceHotkeyBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    command.category === 'Surface' && binding.registration?.kind === 'hotkey'
+      ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
+      : [],
+  )
+})
+
+export const surfaceHotkeySequenceBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    command.category === 'Surface' && binding.registration?.kind === 'sequence'
       ? [{ commandId: command.id, sequence: binding.registration.sequence }]
       : [],
   )

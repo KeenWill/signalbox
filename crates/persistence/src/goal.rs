@@ -56,6 +56,11 @@ pub enum GoalCommandHandlingOutcome {
     /// The expected lineage head no longer held under the session lock, so
     /// nothing was applied and the identity remains unspent.
     LineageMoved,
+    /// Another live commissioned session owns the same pull-request target.
+    TargetBusy {
+        /// The competing live session.
+        session: SessionId,
+    },
 }
 
 /// Result of a scheduler- or model-provenance transition.
@@ -261,6 +266,17 @@ impl GoalRepository {
             let outcome = existing_or_conflicting(&mut transaction, &command, kind).await?;
             transaction.rollback().await?;
             return Ok(outcome);
+        }
+        if command.action().starts_pursuit()
+            && let Some(session) =
+                crate::commissioned_dispatch::lock_competing_pull_request_session(
+                    &mut transaction,
+                    command.session(),
+                )
+                .await?
+        {
+            transaction.rollback().await?;
+            return Ok(GoalCommandHandlingOutcome::TargetBusy { session });
         }
 
         let claimed = sqlx::query(
@@ -1208,7 +1224,7 @@ pub(crate) async fn lock_session(
     )
 }
 
-async fn lock_scheduler(
+pub(crate) async fn lock_scheduler(
     connection: &mut PgConnection,
     session: SessionId,
 ) -> Result<(), GoalRepositoryError> {

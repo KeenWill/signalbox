@@ -467,8 +467,8 @@ mod tests {
     }
 
     #[test]
-    /// INV-071: deterministic reuse is fixed by inputs, procedure, parameters, and implementation.
-    fn inv071_deterministic_derivation_keys_cover_exact_procedure_provenance() {
+    /// INV-078: deterministic reuse is fixed by inputs, procedure, parameters, and implementation.
+    fn inv078_deterministic_derivation_keys_cover_exact_procedure_provenance() {
         let transformation = BlobTransformation::try_new(
             BlobTransformationName::try_new("image.thumbnail")
                 .expect("the fixture procedure name is valid"),

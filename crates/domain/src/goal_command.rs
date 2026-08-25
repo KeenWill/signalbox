@@ -20,6 +20,16 @@ pub enum GoalUserAction {
     Supersede(GoalStatement),
 }
 
+impl GoalUserAction {
+    /// Whether this action can begin or resume goal pursuit.
+    pub const fn starts_pursuit(&self) -> bool {
+        match self {
+            Self::Attach(_) | Self::Resume(_) | Self::Supersede(_) => true,
+            Self::Stop { .. } => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{GoalUserAction, GoalUserCommand};
@@ -54,6 +64,22 @@ mod tests {
 
         assert_eq!(parent_alone, equal_replay);
         assert_ne!(parent_alone, conflicting_replay);
+    }
+
+    #[test]
+    fn pursuit_starting_classification_names_every_action() {
+        let statement = crate::GoalStatement::try_new(String::from("ship the change"))
+            .expect("fixture statement is valid");
+
+        assert!(GoalUserAction::Attach(statement.clone()).starts_pursuit());
+        assert!(GoalUserAction::Resume(None).starts_pursuit());
+        assert!(GoalUserAction::Supersede(statement).starts_pursuit());
+        assert!(
+            !GoalUserAction::Stop {
+                descendant_scope: DescendantTerminationScope::ParentAlone,
+            }
+            .starts_pursuit()
+        );
     }
 }
 

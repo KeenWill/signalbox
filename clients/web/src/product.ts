@@ -1,9 +1,4 @@
 import { decodeWebContractBootstrap, type WebContractBootstrap } from './generated/web-contract.mjs'
-import { MAX_BOOTSTRAP_RESPONSE_BYTES, readBoundedJson } from './session-timeline/model'
-
-// The bootstrap contains only contract identity, capabilities, and limits. The hard response
-// ceiling is independent of the untrusted limits inside that response.
-export { MAX_BOOTSTRAP_RESPONSE_BYTES }
 
 export const productRoutes = [
   { id: 'attention', label: 'Attention', description: 'Actionable work and fleet state' },
@@ -72,6 +67,17 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
   settings: { kind: 'browser-local', authority: 'browser preferences' },
 }
 
+export const productSurfaceCacheLabel = (surface: ProductRouteId): string | null => {
+  switch (productSurfaceStates[surface].kind) {
+    case 'browser-local':
+      return 'Local settings'
+    case 'server-backed':
+      return 'Bounded query'
+    case 'committed-unimplemented':
+      return null
+  }
+}
+
 export interface ProductTransport {
   readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap>
 }
@@ -83,6 +89,29 @@ export class BootstrapContractError extends Error {
   }
 }
 
+// The bootstrap contains only contract identity, capabilities, and limits. Keep a hard response
+// ceiling independent of the untrusted limits inside that response.
+export const MAX_BOOTSTRAP_RESPONSE_BYTES = 65_536
+
+const readBoundedBody = async (response: Response): Promise<string> => {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let body = ''
+  let received = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    received += value.byteLength
+    if (received > MAX_BOOTSTRAP_RESPONSE_BYTES) {
+      await reader.cancel()
+      throw new BootstrapContractError('bootstrap response exceeds the byte limit')
+    }
+    body += decoder.decode(value, { stream: true })
+  }
+  return body + decoder.decode()
+}
+
 export class SameOriginProductTransport implements ProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
     const response = await fetch('/api/bootstrap', {
@@ -91,10 +120,9 @@ export class SameOriginProductTransport implements ProductTransport {
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
+    const body = await readBoundedBody(response)
     try {
-      return decodeWebContractBootstrap(
-        await readBoundedJson(response, MAX_BOOTSTRAP_RESPONSE_BYTES),
-      )
+      return decodeWebContractBootstrap(JSON.parse(body))
     } catch (error) {
       throw new BootstrapContractError('bootstrap response violates the web contract', {
         cause: error,

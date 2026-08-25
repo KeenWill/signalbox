@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { globalHotkeySequenceBindings } from './commands'
 import {
   BootstrapContractError,
   MAX_BOOTSTRAP_RESPONSE_BYTES,
   productRoutes,
+  productSurfaceCacheLabel,
   productSurfaceStates,
   SameOriginProductTransport,
 } from './product'
 import { webContractBootstrapFixture } from './product.fixture'
+import { hasValidSessionTimelineContract } from './session-timeline/model'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -52,7 +53,7 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      BootstrapContractError,
+      'exceeds the byte limit',
     )
   })
 
@@ -64,28 +65,32 @@ describe('SameOriginProductTransport', () => {
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow('status 503')
   })
-
-  it('rejects an oversized bootstrap before JSON materialization', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response('{}', { headers: { 'content-length': '65537' } })),
-    )
-
-    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      BootstrapContractError,
-    )
-  })
 })
 
 describe('product surface availability', () => {
-  it('registers every advertised product navigation sequence', () => {
+  it('requires bounded JSON before enabling timeline reads', () => {
     expect(
-      globalHotkeySequenceBindings.filter((binding) => binding.commandId.startsWith('navigate.')),
-    ).toEqual([
-      { commandId: 'navigate.attention', sequence: ['G', 'A'] },
-      { commandId: 'navigate.sessions', sequence: ['G', 'S'] },
-      { commandId: 'navigate.settings', sequence: ['G', ','] },
-    ])
+      hasValidSessionTimelineContract({
+        ...webContractBootstrapFixture,
+        capabilities: { ...webContractBootstrapFixture.capabilities, bounded_json: false },
+      }),
+    ).toBe(false)
+  })
+
+  it('rejects timeline capability with unusable semantic limits', () => {
+    expect(hasValidSessionTimelineContract(webContractBootstrapFixture)).toBe(true)
+    expect(
+      hasValidSessionTimelineContract({
+        ...webContractBootstrapFixture,
+        limits: { ...webContractBootstrapFixture.limits, max_timeline_window_items: 0 },
+      }),
+    ).toBe(false)
+    expect(
+      hasValidSessionTimelineContract({
+        ...webContractBootstrapFixture,
+        limits: { ...webContractBootstrapFixture.limits, max_timeline_window_bytes: 65_537 },
+      }),
+    ).toBe(false)
   })
 
   it('defines one typed authority state for every product route', () => {
@@ -113,5 +118,11 @@ describe('product surface availability', () => {
       owningTrack: '#991 session projections',
       facts: ['bounded session descriptors', 'stable-address timeline windows'],
     })
+  })
+
+  it('reports cache ownership only for implemented surfaces', () => {
+    expect(productSurfaceCacheLabel('sessions')).toBe('Bounded query')
+    expect(productSurfaceCacheLabel('settings')).toBe('Local settings')
+    expect(productSurfaceCacheLabel('attention')).toBeNull()
   })
 })

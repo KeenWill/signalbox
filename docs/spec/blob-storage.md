@@ -31,6 +31,10 @@ Bounded direct metadata and range reads, replica fallback classification,
 non-waiting process admission, and the terminal read commands are verified
 against this implementing change (`agent/blob-storage-read-wire`).
 
+The canonical multipart domain algebra and ordered process-protocol vocabulary
+are verified against this implementing change
+(`agent/blob-storage-multipart-algebra`).
+
 Same-origin browser delivery, immutable derivation provenance, and lazy isolated
 image derivatives are verified against this PR (`agent/web-blob-delivery`).
 
@@ -425,11 +429,13 @@ They send the selected representation media type, exact `Content-Length`,
 quoted canonical digest, and
 `Cache-Control: public, max-age=31536000, immutable`. `If-None-Match` admits the
 matching strong or weak spelling and returns `304`; `If-Range` applies a range
-only for the matching strong ETag. Exactly one canonical closed, open-ended, or
-suffix byte range is admitted and returns `206` plus `Content-Range`; multiple,
-malformed, zero-suffix, and unsatisfied ranges return `416` plus
-`bytes */{length}`. `HEAD` returns the same status and headers without opening
-or sending blob bytes.
+only for the matching strong ETag, and a failed condition makes every `Range`
+field the request carries inapplicable — repeated fields included — so the full
+representation is served. Once the condition admits the field, exactly one
+canonical closed, open-ended, or suffix byte range is admitted and returns `206`
+plus `Content-Range`; multiple, malformed, zero-suffix, and unsatisfied ranges
+return `416` plus `bytes */{length}`. `HEAD` returns the same status and
+headers, bounded read admission included, without opening or sending blob bytes.
 
 A `BlobDerivation` is an immutable ordered relation from one through sixteen
 input digests to one through sixteen output digests. It records a stable
@@ -445,16 +451,19 @@ deterministic append reloads the one winning record.
 
 Image thumbnail (256-pixel edge) and preview (1,600-pixel edge) transforms are
 lazy deterministic producers. Repeated requests reuse the recorded key without
-executing the producer. A miss copies and re-verifies the source into a private
-temporary workspace, rejecting inputs above 64 MiB and bounding the copy to 120
-seconds, then invokes the current daemon executable through the configured
-filesystem-confined supervisor with no network, a 120-second deadline, and at
-most two concurrent workers. The decoder accepts only the enabled GIF, JPEG,
-PNG, and WebP formats, limits either axis to 16,384 pixels, total pixels to
-67,108,864, decoder allocation to 320 MiB, and the PNG output to 16 MiB. The
-digest of the exact worker executable is the implementation provenance.
-Publication to the generated-artifact route and catalog registration precede the
-derivation append.
+executing the producer, provided its recorded output is still retrievable from
+the store; a record whose replicas are missing or fail verification triggers
+reproduction so the store's repair path can heal them, without appending a new
+derivation record. A miss (or an unretrievable cache hit) copies and re-verifies
+the source into a private temporary workspace, rejecting inputs above 64 MiB and
+bounding the copy to 120 seconds, then invokes the current daemon executable
+through the configured filesystem-confined supervisor with no network, a
+120-second deadline, and at most two concurrent workers. The decoder accepts
+only the enabled GIF, JPEG, PNG, and WebP formats, limits either axis to 16,384
+pixels, total pixels to 67,108,864, decoder allocation to 320 MiB, and the PNG
+output to 16 MiB. The digest of the exact worker executable is the
+implementation provenance. Publication to the generated-artifact route and
+catalog registration precede the derivation append.
 
 ## Multipart user content
 
@@ -564,11 +573,11 @@ rendered frontier; a catalogued digest outside that set is unauthorized. Results
 use the existing text-only tool-result arm and never enter a provider message as
 image or document media.
 
-Content-type-aware readers are committed unimplemented functionality: no present
-surface provides one, and neither its exact inventory nor the formats it
-supports are decided. The compatibility constraint is that attachment stubs and
-the generic read family remain sufficient to add such readers without
-re-deciding visibility.
+The provider-neutral reader model, stable typed-read contracts, and decided
+processor boundary are owned by
+[file and media interpretation](file-and-media.md). Attachment stubs and the
+generic read family remain the visibility and unknown-format substrate for that
+layer.
 
 The image derivative worker above is the first content-interpreting processor.
 Every future content-interpreting reader likewise executes inside strong process
@@ -642,8 +651,8 @@ new imports write only blob references.
   and the artifact lifecycle bullets in
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts);
   this page's append-only catalog is the constraint they design against.
-- The content-type-aware read-tool inventory and the concrete isolation
-  mechanism its processors use are recorded in
+- Concrete format adapters and their per-family dependency choices remain
+  deferred with
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts).
 - How a tool family's admitted result references a blob rather than embedding
   bytes, and rich image/file result-content arms, remain with

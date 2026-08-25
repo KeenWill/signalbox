@@ -113,22 +113,31 @@ describe('artifact renderer compatibility', () => {
     expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
   })
 
-  it.each(['image/gif', 'image/png', 'image/webp'])(
-    'keeps animation-capable %s originals download-only without aggregate decode evidence',
-    (mediaType) => {
-      const descriptor: WebBlobDescriptor = {
-        ...imageArtifact,
-        declared_media_type: mediaType,
-        available_views: [
-          imageDownloadView,
-          { ...imageOriginalView, media_type: mediaType },
-          imagePreviewView,
-        ],
-      }
+  const expectAnimationCapableOriginalStaysDownloadOnly = (mediaType: string) => {
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: mediaType,
+      available_views: [
+        imageDownloadView,
+        { ...imageOriginalView, media_type: mediaType },
+        imagePreviewView,
+      ],
+    }
 
-      expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
-    },
-  )
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+  }
+
+  it('keeps animation-capable GIF originals download-only without aggregate decode evidence', () => {
+    expectAnimationCapableOriginalStaysDownloadOnly('image/gif')
+  })
+
+  it('keeps animation-capable PNG originals download-only without aggregate decode evidence', () => {
+    expectAnimationCapableOriginalStaysDownloadOnly('image/png')
+  })
+
+  it('keeps animation-capable WebP originals download-only without aggregate decode evidence', () => {
+    expectAnimationCapableOriginalStaysDownloadOnly('image/webp')
+  })
 
   it('registers the closed artifact renderer set', () => {
     expect(registeredArtifactKinds).toEqual([

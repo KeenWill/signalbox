@@ -54,6 +54,19 @@ pub trait DeterministicBlobProducer {
         inputs: &[BlobDigest],
         transformation: &BlobTransformation,
     ) -> impl Future<Output = Result<Box<[BlobDigest]>, Self::Error>> + Send;
+
+    /// Reports whether every blob in a previously recorded output set is
+    /// still retrievable from the store.
+    ///
+    /// The deterministic derivation record is immutable and outlives the
+    /// blob content it names: replicas can be lost or found corrupt after a
+    /// derivation is recorded. A cache hit on the record alone is not
+    /// evidence the bytes it names still exist, so the cache-hit fast path
+    /// consults this before trusting a replay.
+    fn outputs_retrievable(
+        &mut self,
+        outputs: &[BlobDigest],
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 }
 
 /// Checked request whose cache key is fixed before external work starts.
@@ -162,11 +175,21 @@ where
         BlobDerivationServiceOutcome,
         BlobDerivationServiceError<Store::Error, Producer::Error>,
     > {
+        // Falls through to reproduction both when there is no recorded
+        // derivation yet and when the record survives but its bytes are
+        // gone: reproducing deterministically lets the store's repair path
+        // heal the missing replica. The immutable record itself does not
+        // change; `record_deterministic` below resolves back to it.
         if let Some(existing) = self
             .store
             .find_deterministic(request.key())
             .await
             .map_err(BlobDerivationServiceError::Store)?
+            && self
+                .producer
+                .outputs_retrievable(existing.outputs())
+                .await
+                .map_err(BlobDerivationServiceError::Producer)?
         {
             return Ok(BlobDerivationServiceOutcome::Reused(existing));
         }
@@ -255,6 +278,17 @@ mod tests {
     struct FakeProducer {
         output: BlobDigest,
         calls: Arc<Mutex<u64>>,
+        retrievable: Arc<Mutex<bool>>,
+    }
+
+    impl FakeProducer {
+        fn new(output: BlobDigest, calls: Arc<Mutex<u64>>) -> Self {
+            Self {
+                output,
+                calls,
+                retrievable: Arc::new(Mutex::new(true)),
+            }
+        }
     }
 
     impl DeterministicBlobProducer for FakeProducer {
@@ -267,6 +301,16 @@ mod tests {
         ) -> impl Future<Output = Result<Box<[BlobDigest]>, Self::Error>> + Send {
             *self.calls.lock().expect("fixture counter lock is healthy") += 1;
             ready(Ok(Vec::from([self.output]).into_boxed_slice()))
+        }
+
+        fn outputs_retrievable(
+            &mut self,
+            _outputs: &[BlobDigest],
+        ) -> impl Future<Output = Result<bool, Self::Error>> + Send {
+            ready(Ok(*self
+                .retrievable
+                .lock()
+                .expect("fixture flag lock is healthy")))
         }
     }
 
@@ -296,10 +340,7 @@ mod tests {
     #[tokio::test]
     async fn repeated_request_reuses_the_recorded_output_without_reproduction() {
         let calls = Arc::new(Mutex::new(0));
-        let producer = FakeProducer {
-            output: BlobDigest::digest(b"output"),
-            calls: calls.clone(),
-        };
+        let producer = FakeProducer::new(BlobDigest::digest(b"output"), calls.clone());
         let mut service =
             DeterministicBlobDerivationService::new(FixedIds, FakeStore::default(), producer);
 
@@ -319,5 +360,38 @@ mod tests {
             panic!("second invocation did not reuse the derivative");
         };
         assert_eq!(*calls.lock().expect("fixture counter lock is healthy"), 1);
+    }
+
+    #[tokio::test]
+    async fn cached_derivation_is_reproduced_when_its_bytes_are_gone() {
+        let calls = Arc::new(Mutex::new(0));
+        let producer = FakeProducer::new(BlobDigest::digest(b"output"), calls.clone());
+        let retrievable = producer.retrievable.clone();
+        let mut service =
+            DeterministicBlobDerivationService::new(FixedIds, FakeStore::default(), producer);
+
+        let first = service
+            .execute(request())
+            .await
+            .expect("first production succeeds");
+        let BlobDerivationServiceOutcome::Produced(first_derivation) = first else {
+            panic!("first invocation did not produce the derivative");
+        };
+
+        *retrievable.lock().expect("fixture flag lock is healthy") = false;
+        let rebuilt = service
+            .execute(request())
+            .await
+            .expect("rebuild after lost replicas succeeds");
+
+        let BlobDerivationServiceOutcome::Reused(rebuilt_derivation) = rebuilt else {
+            panic!("rebuild did not resolve back to the recorded derivation");
+        };
+        assert_eq!(rebuilt_derivation, first_derivation);
+        assert_eq!(
+            *calls.lock().expect("fixture counter lock is healthy"),
+            2,
+            "an unretrievable cached output must trigger reproduction, not a bare replay",
+        );
     }
 }
