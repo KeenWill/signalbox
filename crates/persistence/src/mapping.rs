@@ -1583,6 +1583,7 @@ pub(crate) const fn repo_watch_event_target_to_str(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepoWatchEventProducerStorageKind {
     Poll,
+    Webhook,
 }
 
 pub(crate) const fn repo_watch_event_producer_to_str(
@@ -1590,6 +1591,7 @@ pub(crate) const fn repo_watch_event_producer_to_str(
 ) -> &'static str {
     match value {
         RepoWatchEventProducerStorageKind::Poll => "poll",
+        RepoWatchEventProducerStorageKind::Webhook => "webhook",
     }
 }
 
@@ -1598,6 +1600,7 @@ pub(crate) fn repo_watch_event_producer_from_str(
 ) -> Option<RepoWatchEventProducerStorageKind> {
     match value {
         "poll" => Some(RepoWatchEventProducerStorageKind::Poll),
+        "webhook" => Some(RepoWatchEventProducerStorageKind::Webhook),
         _ => None,
     }
 }

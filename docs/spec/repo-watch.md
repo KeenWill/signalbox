@@ -235,8 +235,15 @@ facts use sequence one without occupying frontier space. A fact counts as
 immutable only when the differ suppresses re-emission on members its stream key
 already names, so completed check runs are not among them: their conclusion can
 change under an unchanged run identity and completion generation, and they
-advance a frontier sequence like any recurring stream. The cursor does not
-retain resource keys, ETags, accepted transport responses, raw provider
+advance a frontier sequence like any recurring stream. Each entry also records
+the pull request owning its stream, or nothing for a repository-global stream
+such as a branch workflow run. A pull request the comparison observes as merged
+releases every stream it owns, because a merged request cannot reopen and so no
+stream it owns can state another fact; a closed but unmerged request keeps its
+sequences, because GitHub permits it to reopen and advance the same streams
+again. Releasing a stream that could still advance would reuse an occurrence
+number, so retirement is confined to that one terminal lifecycle. The cursor
+does not retain resource keys, ETags, accepted transport responses, raw provider
 payloads, or credentials. A per-repository atomic commit accepts an expected
 generation, one complete cursor candidate, and its ordered event-occurrence
 batch. It serializes competing commits, appends the cursor and every event
@@ -336,6 +343,19 @@ version one alone. Exactly one content-identity version is readable once both
 have run. The durable constraint and the decoder admit version one alone, so no
 earlier event shape survives for a reader to accept.
 
+**Implemented behavior.** Frontier ownership arrives as storage version three,
+which resets the frontier the same way version two did rather than migrating the
+entries it replaces. The stream identity a version-two entry stores is a one-way
+domain-separated hash, so no migration can recover the pull request it came
+from, and decoding a version-two entry as unowned would be exactly the
+version-tolerant decoding the pre-alpha compatibility rule forbids: it would
+leave streams that can never be retired counting against the ceiling the
+retirement exists to protect. `202608250501` therefore rewrites every durable
+cursor to storage version three with an empty frontier, and the reader requires
+the ownership member on every entry. The accepted cost is one repeat
+identification pass per repository, paid on the first comparison after the
+migration, and no retirement history before it.
+
 **Implemented behavior.** A pure differ compares consecutive canonical
 per-pull-request state, branch heads, and completed branch-workflow identities
 (`workflow_id`, `run_id`, `run_attempt`), producing only the closed version-one
@@ -400,12 +420,14 @@ current or prior head-repository identity still fails closed.
 **Implemented behavior.** Accepted events append in observation order as durable
 facts and are never updated, deleted, or truncated. The relational storage row
 fixes the event version to one, records the content-identity version and 32-byte
-digest, records `poll` as the only presently implemented producer, closes both
-target and payload discriminators, retains complete PR context, and rejects
-incoherent payload columns. Reads decode every field into the closed domain
-event and fail closed when a durable cursor or event row is malformed or
-noncanonical. Bounded keyset pages expose repository event history in
-cursor-generation and event-ordinal order.
+digest, records the producer that observed the fact — `poll` for the complete
+reconciliation sweep and every targeted refresh it performs, `webhook` for a row
+an authenticated delivery committed under primary mode — closes both target and
+payload discriminators, retains complete PR context, and rejects incoherent
+payload columns. Reads decode every field into the closed domain event and fail
+closed when a durable cursor or event row is malformed or noncanonical. Bounded
+keyset pages expose repository event history in cursor-generation and
+event-ordinal order.
 
 **Implemented behavior.** The closed version-one event payloads are:
 
@@ -1163,7 +1185,19 @@ configured signal-reviewer set. These snapshots remain transport state: rules
 and durable events cannot inspect them. Until this upgrade is built, every
 daemon restart deliberately pays one bounded complete repository poll.
 
-## Webhook transport and shadow reconciliation
+## Webhook transport, primary intake, and shadow reconciliation
+
+**Implemented behavior.** A watched repository that configures webhook intake
+selects its rollout mode with `webhook_mode`, whose closed values are `shadow`
+and `primary`. Only an absent key defaults, and it defaults to `shadow`; a
+present item of any other TOML type, or a string outside those two values, fails
+configuration validation rather than silently selecting a mode the deployment
+did not ask for. The key is meaningful only beside a hook ID and secret file, so
+naming it without an association is refused like any other incomplete entry.
+Shadow projects a delivery against an in-memory baseline and records parity rows
+only; primary applies it to the durable cursor and writes ordinary
+webhook-produced events. Everything the listener does before a delivery is
+durably admitted is identical in both modes.
 
 **Implemented behavior.** The listener accepts only `POST` on its configured
 path as plain HTTP. It requires canonical singleton GitHub hook, delivery,
@@ -1395,24 +1429,27 @@ cursor. `repo_watch_webhook_projection` records each resulting version-one
 content identity and event kind, and the cause of any divergence the producing
 delivery already knows, while `repo_watch_webhook_disposition` atomically
 records projected, duplicate-state, superseded, ignored, or quarantined terminal
-disposition. Shadow mode reserves no committed disposition and no resulting
-cursor generation: the schema refuses both, so the durable shape a later write
-mode would need is left to the ruling that authorizes it. The
-`repo_watch_webhook_parity` view joins those identities to version-one
-poll-produced `repo_watch_event` rows since that repository's first shadow
-receipt and reports `matched`, `webhook_only`, `poll_only`, or
-`not_directly_mapped`, each divergent row alongside a `cause` drawn from one
-closed vocabulary: `compressed_transition`, `context_drift`, `poll_only_family`,
-and `cross_drain_shadow_gap`. A delivery records the cause it knows beside its
-own projection; `poll_only_family` is derived instead, because the event
-families polling produces and webhooks are not designed to reproduce —
-mergeability changes, aggregate check rollups, and reaction changes — have no
-delivery to carry it. Event projections intentionally carry no uniqueness
-constraint because separate deliveries may represent one content occurrence.
-Terminal exact payload bytes remain for seven days; after each successful full
-poll, at most once per day and starting with the first poll after boot, the
-daemon deletes only the expired payload bytes. Delivery tombstones, digests,
-projections, and dispositions remain append-only.
+disposition. That vocabulary is unchanged by primary mode, and no committed
+disposition or resulting cursor generation is added. The ruling that authorized
+write mode chose the two-step durable handoff below, which records the terminal
+disposition *before* the cursor write, so no disposition row can name the
+generation its own write produces; the generation a delivery reached is carried
+by `repo_watch_event.cursor_generation` on the rows it wrote, which is where a
+reader already looks for it. The `repo_watch_webhook_parity` view joins those
+identities to version-one poll-produced `repo_watch_event` rows since that
+repository's first shadow receipt and reports `matched`, `webhook_only`,
+`poll_only`, or `not_directly_mapped`, each divergent row alongside a `cause`
+drawn from one closed vocabulary: `compressed_transition`, `context_drift`,
+`poll_only_family`, and `cross_drain_shadow_gap`. A delivery records the cause
+it knows beside its own projection; `poll_only_family` is derived instead,
+because the event families polling produces and webhooks are not designed to
+reproduce — mergeability changes, aggregate check rollups, and reaction changes
+— have no delivery to carry it. Event projections intentionally carry no
+uniqueness constraint because separate deliveries may represent one content
+occurrence. Terminal exact payload bytes remain for seven days; after each
+successful full poll, at most once per day and starting with the first poll
+after boot, the daemon deletes only the expired payload bytes. Delivery
+tombstones, digests, projections, and dispositions remain append-only.
 
 **Implemented behavior.** Projection coverage is closed by delivery family and
 action:
@@ -1511,18 +1548,63 @@ measurement shadow mode exists to produce; that trade is not taken while poll
 frequency is unchanged and the complete sweep remains authoritative. Full
 polling continues unchanged as the slow complete reconciliation sweep and
 remains authoritative for missed deliveries, reactions, and every provider fact
-outside the mapped set. Poll frequency does not drop in shadow mode; any later
-write mode or slower cadence requires a separately reviewed ruling after parity
-over a real workday.
+outside the mapped set.
 
-**Committed unimplemented functionality.** The rollout gate is no *unexplained*
-divergence, not no divergence: it is zero `repo_watch_webhook_parity` rows whose
-status is `webhook_only` or `poll_only` and whose cause is null, measured over a
-real workday. Divergence that names a closed cause is understood and does not
-hold the gate. Reaching zero uncaused rows is the remaining rollout work, since
-the runtime today records `cross_drain_shadow_gap` and derives
+**Implemented behavior.** A repository in primary mode applies a mapped delivery
+to its durable cursor. The baseline is that cursor rather than an accumulated
+shadow, reloaded for each delivery: every applied delivery commits, so the next
+one already sees its predecessor, and the loaded generation is the expected
+generation the optimistic commit needs — an in-memory baseline advanced past the
+cursor could not supply one. A patch that duplicates state, is superseded, or
+names a fact outside the observable set records the same terminal disposition it
+records in shadow mode and writes nothing. A patch that applies is compared
+against the loaded cursor in one differ pass whose occurrences are both the
+event batch the commit writes and the projections parity records; deriving twice
+would advance the frontier twice and mint identities the committed rows do not
+carry. A delivery that names pull requests still runs the same targeted provider
+refresh, against the patched observation rather than the stored one, so a fact
+the payload supplied for an untargeted subject survives the reconciliation, and
+per-page hydration coalescing is unchanged.
+
+The commit reuses the two-step durable handoff a shadow-mode targeted refresh
+already uses: the terminal disposition and exact projections are recorded first,
+then the cursor and its events are committed inside the same retained completion
+that survives cancellation of the outer drain. Ordering the handoff this way is
+what makes an interrupted primary delivery safe — a delivery whose disposition
+is durable is never loaded again, so a lost cursor write costs the observation
+rather than duplicating it, and a cursor conflict hands ownership to the
+intervening poll exactly as it does in shadow mode. Rows a delivery commits
+record `webhook` as their producer rather than `poll`, so a reader can tell
+which intake observed a fact, and the parity view — whose poll side reads
+`producer = 'poll'` — never reports a primary-mode row as a poll-only
+divergence. Dispatch processing follows a landed commit, because under primary
+mode every applied delivery is a cursor advance that rules may act on.
+
+**Implemented behavior.** Poll frequency does not drop in shadow mode. Under
+primary mode a deployment may lengthen a repository's `poll_interval_seconds` to
+one hour, the cadence the 2026-08-25 rollout ruling authorizes after dogfood
+parity: the delivery stream carries the mapped set, and the sweep returns to
+being the reconciliation backstop rather than the freshness path. Nothing in the
+daemon enforces that cadence — it is a per-repository configuration value, and a
+shorter interval stays valid at the cost of provider quota. No guarantee that
+depends on the sweep changes with the longer interval; only the delay before an
+unmapped or missed fact is observed grows with it.
+
+**Implemented behavior.** The rollout gate is no *unexplained* divergence, not
+no divergence: it is zero `repo_watch_webhook_parity` rows whose status is
+`webhook_only` or `poll_only` and whose cause is null, measured over a real
+workday. Divergence that names a closed cause is understood and does not hold
+the gate. Dogfood parity reached zero uncaused rows and the owner ruled the gate
+met on 2026-08-25, which is what authorizes both primary mode and the hourly
+cadence above.
+
+**Committed unimplemented functionality.** Two of the four closed parity causes
+remain unreachable: the runtime records `cross_drain_shadow_gap` and derives
 `poll_only_family`, while `compressed_transition` and `context_drift` are
-available to record and not yet emitted.
+admitted by the durable vocabulary and never emitted. Both belong beside the
+producing delivery's own projection rather than derived by the parity view,
+because only the delivery knows which applies. They are tracked as follow-up
+work rather than as a condition on the ruling above.
 
 ## Open edges
 
