@@ -749,7 +749,18 @@ const schemas = {
       "continuation_after": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebTimelineAddress"
+            "additionalProperties": false,
+            "description": "Stable browser-visible location of one durable session event.",
+            "properties": {
+              "event_sequence": {
+                "$ref": "#/$defs/WebTimelineEventSequence",
+                "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+              }
+            },
+            "required": [
+              "event_sequence"
+            ],
+            "type": "object"
           },
           {
             "type": "null"
@@ -759,7 +770,18 @@ const schemas = {
       "continuation_before": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebTimelineAddress"
+            "additionalProperties": false,
+            "description": "Stable browser-visible location of one durable session event.",
+            "properties": {
+              "event_sequence": {
+                "$ref": "#/$defs/WebTimelineEventSequence",
+                "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+              }
+            },
+            "required": [
+              "event_sequence"
+            ],
+            "type": "object"
           },
           {
             "type": "null"
@@ -784,7 +806,9 @@ const schemas = {
     "required": [
       "session_id",
       "items",
-      "projected_structured_bytes"
+      "projected_structured_bytes",
+      "continuation_before",
+      "continuation_after"
     ],
     "title": "WebSessionTimelineWindow",
     "type": "object"

@@ -20,6 +20,70 @@ export const productRoutes = [
 
 export type ProductRouteId = (typeof productRoutes)[number]['id']
 
+export type ProductSurfaceState =
+  | { kind: 'browser-local'; authority: 'browser preferences' }
+  | { kind: 'server-backed'; owningTrack: string; facts: readonly string[] }
+  | {
+      kind: 'committed-unimplemented'
+      owningTrack: string
+      facts: readonly string[]
+    }
+
+export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> = {
+  attention: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#992 attention projections',
+    facts: ['prioritized attention reads'],
+  },
+  sessions: {
+    kind: 'server-backed',
+    owningTrack: '#991 session projections',
+    facts: ['bounded session descriptors', 'stable-address timeline windows'],
+  },
+  search: {
+    kind: 'server-backed',
+    owningTrack: '#994 search and usage reads',
+    facts: ['bounded lexical search pages', 'stable-address search continuations'],
+  },
+  activity: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['system activity reads'],
+  },
+  runners: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['runner discovery reads'],
+  },
+  reviews: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['review discovery reads'],
+  },
+  imports: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['import discovery reads'],
+  },
+  usage: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#994 search and usage reads',
+    facts: ['usage aggregation reads'],
+  },
+  settings: { kind: 'browser-local', authority: 'browser preferences' },
+}
+
+export const productSurfaceCacheLabel = (surface: ProductRouteId): string | null => {
+  switch (productSurfaceStates[surface].kind) {
+    case 'browser-local':
+      return 'Local settings'
+    case 'server-backed':
+      return 'Bounded query'
+    case 'committed-unimplemented':
+      return null
+  }
+}
+
 export interface ProductSearchState {
   q?: string
   session?: string
@@ -40,8 +104,10 @@ export interface ProductSearchRequest {
 
 // Hard safety ceiling: bounds search-response allocation and parse work in the browser.
 const MAX_SEARCH_RESPONSE_BYTES = 1_048_576
-// Hard safety ceiling: bounds bootstrap-response allocation and parse work before decoding.
-const MAX_BOOTSTRAP_RESPONSE_BYTES = 65_536
+// Hard safety ceiling: bounds bootstrap-response allocation and parse work before decoding. The
+// bootstrap carries only contract identity, capabilities, and limits, so this ceiling stays
+// independent of the untrusted limits inside that response.
+export const MAX_BOOTSTRAP_RESPONSE_BYTES = 65_536
 // Hard safety ceiling: rejects advertised query limits above the browser's bounded input budget.
 const MAX_SEARCH_QUERY_BYTES = 512
 // Hard safety ceiling: rejects advertised page sizes above the browser's bounded render budget.
@@ -88,6 +154,24 @@ const sourceUuids = (source: WebSearchPage['results'][number]['source']): string
   }
 }
 
+// A bounded read refused the body before allocating it. Kept distinct from a decode failure so
+// callers can report an over-large response separately from a contract violation.
+class ResponseTooLargeError extends TypeError {
+  constructor(maximumBytes: number) {
+    super(`response exceeds ${maximumBytes} bytes`)
+    this.name = 'ResponseTooLargeError'
+  }
+}
+
+export class BootstrapContractError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'BootstrapContractError'
+  }
+}
+
+const describeCause = (error: unknown) => (error instanceof Error ? error.message : String(error))
+
 const readBoundedJson = async (
   response: Response,
   maximumBytes: number,
@@ -95,7 +179,7 @@ const readBoundedJson = async (
 ): Promise<unknown> => {
   const declaredLength = response.headers.get('content-length')
   if (declaredLength !== null && Number(declaredLength) > maximumBytes) {
-    throw new TypeError(`response exceeds ${maximumBytes} bytes`)
+    throw new ResponseTooLargeError(maximumBytes)
   }
   const reader = response.body?.getReader()
   if (reader === undefined) {
@@ -107,7 +191,7 @@ const readBoundedJson = async (
       throw new ProductTransportError(streamFailureMessage)
     }
     if (new TextEncoder().encode(text).byteLength > maximumBytes) {
-      throw new TypeError(`response exceeds ${maximumBytes} bytes`)
+      throw new ResponseTooLargeError(maximumBytes)
     }
     return JSON.parse(text)
   }
@@ -127,7 +211,7 @@ const readBoundedJson = async (
       length += value.byteLength
       if (length > maximumBytes) {
         await reader.cancel()
-        throw new TypeError(`response exceeds ${maximumBytes} bytes`)
+        throw new ResponseTooLargeError(maximumBytes)
       }
       chunks.push(value)
     }
@@ -318,15 +402,37 @@ export class SameOriginProductTransport implements ProductTransport {
     if (!response.ok) {
       throw new ProductTransportError(`Bootstrap request failed with status ${response.status}.`)
     }
-    return validateBootstrapSearchLimits(
-      decodeWebContractBootstrap(
-        await readBoundedJson(
-          response,
-          MAX_BOOTSTRAP_RESPONSE_BYTES,
-          'The bootstrap response stream was interrupted.',
-        ),
-      ),
-    )
+    let payload: unknown
+    try {
+      payload = await readBoundedJson(
+        response,
+        MAX_BOOTSTRAP_RESPONSE_BYTES,
+        'The bootstrap response stream was interrupted.',
+      )
+    } catch (error) {
+      if (error instanceof ProductTransportError) throw error
+      if (error instanceof Error && error.name === 'AbortError') throw error
+      if (error instanceof ResponseTooLargeError) {
+        throw new BootstrapContractError(
+          `bootstrap response exceeds the byte limit: ${error.message}`,
+          { cause: error },
+        )
+      }
+      throw new BootstrapContractError(
+        `bootstrap response violates the web contract: ${describeCause(error)}`,
+        { cause: error },
+      )
+    }
+    let decoded: WebContractBootstrap
+    try {
+      decoded = decodeWebContractBootstrap(payload)
+    } catch (error) {
+      throw new BootstrapContractError(
+        `bootstrap response violates the web contract: ${describeCause(error)}`,
+        { cause: error },
+      )
+    }
+    return validateBootstrapSearchLimits(decoded)
   }
 
   async search(request: ProductSearchRequest, signal?: AbortSignal): Promise<WebSearchPage> {

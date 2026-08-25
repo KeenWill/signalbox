@@ -1,5 +1,6 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import {
   type CommandContext,
@@ -15,6 +16,7 @@ import {
   ScenarioTransport,
   scenarios,
 } from './platform'
+import type { ProductRouteId } from './product'
 import { ScenarioNavigation } from './ScenarioNavigation'
 import { type DiagnosticSnapshot, Diagnostics, OverlaySurfaces, Toolbar } from './Surfaces'
 import {
@@ -50,6 +52,7 @@ function useCommandHotkeys(context: CommandContext) {
 
 export function Workspace({ scenarioId }: { scenarioId: string }) {
   const primaryRef = useRef<HTMLElement>(null)
+  const navigate = useNavigate()
   const knownId = scenarios.some((scenario) => scenario.id === scenarioId)
     ? (scenarioId as ScenarioId)
     : 'streaming'
@@ -88,13 +91,18 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       dispatch,
       getState: store.getState,
       timelineIds,
+      navigate: (path) =>
+        void navigate({
+          to: '/$surface',
+          params: { surface: path.slice(1) as ProductRouteId },
+        }),
       focusTimeline: () => {
         const active = document.activeElement
         if (active instanceof HTMLElement) active.blur()
         document.querySelector<HTMLElement>('[aria-label="Session timeline"]')?.focus()
       },
     }),
-    [dispatch, timelineIds],
+    [dispatch, navigate, timelineIds],
   )
   useCommandHotkeys(commandContext)
 
@@ -110,6 +118,13 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
   useEffect(() => {
     if (timeline !== undefined && fleet !== undefined) primaryRef.current?.focus()
   }, [fleet, timeline])
+
+  useEffect(() => {
+    document.title = `${transport.scenario.title} · Signalbox scenarios`
+    return () => {
+      document.title = 'Signalbox'
+    }
+  }, [transport.scenario.title])
 
   const snapshot = useMemo<DiagnosticSnapshot>(
     () => ({
@@ -186,7 +201,12 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
           <Toolbar context={commandContext} />
         </header>
         <div className="primary-stack">
-          <Transcript key={`timeline-${knownId}`} items={timeline.items} context={commandContext} />
+          <Transcript
+            key={`timeline-${knownId}`}
+            items={timeline.items}
+            context={commandContext}
+            autoFocus
+          />
           {app.layout === 'workbench' && (
             <FleetTable key={`fleet-${knownId}`} rows={fleet.items} totalCount={fleet.totalCount} />
           )}

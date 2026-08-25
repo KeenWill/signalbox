@@ -45,7 +45,12 @@ current-head authentication is additionally verified against the parent slice
 (`agent/scoped-visibility`). The read-scope enforcement and process surface are
 verified against this PR (`agent/scoped-visibility-wiring`).
 Defaults-replacement settings admission and its locked expected-epoch handoff
-are verified against this PR (`agent/model-settings-execution`).
+are verified against this PR (`agent/model-settings-execution`). The
+automatic-reconciliation child outcome — the failed result carrying the
+`ChildResultUnavailable` reason and the exact reconciled child turn that the
+daemon's durable attempt seals for a parent whose delegated call the provider
+can never settle — is verified against this PR
+(`agent/turn-lifecycle-hardening`).
 
 ## Session identity and creation provenance
 
@@ -343,6 +348,29 @@ pins its target and non-secret credential reference at its own model-call
 boundary. The predecessor's prepared or in-flight call retains its existing
 pins, so credential affinity and provider prompt-cache prefixes do not move
 mid-call (INV-046).
+
+**Committed unimplemented functionality — instruction-aware replacement.** Once
+workspace-instruction admission exists, a replacement for a session with a
+nonempty admitted set rejects its proposed model selection unless every target
+the current configuration can select from that direct selection or alias has a
+typed system-instruction transport and capacity for the complete retained
+workspace-instruction region. The replacement checks this before committing the
+successor defaults epoch. What this page requires is the atomicity, not a lock
+recipe: the replacement must resolve every possible target and validate the
+complete retained region under the same serialization it commits the successor
+epoch under, so an admission or activation occurs wholly before or after it and
+cannot invalidate the evidence it checked. Which rows that serialization takes,
+in what order, and in which mode belong to the
+[persistence lock protocol](persistence-protocol.md#lock-protocol), which owns
+that inventory for every transaction and is the only place it is stated.
+Rejection is typed and leaves the current defaults and admitted set unchanged.
+No present replacement path performs this check because no present surface
+admits a bundle. The owning
+[model-selection validation](configuration-and-credentials.md#model-selection-validation)
+also performs the same retained-region check when each later origin is accepted,
+after resolving its alias against the then-current catalog. Replacement-time
+validation therefore does not stand in for acceptance-time validation after an
+alias retarget or daemon restart.
 
 ### Session system prompt
 
@@ -717,17 +745,29 @@ identity, typed owning session/input/turn transcript entry/tool request/tool
 attempt/attachment/derived artifact identity, closed content class, and a
 plain-text snippet with UTF-8 byte highlight ranges. The address is directly
 usable with the timeline `around` read even when the matching region is not
-loaded. An unknown stored source or content class, malformed identity, invalid
-address, or contradictory source shape fails closed.
+loaded. Each returned source is correlated with both its canonical record and
+the exact durable event that supplies its reveal address — an input's acceptance
+event, an assistant entry's terminal call transition, a summary's compaction
+event, a tool item's batch transition, the session's creation event — and a
+transcript-entry source must carry the payload kind its content class asserts.
+An unknown stored source or content class, malformed identity, invalid address,
+mismatched reveal event, or contradictory source shape fails closed, including
+when the offending row is only the unreturned lookahead item fetched to decide a
+continuation.
 
 Requests accept 1 through 100 results and at most 512 UTF-8 query bytes. Each
 returned snippet is at most 512 UTF-8 bytes and carries at most 64 ordered,
 non-overlapping highlight ranges on UTF-8 boundaries. Results have a stable
 strict newest-address-first keyset order by `(event_sequence, projection_id)`;
 the adapter fetches at most one item beyond the requested page to decide whether
-to return a continuation. The GIN full-text index finds matches, while separate
-global and session indexes support the bounded keyset traversal. Search never
-materializes or scans a session transcript in the browser.
+to return a continuation. A bounded per-term GIN probe runs first: a query
+containing a term with no match returns an empty page immediately, a query whose
+rarest term stays under a fixed candidate cap is served from that term's
+index-driven candidate set, and only queries in which every term is common use
+the newest-first keyset traversal, whose page then fills within a bounded
+ordered prefix. Snippets and validity checks are computed for returned rows
+only, never per examined candidate. Search never materializes or scans a session
+transcript in the browser.
 
 ## Semantic transcript entries
 
@@ -1190,7 +1230,13 @@ carry the exact terminal child turn. Returned content is derived only from the
 proof-bearing completed call; independently supplied text cannot authorize a
 result. A completed turn with empty or oversized returned text records the
 distinct `ChildResultUnavailable` reason. Reconciliation-required work is not
-terminal delegation evidence and produces no outcome. **Committed unimplemented
+terminal delegation evidence on its own and produces no outcome while its
+ambiguity stands. Automatic reconciliation is the exception: the daemon's
+durable attempt seals the child as a failed result carrying that same
+`ChildResultUnavailable` reason and the exact reconciled child turn, in the
+transaction that commits the terminal transition, so a parent waiting on a call
+whose provider outcome can never be established is woken by evidence rather than
+left waiting on a turn that has already ended. **Committed unimplemented
 functionality.** Durable terminal-result reconstitution is not exposed by this
 foundation slice; the persistence slice must consume a sealed reconstituted
 ended-call/turn projection rather than accepting parallel raw identities or

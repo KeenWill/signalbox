@@ -1,24 +1,26 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  applyStoredVisualPreferences,
+  BROWSER_PREFERENCES_KEY,
   decodeBrowserPreferences,
   defaultBrowserPreferences,
   loadBrowserPreferences,
-  MAX_KEY_OVERRIDES,
-  MAX_PREFERENCE_RECORD_KEY_BYTES,
-  MAX_PREFERENCE_RECORD_VALUE_BYTES,
-  MAX_PREFERENCE_STORAGE_BYTES,
+  MAX_BROWSER_PREFERENCES_BYTES,
+  MAX_LOGICAL_POSITION_KEY_BYTES,
+  MAX_LOGICAL_POSITION_VALUE_BYTES,
   MAX_SAVED_LOGICAL_POSITIONS,
   saveBrowserPreferences,
+  serializeBrowserPreferences,
 } from './preferences'
 
 const originalLocalStorageDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
 
 const restoreLocalStorageDescriptor = () => {
-  if (originalLocalStorageDescriptor === undefined) {
+  if (originalLocalStorageDescriptor) {
+    Object.defineProperty(globalThis, 'localStorage', originalLocalStorageDescriptor)
+  } else {
     Reflect.deleteProperty(globalThis, 'localStorage')
-    return
   }
-  Object.defineProperty(globalThis, 'localStorage', originalLocalStorageDescriptor)
 }
 
 afterEach(() => {
@@ -26,113 +28,85 @@ afterEach(() => {
   restoreLocalStorageDescriptor()
 })
 
+const oversizedLogicalPositionsFixture = () =>
+  Object.fromEntries(
+    Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS }, (_, index) => [
+      `session-${index}`,
+      '\0'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES),
+    ]),
+  )
+
 describe('browser preferences', () => {
   it('fails closed to defaults for an unrelated stored value', () => {
-    expect(decodeBrowserPreferences('not-an-object')).toEqual(defaultBrowserPreferences)
+    expect(() => decodeBrowserPreferences('not-an-object')).toThrow('preferences must be an object')
   })
 
-  it('clamps pane sizes and rejects unknown closed variants', () => {
+  it('rejects partial and unknown preference schemas atomically', () => {
     const stored = {
       layout: 'dashboard',
       density: 'comfortable',
       paneSizes: { navigation: -50, inspector: 50_000 },
       remoteMedia: 'proxy',
     } as const
-    const decoded = decodeBrowserPreferences(stored)
-
-    expect(decoded.layout).toBe(defaultBrowserPreferences.layout)
-    expect(decoded.density).toBe(stored.density)
-    expect(decoded.paneSizes).toEqual({ navigation: 160, inspector: 480 })
-    expect(decoded.remoteMedia).toBe(defaultBrowserPreferences.remoteMedia)
+    expect(() => decodeBrowserPreferences(stored)).toThrow(
+      'preferences must match the current exact schema',
+    )
   })
 
-  it('bounds retained positions and future key overrides', () => {
+  it('bounds retained logical positions', () => {
     const lastLogicalPositions = Object.fromEntries(
       Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [
         `session-${index}`,
-        `cursor-${index}`,
-      ]),
-    )
-    const keyOverrides = Object.fromEntries(
-      Array.from({ length: MAX_KEY_OVERRIDES + 2 }, (_, index) => [
-        `command-${index}`,
-        `key-${index}`,
+        String(index + 1),
       ]),
     )
 
-    const decoded = decodeBrowserPreferences({ lastLogicalPositions, keyOverrides })
+    const decoded = decodeBrowserPreferences({
+      ...defaultBrowserPreferences,
+      lastLogicalPositions,
+    })
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
-    expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
   })
 
-  it('drops preference records with oversized UTF-8 keys', () => {
-    const oversizedKey = 'é'.repeat(MAX_PREFERENCE_RECORD_KEY_BYTES / 2 + 1)
-
-    const decoded = decodeBrowserPreferences({
-      lastLogicalPositions: { retained: 'cursor', [oversizedKey]: 'cursor' },
+  it('loads defaults atomically when the stored schema is partial', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) =>
+        key === BROWSER_PREFERENCES_KEY ? JSON.stringify({ layout: 'focus' }) : null,
     })
-
-    expect(decoded.lastLogicalPositions).toEqual({ retained: 'cursor' })
-  })
-
-  it('drops preference records with oversized UTF-8 values', () => {
-    const oversizedValue = 'é'.repeat(MAX_PREFERENCE_RECORD_VALUE_BYTES / 2 + 1)
-
-    const decoded = decodeBrowserPreferences({
-      keyOverrides: { retained: 'Shift+K', oversized: oversizedValue },
-    })
-
-    expect(decoded.keyOverrides).toEqual({ retained: 'Shift+K' })
-  })
-
-  it('bounds aggregate bytes retained from preference records', () => {
-    const lastLogicalPositions = Object.fromEntries(
-      Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS }, (_, index) => [
-        `session-${index}`,
-        'x'.repeat(MAX_PREFERENCE_RECORD_VALUE_BYTES),
-      ]),
-    )
-
-    const decoded = decodeBrowserPreferences({ lastLogicalPositions })
-    const retainedBytes = Object.entries(decoded.lastLogicalPositions).reduce(
-      (total, [key, recordValue]) => total + new TextEncoder().encode(key + recordValue).byteLength,
-      0,
-    )
-
-    expect(retainedBytes).toBeLessThanOrEqual(MAX_PREFERENCE_STORAGE_BYTES)
-  })
-
-  it('rejects an oversized stored preference body before parsing', () => {
-    const getItem = vi.fn(() => ' '.repeat(MAX_PREFERENCE_STORAGE_BYTES + 1))
-    vi.stubGlobal('localStorage', { getItem, setItem: vi.fn() })
 
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
-    expect(getItem).toHaveBeenCalledOnce()
   })
 
-  it('bounds preference records before saving them', () => {
+  it('rejects an oversized stored payload before parsing it', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) =>
+        key === BROWSER_PREFERENCES_KEY ? 'x'.repeat(MAX_BROWSER_PREFERENCES_BYTES + 1) : null,
+    })
+
+    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
+  })
+
+  it('does not persist preferences above the serialized byte ceiling', () => {
     const setItem = vi.fn()
-    vi.stubGlobal('localStorage', { getItem: vi.fn(), setItem })
-    const oversizedValue = 'x'.repeat(MAX_PREFERENCE_RECORD_VALUE_BYTES + 1)
-
-    saveBrowserPreferences({
+    vi.stubGlobal('localStorage', { setItem })
+    const oversized = {
       ...defaultBrowserPreferences,
-      keyOverrides: { retained: 'Shift+K', oversized: oversizedValue },
-    })
+      lastLogicalPositions: oversizedLogicalPositionsFixture(),
+    }
 
-    expect(JSON.parse(setItem.mock.calls[0]?.[1] as string).keyOverrides).toEqual({
-      retained: 'Shift+K',
-    })
+    expect(serializeBrowserPreferences(oversized)).toBeNull()
+    saveBrowserPreferences(oversized)
+    expect(setItem).not.toHaveBeenCalled()
   })
 
-  it('falls back when browser storage cannot be read or written', () => {
+  it('treats browser storage access failures as optional', () => {
     vi.stubGlobal('localStorage', {
       getItem: () => {
-        throw new DOMException('blocked')
+        throw new DOMException('blocked', 'SecurityError')
       },
       setItem: () => {
-        throw new DOMException('quota')
+        throw new DOMException('full', 'QuotaExceededError')
       },
     })
 
@@ -140,7 +114,7 @@ describe('browser preferences', () => {
     expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
 
-  it('falls back when resolving the browser storage getter throws', () => {
+  it('guards access to a throwing browser storage getter', () => {
     Object.defineProperty(globalThis, 'localStorage', {
       configurable: true,
       get: () => {
@@ -150,5 +124,101 @@ describe('browser preferences', () => {
 
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
     expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
+  })
+
+  it('rejects logical-position keys and values above their UTF-8 byte ceilings', () => {
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES)]: '7' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { session: 'é'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES) },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+  })
+
+  it('rejects malformed saved logical positions atomically', () => {
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { malformed: 'not-a-position' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { zero: '0' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { overflow: '18446744073709551616' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+  })
+
+  it('accepts logical-position keys exactly at their byte ceiling', () => {
+    const decoded = decodeBrowserPreferences({
+      ...defaultBrowserPreferences,
+      lastLogicalPositions: {
+        ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES / 2)]: '18446744073709551615',
+      },
+    })
+
+    expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(1)
+  })
+
+  it('rejects logical-position keys with unordered plain-object key semantics', () => {
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { 1: '7' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: JSON.parse('{"__proto__":"7"}'),
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+  })
+
+  const stubDocumentDataset = () => {
+    const dataset: Record<string, string> = {}
+    vi.stubGlobal('document', { documentElement: { dataset } })
+    return dataset
+  }
+
+  it('paints the stored theme and density before the application mounts', () => {
+    const stored = { ...defaultBrowserPreferences, theme: 'light', density: 'comfortable' } as const
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => (key === BROWSER_PREFERENCES_KEY ? JSON.stringify(stored) : null),
+      setItem: () => undefined,
+    })
+    const dataset = stubDocumentDataset()
+
+    applyStoredVisualPreferences()
+
+    expect(dataset.theme).toBe('light')
+    expect(dataset.density).toBe('comfortable')
+  })
+
+  it('paints the default presentation when nothing is stored', () => {
+    vi.stubGlobal('localStorage', { getItem: () => null, setItem: () => undefined })
+    const dataset = stubDocumentDataset()
+
+    applyStoredVisualPreferences()
+
+    expect(dataset.theme).toBe(defaultBrowserPreferences.theme)
+    expect(dataset.density).toBe(defaultBrowserPreferences.density)
   })
 })

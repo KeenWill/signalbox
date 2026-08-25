@@ -1,16 +1,12 @@
 import type { DensityMode, DetailMode, LayoutMode, ThemeMode } from './state'
 
-export type RemoteMediaPolicy = 'ask' | 'block' | 'allow'
-
 export interface BrowserPreferences {
   layout: LayoutMode
   density: DensityMode
   detail: DetailMode
   theme: ThemeMode
   paneSizes: { navigation: number; inspector: number }
-  remoteMedia: RemoteMediaPolicy
   lastLogicalPositions: Record<string, string>
-  keyOverrides: Record<string, string>
 }
 
 export const defaultBrowserPreferences: BrowserPreferences = {
@@ -19,126 +15,158 @@ export const defaultBrowserPreferences: BrowserPreferences = {
   detail: 'condensed',
   theme: 'dark',
   paneSizes: { navigation: 218, inspector: 252 },
-  remoteMedia: 'ask',
   lastLogicalPositions: {},
-  keyOverrides: {},
 }
+
+export const createDefaultBrowserPreferences = (): BrowserPreferences => ({
+  ...defaultBrowserPreferences,
+  paneSizes: { ...defaultBrowserPreferences.paneSizes },
+  lastLogicalPositions: {},
+})
 
 export const BROWSER_PREFERENCES_KEY = 'signalbox.web.preferences.v1'
 export const MAX_SAVED_LOGICAL_POSITIONS = 128
-export const MAX_KEY_OVERRIDES = 64
-// Hard safety ceiling: bounds each retained preference-record key and its encoding work.
-export const MAX_PREFERENCE_RECORD_KEY_BYTES = 256
-// Hard safety ceiling: bounds each retained preference-record value and its encoding work.
-export const MAX_PREFERENCE_RECORD_VALUE_BYTES = 4_096
-// Hard safety ceiling: bounds browser-storage reads, JSON parsing, and persisted preference bytes.
-export const MAX_PREFERENCE_STORAGE_BYTES = 65_536
+export const MAX_LOGICAL_POSITION_KEY_BYTES = 512
+export const MAX_LOGICAL_POSITION_VALUE_BYTES = 4_096
+export const MAX_BROWSER_PREFERENCES_BYTES = 1_048_576
 
-const utf8Bytes = (value: string) => new TextEncoder().encode(value).byteLength
-
-const oneOf = <T extends string>(value: unknown, allowed: readonly T[], fallback: T): T =>
-  typeof value === 'string' && allowed.includes(value as T) ? (value as T) : fallback
-
-const boundedNumber = (value: unknown, fallback: number, minimum: number, maximum: number) =>
-  typeof value === 'number' && Number.isFinite(value)
-    ? Math.min(Math.max(Math.round(value), minimum), maximum)
-    : fallback
-
-const boundedRecord = (value: unknown, maximum: number): Record<string, string> => {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
-  const retained: [string, string][] = []
-  let retainedBytes = 0
-  const entries = Object.entries(value)
-  for (let index = entries.length - 1; index >= 0 && retained.length < maximum; index -= 1) {
-    const entry = entries[index]
-    if (entry === undefined || typeof entry[1] !== 'string') continue
-    const keyBytes = utf8Bytes(entry[0])
-    const valueBytes = utf8Bytes(entry[1])
-    if (
-      keyBytes > MAX_PREFERENCE_RECORD_KEY_BYTES ||
-      valueBytes > MAX_PREFERENCE_RECORD_VALUE_BYTES ||
-      retainedBytes + keyBytes + valueBytes > MAX_PREFERENCE_STORAGE_BYTES
-    ) {
-      continue
-    }
-    retained.push([entry[0], entry[1]])
-    retainedBytes += keyBytes + valueBytes
+const isWithinUtf8ByteLimit = (value: string, limit: number): boolean => {
+  let bytes = 0
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0
+    bytes += codePoint <= 0x7f ? 1 : codePoint <= 0x7ff ? 2 : codePoint <= 0xffff ? 3 : 4
+    if (bytes > limit) return false
   }
-  return Object.fromEntries(retained.reverse())
+  return true
+}
+
+const isPositiveDecimalU64 = (value: string): boolean =>
+  /^[1-9]\d{0,19}$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n
+
+export const isBoundedLogicalPosition = (sessionId: string, position: string): boolean =>
+  sessionId !== '__proto__' &&
+  !/^(?:0|[1-9]\d*)$/.test(sessionId) &&
+  isWithinUtf8ByteLimit(sessionId, MAX_LOGICAL_POSITION_KEY_BYTES) &&
+  isWithinUtf8ByteLimit(position, MAX_LOGICAL_POSITION_VALUE_BYTES) &&
+  isPositiveDecimalU64(position)
+
+const exactKeys = (value: Record<string, unknown>, expected: readonly string[]) =>
+  Object.keys(value).length === expected.length &&
+  expected.every((key) => Object.hasOwn(value, key))
+
+const oneOf = <T extends string>(value: unknown, allowed: readonly T[], path: string): T => {
+  if (typeof value !== 'string' || !allowed.includes(value as T)) {
+    throw new TypeError(`${path} must be one of ${allowed.join(', ')}`)
+  }
+  return value as T
+}
+
+const boundedNumber = (value: unknown, minimum: number, maximum: number, path: string) => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new TypeError(`${path} must be a finite number`)
+  }
+  return Math.min(Math.max(Math.round(value), minimum), maximum)
+}
+
+const boundedRecord = (
+  value: unknown,
+  maximum: number,
+  path: string,
+  entryIsValid: (key: string, value: string) => boolean = () => true,
+): Record<string, string> => {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`${path} must be an object`)
+  }
+  const entries = Object.entries(value)
+  if (entries.some(([, entry]) => typeof entry !== 'string')) {
+    throw new TypeError(`${path} values must be strings`)
+  }
+  if (entries.some(([key, entry]) => !entryIsValid(key, entry as string))) {
+    throw new TypeError(`${path} keys or values are out of bounds`)
+  }
+  return Object.fromEntries(entries.slice(-maximum) as [string, string][])
 }
 
 export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => {
-  const candidate =
-    value !== null && typeof value === 'object' && !Array.isArray(value)
-      ? (value as Record<string, unknown>)
-      : {}
-  const panes =
-    candidate.paneSizes !== null && typeof candidate.paneSizes === 'object'
-      ? (candidate.paneSizes as Record<string, unknown>)
-      : {}
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError('preferences must be an object')
+  }
+  const candidate = value as Record<string, unknown>
+  if (
+    !exactKeys(candidate, [
+      'layout',
+      'density',
+      'detail',
+      'theme',
+      'paneSizes',
+      'lastLogicalPositions',
+    ])
+  ) {
+    throw new TypeError('preferences must match the current exact schema')
+  }
+  if (
+    candidate.paneSizes === null ||
+    typeof candidate.paneSizes !== 'object' ||
+    Array.isArray(candidate.paneSizes)
+  ) {
+    throw new TypeError('preferences.paneSizes must be an object')
+  }
+  const panes = candidate.paneSizes as Record<string, unknown>
+  if (!exactKeys(panes, ['navigation', 'inspector'])) {
+    throw new TypeError('preferences.paneSizes must match the current exact schema')
+  }
   return {
-    layout: oneOf(candidate.layout, ['focus', 'workbench'], defaultBrowserPreferences.layout),
-    density: oneOf(
-      candidate.density,
-      ['compact', 'comfortable'],
-      defaultBrowserPreferences.density,
-    ),
-    detail: oneOf(
-      candidate.detail,
-      ['full', 'condensed', 'results'],
-      defaultBrowserPreferences.detail,
-    ),
-    theme: oneOf(candidate.theme, ['light', 'dark'], defaultBrowserPreferences.theme),
+    layout: oneOf(candidate.layout, ['focus', 'workbench'], 'preferences.layout'),
+    density: oneOf(candidate.density, ['compact', 'comfortable'], 'preferences.density'),
+    detail: oneOf(candidate.detail, ['full', 'condensed', 'results'], 'preferences.detail'),
+    theme: oneOf(candidate.theme, ['light', 'dark'], 'preferences.theme'),
     paneSizes: {
-      navigation: boundedNumber(
-        panes.navigation,
-        defaultBrowserPreferences.paneSizes.navigation,
-        160,
-        360,
-      ),
-      inspector: boundedNumber(
-        panes.inspector,
-        defaultBrowserPreferences.paneSizes.inspector,
-        200,
-        480,
-      ),
+      navigation: boundedNumber(panes.navigation, 160, 360, 'preferences.paneSizes.navigation'),
+      inspector: boundedNumber(panes.inspector, 200, 480, 'preferences.paneSizes.inspector'),
     },
-    remoteMedia: oneOf(
-      candidate.remoteMedia,
-      ['ask', 'block', 'allow'],
-      defaultBrowserPreferences.remoteMedia,
-    ),
     lastLogicalPositions: boundedRecord(
       candidate.lastLogicalPositions,
       MAX_SAVED_LOGICAL_POSITIONS,
+      'preferences.lastLogicalPositions',
+      isBoundedLogicalPosition,
     ),
-    keyOverrides: boundedRecord(candidate.keyOverrides, MAX_KEY_OVERRIDES),
   }
 }
 
 export const loadBrowserPreferences = (): BrowserPreferences => {
   try {
-    if (typeof localStorage === 'undefined') return defaultBrowserPreferences
-    const stored = localStorage.getItem(BROWSER_PREFERENCES_KEY)
-    if (stored === null) return defaultBrowserPreferences
-    if (utf8Bytes(stored) > MAX_PREFERENCE_STORAGE_BYTES) return defaultBrowserPreferences
+    const storage = globalThis.localStorage
+    if (storage === undefined) return createDefaultBrowserPreferences()
+    const stored = storage.getItem(BROWSER_PREFERENCES_KEY)
+    if (stored === null) return createDefaultBrowserPreferences()
+    if (!isWithinUtf8ByteLimit(stored, MAX_BROWSER_PREFERENCES_BYTES)) {
+      return createDefaultBrowserPreferences()
+    }
     return decodeBrowserPreferences(JSON.parse(stored))
   } catch {
-    return defaultBrowserPreferences
+    return createDefaultBrowserPreferences()
   }
+}
+
+export const serializeBrowserPreferences = (preferences: BrowserPreferences): string | null => {
+  const serialized = JSON.stringify(preferences)
+  return isWithinUtf8ByteLimit(serialized, MAX_BROWSER_PREFERENCES_BYTES) ? serialized : null
 }
 
 export const saveBrowserPreferences = (preferences: BrowserPreferences): void => {
   try {
-    if (typeof localStorage === 'undefined') return
-    const stored = JSON.stringify(decodeBrowserPreferences(preferences))
-    if (utf8Bytes(stored) > MAX_PREFERENCE_STORAGE_BYTES) return
-    localStorage.setItem(BROWSER_PREFERENCES_KEY, stored)
+    const storage = globalThis.localStorage
+    if (storage === undefined) return
+    const serialized = serializeBrowserPreferences(preferences)
+    if (serialized === null) return
+    storage.setItem(BROWSER_PREFERENCES_KEY, serialized)
   } catch {
-    // The in-memory store remains authoritative when persistence is unavailable.
+    // Browser persistence is optional; the active Redux state remains authoritative.
   }
 }
 
+// Applied from a render-blocking module so the stored theme and density paint on the first frame
+// instead of flashing the defaults until React mounts.
 export const applyStoredVisualPreferences = (): void => {
   const preferences = loadBrowserPreferences()
   document.documentElement.dataset.theme = preferences.theme
