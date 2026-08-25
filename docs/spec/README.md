@@ -65,6 +65,7 @@ owned by a sibling page is linked, never restated.
 - [Process protocol](process-protocol.md)
 - [Repository watch and event dispatch](repo-watch.md)
 - [Pull-request convergence reconciliation](convergence-reconciliation.md)
+- [Workspace instructions and skills](workspace-instructions.md)
 - [Program substrate](program-substrate.md)
 - [Evaluation system](eval-system.md)
 

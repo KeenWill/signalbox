@@ -55,7 +55,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-nine identities defined in `lib.rs`:
+The thirty identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -67,6 +67,7 @@ pub struct AcceptedInputId(/* private */);
 pub struct TurnId(/* private */);
 pub struct TurnAttemptId(/* private */);
 pub struct ModelCallId(/* private */);
+pub struct BlobDerivationId(/* private */);
 pub struct ProviderTargetEvidenceId(/* private */);
 pub struct ToolRequestId(/* private */);
 pub struct ToolAttemptId(/* private */);
@@ -125,6 +126,65 @@ pub enum BlobDigestParseFailure {
 pub struct BlobDigestParseError { /* private */ }
 impl BlobDigestParseError {
     // accessors: rejected(), failure()
+}
+
+pub struct BlobTransformationName(/* private */);
+impl BlobTransformationName {
+    pub fn try_new(value: impl Into<Arc<str>>) -> Result<Self, BlobTransformationError>;
+    // accessor: as_str()
+}
+
+pub struct BlobTransformation { /* private */ }
+impl BlobTransformation {
+    pub fn try_new(
+        name: BlobTransformationName,
+        version: u32,
+        parameters: &serde_json::Value,
+    ) -> Result<Self, BlobTransformationError>;
+    // accessors: name(), version(), parameters_json()
+}
+
+pub enum BlobTransformationError {
+    InvalidName,
+    ZeroVersion,
+    InvalidParameters,
+    ParametersTooLarge,
+}
+
+pub enum BlobDerivationProducer {
+    Deterministic { implementation: BlobDigest },
+    Executed { execution_id: uuid::Uuid, implementation: BlobDigest },
+    ModelDerived { model_call: ModelCallId },
+}
+
+pub struct DeterministicBlobDerivationKey(/* private BlobDigest */);
+impl DeterministicBlobDerivationKey {
+    pub fn try_derive(
+        inputs: &[BlobDigest],
+        transformation: &BlobTransformation,
+        implementation: BlobDigest,
+    ) -> Result<Self, BlobDerivationError>;
+    // accessor: digest()
+}
+
+pub struct BlobDerivation { /* private */ }
+impl BlobDerivation {
+    pub fn try_new(
+        id: BlobDerivationId,
+        inputs: impl Into<Box<[BlobDigest]>>,
+        transformation: BlobTransformation,
+        producer: BlobDerivationProducer,
+        outputs: impl Into<Box<[BlobDigest]>>,
+    ) -> Result<Self, BlobDerivationError>;
+    // accessors: id(), inputs(), transformation(), producer(), outputs(),
+    // deterministic_key()
+}
+
+pub enum BlobDerivationError {
+    EmptyInputs,
+    TooManyInputs,
+    EmptyOutputs,
+    TooManyOutputs,
 }
 ```
 
@@ -583,9 +643,13 @@ impl ImportedTranscriptEntry {
 }
 
 pub struct ImportedTranscriptFrontier { /* private */ }
-// sealed: ImportedConversation frontier methods
 // Copy; equality is the exact imported-conversation boundary.
 impl ImportedTranscriptFrontier {
+    pub const fn from_parts(
+        conversation: ImportedConversationId,
+        through_entry: ImportedTranscriptEntryId,
+        through_position: ImportedTranscriptPosition,
+    ) -> Self;
     // accessors: conversation(), through_entry(), through_position()
 }
 
@@ -5888,6 +5952,225 @@ impl WorkspaceRecord {
 }
 ```
 
+## application: attention
+
+```rust
+pub const fn max_attention_snapshot_items() -> u16;
+pub const fn max_attention_goal_summary_characters() -> u16;
+pub const fn max_attention_change_items() -> u16;
+
+pub struct AttentionCursor(/* private */);
+impl AttentionCursor {
+    pub const fn new(value: u64) -> Self;
+    pub const fn value(self) -> u64;
+}
+
+pub enum AttentionState {
+    Active,
+    Queued,
+    Blocked,
+    AwaitingApproval,
+    Ambiguous,
+    AwaitingToolRecovery,
+    AwaitingReconciliation,
+    RunnerLost,
+    Idle,
+}
+
+pub enum AttentionAction {
+    ProvideGoalNeed,
+    DecideApproval,
+    ReconcileTurn,
+}
+
+pub enum AttentionBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+
+pub struct AttentionGoalBlock {
+    pub generation: u64,
+    pub reason: AttentionBlockedReason,
+    pub need_summary: String,
+}
+
+pub struct AttentionJudgeFacts {
+    pub actionable: u64,
+    pub completed: u64,
+    pub escalated: u64,
+    pub failed: u64,
+}
+
+pub struct AttentionActivity {
+    pub recorded_at: SystemTime,
+    pub kind: AttentionActivityKind,
+}
+
+pub enum AttentionActivityKind {
+    Session,
+    Turn,
+    Goal,
+    ApprovalJudge,
+    Runner,
+}
+
+pub struct AttentionSummary {
+    pub session: SessionId,
+    pub current_turn: Option<TurnId>,
+    pub state: AttentionState,
+    pub action: Option<AttentionAction>,
+    pub goal_block: Option<AttentionGoalBlock>,
+    pub judge: AttentionJudgeFacts,
+    pub last_activity: AttentionActivity,
+}
+
+pub struct AttentionSnapshot {
+    pub cursor: AttentionCursor,
+    pub summaries: Vec<AttentionSummary>,
+    pub continuation_after: Option<SessionId>,
+}
+
+pub enum AttentionChanges {
+    Updated {
+        cursor: AttentionCursor,
+        summaries: Vec<AttentionSummary>,
+    },
+    ResyncRequired { cursor: AttentionCursor },
+}
+
+pub trait AttentionReader {
+    type Error;
+    fn snapshot(
+        &self,
+        after: Option<SessionId>,
+    ) -> impl Future<Output = Result<AttentionSnapshot, Self::Error>> + Send;
+    fn changes_after(
+        &self,
+        cursor: AttentionCursor,
+    ) -> impl Future<Output = Result<AttentionChanges, Self::Error>> + Send;
+}
+```
+
+## domain: workspace_instruction
+
+```rust
+pub struct InstructionDiscoveryId(Uuid);
+pub struct InstructionBundleId(Uuid);
+pub struct TurnInstructionManifestId(Uuid);
+
+pub struct InstructionDigest([u8; 32]);
+impl InstructionDigest {
+    pub fn sha256(bytes: &[u8]) -> Self;
+    pub fn source_content(bytes: &[u8]) -> Self;
+    pub fn empty_admitted_set() -> Self;
+    pub const fn from_sha256(bytes: [u8; 32]) -> Self;
+    pub const fn as_bytes(&self) -> &[u8; 32];
+}
+
+pub struct InstructionPath { /* private */ }
+impl InstructionPath {
+    pub fn try_new(value: String) -> Result<Self, InstructionPathError>;
+    pub fn as_str(&self) -> &str;
+}
+pub struct InstructionSourcePathInterner { /* private */ }
+impl InstructionSourcePathInterner {
+    pub const fn new() -> Self;
+    pub fn root_prefix(root_path: InstructionPath) -> InstructionSourcePathPrefix;
+    pub fn append_prefix(
+        &mut self,
+        prefix: &InstructionSourcePathPrefix,
+        component: &str,
+    ) -> Result<InstructionSourcePathPrefix, InstructionPathError>;
+}
+pub struct InstructionSourcePathPrefix { /* private */ }
+pub struct InstructionSourcePath { /* private */ }
+impl InstructionSourcePath {
+    pub fn try_new(
+        root_path: InstructionPath,
+        value: String,
+    ) -> Result<Self, InstructionPathError>;
+    pub fn try_new_under(
+        interner: &mut InstructionSourcePathInterner,
+        directory: &InstructionSourcePathPrefix,
+        source_name: &str,
+    ) -> Result<Self, InstructionPathError>;
+    pub fn try_new_in(
+        interner: &mut InstructionSourcePathInterner,
+        root_path: InstructionPath,
+        value: String,
+    ) -> Result<Self, InstructionPathError>;
+    pub fn absolute_path(&self) -> String;
+    pub fn relative_path(&self) -> String;
+}
+pub enum InstructionPathError {
+    Empty,
+    ContainsNull,
+    TooLong,
+    NotAbsolute,
+    NotCanonical,
+}
+pub enum InstructionDiscoveryRootKind { Workspace, Configured }
+pub enum InstructionBundleKind { AgentDocument, AgentSkill }
+
+pub struct InstructionSkillMetadataInput {
+    pub name: String,
+    pub description: String,
+    pub parent_directory: String,
+}
+pub struct InstructionSkillMetadata { /* private */ }
+impl InstructionSkillMetadata {
+    pub fn try_new(
+        input: InstructionSkillMetadataInput,
+    ) -> Result<Self, InstructionSkillMetadataError>;
+    // accessors: name(), description()
+}
+pub enum InstructionSkillMetadataError {
+    InvalidName,
+    InvalidDescription,
+    ParentMismatch,
+}
+
+pub struct InstructionBundleRegistrationInput {
+    pub kind: InstructionBundleKind,
+    pub root_kind: InstructionDiscoveryRootKind,
+    pub root_path: InstructionPath,
+    pub source_path: InstructionSourcePath,
+    pub source_bytes: u64,
+    pub source_hash: InstructionDigest,
+    pub skill: Option<InstructionSkillMetadata>,
+}
+pub struct InstructionBundleRegistration { /* private */ }
+impl InstructionBundleRegistration {
+    pub fn new(input: InstructionBundleRegistrationInput) -> Option<Self>;
+    // accessors: kind(), root_kind(), root_path(), source_path(),
+    // relative_source_path(), agent_document_scope(), source_bytes(), source_hash(), skill()
+}
+
+pub struct EmptyTurnInstructionManifestEvidence {
+    pub eligibility_hash: InstructionDigest,
+    pub admitted_set_hash: InstructionDigest,
+    pub manifest_hash: InstructionDigest,
+}
+pub struct TurnInstructionManifest { /* private */ }
+impl TurnInstructionManifest {
+    pub fn empty_turn_start(
+        id: TurnInstructionManifestId,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Self;
+    pub fn reconstitute_empty_turn_start(
+        id: TurnInstructionManifestId,
+        session: SessionId,
+        turn: TurnId,
+        evidence: EmptyTurnInstructionManifestEvidence,
+    ) -> Option<Self>;
+    // accessors: id(), session(), turn(), eligibility_hash(), admitted_set_hash(),
+    // manifest_hash()
+}
+```
+
 ## application: approval_judge
 
 ```rust
@@ -5951,6 +6234,80 @@ pub trait ApprovalJudgeAuthorization {
     fn selection(&self) -> DirectModelSelection;
     fn target(&self) -> ResolvedProviderTarget;
     fn credential_reference(&self) -> &str;
+}
+```
+
+## application: blob_derivation
+
+```rust
+pub trait BlobDerivationIdGenerator {
+    fn next_blob_derivation_id(&mut self) -> BlobDerivationId;
+}
+
+pub struct UuidV7BlobDerivationIdGenerator;
+
+pub trait BlobDerivationStore {
+    type Error;
+    fn find_deterministic(
+        &self,
+        key: DeterministicBlobDerivationKey,
+    ) -> impl Future<Output = Result<Option<BlobDerivation>, Self::Error>> + Send;
+    fn record_deterministic(
+        &self,
+        key: DeterministicBlobDerivationKey,
+        derivation: BlobDerivation,
+    ) -> impl Future<Output = Result<BlobDerivationRecordOutcome, Self::Error>> + Send;
+}
+
+pub enum BlobDerivationRecordOutcome {
+    Recorded(BlobDerivation),
+    Existing(BlobDerivation),
+}
+
+pub trait DeterministicBlobProducer {
+    type Error;
+    fn produce(
+        &mut self,
+        inputs: &[BlobDigest],
+        transformation: &BlobTransformation,
+    ) -> impl Future<Output = Result<Box<[BlobDigest]>, Self::Error>> + Send;
+    fn outputs_retrievable(
+        &mut self,
+        outputs: &[BlobDigest],
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+}
+
+pub struct DeterministicBlobDerivationRequest { /* private */ }
+impl DeterministicBlobDerivationRequest {
+    pub fn try_new(
+        inputs: impl Into<Box<[BlobDigest]>>,
+        transformation: BlobTransformation,
+        implementation: BlobDigest,
+    ) -> Result<Self, BlobDerivationError>;
+    // accessors: inputs(), transformation(), implementation(), key()
+}
+
+pub enum BlobDerivationServiceOutcome {
+    Reused(BlobDerivation),
+    Produced(BlobDerivation),
+}
+
+pub enum BlobDerivationServiceError<StoreError, ProducerError> {
+    Store(StoreError),
+    Producer(ProducerError),
+    InvalidProducerOutput(BlobDerivationError),
+}
+
+pub struct DeterministicBlobDerivationService<Ids, Store, Producer> { /* private */ }
+impl<Ids, Store, Producer> DeterministicBlobDerivationService<Ids, Store, Producer> {
+    pub const fn new(ids: Ids, store: Store, producer: Producer) -> Self;
+    pub async fn execute(
+        &mut self,
+        request: DeterministicBlobDerivationRequest,
+    ) -> Result<
+        BlobDerivationServiceOutcome,
+        BlobDerivationServiceError<Store::Error, Producer::Error>,
+    >;
 }
 ```
 
@@ -7975,6 +8332,21 @@ impl RepoWatchConvergenceAssessment {
 
 pub struct RepoWatchConvergenceAssessmentError;
 
+pub struct RepoWatchStaleReviewClearanceCandidate { /* private */ }
+impl RepoWatchStaleReviewClearanceCandidate {
+    pub fn review_node_id_is_valid(value: &str) -> bool;
+    pub fn try_new(
+        assessment: &RepoWatchConvergenceAssessment,
+        review_node_id: String,
+        reviewer: RepoWatchAuthorLogin,
+        reviewed_head_sha: CommitSha,
+    ) -> Result<Self, RepoWatchStaleReviewClearanceCandidateError>;
+    // accessors: number(), current_head_sha(), review_node_id(), reviewer(),
+    // reviewed_head_sha()
+}
+
+pub struct RepoWatchStaleReviewClearanceCandidateError;
+
 pub enum RepoWatchThreadState {
     Open,
     Resolved,
@@ -9022,6 +9394,42 @@ impl<Lister: SessionMetadataLister> ListSessionMetadataService<Lister> {
         query: SessionMetadataListQuery,
     ) -> Result<Lister::Page, Lister::Error>;
 }
+```
+
+## application: workspace_instructions
+
+```rust
+pub struct InstructionDiscoveryRoot { /* private */ }
+impl InstructionDiscoveryRoot {
+    pub const fn new(kind: InstructionDiscoveryRootKind, path: InstructionPath) -> Self;
+    // accessors: kind(), path()
+}
+pub enum InstructionDiscoveryFindingKind {
+    RootUnavailable,
+    EntryUnreadable,
+    NonUtf8SourcePath,
+    NonUtf8Source,
+    InvalidSkill,
+    LimitReached(InstructionDiscoveryLimitKind),
+}
+pub enum InstructionDiscoveryLimitKind {
+    ClassifiedEntries,
+    Findings,
+    CandidateSourceBytes,
+    ElapsedTime,
+}
+pub struct InstructionDiscoveryFinding { /* private */ }
+impl InstructionDiscoveryFinding {
+    // accessors: path(), kind()
+}
+pub struct InstructionDiscoverySnapshot { /* private */ }
+impl InstructionDiscoverySnapshot {
+    // accessors: roots(), bundles(), findings(), limit_set_version(),
+    // classified_entries(), candidate_source_bytes(), elapsed_millis(), is_complete()
+}
+pub fn discover_workspace_instructions(
+    roots: Vec<InstructionDiscoveryRoot>,
+) -> InstructionDiscoverySnapshot;
 ```
 
 ## application: operator_failure
@@ -11852,9 +12260,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types                     |
 | -------------------------------------------------- | -------------------------------- |
-| domain: lib.rs identities                          | 29                               |
+| domain: lib.rs identities                          | 30                               |
 | domain: actor                                      | 1                                |
-| domain: blob                                       | 3                                |
+| domain: blob                                       | 10                               |
 | domain: program_journal                            | 25                               |
 | domain: imported_conversation                      | 32 (+5 free fn)                  |
 | domain: session_template                           | 6                                |
@@ -11892,8 +12300,11 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: session_metadata                           | 15                               |
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
-| **signalbox-domain total**                         | **815 (+12 free fn)**            |
+| domain: workspace_instruction                      | 18                               |
+| **signalbox-domain total**                         | **841 (+12 free fn)**            |
+| application: attention                             | 12 (+3 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
+| application: blob_derivation                       | 9 (incl. 3 traits)               |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
 | application: create_session                        | 8 (incl. 2 traits)               |
@@ -11910,7 +12321,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
 | application: convergence_reconciliation            | 6 (+1 free fn)                   |
-| application: repo_watch                            | 43 (+2 free fn) (incl. 4 traits) |
+| application: repo_watch                            | 45 (+2 free fn) (incl. 4 traits) |
 | application: repo_watch_webhook                    | 18 (+2 free fn)                  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
@@ -11923,4 +12334,5 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 13                               |
-| **signalbox-application total**                    | **392 (+18 free fn)**            |
+| application: workspace_instructions                | 5 (+1 free fn)                   |
+| **signalbox-application total**                    | **420 (+22 free fn)**            |

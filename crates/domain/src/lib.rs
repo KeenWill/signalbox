@@ -45,6 +45,7 @@ mod turn_eligibility;
 mod turn_lifecycle;
 mod user_content;
 mod workspace;
+mod workspace_instruction;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
@@ -52,7 +53,11 @@ pub use accepted_input::{
 };
 pub use actor::Actor;
 pub use applied_interrupt::{AppliedInterruptCommandResult, AppliedInterruptProof};
-pub use blob::{BlobDigest, BlobDigestParseError, BlobDigestParseFailure};
+pub use blob::{
+    BlobDerivation, BlobDerivationError, BlobDerivationProducer, BlobDigest, BlobDigestParseError,
+    BlobDigestParseFailure, BlobTransformation, BlobTransformationError, BlobTransformationName,
+    DeterministicBlobDerivationKey,
+};
 pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
@@ -393,6 +398,14 @@ pub use user_content::{
     NonEmptyUnicodeText, NonEmptyUnicodeTextError, NonEmptyUnicodeTextFailure, UserContent,
 };
 pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
+pub use workspace_instruction::{
+    EmptyTurnInstructionManifestEvidence, InstructionBundleId, InstructionBundleKind,
+    InstructionBundleRegistration, InstructionBundleRegistrationInput, InstructionDigest,
+    InstructionDiscoveryId, InstructionDiscoveryRootKind, InstructionPath, InstructionPathError,
+    InstructionSkillMetadata, InstructionSkillMetadataError, InstructionSkillMetadataInput,
+    InstructionSourcePath, InstructionSourcePathInterner, InstructionSourcePathPrefix,
+    TurnInstructionManifest, TurnInstructionManifestId,
+};
 
 macro_rules! define_identity {
     ($(#[$documentation:meta])* $name:ident) => {
@@ -426,6 +439,11 @@ define_identity!(
     ///
     /// This identity does not prove that the command was applied.
     DurableCommandId
+);
+
+define_identity!(
+    /// Identifies one immutable blob-to-blob derivation fact.
+    BlobDerivationId
 );
 
 define_identity!(

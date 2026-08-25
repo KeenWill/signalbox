@@ -350,6 +350,29 @@ boundary. The predecessor's prepared or in-flight call retains its existing
 pins, so credential affinity and provider prompt-cache prefixes do not move
 mid-call (INV-046).
 
+**Committed unimplemented functionality — instruction-aware replacement.** Once
+workspace-instruction admission exists, a replacement for a session with a
+nonempty admitted set rejects its proposed model selection unless every target
+the current configuration can select from that direct selection or alias has a
+typed system-instruction transport and capacity for the complete retained
+workspace-instruction region. The replacement checks this before committing the
+successor defaults epoch. What this page requires is the atomicity, not a lock
+recipe: the replacement must resolve every possible target and validate the
+complete retained region under the same serialization it commits the successor
+epoch under, so an admission or activation occurs wholly before or after it and
+cannot invalidate the evidence it checked. Which rows that serialization takes,
+in what order, and in which mode belong to the
+[persistence lock protocol](persistence-protocol.md#lock-protocol), which owns
+that inventory for every transaction and is the only place it is stated.
+Rejection is typed and leaves the current defaults and admitted set unchanged.
+No present replacement path performs this check because no present surface
+admits a bundle. The owning
+[model-selection validation](configuration-and-credentials.md#model-selection-validation)
+also performs the same retained-region check when each later origin is accepted,
+after resolving its alias against the then-current catalog. Replacement-time
+validation therefore does not stand in for acceptance-time validation after an
+alias retarget or daemon restart.
+
 ### Session system prompt
 
 A present session system prompt (`SessionSystemPrompt`) is nonempty exact

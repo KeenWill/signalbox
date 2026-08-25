@@ -21,6 +21,14 @@ use crate::mapping::{
     search_projection_source_kind_to_str,
 };
 
+/// Pins the bounded probe and the page it selects to one snapshot.
+///
+/// The probe decides between the seeded and the traversal page by counting a
+/// term's matches; that count only bounds the seeded candidate relation for
+/// the snapshot it observed, so both statements run inside one repeatable-read
+/// read-only transaction.
+const REPEATABLE_READ_ONLY: &str = "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY";
+
 #[cfg(test)]
 const HEADLINE_START: &str = "\u{e000}";
 #[cfg(test)]
@@ -460,15 +468,25 @@ impl SearchRepository {
             .transpose()
             .map_err(|_| SearchProjectionCorruption::Invalid("cursor projection"))?;
         let fetch_limit = i64::from(query.limit.get()) + 1;
+        // The probe's match count only bounds the seeded candidate set for the
+        // snapshot it observed. Running the probe and the page it selects on
+        // one repeatable-read snapshot keeps that guarantee: a bulk
+        // publication committed between the two statements cannot widen the
+        // unbounded `rare_candidates` relation the probe admitted.
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query(REPEATABLE_READ_ONLY)
+            .execute(&mut *transaction)
+            .await?;
         let probe = sqlx::query(TERM_PROBE_SQL)
             .bind(query.text.as_str())
             .bind(RARE_TERM_CANDIDATE_CAP)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *transaction)
             .await?;
         // No lexeme at all, or a term with zero matches: the conjunction is
         // empty, and running the ordered page query would traverse the whole
         // corpus without ever filling its limit.
         let Some(probe) = probe else {
+            transaction.rollback().await?;
             return Ok(SearchPage {
                 results: Vec::new(),
                 next: None,
@@ -477,6 +495,7 @@ impl SearchRepository {
         let rarest_lexeme: String = probe.try_get("lexeme")?;
         let bounded_count: i64 = probe.try_get("bounded_count")?;
         if bounded_count == 0 {
+            transaction.rollback().await?;
             return Ok(SearchPage {
                 results: Vec::new(),
                 next: None,
@@ -498,7 +517,8 @@ impl SearchRepository {
                 .bind(cursor_projection)
                 .bind(fetch_limit)
         };
-        let rows = page_query.fetch_all(&self.pool).await?;
+        let rows = page_query.fetch_all(&mut *transaction).await?;
+        transaction.rollback().await?;
         decode_page(rows, usize::from(query.limit.get()))
     }
 

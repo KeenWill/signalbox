@@ -1,0 +1,53 @@
+[package]
+name = "signalbox-file-media-processor-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[features]
+test-worker = []
+
+[[bin]]
+name = "signalbox-file-media-synthetic-worker"
+path = "src/bin/signalbox-file-media-synthetic-worker.rs"
+required-features = ["test-worker"]
+
+[[test]]
+name = "isolation"
+path = "tests/isolation.rs"
+required-features = ["test-worker"]
+
+[dependencies]
+base64 = "0.23.0"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = { version = "1.0.140", features = ["unbounded_depth"] }
+sha2 = "0.11.0"
+signalbox-file-media-runtime = { path = "../file-media-runtime" }
+tokio = { version = "1.53.0", default-features = false, features = [
+    "io-std",
+    "io-util",
+    "macros",
+    "process",
+    "rt",
+    "sync",
+    "time",
+] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.186"
+rustix = { version = "1.1.4", default-features = false, features = [
+    "fs",
+    "pipe",
+    "process",
+    "std",
+] }
+signalbox-file-media-linux-sandbox = { path = "../file-media-linux-sandbox" }
+
+[lints]
+workspace = true

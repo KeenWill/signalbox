@@ -65,8 +65,10 @@ use signalboxd::{
     ProcessRuntimeError, PrometheusServer, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
     SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
     SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime,
+    TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime, WebBlobRuntime,
+    WorkspaceInstructionRuntime,
     model_adapter::ConfiguredModelRuntime,
+    run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
         WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError,
@@ -1336,6 +1338,9 @@ async fn run_hub(
             erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
         })?;
     let pool = database.pool().clone();
+    let image_derivative_supervisor = daemon_tool_configuration
+        .as_ref()
+        .map(|configuration| configuration.exec_supervisor_executable().to_path_buf());
     let tools = match daemon_tool_configuration {
         Some(tool_configuration) => DaemonTools::try_new_production(
             SystemCurrentTimeClock,
@@ -1363,8 +1368,8 @@ async fn run_hub(
             model_configuration.web_fetch_egress_policy(),
         ),
     };
-    let (tool_catalog, tool_executor) = match tools {
-        Ok(tools) => tools.into_parts(),
+    let tools = match tools {
+        Ok(tools) => tools,
         Err(error) => {
             let failure = erase_startup_cause(
                 RuntimePhase::Configuration,
@@ -1374,6 +1379,15 @@ async fn run_hub(
             return Err(failure);
         }
     };
+    let workspace_instruction_runtime = WorkspaceInstructionRuntime::new(
+        pool.clone(),
+        tools.workspace_instruction_root_resolver(),
+        model_configuration
+            .workspace_instructions()
+            .roots()
+            .to_vec(),
+    );
+    let (tool_catalog, tool_executor) = tools.into_parts();
 
     let tool_catalog =
         match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
@@ -1602,15 +1616,13 @@ async fn run_hub(
             return Err(failure);
         }
     };
-    let web_http_runtime =
-        match WebHttpRuntime::bind(web_configuration, pool.clone(), model_configuration.clone())
-            .await
-        {
-            Ok(runtime) => runtime,
-            Err(_) => {
+    let snapshot_reader_budget =
+        match signalboxd::shared_snapshot_reader_budget(pool.options().get_max_connections()) {
+            Some(budget) => budget,
+            None => {
                 let failure = erase_startup_cause(
-                    RuntimePhase::SocketBinding,
-                    SanitizedStartupCause::Static("web_http_listener_bind_failed"),
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("insufficient_snapshot_reader_pool_capacity"),
                 );
                 let _ = listener.cleanup();
                 let _ = runner_listener.cleanup();
@@ -1620,6 +1632,71 @@ async fn run_hub(
                 return Err(failure);
             }
         };
+    let web_blob_runtime = match blob_store_registry.as_ref() {
+        Some(registry) => {
+            let worker_program = match std::env::current_exe() {
+                Ok(path) => path,
+                Err(_) => {
+                    let failure = erase_startup_cause(
+                        RuntimePhase::Configuration,
+                        SanitizedStartupCause::Static("web_blob_worker_path_failed"),
+                    );
+                    let _ = listener.cleanup();
+                    let _ = runner_listener.cleanup();
+                    disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
+                        .await;
+                    drop(blob_store_registry);
+                    let _ = database.close().await;
+                    return Err(failure);
+                }
+            };
+            match WebBlobRuntime::new(
+                pool.clone(),
+                registry.clone(),
+                image_derivative_supervisor,
+                worker_program,
+            ) {
+                Ok(runtime) => Some(runtime),
+                Err(_) => {
+                    let failure = erase_startup_cause(
+                        RuntimePhase::Configuration,
+                        SanitizedStartupCause::Static("web_blob_runtime_construction_failed"),
+                    );
+                    let _ = listener.cleanup();
+                    let _ = runner_listener.cleanup();
+                    disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
+                        .await;
+                    drop(blob_store_registry);
+                    let _ = database.close().await;
+                    return Err(failure);
+                }
+            }
+        }
+        None => None,
+    };
+    let web_http_runtime = match WebHttpRuntime::bind_with_snapshot_reader_budget(
+        web_configuration,
+        pool.clone(),
+        web_blob_runtime,
+        model_configuration.clone(),
+        Arc::clone(&snapshot_reader_budget),
+    )
+    .await
+    {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::SocketBinding,
+                SanitizedStartupCause::Static("web_http_listener_bind_failed"),
+            );
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+    };
     tracing::info!(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
@@ -1789,7 +1866,8 @@ async fn run_hub(
         model_configuration.clone(),
         template_configuration,
     )
-    .with_context_compaction_model(Arc::clone(&context_compaction_model));
+    .with_context_compaction_model(Arc::clone(&context_compaction_model))
+    .with_snapshot_reader_budget(snapshot_reader_budget);
     let process_runtime = match prometheus_runtime.as_ref() {
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
         None => process_runtime,
@@ -1814,6 +1892,7 @@ async fn run_hub(
             UsageLimitedModelCallProvider::new(provider, &model_configuration),
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
+        .with_workspace_instructions(workspace_instruction_runtime)
         .with_approval_judge(
             approval_judge_model,
             model_configuration.configured_approval_judge_selection(),
@@ -2190,6 +2269,9 @@ fn install_tracing_subscriber(
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if let Some(exit_code) = run_web_image_derivative_worker_if_requested() {
+        return exit_code;
+    }
     let telemetry_configuration = match TelemetryConfiguration::from_environment() {
         Ok(configuration) => configuration,
         Err(error) => {
