@@ -59,7 +59,7 @@ describe('browser preferences', () => {
     const lastLogicalPositions = Object.fromEntries(
       Array.from({ length: MAX_SAVED_LOGICAL_POSITIONS + 3 }, (_, index) => [
         `session-${index}`,
-        `cursor-${index}`,
+        String(index + 1),
       ]),
     )
 
@@ -131,7 +131,6 @@ describe('browser preferences', () => {
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
     expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
-
   it('guards access to a throwing browser storage getter', () => {
     Object.defineProperty(globalThis, 'localStorage', {
       configurable: true,
@@ -160,17 +159,45 @@ describe('browser preferences', () => {
     ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
   })
 
-  it('accepts UTF-8 logical positions exactly at their byte ceilings', () => {
+  it('accepts canonical logical positions with keys at their UTF-8 byte ceiling', () => {
     const decoded = decodeBrowserPreferences({
       ...defaultBrowserPreferences,
       lastLogicalPositions: {
-        ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES / 2)]: '😀'.repeat(
-          MAX_LOGICAL_POSITION_VALUE_BYTES / 4,
-        ),
+        ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES / 2)]: '18446744073709551615',
       },
     })
 
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(1)
+  })
+
+  it('rejects noncanonical and out-of-range persisted logical positions', () => {
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { session: 'cursor' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { session: '0' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { session: '01' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { session: '18446744073709551616' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
   })
 
   it('rejects key-override keys and values above their UTF-8 byte ceilings', () => {

@@ -6,9 +6,22 @@ export interface CommandContext {
   dispatch: AppDispatch
   getState: () => RootState
   timelineIds: readonly string[]
+  timelineWindowAvailable?: boolean
   focusTimeline: () => void
+  loadTimelineWindow?: (anchor: 'first' | 'latest') => void
   navigate?: (path: string) => void
   navigateScenario?: () => void
+  sessionCatalogAvailable?: boolean
+  sessionWorkspaceAvailable?: boolean
+  focusSessionSearch?: () => void
+  applySessionSearch?: () => void
+  loadMoreSessions?: () => void
+  loadMoreSessionsAvailable?: boolean
+  toggleSessionSort?: () => void
+  selectSession?: (offset: -1 | 1) => void
+  switchSession?: (offset: -1 | 1) => void
+  openSelectedSession?: () => void
+  preferencePaneSizes?: RootState['app']['paneSizes']
 }
 
 export interface CommandBinding {
@@ -31,7 +44,6 @@ interface CommandDefinitionShape {
 const always = () => true
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
 const scenarioNavigation = (context: CommandContext) => context.navigateScenario !== undefined
-const scenarioTimeline = (context: CommandContext) => context.timelineIds.length > 0
 export const commandRegistry = [
   {
     id: 'navigate.attention',
@@ -138,7 +150,7 @@ export const commandRegistry = [
     description: 'Review modal navigation and command bindings.',
     category: 'Surface',
     bindings: [{ label: '?', registration: { kind: 'hotkey', hotkey: { key: '/', shift: true } } }],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.overlaySet('help')),
   },
   {
@@ -196,28 +208,116 @@ export const commandRegistry = [
   },
   {
     id: 'selection.first',
-    title: 'Select first loaded item',
-    description: 'Move to the earliest item in the loaded cursor window.',
+    title: 'Go to first timeline item',
+    description: 'Load the first timeline window or select its first loaded item.',
     category: 'Navigate',
     bindings: [
       { label: 'g g', registration: { kind: 'sequence', sequence: ['G', 'G'] } },
       { label: 'Home' },
     ],
-    available: (context) => context.timelineIds.length > 0,
-    run: (context) => context.dispatch(actions.timelineSelected(context.timelineIds[0] ?? null)),
+    available: (context) =>
+      context.timelineIds.length > 0 || context.timelineWindowAvailable === true,
+    run: (context) => {
+      if (context.loadTimelineWindow) context.loadTimelineWindow('first')
+      else context.dispatch(actions.timelineSelected(context.timelineIds[0] ?? null))
+    },
   },
   {
     id: 'selection.last',
-    title: 'Select latest loaded item',
-    description: 'Move to the latest item in the loaded cursor window.',
+    title: 'Go to latest timeline item',
+    description: 'Load the latest timeline window or select its latest loaded item.',
     category: 'Navigate',
     bindings: [
       { label: 'G', registration: { kind: 'hotkey', hotkey: 'Shift+G' } },
       { label: 'End' },
     ],
-    available: (context) => context.timelineIds.length > 0,
-    run: (context) =>
-      context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null)),
+    available: (context) =>
+      context.timelineIds.length > 0 || context.timelineWindowAvailable === true,
+    run: (context) => {
+      if (context.loadTimelineWindow) context.loadTimelineWindow('latest')
+      else context.dispatch(actions.timelineSelected(context.timelineIds.at(-1) ?? null))
+    },
+  },
+  {
+    id: 'session.catalog.search',
+    title: 'Search sessions',
+    description: 'Focus the bounded server-backed session search.',
+    category: 'Surface',
+    bindings: [{ label: '/', registration: { kind: 'hotkey', hotkey: '/' } }],
+    available: (context) => context.focusSessionSearch !== undefined,
+    run: (context) => context.focusSessionSearch?.(),
+  },
+  {
+    id: 'session.catalog.apply-search',
+    title: 'Apply session search',
+    description: 'Apply the current browser-local search text to the bounded catalog.',
+    category: 'Surface',
+    bindings: [],
+    available: (context) => context.applySessionSearch !== undefined,
+    run: (context) => context.applySessionSearch?.(),
+  },
+  {
+    id: 'session.catalog.sort',
+    title: 'Toggle session sort',
+    description: 'Toggle authoritative activity order and stable session identity order.',
+    category: 'View',
+    bindings: [],
+    available: (context) => context.toggleSessionSort !== undefined,
+    run: (context) => context.toggleSessionSort?.(),
+  },
+  {
+    id: 'session.catalog.more',
+    title: 'Load more sessions',
+    description: 'Read the next keyset page without scanning transcripts.',
+    category: 'Surface',
+    bindings: [],
+    available: (context) => context.loadMoreSessionsAvailable === true,
+    run: (context) => context.loadMoreSessions?.(),
+  },
+  {
+    id: 'session.catalog.previous',
+    title: 'Select previous session',
+    description: 'Move catalog selection toward the first loaded session.',
+    category: 'Navigate',
+    bindings: [{ label: 'Alt+K', registration: { kind: 'hotkey', hotkey: 'Alt+K' } }],
+    available: (context) => context.sessionCatalogAvailable === true,
+    run: (context) => context.selectSession?.(-1),
+  },
+  {
+    id: 'session.catalog.next',
+    title: 'Select next session',
+    description: 'Move catalog selection toward the last loaded session.',
+    category: 'Navigate',
+    bindings: [{ label: 'Alt+J', registration: { kind: 'hotkey', hotkey: 'Alt+J' } }],
+    available: (context) => context.sessionCatalogAvailable === true,
+    run: (context) => context.selectSession?.(1),
+  },
+  {
+    id: 'session.catalog.open',
+    title: 'Open selected session',
+    description: 'Open the selected catalog row in the bounded workspace.',
+    category: 'Navigate',
+    bindings: [],
+    available: (context) => context.sessionCatalogAvailable === true,
+    run: (context) => context.openSelectedSession?.(),
+  },
+  {
+    id: 'session.switch.previous',
+    title: 'Switch to previous session',
+    description: 'Open the previous loaded catalog session without returning to the table.',
+    category: 'Navigate',
+    bindings: [{ label: '[', registration: { kind: 'hotkey', hotkey: '[' } }],
+    available: (context) => context.sessionWorkspaceAvailable === true,
+    run: (context) => context.switchSession?.(-1),
+  },
+  {
+    id: 'session.switch.next',
+    title: 'Switch to next session',
+    description: 'Open the next loaded catalog session without returning to the table.',
+    category: 'Navigate',
+    bindings: [{ label: ']', registration: { kind: 'hotkey', hotkey: ']' } }],
+    available: (context) => context.sessionWorkspaceAvailable === true,
+    run: (context) => context.switchSession?.(1),
   },
   {
     id: 'layout.toggle',
@@ -262,7 +362,7 @@ export const commandRegistry = [
     description: 'Show every supported timeline record.',
     category: 'View',
     bindings: [],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.detailSet('full')),
   },
   {
@@ -271,7 +371,7 @@ export const commandRegistry = [
     description: 'Keep origins, tools, progress, warnings, and results compact.',
     category: 'View',
     bindings: [],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.detailSet('condensed')),
   },
   {
@@ -280,8 +380,84 @@ export const commandRegistry = [
     description: 'Emphasize origins and durable results.',
     category: 'View',
     bindings: [],
-    available: scenarioTimeline,
+    available: always,
     run: (context) => context.dispatch(actions.detailSet('results')),
+  },
+  {
+    id: 'layout.workbench',
+    title: 'Use workbench layout',
+    description: 'Show navigation, the primary surface, and the contextual inspector.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.layoutSet('workbench')),
+  },
+  {
+    id: 'layout.focus',
+    title: 'Use focus layout',
+    description: 'Show a quiet primary surface without secondary panes.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.layoutSet('focus')),
+  },
+  {
+    id: 'density.compact',
+    title: 'Use compact density',
+    description: 'Use dense rows for high-volume operator work.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.densitySet('compact')),
+  },
+  {
+    id: 'density.comfortable',
+    title: 'Use comfortable density',
+    description: 'Use more separation without changing information detail.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.densitySet('comfortable')),
+  },
+  {
+    id: 'theme.dark',
+    title: 'Use dark theme',
+    description: 'Use the dark CSS-variable theme.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.themeSet('dark')),
+  },
+  {
+    id: 'theme.light',
+    title: 'Use light theme',
+    description: 'Use the light CSS-variable theme.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.themeSet('light')),
+  },
+  {
+    id: 'preferences.panes.set',
+    title: 'Set workbench pane sizes',
+    description: 'Apply browser-local navigation and inspector widths.',
+    category: 'View',
+    bindings: [],
+    available: (context) => context.preferencePaneSizes !== undefined,
+    run: (context) => {
+      if (context.preferencePaneSizes) {
+        context.dispatch(actions.paneSizesSet(context.preferencePaneSizes))
+      }
+    },
+  },
+  {
+    id: 'preferences.reset',
+    title: 'Restore preference defaults',
+    description: 'Restore all browser-local workstation preferences.',
+    category: 'View',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.preferencesReset()),
   },
 ] as const satisfies readonly CommandDefinitionShape[]
 

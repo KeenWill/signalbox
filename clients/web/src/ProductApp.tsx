@@ -2,21 +2,20 @@ import * as Dialog from '@radix-ui/react-dialog'
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
+import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
 import {
-  AlertTriangle,
-  Command,
-  Menu,
-  Moon,
-  PanelLeftClose,
-  Rows3,
-  Search,
-  Sun,
-  X,
-} from 'lucide-react'
-import { type RefObject, useEffect, useMemo, useRef } from 'react'
+  type CSSProperties,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import {
   type CommandContext,
   type CommandId,
+  commandById,
   commandRegistry,
   globalHotkeyBindings,
   globalHotkeySequenceBindings,
@@ -26,67 +25,64 @@ import {
   BootstrapContractError,
   type ProductRouteId,
   productRoutes,
+  productSurfaceCacheLabel,
+  productSurfaceStates,
   productTransport,
 } from './product'
+import {
+  type SessionCommandControls,
+  type SessionSelectionEvidence,
+  SessionWorkspaceSurface,
+} from './SessionWorkspaceSurface'
+import { SettingsSurface } from './SettingsSurface'
+import { MAX_JSON_BODY_BYTES, MAX_NDJSON_RECORD_BYTES } from './session-live/model'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
-const surfaceCopy: Record<
-  ProductRouteId,
-  { eyebrow: string; title: string; question: string; track: string }
-> = {
+const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
   attention: {
     eyebrow: 'Operator overview',
     title: 'Attention',
     question: 'What needs intervention now?',
-    track: '#992 attention projections',
   },
   sessions: {
     eyebrow: 'Conversation index',
     title: 'Sessions',
     question: 'Where is work active, blocked, or recently settled?',
-    track: '#991 session projections',
   },
   search: {
     eyebrow: 'Corpus navigation',
     title: 'Search',
     question: 'Where does this fact occur?',
-    track: '#994 search reads',
   },
   activity: {
     eyebrow: 'Repository operations',
     title: 'Activity',
     question: 'What entered the system and how was it handled?',
-    track: '#995 discovery reads',
   },
   runners: {
     eyebrow: 'Execution fleet',
     title: 'Runners',
     question: 'Which runners are available, occupied, or lost?',
-    track: '#995 runner discovery',
   },
   reviews: {
     eyebrow: 'Convergence',
     title: 'Reviews',
     question: 'Which pull requests still need work?',
-    track: '#995 review discovery',
   },
   imports: {
     eyebrow: 'Conversation intake',
     title: 'Imports',
     question: 'Which imports completed, failed, or need inspection?',
-    track: '#995 import discovery',
   },
   usage: {
     eyebrow: 'Accounting',
     title: 'Usage',
     question: 'Where are tokens and cost accumulating?',
-    track: '#994 usage reads',
   },
   settings: {
     eyebrow: 'Local preferences',
     title: 'Settings',
     question: 'How should this workstation present information?',
-    track: 'Web track H slice 2',
   },
 }
 
@@ -169,6 +165,30 @@ function ProductNavigation({
   )
 }
 
+/**
+ * These overlays are controlled dialogs without a `Dialog.Trigger`, so Radix
+ * has no element to restore focus to on close. The opener is recorded before
+ * Radix moves focus into the content, and close autofocus returns keyboard
+ * users to it while it is still rendered.
+ */
+function useDialogOpenerFocus() {
+  const openerRef = useRef<HTMLElement | null>(null)
+  return {
+    onOpenAutoFocus: () => {
+      openerRef.current =
+        document.activeElement instanceof HTMLElement ? document.activeElement : null
+    },
+    onCloseAutoFocus: (event: Event) => {
+      const opener = openerRef.current
+      openerRef.current = null
+      if (opener?.getClientRects().length) {
+        event.preventDefault()
+        opener.focus()
+      }
+    },
+  }
+}
+
 function CommandPalette({
   context,
   onOpenNavigation,
@@ -177,6 +197,7 @@ function CommandPalette({
   onOpenNavigation: () => void
 }) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
+  const openerFocus = useDialogOpenerFocus()
   return (
     <Dialog.Root
       open={open}
@@ -189,6 +210,8 @@ function CommandPalette({
         <Dialog.Content
           className="dialog-content product-palette"
           aria-describedby="product-palette-description"
+          onOpenAutoFocus={openerFocus.onOpenAutoFocus}
+          onCloseAutoFocus={openerFocus.onCloseAutoFocus}
         >
           <div className="dialog-heading">
             <div>
@@ -230,19 +253,81 @@ function CommandPalette({
   )
 }
 
-function SurfaceUnavailable({ surface }: { surface: ProductRouteId }) {
-  const copy = surfaceCopy[surface]
+function KeyboardHelp({ context }: { context: CommandContext }) {
+  const open = useAppSelector((state) => state.app.overlay === 'help')
+  const openerFocus = useDialogOpenerFocus()
   return (
-    <section className="surface-empty" aria-labelledby="surface-unavailable-heading">
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) invokeCommand('surface.escape', context)
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content
+          className="dialog-content product-palette"
+          aria-describedby="keyboard-help-description"
+          onOpenAutoFocus={openerFocus.onOpenAutoFocus}
+          onCloseAutoFocus={openerFocus.onCloseAutoFocus}
+        >
+          <div className="dialog-heading">
+            <div>
+              <Dialog.Title>Keyboard help</Dialog.Title>
+              <Dialog.Description id="keyboard-help-description">
+                Available workstation commands and bindings.
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button className="icon-button" type="button" aria-label="Close keyboard help">
+                <X />
+              </button>
+            </Dialog.Close>
+          </div>
+          <div className="command-list">
+            {commandRegistry
+              .filter(
+                (command) =>
+                  command.id !== 'surface.escape' &&
+                  command.bindings.length > 0 &&
+                  command.available(context),
+              )
+              .map((command) => (
+                <div key={command.id}>
+                  <span>
+                    <strong>{command.title}</strong>
+                    <small>{command.description}</small>
+                  </span>
+                  <kbd>{command.bindings.map((binding) => binding.label).join(' / ')}</kbd>
+                </div>
+              ))}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
+function SurfaceUnavailable({ surface }: { surface: ProductRouteId }) {
+  const state = productSurfaceStates[surface]
+  if (state.kind !== 'committed-unimplemented') return null
+  return (
+    <section className="surface-empty" aria-labelledby={`${surface}-unavailable-heading`}>
       <AlertTriangle aria-hidden="true" />
       <div>
-        <h2 id="surface-unavailable-heading">
+        <span className="availability-tag">Committed · unavailable</span>
+        <h2 id={`${surface}-unavailable-heading`}>
           Operational data is not exposed by this daemon contract
         </h2>
         <p>
-          The product route is ready, but {copy.track} has not supplied a production read on this
-          branch. Signalbox will not infer or fabricate these facts.
+          {state.owningTrack} is committed, but no present production surface provides the required
+          facts on this branch. Signalbox will not infer or fabricate them.
         </p>
+        <ul>
+          {state.facts.map((fact) => (
+            <li key={fact}>{fact}</li>
+          ))}
+        </ul>
       </div>
     </section>
   )
@@ -264,56 +349,10 @@ function AttentionSurface() {
   )
 }
 
-function SessionsSurface() {
-  return (
-    <div className="surface-body sessions-surface">
-      <div className="sessions-toolbar" role="toolbar" aria-label="Session controls">
-        <label>
-          <Search aria-hidden="true" />
-          <input
-            aria-label="Filter loaded sessions"
-            placeholder="Filter loaded sessions"
-            disabled
-          />
-        </label>
-        <button type="button" disabled>
-          New session
-        </button>
-      </div>
-      <div className="session-columns" aria-hidden="true">
-        <span>Session</span>
-        <span>State</span>
-        <span>Activity</span>
-        <span>Updated</span>
-      </div>
-      <SurfaceUnavailable surface="sessions" />
-    </div>
-  )
-}
-
 function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   return (
     <div className="surface-body">
       <SurfaceUnavailable surface={surface} />
-    </div>
-  )
-}
-
-function SettingsSurface() {
-  return (
-    <div className="surface-body">
-      <section
-        className="surface-empty surface-empty-no-icon"
-        aria-labelledby="settings-local-heading"
-      >
-        <div>
-          <h2 id="settings-local-heading">Local settings are not exposed in this slice</h2>
-          <p>
-            Presentation preferences remain browser-local. Their dedicated controls arrive in Web
-            track H slice 2 and do not depend on a daemon read contract.
-          </p>
-        </div>
-      </section>
     </div>
   )
 }
@@ -389,6 +428,21 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const navigationTriggerRef = useRef<HTMLButtonElement>(null)
   const paletteTriggerRef = useRef<HTMLButtonElement>(null)
   const navigationReturnFocusRef = useRef<HTMLButtonElement | null>(null)
+  const timelineRef = useRef<HTMLDivElement>(null)
+  const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
+  const [sessionControls, setSessionControls] = useState<SessionCommandControls | null>(null)
+  const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
+  const [selectionEvidence, setSelectionEvidence] = useState<SessionSelectionEvidence | null>(null)
+  const [windowRequest, setWindowRequest] = useState<{
+    anchor: 'first' | 'latest'
+    attempt: number
+  } | null>(null)
+  const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
+  const updateSelectionEvidence = useCallback(
+    (evidence: SessionSelectionEvidence | null) => setSelectionEvidence(evidence),
+    [],
+  )
+  const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -398,19 +452,40 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     () => ({
       dispatch,
       getState: store.getState,
-      timelineIds: [],
-      focusTimeline: () => primaryRef.current?.focus(),
+      timelineIds,
+      timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
+      focusTimeline: () => (timelineRef.current ?? primaryRef.current)?.focus(),
+      loadTimelineWindow: (anchor) =>
+        setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
       navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
       navigateScenario: () =>
         void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } }),
+      sessionCatalogAvailable: surface === 'sessions' && sessionControls?.catalogAvailable === true,
+      sessionWorkspaceAvailable:
+        surface === 'sessions' && sessionControls?.workspaceAvailable === true,
+      focusSessionSearch: surface === 'sessions' ? sessionControls?.focusSearch : undefined,
+      applySessionSearch: surface === 'sessions' ? sessionControls?.applySearch : undefined,
+      loadMoreSessions: surface === 'sessions' ? sessionControls?.loadMore : undefined,
+      loadMoreSessionsAvailable:
+        surface === 'sessions' && sessionControls?.loadMoreAvailable === true,
+      toggleSessionSort: surface === 'sessions' ? sessionControls?.toggleSort : undefined,
+      selectSession: surface === 'sessions' ? sessionControls?.select : undefined,
+      switchSession: surface === 'sessions' ? sessionControls?.switchSession : undefined,
+      openSelectedSession: surface === 'sessions' ? sessionControls?.openSelected : undefined,
     }),
-    [dispatch, navigate],
+    [dispatch, navigate, sessionControls, surface, timelineIds, timelineWindowAvailable],
   )
   useHotkeys(
     globalHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
       callback: () => {
-        if (store.getState().app.overlay === null) invokeCommand(binding.commandId, context)
+        if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
+          const command = commandById(binding.commandId)
+          if (command.available(context)) {
+            if (binding.commandId.startsWith('selection.')) context.focusTimeline()
+            invokeCommand(binding.commandId, context)
+          }
+        }
       },
     })),
   )
@@ -418,7 +493,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     globalHotkeySequenceBindings.map((binding) => ({
       sequence: binding.sequence,
       callback: () => {
-        if (store.getState().app.overlay === null) invokeCommand(binding.commandId, context)
+        if (store.getState().app.overlay === null) {
+          const command = commandById(binding.commandId)
+          if (command.available(context)) {
+            if (binding.commandId.startsWith('selection.')) context.focusTimeline()
+            invokeCommand(binding.commandId, context)
+          }
+        }
       },
     })),
   )
@@ -440,19 +521,52 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [surface])
 
   const copy = surfaceCopy[surface]
+  const cacheLabel = productSurfaceCacheLabel(surface)
+  const timelineCapability = bootstrap.isPending
+    ? 'checking'
+    : bootstrap.isSuccess &&
+        bootstrap.data.capabilities.bounded_session_timeline &&
+        bootstrap.data.capabilities.bounded_session_live &&
+        bootstrap.data.capabilities.bounded_json &&
+        bootstrap.data.capabilities.ndjson_streaming
+      ? 'available'
+      : 'unavailable'
+
   const content =
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
-      <SessionsSurface />
+      <SessionWorkspaceSurface
+        maxJsonBodyBytes={Math.min(
+          bootstrap.data?.limits.max_json_body_bytes ?? MAX_JSON_BODY_BYTES,
+          MAX_JSON_BODY_BYTES,
+        )}
+        maxNdjsonRecordBytes={Math.min(
+          bootstrap.data?.limits.max_ndjson_item_bytes ?? MAX_NDJSON_RECORD_BYTES,
+          MAX_NDJSON_RECORD_BYTES,
+        )}
+        onCommandControls={setSessionControls}
+        onSelectionEvidence={updateSelectionEvidence}
+        onTimelineIds={updateTimelineIds}
+        onTimelineWindowAvailable={setTimelineWindowAvailable}
+        onWindowRequestConsumed={consumeWindowRequest}
+        timelineCapability={timelineCapability}
+        timelineRef={timelineRef}
+        windowRequest={windowRequest}
+      />
     ) : surface === 'settings' ? (
       <SettingsSurface />
     ) : (
       <DeferredSurface surface={surface} />
     )
 
+  const shellStyle = {
+    '--product-navigation-width': `${app.paneSizes.navigation}px`,
+    '--product-inspector-width': `${app.paneSizes.inspector}px`,
+  } as CSSProperties
+
   return (
-    <div className={`product-shell layout-${app.layout}`}>
+    <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
         <ProductNavigation active={surface} context={context} />
       </aside>
@@ -494,6 +608,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                     : 'Transport unavailable'
                   : 'Checking contract…'}
           </span>
+          {surface !== 'settings' && bootstrap.isError && (
+            <button
+              type="button"
+              className="bootstrap-retry"
+              onClick={() => void bootstrap.refetch()}
+            >
+              Retry contract
+            </button>
+          )}
         </div>
         {content}
       </main>
@@ -504,7 +627,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           <p>
             {surface === 'settings'
               ? 'Presentation preferences are stored locally in this browser.'
-              : 'Select an available operational record to inspect its server-provided evidence.'}
+              : surface === 'sessions' && selectionEvidence !== null
+                ? 'Bounded server-provided timeline projection for the selected record.'
+                : 'Select an available operational record to inspect its server-provided evidence.'}
           </p>
           <dl>
             <div>
@@ -515,10 +640,32 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               <dt>Authority</dt>
               <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
             </div>
-            <div>
-              <dt>Cache</dt>
-              <dd>{surface === 'settings' ? 'Local preferences' : 'Bounded query'}</dd>
-            </div>
+            {cacheLabel !== null && (
+              <div>
+                <dt>Cache</dt>
+                <dd>{cacheLabel}</dd>
+              </div>
+            )}
+            {surface === 'sessions' && selectionEvidence !== null && (
+              <>
+                <div>
+                  <dt>Session</dt>
+                  <dd>{selectionEvidence.sessionId}</dd>
+                </div>
+                <div>
+                  <dt>Event</dt>
+                  <dd>{selectionEvidence.eventSequence}</dd>
+                </div>
+                <div>
+                  <dt>Kind</dt>
+                  <dd>{selectionEvidence.kind.replaceAll('_', ' ')}</dd>
+                </div>
+                <div>
+                  <dt>Projected bytes</dt>
+                  <dd>{selectionEvidence.projectedStructuredBytes ?? 'Unavailable'}</dd>
+                </div>
+              </>
+            )}
           </dl>
         </aside>
       )}
@@ -528,6 +675,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           navigationReturnFocusRef.current = paletteTriggerRef.current
         }}
       />
+      <KeyboardHelp context={context} />
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {

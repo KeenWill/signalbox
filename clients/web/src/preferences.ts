@@ -24,6 +24,13 @@ export const defaultBrowserPreferences: BrowserPreferences = {
   keyOverrides: {},
 }
 
+export const createDefaultBrowserPreferences = (): BrowserPreferences => ({
+  ...defaultBrowserPreferences,
+  paneSizes: { ...defaultBrowserPreferences.paneSizes },
+  lastLogicalPositions: {},
+  keyOverrides: {},
+})
+
 export const BROWSER_PREFERENCES_KEY = 'signalbox.web.preferences.v1'
 export const MAX_SAVED_LOGICAL_POSITIONS = 128
 export const MAX_KEY_OVERRIDES = 64
@@ -32,6 +39,7 @@ export const MAX_LOGICAL_POSITION_VALUE_BYTES = 4_096
 export const MAX_KEY_OVERRIDE_KEY_BYTES = 512
 export const MAX_KEY_OVERRIDE_VALUE_BYTES = 512
 export const MAX_BROWSER_PREFERENCES_BYTES = 1_048_576
+const MAX_U64 = (1n << 64n) - 1n
 
 const isWithinUtf8ByteLimit = (value: string, limit: number): boolean => {
   let bytes = 0
@@ -48,6 +56,12 @@ export const isBoundedLogicalPosition = (sessionId: string, position: string): b
   !/^(?:0|[1-9]\d*)$/.test(sessionId) &&
   isWithinUtf8ByteLimit(sessionId, MAX_LOGICAL_POSITION_KEY_BYTES) &&
   isWithinUtf8ByteLimit(position, MAX_LOGICAL_POSITION_VALUE_BYTES)
+
+const isPersistedLogicalPosition = (sessionId: string, position: string): boolean =>
+  isBoundedLogicalPosition(sessionId, position) &&
+  /^[1-9]\d*$/.test(position) &&
+  position.length <= 20 &&
+  BigInt(position) <= MAX_U64
 
 const isBoundedKeyOverride = (commandId: string, binding: string): boolean =>
   commandId !== '__proto__' &&
@@ -136,7 +150,7 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
       candidate.lastLogicalPositions,
       MAX_SAVED_LOGICAL_POSITIONS,
       'preferences.lastLogicalPositions',
-      isBoundedLogicalPosition,
+      isPersistedLogicalPosition,
     ),
     keyOverrides: boundedRecord(
       candidate.keyOverrides,
@@ -150,15 +164,15 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
 export const loadBrowserPreferences = (): BrowserPreferences => {
   try {
     const storage = globalThis.localStorage
-    if (storage === undefined) return defaultBrowserPreferences
+    if (storage === undefined) return createDefaultBrowserPreferences()
     const stored = storage.getItem(BROWSER_PREFERENCES_KEY)
-    if (stored === null) return defaultBrowserPreferences
+    if (stored === null) return createDefaultBrowserPreferences()
     if (!isWithinUtf8ByteLimit(stored, MAX_BROWSER_PREFERENCES_BYTES)) {
-      return defaultBrowserPreferences
+      return createDefaultBrowserPreferences()
     }
     return decodeBrowserPreferences(JSON.parse(stored))
   } catch {
-    return defaultBrowserPreferences
+    return createDefaultBrowserPreferences()
   }
 }
 

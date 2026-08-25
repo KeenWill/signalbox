@@ -163,8 +163,11 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     private readonly request: typeof fetch,
   ) {}
 
-  static async connect(request: typeof fetch = fetch): Promise<HttpSessionTimelineSource> {
-    const response = await request('/api/bootstrap')
+  static async connect(
+    request: typeof fetch = fetch,
+    signal?: AbortSignal,
+  ): Promise<HttpSessionTimelineSource> {
+    const response = await request('/api/bootstrap', { signal })
     if (!response.ok) return throwApiError(response)
     const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
     if (!bootstrap.capabilities.bounded_json || !bootstrap.capabilities.bounded_session_timeline) {
