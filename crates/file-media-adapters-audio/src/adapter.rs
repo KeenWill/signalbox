@@ -271,8 +271,15 @@ fn decode_with_symphonia(
         validate_duration(presented_frames, observed.sample_rate_hz)?;
     }
     let metadata = metadata.ok_or("malformed_audio")?;
+    // `declared_frames` is already `None` for FLAC's "unknown total samples"
+    // STREAMINFO convention (`flac_declared_frames` maps 0 to `None`), so no
+    // extra zero-skip is needed here for FLAC. For MP3, a Xing/VBRI header
+    // declaring exactly one total frame yields `Some(0)` audio frames after
+    // subtracting the metadata frame, and that is a real declared count, not
+    // an "unknown" sentinel; comparing it lets a header claiming zero audio
+    // frames be caught if the source decodes any.
     if matches!(format, AdapterFormat::Mp3 | AdapterFormat::Flac)
-        && declared_frames.is_some_and(|frames| frames != 0 && frames != raw_decoded_frames)
+        && declared_frames.is_some_and(|frames| frames != raw_decoded_frames)
     {
         return Err("malformed_audio");
     }

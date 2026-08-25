@@ -327,6 +327,32 @@ pub(crate) fn mp3_with_excess_xing_frame_count() -> Result<Vec<u8>, Box<dyn Erro
     Ok(bytes)
 }
 
+pub(crate) fn mp3_with_xing_frame_count_of_one() -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut bytes = mp3(8_000, 576)?;
+    let frame_start = 10_usize;
+    let header = bytes
+        .get(frame_start..frame_start + 4)
+        .ok_or("missing MPEG frame header")?;
+    let has_crc = header[1] & 1 == 0;
+    let mpeg_one = (header[1] >> 3) & 0x03 == 0x03;
+    let mono = (header[3] >> 6) & 0x03 == 0x03;
+    let header_size = if has_crc { 6 } else { 4 };
+    let side_information = match (mpeg_one, mono) {
+        (true, true) => 17,
+        (true, false) => 32,
+        (false, true) => 9,
+        (false, false) => 17,
+    };
+    let xing = frame_start + header_size + side_information;
+    bytes
+        .get_mut(xing..xing + 12)
+        .ok_or("MPEG frame is too short for a Xing header")?
+        // A declared total of one frame is the Xing/VBRI header frame
+        // itself and no audio frames, distinct from "unknown" (0).
+        .copy_from_slice(&[b'X', b'i', b'n', b'g', 0, 0, 0, 1, 0, 0, 0, 1]);
+    Ok(bytes)
+}
+
 pub(crate) fn ogg_opus_with_tags_end_of_stream() -> Result<Vec<u8>, Box<dyn Error>> {
     ogg_opus_with_tags_ending(PacketWriteEndInfo::EndStream, 0)
 }
