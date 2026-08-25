@@ -5,7 +5,12 @@ Its isolated processor implementation is verified against PR #900
 (`agent/file-media-worker`). Together they include the type model, declaration
 and registry checks, detection and validation algorithm, untrusted
 processor-response boundary, stable agent tool contracts, visibility-authorizing
-application bridge, and fresh daemon-supervised worker runtime.
+application bridge, and fresh daemon-supervised worker runtime. The PDF adapter
+is verified against this PR (`agent/file-media-adapter-pdf`).
+
+The text-family adapter coverage is verified against PR #903
+(`agent/file-media-text-family`). The Office Open XML adapter is verified
+against this PR (`agent/file-media-adapter-office`).
 
 The video adapter is verified against this PR
 (`agent/file-media-adapter-video`).
@@ -74,12 +79,6 @@ reason, metadata object, body, JSON tree, continuation, and bound before
 admitting it. Structured output node and per-container entry ceilings stop
 duplicate-aware deserialization before structural excess is materialized.
 
-## Implemented adapter coverage
-
-| Family | Exact types               | Views      | Decoder and enforced exclusions                                                                                                                                                                                                                                                          |
-| ------ | ------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Video  | `video/mp4`, `video/webm` | `metadata` | In-worker ISO BMFF and EBML parsing from a bounded 256 KiB metadata prefix, with no codec library; frame/audio decoding, rendering, frame extraction, thumbnails, OCR, transcription, subtitles, external resources, recursive containers, and metadata outside that prefix are excluded |
-
 ## Detection and validation
 
 Inspection first requires the verified source digest and length to equal the
@@ -90,21 +89,26 @@ settles conflicting claims.
 
 Incompatible strong claims return ambiguity. Compatible strong claims resolve to
 their sole type and reader and require strong-signature validation. With no
-strong claim, a sole compatible structural candidate receives structural
-validation. This ordering is the simplest interpretation of the accepted
-design's otherwise unplaced `StructuralCandidate` strength. With neither, a
-syntactically canonical declaration may nominate its exact reader for
-independent structural validation. Finally, the sole registered text fallback
-may claim only through complete streaming validation. No successful path returns
-an ordinary declaration as evidence.
+strong claim, a sole compatible structural or provisional structural candidate
+receives structural validation. A provisional structural candidate records a
+complete value at the end of a bounded prefix whose source continues, so full
+validation may disprove it and resume declaration or text fallback. This
+ordering is the simplest interpretation of the accepted design's otherwise
+unplaced `StructuralCandidate` strength. With neither, a syntactically canonical
+declaration may nominate its exact reader for independent structural validation.
+Finally, the sole registered text fallback may claim only through complete
+streaming validation. No successful path returns an ordinary declaration as
+evidence.
 
 A recognized-malformed probe is terminal; incompatible recognized types are
-ambiguous. Strong or structural validation cannot quietly return no-match and
-fall through. A declared or streaming candidate that does not validate becomes
-ordinary unknown. Successful detection that disagrees with a syntactically
-canonical caller declaration becomes `DeclaredTypeMismatch`, blocking typed
-reads without changing the blob or its metadata. Recognized encrypted or locked
-content is terminal `EncryptedOrLocked`; version one has no password channel.
+ambiguous. Strong or ordinary structural validation cannot quietly return
+no-match and fall through. A provisional structural, declared, or streaming
+candidate that does not validate resumes the remaining fallback path and becomes
+ordinary unknown when none succeeds. Successful detection that disagrees with a
+syntactically canonical caller declaration becomes `DeclaredTypeMismatch`,
+blocking typed reads without changing the blob or its metadata. Recognized
+encrypted or locked content is terminal `EncryptedOrLocked`; version one has no
+password channel.
 
 ## Agent tools
 
@@ -137,12 +141,24 @@ request contracts.
 
 **Committed unimplemented functionality.** No present daemon catalog composes
 these tools because the concrete rendered-frontier attachment resolver is not
-yet on `main`; the video adapter and its worker exist, but no daemon catalog
-registers them, so the empty registry recognizes no format. The compatibility
-constraint is that daemon composition supplies the existing visibility proof to
-`FileUseResolver`, not a weaker catalog-presence check. Format adapters are
-separate follow-on changes and add no MIME branch to the executor, bridge, or
-daemon.
+yet on `main`; the empty daemon registry recognizes no format. Dedicated adapter
+workers may register compiled providers with their worker catalogs, but the
+compatibility constraint is that future daemon composition supplies the existing
+visibility proof to `FileUseResolver`, not a weaker catalog-presence check.
+Format adapters add no MIME branch to the executor, bridge, or daemon.
+
+## Adapter coverage
+
+Each listed adapter is compiled into a dedicated worker and registered there as
+one provider declaration. Inputs remain whole-source bounded; adapter output is
+untrusted until the daemon-side registry sanitizer admits it.
+
+| Family | Canonical types                              | Detection and validation                                                                                           | Views                                                                                 | Decoder choice                                                                                     |
+| ------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| Text   | `text/plain`, `application/json`, `text/csv` | Complete NUL-free UTF-8 fallback; structural JSON parse; strict rectangular CSV parse with row and column ceilings | Exact `text`; bounded JSON `structured`; bounded CSV headers and rows as `structured` | Standard-library UTF-8, `serde_json`, and pure-Rust `csv`; all execute only in the isolated worker |
+| PDF    | `application/pdf`                            | Exact declared-type match against the verified source digest and length; bounded object and page parse             | Exact `text`; bounded `metadata`                                                      | `lopdf` 0.44 with default features disabled, compiled only into `signalbox-file-media-pdf-worker`; 8 MiB source, 10,000-page/object, 1 MiB decompressed-page, 256 MiB aggregate decompressed-content, and 174,000-byte text bounds; no rendering, OCR, embedded-file extraction, or password channel |
+| Office Open XML | `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`, `application/vnd.openxmlformats-officedocument.presentationml.presentation` | Exact declared-type match; bounded ZIP container and XML part parse | Exact `text`; bounded `metadata` | `zip` 8 with only its Rust `flate2` backend and `quick-xml` 0.41, compiled only into `signalbox-file-media-office-worker`; macro-enabled and legacy OLE formats, formulas, macros, rendering, OCR, external entities, links, and embedded recursive containers are excluded |
+| Video  | `video/mp4`, `video/webm`                    | Structural ISO BMFF and EBML detection over a bounded 4 KiB prefix; in-worker container parse confined to a 256 KiB metadata prefix | Bounded track, duration, and dimension facts as `metadata`                           | In-worker ISO BMFF and EBML parsing with no codec library; frame/audio decoding, rendering, frame extraction, thumbnails, OCR, transcription, subtitles, external resources, recursive containers, and metadata outside that prefix are excluded |
 
 ## Processor and durable media boundary
 
@@ -249,14 +265,14 @@ source-work envelope; a whole-decode view may reject it without changing the
 blob.
 
 **Committed unimplemented functionality.** No worker is composed into
-`signalboxd` because the concrete rendered-frontier resolver is absent. The
-video format adapter and its dedicated worker exist, but no image, audio, or
-general-file producer exists, so this slice adds no rich `BlobReference` result
-arm: the accepted design forbids that arm until one producer-to-provider path
-proves publication, registration, preparation, and failure behavior. When such
-an adapter lands, generated bytes must publish and verify before catalog
-registration, and registration must precede durable result commit; a failed path
-may leave an unreferenced orphan but never a dangling result.
+`signalboxd` because no concrete rendered-frontier resolver is present. No
+image, audio, or general-file producer exists, so this slice adds no rich
+`BlobReference` result arm: the accepted design forbids that arm until one
+producer-to-provider path proves publication, registration, preparation, and
+failure behavior. When such an adapter lands, generated bytes must publish and
+verify before catalog registration, and registration must precede durable result
+commit; a failed path may leave an unreferenced orphan but never a dangling
+result.
 
 No classification cache exists. Earlier durable tool results preserve what a
 model saw while a later request may use a newer immutable reader revision. OCR
@@ -264,8 +280,8 @@ and transcription are absent in version one.
 
 ## Open edges
 
-- Additional format families and their independently reviewed dependencies
-  remain with
+- Remaining concrete format families and their independently reviewed
+  dependencies remain with
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts).
 - Cumulative per-turn typed-read and source-work budgets wait for the first
   adapter benchmarks under
