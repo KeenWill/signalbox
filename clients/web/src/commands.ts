@@ -13,6 +13,17 @@ export interface CommandContext {
   sessionId?: string
   timelineWindowAvailable?: boolean
   focusTimeline: () => void
+  importEntryIds?: readonly string[]
+  selectedImportEntry?: string | null
+  requestedImportEntry?: string
+  selectImportEntry?: (id: string) => void
+  canSelectImportEntry?: boolean
+  canContinueImport?: boolean
+  continueImport?: (relationship: 'resume' | 'fork') => void
+  canRetryImport?: boolean
+  retryImport?: () => void
+  canAbandonImport?: boolean
+  abandonImport?: () => void
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
   navigate?: (path: string) => void
   openSession?: (sessionId: string) => void
@@ -21,6 +32,7 @@ export interface CommandContext {
 
 export interface CommandBinding {
   label: string
+  scope?: 'workspace' | 'imports'
   registration?:
     | { kind: 'hotkey'; hotkey: RegisterableHotkey }
     | { kind: 'sequence'; sequence: HotkeySequence }
@@ -30,7 +42,7 @@ interface CommandDefinitionShape {
   id: string
   title: string
   description: string
-  category: 'Navigate' | 'View' | 'Surface' | 'Artifact'
+  category: 'Navigate' | 'View' | 'Surface' | 'Artifact' | 'Imports'
   bindings: readonly CommandBinding[]
   available: (context: CommandContext) => boolean
   run: (context: CommandContext) => void
@@ -313,6 +325,134 @@ export const commandRegistry = [
     },
   },
   {
+    id: 'imports.entry.select',
+    title: 'Select imported frontier',
+    description: 'Select the requested immutable imported entry.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      context.requestedImportEntry !== undefined &&
+      context.selectImportEntry !== undefined,
+    run: (context) => context.selectImportEntry?.(context.requestedImportEntry ?? ''),
+  },
+  {
+    id: 'imports.entry.next',
+    title: 'Select next imported frontier',
+    description: 'Move toward the latest entry in the loaded import window.',
+    category: 'Imports',
+    bindings: [
+      { label: 'j', scope: 'imports', registration: { kind: 'hotkey', hotkey: 'J' } },
+      { label: 'ArrowDown', scope: 'imports' },
+    ],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
+    run: (context) => {
+      const ids = context.importEntryIds ?? []
+      const currentIndex = ids.indexOf(context.selectedImportEntry ?? '')
+      const nextIndex = currentIndex < 0 ? 0 : Math.min(currentIndex + 1, ids.length - 1)
+      context.selectImportEntry?.(ids[nextIndex] ?? '')
+    },
+  },
+  {
+    id: 'imports.entry.previous',
+    title: 'Select previous imported frontier',
+    description: 'Move toward the first entry in the loaded import window.',
+    category: 'Imports',
+    bindings: [
+      { label: 'k', scope: 'imports', registration: { kind: 'hotkey', hotkey: 'K' } },
+      { label: 'ArrowUp', scope: 'imports' },
+    ],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
+    run: (context) => {
+      const ids = context.importEntryIds ?? []
+      const currentIndex = Math.max(ids.indexOf(context.selectedImportEntry ?? ''), 0)
+      context.selectImportEntry?.(ids[Math.max(currentIndex - 1, 0)] ?? '')
+    },
+  },
+  {
+    id: 'imports.entry.first',
+    title: 'Select first loaded imported frontier',
+    description: 'Move to the earliest entry in the loaded import window.',
+    category: 'Imports',
+    bindings: [
+      {
+        label: 'g g',
+        scope: 'imports',
+        registration: { kind: 'sequence', sequence: ['G', 'G'] },
+      },
+      { label: 'Home', scope: 'imports' },
+    ],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
+    run: (context) => context.selectImportEntry?.(context.importEntryIds?.[0] ?? ''),
+  },
+  {
+    id: 'imports.entry.last',
+    title: 'Select latest loaded imported frontier',
+    description: 'Move to the latest entry in the loaded import window.',
+    category: 'Imports',
+    bindings: [
+      {
+        label: 'G',
+        scope: 'imports',
+        registration: { kind: 'hotkey', hotkey: 'Shift+G' },
+      },
+      { label: 'End', scope: 'imports' },
+    ],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
+    run: (context) => context.selectImportEntry?.(context.importEntryIds?.at(-1) ?? ''),
+  },
+  {
+    id: 'imports.continue.resume',
+    title: 'Resume from imported frontier',
+    description: 'Create a native session by resuming the selected imported frontier.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canContinueImport === true && context.continueImport !== undefined,
+    run: (context) => context.continueImport?.('resume'),
+  },
+  {
+    id: 'imports.continue.fork',
+    title: 'Fork from imported frontier',
+    description: 'Create a native session by forking the selected imported frontier.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canContinueImport === true && context.continueImport !== undefined,
+    run: (context) => context.continueImport?.('fork'),
+  },
+  {
+    id: 'imports.continue.retry',
+    title: 'Retry exact imported continuation',
+    description: 'Replay the retained imported-continuation command without changing its payload.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) => context.canRetryImport === true && context.retryImport !== undefined,
+    run: (context) => context.retryImport?.(),
+  },
+  {
+    id: 'imports.continue.abandon',
+    title: 'Abandon exact imported continuation',
+    description: 'Discard the retained imported-continuation command after explicit confirmation.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canAbandonImport === true && context.abandonImport !== undefined,
+    run: (context) => context.abandonImport?.(),
+  },
+  {
     id: 'layout.toggle',
     title: 'Toggle focus/workbench layout',
     description: 'Switch between a quiet transcript and the full operator workspace.',
@@ -439,7 +579,7 @@ export type CommandId = CommandDefinition['id']
 export const globalHotkeyBindings = commandRegistry.flatMap((command) => {
   const bindings: readonly CommandBinding[] = command.bindings
   return bindings.flatMap((binding) =>
-    binding.registration?.kind === 'hotkey'
+    binding.scope !== 'imports' && binding.registration?.kind === 'hotkey'
       ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
       : [],
   )
@@ -448,7 +588,43 @@ export const globalHotkeyBindings = commandRegistry.flatMap((command) => {
 export const globalHotkeySequenceBindings = commandRegistry.flatMap((command) => {
   const bindings: readonly CommandBinding[] = command.bindings
   return bindings.flatMap((binding) =>
-    binding.registration?.kind === 'sequence'
+    binding.scope !== 'imports' && binding.registration?.kind === 'sequence'
+      ? [{ commandId: command.id, sequence: binding.registration.sequence }]
+      : [],
+  )
+})
+
+export const importHotkeyBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    binding.scope === 'imports' && binding.registration?.kind === 'hotkey'
+      ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
+      : [],
+  )
+})
+
+export const importHotkeySequenceBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    binding.scope === 'imports' && binding.registration?.kind === 'sequence'
+      ? [{ commandId: command.id, sequence: binding.registration.sequence }]
+      : [],
+  )
+})
+
+export const surfaceHotkeyBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    command.category === 'Surface' && binding.registration?.kind === 'hotkey'
+      ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
+      : [],
+  )
+})
+
+export const surfaceHotkeySequenceBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    command.category === 'Surface' && binding.registration?.kind === 'sequence'
       ? [{ commandId: command.id, sequence: binding.registration.sequence }]
       : [],
   )

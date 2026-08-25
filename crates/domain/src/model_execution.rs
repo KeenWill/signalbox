@@ -6890,7 +6890,8 @@ mod tests {
             request
                 .origin_content(accepted_input_id(4))
                 .expect("the checked origin has exact user content")
-                .text()
+                .single_text()
+                .expect("the fixture has exactly one text part")
                 .as_str(),
             "hello"
         );

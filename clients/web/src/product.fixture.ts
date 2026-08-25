@@ -8,6 +8,8 @@ export const webContractBootstrapFixture = {
     immutable_blob_content: true,
     blob_derivations: true,
     image_derivatives: true,
+    import_discovery: true,
+    imported_continuations: true,
     bounded_session_timeline: true,
   },
   limits: {

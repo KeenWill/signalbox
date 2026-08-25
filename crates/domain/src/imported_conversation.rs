@@ -1117,6 +1117,20 @@ pub struct ImportedTranscriptFrontier {
 }
 
 impl ImportedTranscriptFrontier {
+    /// Constructs one caller-selected frontier for authoritative aggregate
+    /// validation at the command boundary.
+    pub const fn from_parts(
+        conversation: ImportedConversationId,
+        through_entry: ImportedTranscriptEntryId,
+        through_position: ImportedTranscriptPosition,
+    ) -> Self {
+        Self {
+            conversation,
+            through_entry,
+            through_position,
+        }
+    }
+
     /// Returns the immutable imported conversation.
     pub const fn conversation(self) -> ImportedConversationId {
         self.conversation
@@ -1138,11 +1152,7 @@ pub(crate) const fn imported_frontier_from_validated_parts(
     through_entry: ImportedTranscriptEntryId,
     through_position: ImportedTranscriptPosition,
 ) -> ImportedTranscriptFrontier {
-    ImportedTranscriptFrontier {
-        conversation,
-        through_entry,
-        through_position,
-    }
+    ImportedTranscriptFrontier::from_parts(conversation, through_entry, through_position)
 }
 
 #[cfg(test)]
