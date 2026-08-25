@@ -75,10 +75,10 @@ turn belongs to exactly one session, so when a selection supplies both, only the
 turn predicate reaches the projection: the session filter is decided by one
 bounded probe of the unique turn-ownership record, a matched pair reads exactly
 the turn scope through a turn-led index, and a mismatched pair is proven empty
-without scanning either dimension's history. Why: pairwise prefixes are
-not enough — each pair can be common while a deeper intersection is rare or
-empty, which would force a large range to be scanned and filtered before the
-bounded detail or aggregate limit applies.
+without scanning either dimension's history. Why: pairwise prefixes are not
+enough — each pair can be common while a deeper intersection is rare or empty,
+which would force a large range to be scanned and filtered before the bounded
+detail or aggregate limit applies.
 
 ## Open edges
 
