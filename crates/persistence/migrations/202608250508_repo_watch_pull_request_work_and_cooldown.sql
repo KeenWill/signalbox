@@ -177,7 +177,7 @@ CREATE TABLE repo_watch_current_singleton_cooldown (
     eligible_at timestamptz NOT NULL,
 
     CHECK (repo_watch_rule_id_is_valid(rule_id)),
-    CHECK (rule_version = 1)
+    CHECK (rule_version > 0)
 );
 
 CREATE UNIQUE INDEX repo_watch_current_singleton_cooldown_identity
