@@ -6,6 +6,24 @@ pub(crate) fn truncated_utf8() -> Vec<u8> {
     vec![b'a', 0xe2, 0x82]
 }
 
+/// A complete source: valid JSON followed by an incomplete UTF-8 scalar.
+///
+/// The trailing byte is real content rather than a probe-boundary artifact, so
+/// the source is not valid UTF-8 and no JSON candidate may be claimed from the
+/// shortened text.
+pub(crate) fn json_then_incomplete_scalar() -> Vec<u8> {
+    let mut bytes = br#"{"a":1}"#.to_vec();
+    bytes.push(0xc3);
+    bytes
+}
+
+/// A complete source: valid CSV records followed by an incomplete UTF-8 scalar.
+pub(crate) fn csv_then_incomplete_scalar() -> Vec<u8> {
+    let mut bytes = b"h1,h2\n1,2\n".to_vec();
+    bytes.push(0xc3);
+    bytes
+}
+
 pub(crate) fn json_document() -> Vec<u8> {
     br#"{"name":"fixture","values":[1,2,3]}"#.to_vec()
 }

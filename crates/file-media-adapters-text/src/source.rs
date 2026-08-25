@@ -1,6 +1,6 @@
 use signalbox_file_media_runtime::{CancellationSignal, ProcessorFailure, VerifiedBlobSource};
 
-use crate::{MAX_TEXT_FAMILY_BYTES, PROBE_PREFIX_BYTES};
+use crate::{MAX_TEXT_FAMILY_BYTES, PROBE_PREFIX_BYTES, json_adapter::ProbeExtent};
 
 pub(crate) async fn read_complete(
     source: &dyn VerifiedBlobSource,
@@ -55,6 +55,12 @@ async fn read_prefix(
         .map_err(|_| ProcessorFailure::Failed)
 }
 
+/// Decodes probe bytes whose trailing scalar may have been cut by the probe
+/// boundary, discarding an incomplete final scalar as a read artifact.
+///
+/// Only sound for a genuinely truncated prefix. Use [`probe_utf8_within`] when
+/// the extent is known, so a complete source is never judged on a shortened
+/// view of its own bytes.
 pub(crate) fn probe_utf8(bytes: &[u8]) -> Option<&str> {
     match std::str::from_utf8(bytes) {
         Ok(text) => Some(text),
@@ -62,6 +68,20 @@ pub(crate) fn probe_utf8(bytes: &[u8]) -> Option<&str> {
             std::str::from_utf8(&bytes[..error.valid_up_to()]).ok()
         }
         Err(_) => None,
+    }
+}
+
+/// Decodes probe bytes according to how much of the source they cover.
+///
+/// A truncated prefix may end mid-scalar because the probe boundary cut the
+/// source, so the incomplete trailing scalar is a read artifact and is dropped.
+/// A complete source has no such artifact: every byte is real content, so an
+/// incomplete trailing scalar means the source itself is not valid UTF-8 and no
+/// structural candidate may be claimed from the shortened text.
+pub(crate) fn probe_utf8_within(bytes: &[u8], extent: ProbeExtent) -> Option<&str> {
+    match extent {
+        ProbeExtent::CompleteSource => std::str::from_utf8(bytes).ok(),
+        ProbeExtent::TruncatedPrefix => probe_utf8(bytes),
     }
 }
 

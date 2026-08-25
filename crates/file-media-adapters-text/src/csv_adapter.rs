@@ -26,7 +26,8 @@ pub(crate) async fn probe(
     let json_suppresses_csv = matches!(extent, ProbeExtent::CompleteSource)
         && json_adapter::is_complete_json_document(&prefix);
     let candidate = !json_suppresses_csv
-        && source::probe_utf8(&prefix).is_some_and(|text| has_record_structure(text, extent));
+        && source::probe_utf8_within(&prefix, extent)
+            .is_some_and(|text| has_record_structure(text, extent));
     if candidate {
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(CSV_MEDIA_TYPE),

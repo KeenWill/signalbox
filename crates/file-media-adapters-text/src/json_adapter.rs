@@ -59,7 +59,7 @@ pub(crate) fn has_raw_json_structure(prefix: &[u8], extent: ProbeExtent) -> bool
     if !matches!(prefix.first(), Some(b'{' | b'[')) {
         return false;
     }
-    let Some(text) = source::probe_utf8(prefix) else {
+    let Some(text) = source::probe_utf8_within(prefix, extent) else {
         return false;
     };
     match extent {
