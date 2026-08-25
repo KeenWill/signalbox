@@ -282,13 +282,6 @@ impl PostgresRepoWatchDispatchStore {
         .await?;
         let mut cutoff_corruption = None;
         if disposition == RepoWatchLifecycleCutoffDispositionStorageKind::Terminal {
-            crate::repo_watch_dispatch_obligation::settle_terminal_target_obligations(
-                &mut transaction,
-                repository,
-                pull_request_number,
-                RepoWatchEventId::from_uuid(event_id),
-            )
-            .await?;
             let sessions = sqlx::query_scalar::<_, Uuid>(
                 "SELECT DISTINCT action.session_id
                    FROM repo_watch_dispatch_action AS action
@@ -345,6 +338,162 @@ impl PostgresRepoWatchDispatchStore {
                         savepoint.rollback().await?;
                         return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
                     }
+                }
+            }
+            // After the stops, not before. A goal termination holds its session
+            // row and then waits for its obligation row inside the requeue, so a
+            // cutoff that took obligation rows first and session rows second
+            // would close a lock cycle against any sibling still terminating.
+            crate::repo_watch_dispatch_obligation::settle_terminal_target_obligations(
+                &mut transaction,
+                repository,
+                pull_request_number,
+                RepoWatchEventId::from_uuid(event_id),
+            )
+            .await?;
+        }
+        commit(transaction).await?;
+        if let Some(error) = cutoff_corruption {
+            return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
+        }
+        Ok(true)
+    }
+
+    /// Processes the oldest unhandled convergence seal and withdraws every
+    /// still-active generation-one goal commissioned for its pull request.
+    pub async fn process_next_convergence_cutoff<NextCommandId>(
+        &self,
+        repository: &RepositorySlug,
+        mut next_command_id: NextCommandId,
+    ) -> Result<bool, RepoWatchDispatchRepositoryError>
+    where
+        NextCommandId: FnMut() -> DurableCommandId,
+    {
+        let mut transaction = self.pool.begin().await?;
+        lock_text(&mut transaction, repository.as_str()).await?;
+        let candidate = sqlx::query(
+            "SELECT convergence.assessment_id, current.identity_id,
+                    current.assessment_id AS identity_assessment_id,
+                    current.cursor_generation, convergence.pull_request_number
+               FROM repo_watch_pull_request_convergence AS convergence
+               JOIN LATERAL (
+                    SELECT identity.identity_id, identity.assessment_id,
+                           identity.cursor_generation, assessment.head_sha,
+                           assessment.base_revision
+                      FROM repo_watch_pull_request_convergence_identity AS identity
+                      JOIN repo_watch_pull_request_convergence_assessment AS assessment
+                        ON assessment.assessment_id = identity.assessment_id
+                     WHERE identity.repository = convergence.repository
+                       AND identity.pull_request_number = convergence.pull_request_number
+                     ORDER BY identity.cursor_generation DESC, identity.recorded_at DESC,
+                              identity.identity_id DESC
+                     LIMIT 1
+               ) AS current ON current.head_sha = convergence.head_sha
+                           AND current.base_revision = convergence.base_revision
+              JOIN LATERAL (
+                    SELECT cursor_payload
+                      FROM repo_watch_cursor
+                     WHERE repository = convergence.repository
+                     ORDER BY generation DESC
+                     LIMIT 1
+               ) AS cursor ON true
+              JOIN LATERAL jsonb_array_elements(
+                    cursor.cursor_payload -> 'state' -> 'pull_requests'
+               ) AS pull_request ON
+                    (pull_request ->> 'number')::numeric =
+                        convergence.pull_request_number
+              JOIN LATERAL jsonb_array_elements(
+                    cursor.cursor_payload -> 'state' -> 'branch_heads'
+               ) AS base_head ON
+                    base_head ->> 'branch' = pull_request ->> 'base_branch'
+              WHERE convergence.repository = $1
+                AND pull_request ->> 'head_sha' = current.head_sha
+                AND base_head ->> 'head' = current.base_revision
+                AND NOT EXISTS (
+                    SELECT 1
+                      FROM repo_watch_convergence_cutoff AS cutoff
+                     WHERE cutoff.assessment_id = convergence.assessment_id
+                       AND cutoff.identity_id = current.identity_id
+                )
+              ORDER BY convergence.converged_at, convergence.assessment_id
+              LIMIT 1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(candidate) = candidate else {
+            transaction.rollback().await?;
+            return Ok(false);
+        };
+        let assessment_id: Uuid = candidate.try_get("assessment_id")?;
+        let identity_id: Uuid = candidate.try_get("identity_id")?;
+        let identity_assessment_id: Uuid = candidate.try_get("identity_assessment_id")?;
+        let cursor_generation: i64 = candidate.try_get("cursor_generation")?;
+        let pull_request_number: Decimal = candidate.try_get("pull_request_number")?;
+        sqlx::query(
+            "INSERT INTO repo_watch_convergence_cutoff
+                (assessment_id, identity_id, identity_assessment_id, cursor_generation)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(assessment_id)
+        .bind(identity_id)
+        .bind(identity_assessment_id)
+        .bind(cursor_generation)
+        .execute(&mut *transaction)
+        .await?;
+        let sessions = sqlx::query_scalar::<_, Uuid>(
+            "SELECT DISTINCT action.session_id
+               FROM repo_watch_dispatch_action AS action
+               JOIN repo_watch_event AS origin ON origin.event_id = action.event_id
+              WHERE origin.repository = $1
+                AND origin.pull_request_number = $2
+                AND origin.event_kind NOT IN (
+                    'pull_request_closed', 'pull_request_merged'
+                )
+              ORDER BY action.session_id",
+        )
+        .bind(repository.as_str())
+        .bind(pull_request_number)
+        .fetch_all(&mut *transaction)
+        .await?;
+        let mut cutoff_corruption = None;
+        for session_id in sessions {
+            let session = SessionId::from_uuid(session_id);
+            let command = GoalUserCommand::new(
+                next_command_id(),
+                session,
+                GoalUserAction::Stop {
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                },
+            );
+            let mut savepoint = transaction.begin().await?;
+            match crate::goal::insert_repo_watch_composed_stop(&mut savepoint, command.clone())
+                .await
+            {
+                Ok(stopped) => {
+                    if stopped {
+                        sqlx::query(
+                            "INSERT INTO repo_watch_convergence_cutoff_goal
+                                (assessment_id, identity_id, session_id, goal_command_id)
+                             VALUES ($1, $2, $3, $4)",
+                        )
+                        .bind(assessment_id)
+                        .bind(identity_id)
+                        .bind(session_id)
+                        .bind(command.command_id().as_uuid())
+                        .execute(&mut *savepoint)
+                        .await?;
+                    }
+                    savepoint.commit().await?;
+                }
+                Err(crate::goal::GoalRepositoryError::Corruption(error)) => {
+                    savepoint.rollback().await?;
+                    cutoff_corruption
+                        .get_or_insert(crate::goal::GoalRepositoryError::Corruption(error));
+                }
+                Err(error) => {
+                    savepoint.rollback().await?;
+                    return Err(RepoWatchDispatchRepositoryError::GoalCutoff(error));
                 }
             }
         }
@@ -440,6 +589,87 @@ impl PostgresRepoWatchDispatchStore {
                 Ok(false) => {
                     return Err(RepoWatchDispatchRepositoryError::Corruption(
                         "selected pending lifecycle cutoff disappeared",
+                    ));
+                }
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    crate::goal::GoalRepositoryError::Corruption(_),
+                )) => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Drains eligible convergence cutoffs before repository-specific tasks start.
+    pub async fn process_pending_convergence_cutoffs<NextCommandId>(
+        &self,
+        mut next_command_id: NextCommandId,
+    ) -> Result<(), RepoWatchDispatchRepositoryError>
+    where
+        NextCommandId: FnMut() -> DurableCommandId,
+    {
+        loop {
+            let repository: Option<String> = sqlx::query_scalar(
+                "SELECT convergence.repository
+                   FROM repo_watch_pull_request_convergence AS convergence
+                   JOIN LATERAL (
+                        SELECT identity.identity_id, identity.cursor_generation,
+                               assessment.head_sha, assessment.base_revision
+                          FROM repo_watch_pull_request_convergence_identity AS identity
+                          JOIN repo_watch_pull_request_convergence_assessment AS assessment
+                            ON assessment.assessment_id = identity.assessment_id
+                         WHERE identity.repository = convergence.repository
+                           AND identity.pull_request_number = convergence.pull_request_number
+                         ORDER BY identity.cursor_generation DESC, identity.recorded_at DESC,
+                                  identity.identity_id DESC
+                         LIMIT 1
+                   ) AS current ON current.head_sha = convergence.head_sha
+                               AND current.base_revision = convergence.base_revision
+                  JOIN LATERAL (
+                        SELECT cursor_payload
+                          FROM repo_watch_cursor
+                         WHERE repository = convergence.repository
+                         ORDER BY generation DESC
+                         LIMIT 1
+                   ) AS cursor ON true
+                  JOIN LATERAL jsonb_array_elements(
+                        cursor.cursor_payload -> 'state' -> 'pull_requests'
+                   ) AS pull_request ON
+                        (pull_request ->> 'number')::numeric =
+                            convergence.pull_request_number
+                  JOIN LATERAL jsonb_array_elements(
+                        cursor.cursor_payload -> 'state' -> 'branch_heads'
+                   ) AS base_head ON
+                        base_head ->> 'branch' = pull_request ->> 'base_branch'
+                  WHERE NOT EXISTS (
+                        SELECT 1
+                          FROM repo_watch_convergence_cutoff AS cutoff
+                         WHERE cutoff.assessment_id = convergence.assessment_id
+                           AND cutoff.identity_id = current.identity_id
+                  )
+                    AND pull_request ->> 'head_sha' = current.head_sha
+                    AND base_head ->> 'head' = current.base_revision
+                  ORDER BY convergence.repository, convergence.converged_at,
+                           convergence.assessment_id
+                  LIMIT 1",
+            )
+            .fetch_optional(&self.pool)
+            .await?;
+            let Some(repository) = repository else {
+                return Ok(());
+            };
+            let repository = RepositorySlug::try_new(repository).map_err(|_| {
+                RepoWatchDispatchRepositoryError::Corruption(
+                    "pending convergence cutoff has an invalid repository",
+                )
+            })?;
+            match self
+                .process_next_convergence_cutoff(&repository, &mut next_command_id)
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(RepoWatchDispatchRepositoryError::Corruption(
+                        "selected pending convergence cutoff disappeared",
                     ));
                 }
                 Err(RepoWatchDispatchRepositoryError::GoalCutoff(
@@ -727,6 +957,7 @@ impl PostgresRepoWatchDispatchStore {
                 cooldown,
                 actions,
             } => {
+                self.release_parked_obligations_for_event(&event).await?;
                 let mut transaction = self.pool.begin().await?;
                 let (singleton, matched_admission) = match admission {
                     EvaluationAdmission::Fresh => (
@@ -774,7 +1005,10 @@ impl PostgresRepoWatchDispatchStore {
                         .await?
                         {
                             ObligationAdmission::Pending => {}
-                            ObligationAdmission::Superseded => {
+                            // Parking withholds the obligation rather than
+                            // settling it, so it reads as unfinished work no
+                            // dispatch currently owns.
+                            ObligationAdmission::Superseded | ObligationAdmission::Parked => {
                                 transaction.rollback().await?;
                                 return Ok(RepoWatchRuleEvaluationOutcome::Occupied);
                             }
@@ -823,6 +1057,31 @@ impl PostgresRepoWatchDispatchStore {
                     commit(transaction).await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::TargetClosed);
                 }
+                if !terminal_event && event_target_is_converged(&mut transaction, &event).await? {
+                    match matched_admission {
+                        MatchedAdmission::Fresh => {
+                            insert_evaluation(
+                                &mut transaction,
+                                &event,
+                                &rule_id,
+                                rule_version,
+                                RepoWatchEvaluationOutcomeStorageKind::TargetConverged,
+                                None,
+                            )
+                            .await?;
+                        }
+                        MatchedAdmission::Obligation { obligation_id } => {
+                            crate::repo_watch_dispatch_obligation::settle_target_converged_obligation(
+                                &mut transaction,
+                                obligation_id,
+                                event.id(),
+                            )
+                            .await?;
+                        }
+                    }
+                    commit(transaction).await?;
+                    return Ok(RepoWatchRuleEvaluationOutcome::TargetConverged);
+                }
                 if matched_admission == MatchedAdmission::Fresh
                     && crate::repo_watch_dispatch_obligation::active_obligation_exists(
                         &mut transaction,
@@ -844,7 +1103,7 @@ impl PostgresRepoWatchDispatchStore {
                     crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
                         &mut transaction,
                         dispatch_id,
-                        None,
+                        crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::Existing,
                         &event,
                         &rule_id,
                         rule_version,
@@ -857,30 +1116,89 @@ impl PostgresRepoWatchDispatchStore {
                 if let Some(blocking_dispatch) =
                     occupying_dispatch(&mut transaction, &rule_id, rule_version, &singleton).await?
                 {
-                    if matched_admission == MatchedAdmission::Fresh {
-                        insert_evaluation(
-                            &mut transaction,
-                            &event,
-                            &rule_id,
-                            rule_version,
-                            RepoWatchEvaluationOutcomeStorageKind::Occupied,
-                            None,
-                        )
-                        .await?;
-                        crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
-                            &mut transaction,
-                            dispatch_id,
-                            Some(blocking_dispatch),
-                            &event,
-                            &rule_id,
-                            rule_version,
-                            &singleton,
-                        )
-                        .await?;
-                        commit(transaction).await?;
-                    } else {
-                        transaction.rollback().await?;
+                    match matched_admission {
+                        MatchedAdmission::Fresh => {
+                            insert_evaluation(
+                                &mut transaction,
+                                &event,
+                                &rule_id,
+                                rule_version,
+                                RepoWatchEvaluationOutcomeStorageKind::Occupied,
+                                None,
+                            )
+                            .await?;
+                            crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
+                                &mut transaction,
+                                dispatch_id,
+                                crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::RepoWatchDispatch(
+                                    blocking_dispatch,
+                                ),
+                                &event,
+                                &rule_id,
+                                rule_version,
+                                &singleton,
+                            )
+                            .await?;
+                        }
+                        MatchedAdmission::Obligation { obligation_id } => {
+                            crate::repo_watch_dispatch_obligation::replace_dispatch_obligation_blocker(
+                                &mut transaction,
+                                obligation_id,
+                                crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::RepoWatchDispatch(
+                                    blocking_dispatch,
+                                ),
+                            )
+                            .await?;
+                        }
                     }
+                    commit(transaction).await?;
+                    return Ok(RepoWatchRuleEvaluationOutcome::Occupied);
+                }
+                if let RepoWatchEventTarget::PullRequest(context) = event.target()
+                    && let Some(blocking_session) =
+                        crate::commissioned_dispatch::lock_live_pull_request_target_identity(
+                            &mut transaction,
+                            event.repository(),
+                            context.number(),
+                        )
+                        .await?
+                {
+                    match matched_admission {
+                        MatchedAdmission::Fresh => {
+                            insert_evaluation(
+                                &mut transaction,
+                                &event,
+                                &rule_id,
+                                rule_version,
+                                RepoWatchEvaluationOutcomeStorageKind::Occupied,
+                                None,
+                            )
+                            .await?;
+                            crate::repo_watch_dispatch_obligation::record_dispatch_obligation(
+                                &mut transaction,
+                                dispatch_id,
+                                crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::ExternalSession(
+                                    blocking_session,
+                                ),
+                                &event,
+                                &rule_id,
+                                rule_version,
+                                &singleton,
+                            )
+                            .await?;
+                        }
+                        MatchedAdmission::Obligation { obligation_id } => {
+                            crate::repo_watch_dispatch_obligation::replace_dispatch_obligation_blocker(
+                                &mut transaction,
+                                obligation_id,
+                                crate::repo_watch_dispatch_obligation::DispatchObligationBlocker::ExternalSession(
+                                    blocking_session,
+                                ),
+                            )
+                            .await?;
+                        }
+                    }
+                    commit(transaction).await?;
                     return Ok(RepoWatchRuleEvaluationOutcome::Occupied);
                 }
                 if singleton_is_cooling_down(&mut transaction, &rule_id, rule_version, &singleton)
@@ -1090,6 +1408,30 @@ impl RepoWatchDispatchTransaction for PostgresRepoWatchDispatchStore {
 }
 
 impl PostgresRepoWatchDispatchStore {
+    /// Releases every parked obligation this event is progress for.
+    ///
+    /// Both terminal evaluation paths call this, because a parked lineage is
+    /// released by its pull request moving on and not by the moving event
+    /// happening to match the rule that parked it.
+    ///
+    /// Committed on its own, before any singleton key is taken. A rule-scoped
+    /// singleton spans repositories, so an evaluation holding one can own the
+    /// obligation row of a lineage parked in another repository while this scan
+    /// wants a row that another repository's evaluation owns the same way;
+    /// inside the critical section those two waits close a cycle. Releasing
+    /// first costs only idempotent repetition if the evaluation that follows
+    /// fails, since a release is recorded against the event that bought it.
+    async fn release_parked_obligations_for_event(
+        &self,
+        event: &RepoWatchEvent,
+    ) -> Result<(), RepoWatchDispatchRepositoryError> {
+        sqlx::query("SELECT repo_watch_release_dispatch_obligation_parks_for_event($1)")
+            .bind(event.id().as_uuid())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     async fn record_simple_outcome(
         &self,
         event: &RepoWatchEvent,
@@ -1097,6 +1439,7 @@ impl PostgresRepoWatchDispatchStore {
         rule_version: RepoWatchRuleVersion,
         outcome: RepoWatchEvaluationOutcomeStorageKind,
     ) -> Result<RepoWatchRuleEvaluationOutcome, RepoWatchDispatchRepositoryError> {
+        self.release_parked_obligations_for_event(event).await?;
         let mut transaction = self.pool.begin().await?;
         lock_text(&mut transaction, event.repository().as_str()).await?;
         if let Some(recorded) =
@@ -1458,8 +1801,9 @@ async fn insert_batch(
         "INSERT INTO repo_watch_dispatch_batch
             (dispatch_id, event_id, rule_id, rule_version, singleton_scope,
              singleton_repository, singleton_pull_request_number,
-             singleton_stack_root_pull_request_number, cooldown_seconds, action_count)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)",
+             singleton_stack_root_pull_request_number, cooldown_seconds, action_count,
+             admitted_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,clock_timestamp())",
     )
     .bind(batch.dispatch_id.as_uuid())
     .bind(batch.event.id().as_uuid())
@@ -1578,6 +1922,9 @@ async fn load_recorded_evaluation(
         }
         Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed) => {
             Ok(Some(RepoWatchRuleEvaluationOutcome::TargetClosed))
+        }
+        Some(RepoWatchEvaluationOutcomeStorageKind::TargetConverged) => {
+            Ok(Some(RepoWatchRuleEvaluationOutcome::TargetConverged))
         }
         Some(
             RepoWatchEvaluationOutcomeStorageKind::Occupied
@@ -1708,6 +2055,59 @@ async fn terminal_event_has_later_terminal_cutoff(
         }
     }
     Ok(false)
+}
+
+async fn event_target_is_converged(
+    transaction: &mut Transaction<'_, Postgres>,
+    event: &RepoWatchEvent,
+) -> Result<bool, RepoWatchDispatchRepositoryError> {
+    let RepoWatchEventTarget::PullRequest(context) = event.target() else {
+        return Ok(false);
+    };
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM (
+                    SELECT assessment.head_sha, assessment.base_revision
+                      FROM repo_watch_pull_request_convergence_identity AS identity
+                      JOIN repo_watch_pull_request_convergence_assessment AS assessment
+                        ON assessment.assessment_id = identity.assessment_id
+                     WHERE identity.repository = $1
+                       AND identity.pull_request_number = $2
+                     ORDER BY identity.cursor_generation DESC, identity.recorded_at DESC,
+                              identity.identity_id DESC
+                     LIMIT 1
+                   ) AS current
+              JOIN repo_watch_pull_request_convergence AS convergence
+                ON convergence.repository = $1
+               AND convergence.pull_request_number = $2
+               AND convergence.head_sha = current.head_sha
+               AND convergence.base_revision = current.base_revision
+              JOIN LATERAL (
+                    SELECT cursor_payload
+                      FROM repo_watch_cursor
+                     WHERE repository = $1
+                     ORDER BY generation DESC
+                     LIMIT 1
+                   ) AS cursor ON true
+              JOIN LATERAL jsonb_array_elements(
+                    cursor.cursor_payload -> 'state' -> 'pull_requests'
+                   ) AS pull_request ON
+                    (pull_request ->> 'number')::numeric = $2
+              JOIN LATERAL jsonb_array_elements(
+                    cursor.cursor_payload -> 'state' -> 'branch_heads'
+                   ) AS base_head ON
+                    base_head ->> 'branch' = pull_request ->> 'base_branch'
+             WHERE current.head_sha = $3
+               AND pull_request ->> 'head_sha' = $3
+               AND base_head ->> 'head' = current.base_revision
+        )",
+    )
+    .bind(event.repository().as_str())
+    .bind(Decimal::from(context.number().get()))
+    .bind(context.head_sha().as_str())
+    .fetch_one(&mut **transaction)
+    .await?)
 }
 
 async fn singleton_is_cooling_down(
