@@ -1,3 +1,5 @@
+use std::{collections::BTreeSet, process::Command};
+
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_model_reference_catalog::{
@@ -5,6 +7,8 @@ use signalbox_model_reference_catalog::{
     PriceResolution, Provider, RateDimension, ReferenceResolution, bundled_catalog,
     render_projections,
 };
+
+const REFERENCE_PACKAGE: &str = "signalbox-model-reference-catalog";
 
 fn exact_api_snapshot_rate_set_ids(
     catalog: &Catalog,
@@ -360,6 +364,30 @@ fn observation_bounded_price_transition_returns_ambiguity() {
 }
 
 #[test]
+fn expired_rate_does_not_support_a_later_transition_observation() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["rate_sets"][36]["id"], "oai-gpt56-sol-launch");
+    assert_eq!(raw["rate_sets"][37]["id"], "oai-gpt56-sol-current");
+    raw["rate_sets"][36]["window"]["effective_until"] = Value::String(String::from("2026-08-01"));
+    raw["rate_sets"][37]["window"]["precision"] = Value::String(String::from("observation_window"));
+    raw["rate_sets"][37]["window"]["effective_from"] = Value::Null;
+    raw["rate_sets"][37]["window"]["first_observed_new_rate"] =
+        Value::String(String::from("2026-08-24"));
+    let catalog = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap();
+
+    let resolution = catalog
+        .resolve(
+            Provider::Openai,
+            "gpt-5.6-sol",
+            "2026-08-22",
+            CommercialChannel::Api,
+        )
+        .unwrap();
+
+    assert_eq!(resolution.price(), Some(&PriceResolution::Unknown));
+}
+
+#[test]
 fn unrelated_rate_overlays_do_not_form_a_transition() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
     assert_eq!(raw["rate_sets"][37]["id"], "oai-gpt56-sol-current");
@@ -511,6 +539,52 @@ fn rate_window_cannot_extend_past_model_availability() {
 }
 
 #[test]
+fn consumer_mapping_cannot_outlive_model_availability() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["consumer_mappings"][9]["id"], "oai-codex-cli-mini");
+    raw["consumer_mappings"][9]["observed_identity"] =
+        Value::String(String::from("gpt-3.5-turbo-0301"));
+    raw["consumer_mappings"][9]["normalized_model"] =
+        Value::String(String::from("openai:gpt-3.5-turbo-0301"));
+    raw["consumer_mappings"][9]["window"]["effective_from"] =
+        Value::String(String::from("2023-03-01"));
+    raw["consumer_mappings"][9]["window"]["first_observed_new_rate"] =
+        Value::String(String::from("2023-03-01"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("extends beyond model availability")
+    );
+}
+
+#[test]
+fn consumer_mapping_cannot_start_after_model_retirement() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["consumer_mappings"][9]["id"], "oai-codex-cli-mini");
+    raw["consumer_mappings"][9]["observed_identity"] =
+        Value::String(String::from("gpt-3.5-turbo-0301"));
+    raw["consumer_mappings"][9]["normalized_model"] =
+        Value::String(String::from("openai:gpt-3.5-turbo-0301"));
+    raw["consumer_mappings"][9]["window"]["effective_from"] =
+        Value::String(String::from("2025-05-01"));
+    raw["consumer_mappings"][9]["window"]["effective_until"] =
+        Value::String(String::from("2025-06-01"));
+    raw["consumer_mappings"][9]["window"]["first_observed_new_rate"] =
+        Value::String(String::from("2025-05-01"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("extends beyond model availability")
+    );
+}
+
+#[test]
 fn exact_day_observation_boundary_must_be_ordered() {
     let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
     assert_eq!(raw["rate_sets"][15]["id"], "oai-o3-reduced");
@@ -524,6 +598,76 @@ fn exact_day_observation_boundary_must_be_ordered() {
             .to_string()
             .contains("does not leave an ordered observation boundary")
     );
+}
+
+#[test]
+fn consumer_mapping_observation_boundary_must_be_ordered() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(
+        raw["consumer_mappings"][30]["id"],
+        "anth-code-default-sonnet5"
+    );
+    raw["consumer_mappings"][30]["window"]["last_observed_old_rate"] =
+        Value::String(String::from("2026-06-30"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("does not leave an ordered observation boundary")
+    );
+}
+
+#[test]
+fn consumer_channel_must_belong_to_the_mapping_provider() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["consumer_mappings"][0]["id"], "oai-chatgpt-gpt35");
+    raw["consumer_mappings"][0]["commercial_channel"] =
+        Value::String(String::from("claude_subscription"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("another provider's commercial channel")
+    );
+}
+
+#[test]
+fn low_confidence_rate_requires_an_explicit_limitation() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["rate_sets"][0]["id"], "oai-gpt35-launch");
+    raw["rate_sets"][0]["confidence"] = Value::String(String::from("low"));
+    raw["rate_sets"][0]["limitations"] = Value::Array(Vec::new());
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(error.to_string().contains("has no explicit limitation"));
+}
+
+#[test]
+fn low_confidence_mapping_requires_an_explicit_limitation() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["consumer_mappings"][0]["id"], "oai-chatgpt-gpt35");
+    raw["consumer_mappings"][0]["confidence"] = Value::String(String::from("low"));
+    raw["consumer_mappings"][0]["limitations"] = Value::Array(Vec::new());
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(error.to_string().contains("has no explicit limitation"));
+}
+
+#[test]
+fn projection_breaking_source_text_is_rejected() {
+    let mut raw: Value = serde_json::from_str(BUNDLED_CATALOG_JSON).unwrap();
+    assert_eq!(raw["sources"][0]["id"], "oai-gpt35-launch-2023-03-01");
+    raw["sources"][0]["evidence"] = Value::String(String::from("safe\n```\n# injected"));
+
+    let error = Catalog::from_json(&serde_json::to_string(&raw).unwrap()).unwrap_err();
+
+    assert!(error.to_string().contains("projection-breaking character"));
 }
 
 #[test]
@@ -634,14 +778,40 @@ fn incompatible_overlapping_rate_is_rejected() {
 }
 
 #[test]
-fn reference_catalog_has_no_runtime_authority_dependency() {
-    let reference_manifest = include_str!("../Cargo.toml");
-    let daemon_manifest = include_str!("../../../apps/signalboxd/Cargo.toml");
+fn inv_077_reference_catalog_has_no_workspace_dependency_edge() {
+    let output = Command::new(env!("CARGO"))
+        .args(["metadata", "--no-deps", "--format-version", "1"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let metadata: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let packages = metadata["packages"].as_array().unwrap();
+    let workspace_packages = packages
+        .iter()
+        .map(|package| package["name"].as_str().unwrap())
+        .collect::<BTreeSet<_>>();
+    let mut dependency_edges = packages
+        .iter()
+        .flat_map(|package| {
+            let package_name = package["name"].as_str().unwrap();
+            let workspace_packages = &workspace_packages;
+            package["dependencies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(move |dependency| {
+                    let dependency_name = dependency["name"].as_str().unwrap();
+                    (workspace_packages.contains(dependency_name)
+                        && (package_name == REFERENCE_PACKAGE
+                            || dependency_name == REFERENCE_PACKAGE))
+                        .then(|| format!("{package_name} -> {dependency_name}"))
+                })
+        })
+        .collect::<Vec<_>>();
+    dependency_edges.sort();
 
-    assert!(!reference_manifest.contains("signalbox-domain"));
-    assert!(!reference_manifest.contains("signalbox-model-provider-runtime"));
-    assert!(!reference_manifest.contains("signalbox-model-runtime"));
-    assert!(!daemon_manifest.contains("signalbox-model-reference-catalog"));
+    assert_eq!(dependency_edges, Vec::<String>::new());
 }
 
 #[test]

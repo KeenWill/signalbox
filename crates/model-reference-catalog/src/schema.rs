@@ -95,6 +95,16 @@ impl CommercialChannel {
     fn is_api_rate_channel(self) -> bool {
         matches!(self, Self::Api | Self::BatchApi)
     }
+
+    fn consumer_provider(self) -> Option<Provider> {
+        match self {
+            Self::Api | Self::BatchApi => None,
+            Self::ChatgptSubscription | Self::CodexSubscription | Self::CodexCliSubscription => {
+                Some(Provider::Openai)
+            }
+            Self::ClaudeSubscription | Self::ClaudeCodeSubscription => Some(Provider::Anthropic),
+        }
+    }
 }
 
 /// What stability semantics a reference model identifier has.
@@ -755,6 +765,12 @@ impl Catalog {
                             .as_deref()
                             .is_some_and(|until| until <= date)
                     })
+                    .filter(|old| {
+                        new.window
+                            .last_observed_old_rate
+                            .as_deref()
+                            .is_some_and(|observed| old.window.contains(observed))
+                    })
                     .filter(|old| rate_sets_share_dimension_and_qualifier(old, new))
                     .map(move |old| (new, old))
             })
@@ -1131,17 +1147,9 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
             )));
         }
         validate_window(&set.window, &set.id)?;
-        if set.window.precision == DatePrecision::ExactDay
-            && let Some(last_old) = &set.window.last_observed_old_rate
-            && last_old >= &set.window.first_observed_new_rate
-        {
-            return Err(CatalogError::new(format!(
-                "window {} does not leave an ordered observation boundary",
-                set.id
-            )));
-        }
         validate_source_refs(&set.source_ids, &source_ids, &set.id)?;
         validate_source_providers(raw, set.provider, &set.source_ids, &set.id)?;
+        validate_limitations(set.confidence, &set.limitations, &set.id)?;
         let rate_start = set
             .window
             .effective_from
@@ -1201,10 +1209,17 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
                 mapping.id
             )));
         }
+        if mapping.commercial_channel.consumer_provider() != Some(mapping.provider) {
+            return Err(CatalogError::new(format!(
+                "consumer mapping {} uses another provider's commercial channel",
+                mapping.id
+            )));
+        }
         validate_nonempty(&mapping.observed_identity, "observed identity")?;
         validate_window(&mapping.window, &mapping.id)?;
         validate_source_refs(&mapping.source_ids, &source_ids, &mapping.id)?;
         validate_source_providers(raw, mapping.provider, &mapping.source_ids, &mapping.id)?;
+        validate_limitations(mapping.confidence, &mapping.limitations, &mapping.id)?;
         validate_model_ref(
             raw,
             mapping.provider,
@@ -1229,6 +1244,19 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
             {
                 return Err(CatalogError::new(format!(
                     "mapping {} predates model availability",
+                    mapping.id
+                )));
+            }
+            if let Some(model_until) = model.available_until.as_deref()
+                && (mapping_start >= model_until
+                    || mapping
+                        .window
+                        .effective_until
+                        .as_deref()
+                        .is_none_or(|mapping_until| mapping_until > model_until))
+            {
+                return Err(CatalogError::new(format!(
+                    "mapping {} extends beyond model availability",
                     mapping.id
                 )));
             }
@@ -1289,6 +1317,7 @@ fn validate(raw: &RawCatalog) -> Result<HashMap<String, usize>, CatalogError> {
 fn validate_source(source: &Source) -> Result<(), CatalogError> {
     validate_nonempty(&source.id, "source id")?;
     validate_nonempty(&source.title, "source title")?;
+    validate_nonempty(&source.url, "source URL")?;
     validate_nonempty(&source.evidence, "source evidence")?;
     validate_date(&source.retrieved, "source retrieved")?;
     if let Some(published) = &source.published {
@@ -1399,8 +1428,7 @@ fn validate_window(window: &DateWindow, subject: &str) -> Result<(), CatalogErro
             "window {subject} observes its rate after the window ends"
         )));
     }
-    if window.precision == DatePrecision::ObservationWindow
-        && let Some(last_old) = &window.last_observed_old_rate
+    if let Some(last_old) = &window.last_observed_old_rate
         && last_old >= &window.first_observed_new_rate
     {
         return Err(CatalogError::new(format!(
@@ -1666,9 +1694,29 @@ fn validate_nonempty(value: &str, field: &str) -> Result<(), CatalogError> {
         Err(CatalogError::new(format!(
             "{field} is empty, padded, or NUL-bearing"
         )))
+    } else if value.chars().any(char::is_control) || value.contains(['|', '`']) {
+        Err(CatalogError::new(format!(
+            "{field} contains a projection-breaking character"
+        )))
     } else {
         Ok(())
     }
+}
+
+fn validate_limitations(
+    confidence: Confidence,
+    limitations: &[String],
+    subject: &str,
+) -> Result<(), CatalogError> {
+    if confidence == Confidence::Low && limitations.is_empty() {
+        return Err(CatalogError::new(format!(
+            "low-confidence record {subject} has no explicit limitation"
+        )));
+    }
+    for limitation in limitations {
+        validate_nonempty(limitation, "limitation")?;
+    }
+    Ok(())
 }
 
 fn validate_date(value: &str, field: &str) -> Result<(), CatalogError> {

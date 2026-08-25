@@ -136,11 +136,11 @@ mod tests {
 
     use super::{Mode, synchronize_projections};
 
-    fn one_current_projection() -> Vec<Projection> {
-        vec![Projection {
+    fn current_projection() -> Projection {
+        Projection {
             filename: "current.md",
             contents: format!("{GENERATED_PROJECTION_BANNER}# Current\n"),
-        }]
+        }
     }
 
     #[test]
@@ -148,11 +148,8 @@ mod tests {
         let directory = tempdir().unwrap();
         let current = directory.path().join("current.md");
         let obsolete = directory.path().join("obsolete.md");
-        fs::write(
-            &current,
-            format!("{GENERATED_PROJECTION_BANNER}# Current\n"),
-        )
-        .unwrap();
+        let projection = current_projection();
+        fs::write(&current, &projection.contents).unwrap();
         fs::write(
             &obsolete,
             format!("{GENERATED_PROJECTION_BANNER}# Obsolete\n"),
@@ -160,8 +157,7 @@ mod tests {
         .unwrap();
 
         let error =
-            synchronize_projections(Mode::Check, directory.path(), one_current_projection())
-                .unwrap_err();
+            synchronize_projections(Mode::Check, directory.path(), vec![projection]).unwrap_err();
 
         assert_eq!(
             error,
@@ -176,18 +172,20 @@ mod tests {
     fn write_removes_an_obsolete_generated_projection() {
         let directory = tempdir().unwrap();
         let obsolete = directory.path().join("obsolete.md");
+        let projection = current_projection();
+        let current_contents = projection.contents.clone();
         fs::write(
             &obsolete,
             format!("{GENERATED_PROJECTION_BANNER}# Obsolete\n"),
         )
         .unwrap();
 
-        synchronize_projections(Mode::Write, directory.path(), one_current_projection()).unwrap();
+        synchronize_projections(Mode::Write, directory.path(), vec![projection]).unwrap();
 
         assert!(!obsolete.exists());
         assert_eq!(
             fs::read_to_string(directory.path().join("current.md")).unwrap(),
-            format!("{GENERATED_PROJECTION_BANNER}# Current\n")
+            current_contents
         );
     }
 }
