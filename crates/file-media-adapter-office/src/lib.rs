@@ -46,8 +46,14 @@ const XML_MALFORMED: &str = "xml_malformed";
 const ZIP_PREFIX_BYTES: u64 = 4;
 // numeric-bound: not-a-bound - fixed maximum ZIP comment plus trailing record coverage
 const ZIP_SUFFIX_BYTES: u64 = 65_536;
-// numeric-bound: not-a-bound - fixed ZIP64 trailer width preceding the suffix
-const EOCD_PRECEDING_BYTES: u64 = 97;
+// numeric-bound: ceiling - bounds ZIP64 extensible end-record data inspected during probing
+const MAX_ZIP64_EOCD_BYTES: u64 = 64 * 1024;
+// numeric-bound: not-a-bound - maximum EOCD reach, locator width, and bounded ZIP64 record
+const EOCD_PRECEDING_BYTES: u64 = 21 + 20 + MAX_ZIP64_EOCD_BYTES;
+// numeric-bound: not-a-bound - maximum selected main-part name width across supported families
+const SELECTED_PART_NAME_BYTES: u64 = 20;
+// numeric-bound: not-a-bound - fixed number of supported Office families selected by one probe
+const MAX_SELECTED_PARTS: u64 = 3;
 // numeric-bound: ceiling - protects probe broker memory and cumulative source reads
 const VALIDATION_SOURCE_BYTES: u64 = 262_144;
 // numeric-bound: ceiling - protects probe decompression from oversized type metadata
@@ -292,7 +298,7 @@ fn reader_declaration(
         probe: ProbeDeclaration::new(
             ZIP_PREFIX_BYTES,
             ZIP_SUFFIX_BYTES,
-            10,
+            16,
             VALIDATION_SOURCE_BYTES,
         ),
         views: vec![text_view, metadata_view],
@@ -504,6 +510,8 @@ async fn read_central_inventory(
                 - PACKAGE_RELS_NAME_BYTES
                 - LOCAL_EXTRA_BYTES
                 - PACKAGE_RELS_COMPRESSED_BYTES
+                - MAX_SELECTED_PARTS
+                    * (LOCAL_HEADER_BYTES + SELECTED_PART_NAME_BYTES + LOCAL_EXTRA_BYTES)
     {
         return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
     }
@@ -544,6 +552,7 @@ async fn read_central_inventory(
         }
         if content_types.flags & 1 != 0 || package_relationships.flags & 1 != 0 {
             inventory.kinds = recognized;
+            validate_selected_probe_entries(source, cancellation, &inventory).await?;
             return Ok(inventory);
         }
     }
@@ -597,20 +606,29 @@ async fn read_central_inventory(
         issue,
         kinds: recognized,
     })?;
-    validate_selected_probe_entries(&inventory)?;
+    validate_selected_probe_entries(source, cancellation, &inventory).await?;
     Ok(inventory)
 }
 
-fn validate_selected_probe_entries(inventory: &CentralInventory) -> Result<(), CentralReadError> {
+async fn validate_selected_probe_entries(
+    source: &dyn VerifiedBlobSource,
+    cancellation: &dyn CancellationSignal,
+    inventory: &CentralInventory,
+) -> Result<(), CentralReadError> {
     for kind in &inventory.kinds {
         let entry = inventory
             .entries_by_name
             .iter()
             .find(|entry| entry.name == kind.marker())
             .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
-        if entry.flags & 1 != 0 {
-            continue;
-        }
+        validate_selected_probe_entry(entry)?;
+        read_probe_local_header(source, cancellation, entry).await?;
+    }
+    Ok(())
+}
+
+fn validate_selected_probe_entry(entry: &CentralEntry) -> Result<(), CentralReadError> {
+    if entry.flags & 1 == 0 {
         if !matches!(entry.compression, 0 | 8) {
             return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
         }
@@ -925,6 +943,41 @@ async fn read_probe_entry(
     {
         return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT).into());
     }
+    let data_offset = read_probe_local_header(source, cancellation, entry).await?;
+    require_range(
+        source.byte_length().get(),
+        data_offset,
+        entry.compressed_bytes,
+    )?;
+    let compressed = read_range(source, data_offset, entry.compressed_bytes).await?;
+    let bytes = match entry.compression {
+        0 => compressed,
+        8 => {
+            let mut decoded = Vec::new();
+            DeflateDecoder::new(Cursor::new(compressed))
+                .take(MAX_ENTRY_BYTES + 1)
+                .read_to_end(&mut decoded)
+                .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
+            decoded
+        }
+        _ => return Err(ValidationIssue::Malformed(MALFORMED_REASON).into()),
+    };
+    if u64::try_from(bytes.len()).ok() != Some(entry.expanded_bytes)
+        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ENTRY_BYTES
+    {
+        return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT).into());
+    }
+    if crc32fast::hash(&bytes) != entry.crc32 {
+        return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
+    }
+    Ok(bytes)
+}
+
+async fn read_probe_local_header(
+    source: &dyn VerifiedBlobSource,
+    cancellation: &dyn CancellationSignal,
+    entry: &CentralEntry,
+) -> Result<u64, CentralReadError> {
     require_active(cancellation)?;
     require_range(
         source.byte_length().get(),
@@ -970,39 +1023,11 @@ async fn read_probe_entry(
         return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
     }
     validate_local_header_fields(&local, local_extra, entry)?;
-    let data_offset = entry
+    entry
         .local_offset
         .checked_add(LOCAL_HEADER_BYTES)
-        .and_then(|value| value.checked_add(name_length))
-        .and_then(|value| value.checked_add(extra_length))
-        .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
-    require_range(
-        source.byte_length().get(),
-        data_offset,
-        entry.compressed_bytes,
-    )?;
-    let compressed = read_range(source, data_offset, entry.compressed_bytes).await?;
-    let bytes = match entry.compression {
-        0 => compressed,
-        8 => {
-            let mut decoded = Vec::new();
-            DeflateDecoder::new(Cursor::new(compressed))
-                .take(MAX_ENTRY_BYTES + 1)
-                .read_to_end(&mut decoded)
-                .map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
-            decoded
-        }
-        _ => return Err(ValidationIssue::Malformed(MALFORMED_REASON).into()),
-    };
-    if u64::try_from(bytes.len()).ok() != Some(entry.expanded_bytes)
-        || u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ENTRY_BYTES
-    {
-        return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT).into());
-    }
-    if crc32fast::hash(&bytes) != entry.crc32 {
-        return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
-    }
-    Ok(bytes)
+        .and_then(|value| value.checked_add(local_variable_length))
+        .ok_or_else(|| ValidationIssue::Malformed(MALFORMED_REASON).into())
 }
 
 fn validate_local_header_fields(
@@ -3372,6 +3397,34 @@ mod tests {
         }
     }
 
+    struct BytesSource(Vec<u8>);
+
+    impl VerifiedBlobSource for BytesSource {
+        fn digest(&self) -> FileDigest {
+            FileDigest::from_bytes([0x42; 32])
+        }
+
+        fn byte_length(&self) -> NonZeroU64 {
+            NonZeroU64::new(u64::try_from(self.0.len()).expect("fixture length fits u64"))
+                .expect("fixture length is nonzero")
+        }
+
+        fn read_range(&self, offset: u64, length: NonZeroU64) -> SourceReadFuture<'_> {
+            Box::pin(async move {
+                let start = usize::try_from(offset).map_err(|_| SourceReadError::Unavailable)?;
+                let length =
+                    usize::try_from(length.get()).map_err(|_| SourceReadError::Unavailable)?;
+                let end = start
+                    .checked_add(length)
+                    .ok_or(SourceReadError::Unavailable)?;
+                self.0
+                    .get(start..end)
+                    .map(Vec::from)
+                    .ok_or(SourceReadError::Unavailable)
+            })
+        }
+    }
+
     #[test]
     fn unrecognized_declared_candidate_returns_no_match() {
         let result = ValidationIssue::Unrecognized.validation(OfficeKind::Docx);
@@ -3735,9 +3788,10 @@ mod tests {
     }
 
     #[test]
-    fn probe_budget_reserves_the_content_types_local_filename() {
+    fn probe_budget_reserves_all_local_header_reads() {
         let admitted_central_bytes = VALIDATION_SOURCE_BYTES
             - ZIP_SUFFIX_BYTES
+            - EOCD_PRECEDING_BYTES
             - ZIP_PREFIX_BYTES
             - LOCAL_HEADER_BYTES
             - CONTENT_TYPES_NAME_BYTES
@@ -3746,11 +3800,14 @@ mod tests {
             - LOCAL_HEADER_BYTES
             - PACKAGE_RELS_NAME_BYTES
             - LOCAL_EXTRA_BYTES
-            - PACKAGE_RELS_COMPRESSED_BYTES;
+            - PACKAGE_RELS_COMPRESSED_BYTES
+            - MAX_SELECTED_PARTS
+                * (LOCAL_HEADER_BYTES + SELECTED_PART_NAME_BYTES + LOCAL_EXTRA_BYTES);
 
         assert_eq!(
             ZIP_PREFIX_BYTES
                 + ZIP_SUFFIX_BYTES
+                + EOCD_PRECEDING_BYTES
                 + admitted_central_bytes
                 + LOCAL_HEADER_BYTES
                 + CONTENT_TYPES_NAME_BYTES
@@ -3759,9 +3816,46 @@ mod tests {
                 + LOCAL_HEADER_BYTES
                 + PACKAGE_RELS_NAME_BYTES
                 + LOCAL_EXTRA_BYTES
-                + PACKAGE_RELS_COMPRESSED_BYTES,
+                + PACKAGE_RELS_COMPRESSED_BYTES
+                + MAX_SELECTED_PARTS
+                    * (LOCAL_HEADER_BYTES + SELECTED_PART_NAME_BYTES + LOCAL_EXTRA_BYTES),
             VALIDATION_SOURCE_BYTES
         );
+    }
+
+    #[tokio::test]
+    async fn selected_parts_require_matching_local_headers() {
+        let name = OfficeKind::Docx.marker();
+        let mut bytes = vec![0_u8; 30 + name.len()];
+        bytes[0..4].copy_from_slice(b"PK\x03\x04");
+        bytes[18..22].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[22..26].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[26..28].copy_from_slice(
+            &u16::try_from(name.len())
+                .expect("fixture name fits in a ZIP length")
+                .to_le_bytes(),
+        );
+        bytes[30..].copy_from_slice(b"word/document.xmz");
+        let source = BytesSource(bytes);
+        let entry = CentralEntry {
+            name: String::from(name),
+            flags: 0,
+            compression: 0,
+            crc32: 0,
+            compressed_bytes: 1,
+            expanded_bytes: 1,
+            local_offset: 0,
+        };
+
+        let result = read_probe_local_header(&source, &NeverCancelled, &entry).await;
+
+        assert!(matches!(
+            result,
+            Err(CentralReadError::Validation {
+                issue: ValidationIssue::Malformed(MALFORMED_REASON),
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -3866,7 +3960,11 @@ mod tests {
             encrypted: true,
         };
 
-        assert!(validate_selected_probe_entries(&inventory).is_ok());
+        let entry = inventory
+            .entries_by_name
+            .first()
+            .expect("the fixture should contain its selected entry");
+        assert!(validate_selected_probe_entry(entry).is_ok());
     }
 
     #[test]
@@ -4315,8 +4413,40 @@ mod tests {
     }
 
     #[test]
-    fn zip64_trailer_budget_covers_the_maximum_comment() {
-        assert_eq!(EOCD_PRECEDING_BYTES, 21 + 20 + 56);
+    fn zip64_eocd_fields_allow_bounded_extensible_data() {
+        let suffix_start = 1_000_u64;
+        let extensible_bytes = 32_usize;
+        let record_length = 56 + extensible_bytes;
+        let locator_offset = record_length;
+        let eocd_offset = locator_offset + 20;
+        let mut bytes = vec![0_u8; eocd_offset + 22];
+        bytes[0..4].copy_from_slice(b"PK\x06\x06");
+        bytes[4..12].copy_from_slice(
+            &u64::try_from(record_length - 12)
+                .expect("fixture record length fits u64")
+                .to_le_bytes(),
+        );
+        bytes[24..32].copy_from_slice(&3_u64.to_le_bytes());
+        bytes[32..40].copy_from_slice(&3_u64.to_le_bytes());
+        bytes[40..48].copy_from_slice(&123_u64.to_le_bytes());
+        bytes[48..56].copy_from_slice(&456_u64.to_le_bytes());
+        bytes[locator_offset..locator_offset + 4].copy_from_slice(b"PK\x06\x07");
+        bytes[locator_offset + 8..locator_offset + 16].copy_from_slice(&suffix_start.to_le_bytes());
+        bytes[locator_offset + 16..locator_offset + 20].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[eocd_offset..eocd_offset + 4].copy_from_slice(b"PK\x05\x06");
+        bytes[eocd_offset + 8..eocd_offset + 10].copy_from_slice(&u16::MAX.to_le_bytes());
+        bytes[eocd_offset + 10..eocd_offset + 12].copy_from_slice(&u16::MAX.to_le_bytes());
+        bytes[eocd_offset + 12..eocd_offset + 16].copy_from_slice(&u32::MAX.to_le_bytes());
+        bytes[eocd_offset + 16..eocd_offset + 20].copy_from_slice(&u32::MAX.to_le_bytes());
+
+        let result = central_directory_fields(&bytes, eocd_offset, suffix_start);
+
+        assert!(matches!(result, Ok((3, 123, 456))));
+    }
+
+    #[test]
+    fn zip64_trailer_budget_covers_bounded_extensible_data() {
+        assert_eq!(EOCD_PRECEDING_BYTES, 21 + 20 + MAX_ZIP64_EOCD_BYTES);
     }
 
     #[test]
