@@ -3203,6 +3203,9 @@ function assertTimelineDetailPage(value) {
             "present for a projected tool-batch member",
           );
         }
+        if (tool !== undefined && goal !== undefined) {
+          fail(`${path}.body`, "one projected tool or goal member");
+        }
         if (tool !== undefined) {
           const operatorRequired =
             tool.approval_judge_escalated || tool.approval_posture === "human";
@@ -3272,9 +3275,6 @@ function assertTimelineDetailPage(value) {
           }
         }
         if (goal !== undefined && goal.text !== undefined && goal.text !== null) {
-          if (tool !== undefined) {
-            fail(`${path}.body`, "one projected tool or goal member");
-          }
           continuation = assertTimelineExcerpt(
             goal.text,
             item.address,
@@ -3371,6 +3371,15 @@ function assertTimelineDetailPage(value) {
           fail(`${path}.kind`, "delegation_update for a delegation update body");
         }
         if (
+          item.body.detail.type === "session_message" &&
+          item.body.detail.recipient_session_id !== value.session_id
+        ) {
+          fail(
+            `${path}.body.detail.recipient_session_id`,
+            "the enclosing page session",
+          );
+        }
+        if (
           item.body.detail.type === "child_result" ||
           item.body.detail.type === "child_lifecycle_disposition"
         ) {
@@ -3454,6 +3463,15 @@ function assertTimelineDetailPage(value) {
             item.body.detail.installed_settings,
             `${path}.body.detail.installed_settings`,
           );
+          if (
+            BigInt(item.body.detail.installed_defaults_version) !==
+            BigInt(item.body.detail.prior_defaults_version) + 1n
+          ) {
+            fail(
+              `${path}.body.detail.installed_defaults_version`,
+              "the checked successor of the prior defaults version",
+            );
+          }
         } else {
           assertModelSettingsSnapshot(
             item.body.detail.settings,

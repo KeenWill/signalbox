@@ -1391,4 +1391,121 @@ describe('generated timeline detail decoder', () => {
       'a prior direct selection different from the selected identity',
     )
   })
+
+  it('rejects a tool member alongside a textless goal member', () => {
+    expectTimelineBodyRejected(
+      'tool_batch_transition',
+      {
+        type: 'tool_batch',
+        turn_id: '00000000-0000-0000-0000-000000000002',
+        producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+        projected_member_index: 0,
+        state: {
+          type: 'proposed',
+          frontier_id: '00000000-0000-0000-0000-000000000008',
+        },
+        tools: [
+          {
+            request_id: '00000000-0000-0000-0000-000000000004',
+            tool_name: 'exec',
+            approval_posture: 'auto',
+            approval_judge_escalated: false,
+            operator_required: false,
+            evidence: { type: 'request_only' },
+          },
+        ],
+        goal_events: [{ type: 'user_stopped', generation: '1' }],
+      },
+      'one projected tool or goal member',
+    )
+  })
+
+  it('accepts a lone textless goal member', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '26' },
+          kind: 'tool_batch_transition',
+          body: {
+            type: 'tool_batch',
+            turn_id: '00000000-0000-0000-0000-000000000002',
+            producing_model_call_id: '00000000-0000-0000-0000-000000000003',
+            projected_member_index: 0,
+            state: {
+              type: 'proposed',
+              frontier_id: '00000000-0000-0000-0000-000000000008',
+            },
+            tools: [],
+            goal_events: [{ type: 'user_stopped', generation: '1' }],
+          },
+          projected_body_bytes: 128,
+        },
+      ],
+      projected_body_bytes: 128,
+    }
+
+    expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
+  })
+
+  it('rejects a non-successor installed defaults version', () => {
+    expectTimelineBodyRejected(
+      'session_model_settings_changed',
+      {
+        ...sessionDefaultsSettingsBody,
+        detail: {
+          ...sessionDefaultsSettingsBody.detail,
+          prior_defaults_version: '1',
+          installed_defaults_version: '3',
+        },
+      },
+      'the checked successor of the prior defaults version',
+    )
+  })
+
+  function sessionMessageBody(recipient: string) {
+    return {
+      type: 'delegation',
+      detail: {
+        type: 'session_message',
+        relationship_id: '00000000-0000-0000-0000-000000000004',
+        message_id: '00000000-0000-0000-0000-000000000008',
+        sender_session_id: '00000000-0000-0000-0000-000000000005',
+        recipient_session_id: recipient,
+        message_ordinal: '1',
+        delivery_sequence: '1',
+        content: {
+          text: 'hi',
+          offset_bytes: '0',
+          total_bytes: '2',
+          continuation: null,
+        },
+      },
+    }
+  }
+
+  it('rejects a session message addressed to another session', () => {
+    expectTimelineBodyRejected(
+      'delegation_update',
+      sessionMessageBody('00000000-0000-0000-0000-000000000009'),
+      'the enclosing page session',
+    )
+  })
+
+  it('accepts a session message addressed to the page session', () => {
+    const page = {
+      session_id: ambiguousModelCallPage.session_id,
+      items: [
+        {
+          address: { event_sequence: '27' },
+          kind: 'delegation_update',
+          body: sessionMessageBody(ambiguousModelCallPage.session_id),
+          projected_body_bytes: 130,
+        },
+      ],
+      projected_body_bytes: 130,
+    }
+
+    expect(decodeWebSessionTimelineDetailPage(page)).toEqual(page)
+  })
 })
