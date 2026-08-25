@@ -385,6 +385,67 @@ async fn lowered_validation_ceiling_is_a_typed_validation_limit() -> Result<(), 
 }
 
 #[tokio::test]
+async fn truncated_root_probe_under_a_lowered_ceiling_is_a_typed_validation_limit()
+-> Result<(), Box<dyn Error>> {
+    // A legitimate SVG whose root start tag is long enough that a very low
+    // `validation_source_bytes` ceiling cuts the prefix probe off mid-tag.
+    // The unbounded top-level probe (bounded only by `PROBE_BYTES`) still
+    // sees the whole tag and classifies this as a structural SVG candidate,
+    // so the truncated re-probe inside `inspect` must not report `NoMatch`
+    // for what is really an indeterminate, not a disproven, root: doing so
+    // would turn a typed `source_size_limit` outcome into a hard processor
+    // failure for oversized-but-genuine SVG content.
+    let mut bytes = br#"<svg xmlns="http://www.w3.org/2000/svg" data-pad=""#.to_vec();
+    bytes.extend(std::iter::repeat_n(b'A', 300));
+    bytes.extend_from_slice(b"\">");
+    bytes.resize(256 * 1024 + 1, b' ');
+    bytes.extend_from_slice(b"</svg>");
+    let source = SvgFixture::raw(&bytes).into_source()?;
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 100;
+    let request = InspectionRequest {
+        source: source
+            .file_use()
+            .map_err(|_| FileMediaFailure::ProcessorFailed)?,
+        visible_part: None,
+    };
+    let inspection = registry_with(ceilings)?
+        .inspect(&DirectProcessor::new(), request, &source, &NeverCancelled)
+        .await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Malformed);
+    assert_eq!(malformed_reason(&inspection)?, "source_size_limit");
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_svg_source_exceeding_only_the_lowered_ceiling_is_unknown() -> Result<(), Box<dyn Error>>
+{
+    // Declared as SVG but not actually SVG, and only over the deployment's
+    // lowered `validation_source_bytes` ceiling, not the adapter's hard
+    // ceiling. Bounded root classification must still run so the registry
+    // reports the ordinary `Unknown` a declared-but-unvalidated candidate
+    // gets, rather than a misleading `Malformed`/`source_size_limit`.
+    let mut bytes = b"<foo/>".to_vec();
+    bytes.resize(50, b'a');
+    let source = SvgFixture::raw(&bytes).into_source()?;
+    let mut ceilings = FileMediaCeilings::version_one();
+    ceilings.validation_source_bytes = 10;
+    let request = InspectionRequest {
+        source: source
+            .file_use()
+            .map_err(|_| FileMediaFailure::ProcessorFailed)?,
+        visible_part: None,
+    };
+    let inspection = registry_with(ceilings)?
+        .inspect(&DirectProcessor::new(), request, &source, &NeverCancelled)
+        .await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Unknown);
+    Ok(())
+}
+
+#[tokio::test]
 async fn malformed_dimension_is_rejected_before_metadata_output() -> Result<(), Box<dyn Error>> {
     assert_malformed!(SvgFixture::malformed_dimension(), "malformed_svg").await
 }
@@ -696,6 +757,17 @@ async fn offset_path_resource_reference_is_rejected() -> Result<(), Box<dyn Erro
     assert_malformed!(
         SvgFixture::raw(
             br#"<svg xmlns="http://www.w3.org/2000/svg"><path offset-path="url(https://example.invalid/path.svg#p)"/></svg>"#,
+        ),
+        "external_reference",
+    )
+    .await
+}
+
+#[tokio::test]
+async fn color_profile_resource_reference_is_rejected() -> Result<(), Box<dyn Error>> {
+    assert_malformed!(
+        SvgFixture::raw(
+            br#"<svg xmlns="http://www.w3.org/2000/svg"><rect color-profile="url(https://example.invalid/profile.icc)"/></svg>"#,
         ),
         "external_reference",
     )

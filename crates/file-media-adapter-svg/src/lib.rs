@@ -98,7 +98,7 @@ impl FileMediaProvider for SvgProvider {
                 },
                 ProbeRoot::MalformedSvg => malformed_probe(MALFORMED_REASON),
                 ProbeRoot::ActiveSvg => malformed_probe(ACTIVE_CONTENT_REASON),
-                ProbeRoot::Other => ProcessorProbeOutput::NoMatch,
+                ProbeRoot::Other | ProbeRoot::Indeterminate => ProcessorProbeOutput::NoMatch,
             })
         })
     }
@@ -123,7 +123,7 @@ impl FileMediaProvider for SvgProvider {
                     .get()
                     .min(PROBE_BYTES)
                     .min(maximum_source_bytes);
-                if source.byte_length().get() > SOURCE_BYTES && probe_length > 0 {
+                if probe_length > 0 {
                     let prefix = read_range(
                         source,
                         SourceRange {
@@ -132,6 +132,17 @@ impl FileMediaProvider for SvgProvider {
                         },
                     )
                     .await?;
+                    // `probe_length` is always a strict prefix here, so an
+                    // `Indeterminate` result only proves the read stopped
+                    // before reaching a root element; it never proves the
+                    // source is not SVG. Only a fully classified non-SVG
+                    // root (`ProbeRoot::Other`) is trustworthy enough to
+                    // report `NoMatch`, so this still runs bounded
+                    // classification whenever the effective ceiling (not
+                    // just the adapter's hard ceiling) is exceeded, without
+                    // resurrecting the truncation false-negative that would
+                    // turn a legitimate oversized SVG into a processor
+                    // failure.
                     if matches!(probe_root(&prefix), ProbeRoot::Other) {
                         return Ok(ProcessorValidationOutput::NoMatch);
                     }
@@ -296,7 +307,14 @@ enum ProbeRoot {
     Svg,
     MalformedSvg,
     ActiveSvg,
+    /// A root element was fully parsed and it is conclusively not `<svg>`.
     Other,
+    /// Parsing ended (decode failure, parser error, or EOF) before a root
+    /// start/empty element was fully read, so no conclusion could be drawn.
+    /// This is expected when probing a length-capped prefix that stops
+    /// short of the actual root tag, and must not be treated the same as
+    /// `Other`'s definite non-match by callers that reason about truncation.
+    Indeterminate,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -310,7 +328,7 @@ enum XmlEncoding {
 
 fn probe_root(bytes: &[u8]) -> ProbeRoot {
     let Ok((document, source_encoding)) = decode_xml(bytes, true) else {
-        return ProbeRoot::Other;
+        return ProbeRoot::Indeterminate;
     };
     let mut reader = NsReader::from_reader(document.as_bytes());
     let mut buffer = Vec::new();
@@ -356,9 +374,9 @@ fn probe_root(bytes: &[u8]) -> ProbeRoot {
             Ok((_, Event::Text(text))) => match text.xml10_content() {
                 Ok(text) if is_xml_whitespace(&text) => {}
                 Ok(_) => forbidden_prolog_event = true,
-                Err(_) => return ProbeRoot::Other,
+                Err(_) => return ProbeRoot::Indeterminate,
             },
-            Ok((_, Event::Eof)) | Err(_) => return ProbeRoot::Other,
+            Ok((_, Event::Eof)) | Err(_) => return ProbeRoot::Indeterminate,
             _ => {}
         }
         buffer.clear();
@@ -841,6 +859,7 @@ fn resource_capable_attribute(name: &[u8]) -> bool {
             | b"shape-inside"
             | b"shape-outside"
             | b"shape-subtract"
+            | b"color-profile"
     )
 }
 
