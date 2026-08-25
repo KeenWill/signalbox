@@ -331,7 +331,9 @@ export function SearchUsageWorkbench({
   const searchQuery = useInfiniteQuery({
     queryKey: ['search-usage', 'search', route.q, route.searchScope, currentSessionId],
     enabled: route.view === 'search' && route.q.trim().length > 0,
-    initialPageParam: undefined as WebSearchPage['continuation'],
+    // The merged contract states `continuation` as a present nullable member, so the
+    // absent first-page cursor widens the page-param type rather than casting to it.
+    initialPageParam: undefined as WebSearchPage['continuation'] | undefined,
     queryFn: ({ pageParam, signal }) =>
       source.search(
         {
