@@ -140,26 +140,28 @@ pub async fn verify_recording_schema(
     // and multiple matching identities fail closed instead of letting a
     // shadow schema win.
     let schemas = sqlx::query(
-        "WITH expected_trigger(trigger_name, table_name, function_name) AS (
+        "WITH expected_trigger(
+             trigger_name, table_name, function_name, trigger_type
+         ) AS (
              VALUES
                ('approval_judge_eval_run_stamps_its_recording_transaction',
                 'approval_judge_eval_run',
-                'stamp_eval_run_recording_transaction'),
+                'stamp_eval_run_recording_transaction', 7::int2),
                ('approval_judge_eval_call_is_sealed_with_its_run',
                 'approval_judge_eval_call',
-                'reject_eval_call_outside_run_recording'),
+                'reject_eval_call_outside_run_recording', 7::int2),
                ('approval_judge_eval_run_is_append_only',
                 'approval_judge_eval_run',
-                'reject_immutable_record_change'),
+                'reject_immutable_record_change', 27::int2),
                ('approval_judge_eval_run_cannot_be_truncated',
                 'approval_judge_eval_run',
-                'reject_immutable_record_change'),
+                'reject_immutable_record_change', 34::int2),
                ('approval_judge_eval_call_is_append_only',
                 'approval_judge_eval_call',
-                'reject_immutable_record_change'),
+                'reject_immutable_record_change', 27::int2),
                ('approval_judge_eval_call_cannot_be_truncated',
                 'approval_judge_eval_call',
-                'reject_immutable_record_change')
+                'reject_immutable_record_change', 34::int2)
          )
          SELECT namespace.nspname,
                 pg_catalog.quote_ident(namespace.nspname) AS quoted_name
@@ -168,6 +170,7 @@ pub async fn verify_recording_schema(
              ON installed_trigger.tgname = expected_trigger.trigger_name
             AND NOT installed_trigger.tgisinternal
             AND installed_trigger.tgenabled IN ('O', 'A')
+            AND installed_trigger.tgtype = expected_trigger.trigger_type
            JOIN pg_catalog.pg_class AS evidence_table
              ON evidence_table.oid = installed_trigger.tgrelid
             AND evidence_table.relname = expected_trigger.table_name
@@ -315,6 +318,9 @@ fn require_scorecard_verdict_agreement(
     else {
         return Err(verdict_mismatch("cases"));
     };
+    if cases.is_empty() {
+        return Err(verdict_mismatch("cases"));
+    }
     let mut stated: BTreeMap<&str, Vec<(&str, &str)>> = BTreeMap::new();
     for case in cases {
         let Some(name) = case

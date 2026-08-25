@@ -724,6 +724,20 @@ async fn recording_requires_every_evidence_trigger_to_be_active() -> Result<(), 
         .await
         .expect_err("a disabled append-only trigger makes recording unavailable");
     expect_tables_absent(&absent);
+    sqlx::raw_sql(
+        "DROP TRIGGER approval_judge_eval_run_is_append_only
+             ON approval_judge_eval_run;
+         CREATE TRIGGER approval_judge_eval_run_is_append_only
+         BEFORE UPDATE ON approval_judge_eval_run
+         FOR EACH ROW
+         EXECUTE FUNCTION reject_immutable_record_change()",
+    )
+    .execute(&pool)
+    .await?;
+    let incomplete = verify_recording_schema(&pool)
+        .await
+        .expect_err("an append-only trigger missing DELETE makes recording unavailable");
+    expect_tables_absent(&incomplete);
     Ok(())
 }
 
@@ -895,6 +909,24 @@ async fn contradictory_scorecard_headers_are_rejected() -> Result<(), Box<dyn Er
         .await
         .expect_err("a scorecard with foreign scoring semantics is rejected");
     expect_scorecard_header_mismatch(&error, "scoring_semantics_version");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn empty_scorecards_are_rejected() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let run = run_record_with(RUN_IDENTITY, &[], no_case_aggregates());
+    let error = record_eval_run(&pool, &run, &[])
+        .await
+        .expect_err("a run with no selected cases is rejected");
+    expect_scorecard_verdict_mismatch(&error, "cases");
+    let stored_runs: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM approval_judge_eval_run WHERE eval_run_id = $1")
+            .bind(run.run.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stored_runs, 0);
     Ok(())
 }
 
