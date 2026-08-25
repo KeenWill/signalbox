@@ -14,6 +14,7 @@ members = [
     "crates/conversation-import-json",
     "crates/domain",
     "crates/expect-table",
+    "crates/file-media-adapters-image",
     "crates/file-media-adapters-text",
     "crates/file-media-runtime",
     "crates/file-media-adapter-office",
