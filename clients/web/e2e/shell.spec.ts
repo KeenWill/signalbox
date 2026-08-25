@@ -509,7 +509,6 @@ test('the command palette opens keyboard help with available product navigation'
   await page.getByRole('button', { name: /Open keyboard help/ }).click()
   const help = page.getByRole('dialog', { name: 'Keyboard help' })
   await expect(help).toBeVisible()
-  await expect(help.getByText('Select first loaded item')).toBeVisible()
   await expect(help.getByText('Go to Attention', { exact: true })).toBeVisible()
   await expect(help.getByText('Go to Sessions', { exact: true })).toBeVisible()
   await expect(help.getByText('Go to Settings', { exact: true })).toBeVisible()

@@ -398,7 +398,7 @@ test('does not search without the bounded JSON capability', async ({ page }) => 
 
   await expect(
     page.getByRole('heading', {
-      name: 'Operational data is not exposed by this daemon contract',
+      name: 'This daemon contract does not advertise bounded lexical search',
     }),
   ).toBeVisible()
   expect(searchRequests).toBe(0)
@@ -423,7 +423,7 @@ test('does not expose focusable search fields before capabilities defer Search',
   await expect(page.getByRole('textbox', { name: 'Search text' })).toHaveCount(0)
   await expect(
     page.getByRole('heading', {
-      name: 'Operational data is not exposed by this daemon contract',
+      name: 'This daemon contract does not advertise bounded lexical search',
     }),
   ).toBeVisible()
   await expect(main).toBeFocused()

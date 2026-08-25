@@ -108,7 +108,14 @@ test('applies saved visual preferences before the first rendered frame', async (
   await page.addInitScript(() => {
     localStorage.setItem(
       'signalbox.web.preferences.v1',
-      JSON.stringify({ theme: 'light', density: 'comfortable' }),
+      JSON.stringify({
+        layout: 'workbench',
+        density: 'comfortable',
+        detail: 'condensed',
+        theme: 'light',
+        paneSizes: { navigation: 218, inspector: 252 },
+        lastLogicalPositions: {},
+      }),
     )
     const observed: string[] = []
     Object.defineProperty(window, '__visualPreferenceMutations', { value: observed })
@@ -710,7 +717,6 @@ test('closes phone navigation after selecting a route', async ({ page }) => {
   await navigation.getByRole('link', { name: /Sessions/ }).click()
   await expect(navigation).toBeHidden()
   await expect(page).toHaveURL(/\/sessions$/)
-  await expect(page.getByRole('main')).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 

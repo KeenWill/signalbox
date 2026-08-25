@@ -3,7 +3,15 @@ import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  type CSSProperties,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import {
   BootstrapContractError,
   type ProductRouteId,
@@ -143,7 +151,13 @@ function ProductNavigation({
   )
 }
 
-function CommandPalette({ context }: { context: ProductCommandContext }) {
+function CommandPalette({
+  context,
+  openerRef,
+}: {
+  context: ProductCommandContext
+  openerRef: RefObject<HTMLElement | null>
+}) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
   const focusTimelineAfterClose = useRef(false)
   return (
@@ -159,10 +173,18 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
           className="dialog-content product-palette"
           aria-describedby="product-palette-description"
           onCloseAutoFocus={(event) => {
-            if (!focusTimelineAfterClose.current) return
+            if (focusTimelineAfterClose.current) {
+              event.preventDefault()
+              focusTimelineAfterClose.current = false
+              context.focusTimeline()
+              return
+            }
+            // Hand the palette's keystroke back to the control it was invoked from, unless another
+            // overlay has already taken over the surface.
+            const opener = openerRef.current
+            if (context.getState().app.overlay !== null || !opener?.isConnected) return
             event.preventDefault()
-            focusTimelineAfterClose.current = false
-            context.focusTimeline()
+            opener.focus()
           }}
         >
           <div className="dialog-heading">
@@ -409,7 +431,15 @@ export function ProductApp({
       getState: store.getState,
       timelineIds,
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
-      focusTimeline: () => timelineRef.current?.focus(),
+      focusTimeline: () => {
+        if (timelineRef.current !== null) {
+          timelineRef.current.focus()
+          return
+        }
+        // A surface with no timeline still has to release an editing control on unwind, but
+        // Escape with nothing to unwind must leave focus exactly where it is.
+        if (isEditableTarget(document.activeElement)) mainRef.current?.focus()
+      },
       loadTimelineWindow: (anchor) =>
         setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
       navigate: (path) => {
@@ -438,7 +468,7 @@ export function ProductApp({
       // field is editing.
       options: binding.commandId === 'palette.open' ? { ignoreInputs: true } : undefined,
       callback: (event) => {
-        if (isEditableTarget(event.target)) return
+        if (binding.commandId === 'palette.open' && isEditableTarget(event.target)) return
         if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
           if (binding.commandId === 'palette.open') {
             const activeElement = document.activeElement
@@ -671,7 +701,7 @@ export function ProductApp({
           </dl>
         </aside>
       )}
-      <CommandPalette context={context} />
+      <CommandPalette context={context} openerRef={paletteOpenerRef} />
       <KeyboardHelp context={context} />
       <Dialog.Root
         open={app.overlay === 'navigation'}
