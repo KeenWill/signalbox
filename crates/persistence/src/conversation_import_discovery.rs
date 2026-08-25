@@ -578,11 +578,21 @@ fn decode_entry(
     let source_speaker = decode_source_speaker(&source_speaker_kind)
         .map_err(|_| ImportedConversationDiscoveryCorruption::Unsupported("source speaker"))?;
     let content = checked_content_projection(row)?;
-    if matches!(content, ImportedEntryContentProjection::SourceEvent)
-        && source_speaker != ImportedSourceAttestation::NotAttested
-    {
+    // Mirror the speaker correlation aggregate reconstitution decides without the raw
+    // record: a source event carries no speaker evidence, and an attested-absent speaker
+    // is rejected for every message-derived kind in every reconstitution branch. A
+    // not-attested speaker can be valid for records without speaker evidence, so only the
+    // complete aggregate can judge it.
+    if matches!(content, ImportedEntryContentProjection::SourceEvent) {
+        if source_speaker != ImportedSourceAttestation::NotAttested {
+            return Err(ImportedConversationDiscoveryCorruption::Inconsistent(
+                "source-event speaker evidence",
+            )
+            .into());
+        }
+    } else if source_speaker == ImportedSourceAttestation::AttestedAbsent {
         return Err(ImportedConversationDiscoveryCorruption::Inconsistent(
-            "source-event speaker evidence",
+            "message-entry speaker evidence",
         )
         .into());
     }
