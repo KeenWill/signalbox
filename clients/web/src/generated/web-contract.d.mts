@@ -9,6 +9,8 @@ type WebApiError = {
 
 type WebApiErrorKind = "transport" | "application";
 
+type WebBlobId = string;
+
 type WebContractCapabilities = {
   readonly bounded_json: boolean;
   readonly bounded_session_timeline: boolean;
@@ -31,6 +33,8 @@ type WebContractLimits = {
   readonly max_timeline_window_items: number;
 };
 
+type WebProviderModelCallFailureCause = "credential_rejected" | "permission_denied" | "invalid_request" | "target_not_found" | "request_too_large" | "rate_limited" | "quota_exhausted" | "overloaded" | "provider_internal" | "unrecognized";
+
 type WebSessionId = string;
 
 type WebSessionTimelineDetail = {
@@ -43,22 +47,22 @@ type WebSessionTimelineDetail = {
 type WebSessionTimelineDetailBody = {
   readonly attachments: ReadonlyArray<WebTimelineBlobReference>;
   readonly text: WebTimelineTextExcerpt;
-  readonly turn_id: string;
+  readonly turn_id: WebSessionId;
   readonly type: "user_input";
 } | {
-  readonly cause_code?: string | null;
-  readonly model_call_id: string;
-  readonly model_identity_id: string;
+  readonly model_call_id: WebSessionId;
+  readonly model_identity_id: WebSessionId;
+  readonly provider_failure_cause?: WebProviderModelCallFailureCause | null;
   readonly request_context_items: WebU64;
   readonly response?: WebTimelineTextExcerpt | null;
   readonly state: WebTimelineModelCallState;
-  readonly turn_id: string;
+  readonly turn_id: WebSessionId;
   readonly type: "model_call";
   readonly usage: WebTimelineModelUsage;
 } | {
   readonly cause_code: string;
   readonly lifecycle: WebTimelineTurnLifecycleKind;
-  readonly turn_id: string;
+  readonly turn_id: WebSessionId;
   readonly type: "turn_lifecycle";
 } | {
   readonly kind: WebSessionTimelineEventKind;
@@ -91,7 +95,7 @@ type WebTimelineAddress = {
 };
 
 type WebTimelineBlobReference = {
-  readonly blob_id: string;
+  readonly blob_id: WebBlobId;
   readonly length_bytes: WebU64;
   readonly media_type?: string | null;
 };
@@ -170,8 +174,12 @@ export type WebSessionTimelineDescriptor = {
 };
 
 export type WebSessionTimelineWindow = {
-  readonly continuation_after?: WebTimelineAddress | null;
-  readonly continuation_before?: WebTimelineAddress | null;
+  readonly continuation_after: {
+  readonly event_sequence: WebTimelineEventSequence;
+} | null;
+  readonly continuation_before: {
+  readonly event_sequence: WebTimelineEventSequence;
+} | null;
   readonly items: ReadonlyArray<WebSessionTimelineItem>;
   readonly projected_structured_bytes: number;
   readonly session_id: WebSessionId;
@@ -181,7 +189,7 @@ export type WebSessionTimelineDetailPage = {
   readonly continuation?: WebTimelineDetailContinuation | null;
   readonly items: ReadonlyArray<WebSessionTimelineDetail>;
   readonly projected_body_bytes: number;
-  readonly session_id: string;
+  readonly session_id: WebSessionId;
 };
 
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;

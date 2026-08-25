@@ -14,6 +14,7 @@ import {
   useState,
 } from 'react'
 import {
+  BootstrapContractError,
   type ProductRouteId,
   productRoutes,
   productSurfaceStates,
@@ -140,11 +141,13 @@ function CommandPalette({
   context,
   openerRef,
   helpOpenerRef,
+  navigationOpenerRef,
   fallbackRef,
 }: {
   context: ProductCommandContext
   openerRef: RefObject<HTMLElement | null>
   helpOpenerRef: RefObject<HTMLElement | null>
+  navigationOpenerRef: RefObject<HTMLElement | null>
   fallbackRef: RefObject<HTMLElement | null>
 }) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
@@ -193,9 +196,14 @@ function CommandPalette({
                   key={command.id}
                   type="button"
                   onClick={() => {
-                    if (command.id === 'help.open') helpOpenerRef.current = openerRef.current
+                    const paletteOpener = openerRef.current
                     invokeProductCommand('surface.escape', context)
                     invokeProductCommand(command.id, context)
+                    // The palette row that launched this command is about to unmount, so the
+                    // overlay it opened inherits the palette's own opener instead.
+                    if (command.id === 'help.open') helpOpenerRef.current = paletteOpener
+                    if (command.id === 'navigation.open')
+                      navigationOpenerRef.current = paletteOpener
                   }}
                 >
                   <span>
@@ -419,6 +427,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           primaryRef.current?.focus(),
         )
       },
+      navigateScenario: () =>
+        void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } }),
       navigateTimelineWindow: (anchor) => timelineWindowNavigationRef.current(anchor),
       openNavigation: () => {
         const active = document.activeElement
@@ -481,6 +491,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
 
+  useEffect(() => {
+    document.title = `${surfaceCopy[surface].title} · Signalbox`
+    return () => {
+      document.title = 'Signalbox'
+    }
+  }, [surface])
+
   const copy = surfaceCopy[surface]
   const surfaceUnavailable =
     productSurfaceStates[surface].kind === 'committed-unimplemented' ||
@@ -524,13 +541,25 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         <div className="surface-question">
           <p>{copy.question}</p>
           <span
-            className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+            className={`contract-state ${
+              surface === 'settings' || bootstrap.isSuccess
+                ? 'ready'
+                : bootstrap.isError
+                  ? 'failed'
+                  : ''
+            }`}
+            role="status"
+            aria-live="polite"
           >
-            {bootstrap.isSuccess
-              ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
-              : bootstrap.isError
-                ? 'Transport unavailable'
-                : 'Checking contract…'}
+            {surface === 'settings'
+              ? 'Browser-local preferences'
+              : bootstrap.isSuccess
+                ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
+                : bootstrap.isError
+                  ? bootstrap.error instanceof BootstrapContractError
+                    ? 'Incompatible daemon contract'
+                    : 'Transport unavailable'
+                  : 'Checking contract…'}
           </span>
           {bootstrap.isError && (
             <button type="button" onClick={() => void bootstrap.refetch()}>
@@ -544,7 +573,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         <aside className="product-inspector" aria-label="Inspector">
           <span className="eyebrow">Inspector</span>
           <h2>Selection details</h2>
-          <p>Select an available operational record to inspect its server-provided evidence.</p>
+          <p>
+            {surface === 'settings'
+              ? 'Presentation preferences are stored locally in this browser.'
+              : 'Select an available operational record to inspect its server-provided evidence.'}
+          </p>
           <dl>
             <div>
               <dt>Surface</dt>
@@ -573,6 +606,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         context={context}
         openerRef={paletteOpenerRef}
         helpOpenerRef={helpOpenerRef}
+        navigationOpenerRef={navigationOpenerRef}
         fallbackRef={primaryRef}
       />
       <KeyboardHelp context={context} openerRef={helpOpenerRef} fallbackRef={primaryRef} />

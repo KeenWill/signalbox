@@ -3,9 +3,12 @@ import { useDispatch, useSelector } from 'react-redux'
 import {
   type BrowserPreferences,
   createDefaultBrowserPreferences,
+  isBoundedLogicalPosition,
   loadBrowserPreferences,
   MAX_SAVED_LOGICAL_POSITIONS,
+  type RemoteMediaPolicy,
   saveBrowserPreferences,
+  serializeBrowserPreferences,
 } from './preferences'
 
 export type LayoutMode = 'focus' | 'workbench'
@@ -69,17 +72,37 @@ const appSlice = createSlice({
       state.paneSizes = action.payload
       state.activitySequence += 1
     },
+    remoteMediaSet(state, action: { payload: RemoteMediaPolicy }) {
+      state.remoteMedia = action.payload
+      state.activitySequence += 1
+    },
     preferencesReset(state) {
       Object.assign(state, createDefaultBrowserPreferences())
       state.activitySequence += 1
     },
     logicalPositionRecorded(state, action: { payload: { sessionId: string; position: string } }) {
-      delete state.lastLogicalPositions[action.payload.sessionId]
-      state.lastLogicalPositions[action.payload.sessionId] = action.payload.position
-      const retained = Object.entries(state.lastLogicalPositions).slice(
-        -MAX_SAVED_LOGICAL_POSITIONS,
+      if (!isBoundedLogicalPosition(action.payload.sessionId, action.payload.position)) return
+      const nextPositions = { ...state.lastLogicalPositions }
+      delete nextPositions[action.payload.sessionId]
+      nextPositions[action.payload.sessionId] = action.payload.position
+      const lastLogicalPositions = Object.fromEntries(
+        Object.entries(nextPositions).slice(-MAX_SAVED_LOGICAL_POSITIONS),
       )
-      state.lastLogicalPositions = Object.fromEntries(retained)
+      if (
+        serializeBrowserPreferences({
+          layout: state.layout,
+          density: state.density,
+          detail: state.detail,
+          theme: state.theme,
+          paneSizes: state.paneSizes,
+          remoteMedia: state.remoteMedia,
+          lastLogicalPositions,
+          keyOverrides: state.keyOverrides,
+        }) === null
+      ) {
+        return
+      }
+      state.lastLogicalPositions = lastLogicalPositions
     },
     overlaySet(state, action: { payload: Overlay }) {
       state.overlay = action.payload
@@ -119,6 +142,7 @@ const preferenceActionTypes = new Set<string>([
   appSlice.actions.detailSet.type,
   appSlice.actions.themeSet.type,
   appSlice.actions.paneSizesSet.type,
+  appSlice.actions.remoteMediaSet.type,
   appSlice.actions.preferencesReset.type,
   appSlice.actions.logicalPositionRecorded.type,
 ])
@@ -137,18 +161,23 @@ const preferenceMiddleware: Middleware = (api) => (next) => (action) => {
       detail: app.detail,
       theme: app.theme,
       paneSizes: app.paneSizes,
+      remoteMedia: app.remoteMedia,
       lastLogicalPositions: app.lastLogicalPositions,
+      keyOverrides: app.keyOverrides,
     })
   }
   return result
 }
 
-export const store = configureStore({
-  reducer: { app: appSlice.reducer },
-  middleware: (getDefaultMiddleware) =>
-    getDefaultMiddleware().concat(traceMiddleware, preferenceMiddleware),
-  devTools: { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false },
-})
+export const createAppStore = () =>
+  configureStore({
+    reducer: { app: appSlice.reducer },
+    middleware: (getDefaultMiddleware) =>
+      getDefaultMiddleware().concat(traceMiddleware, preferenceMiddleware),
+    devTools: { maxAge: REDUX_DEVTOOLS_ACTIONS, trace: false },
+  })
+
+export const store = createAppStore()
 
 export const actions = appSlice.actions
 export type RootState = ReturnType<typeof store.getState>

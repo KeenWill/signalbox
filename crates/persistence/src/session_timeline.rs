@@ -11,12 +11,16 @@ use signalbox_application::{
     TimelineContinuation, TimelineDetailContinuation, TimelineDetailCursor, TimelineDetailLimits,
     TimelineModelCallDisposition, TimelineModelCallState, TimelineModelUsage, TimelineTextExcerpt,
     TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
+    timeline_detail_envelope_bytes,
 };
-use signalbox_domain::{ProviderModelIdentity, SessionId, TurnId};
+use signalbox_domain::{ProviderModelCallFailureCause, ProviderModelIdentity, SessionId, TurnId};
 use sqlx::{PgConnection, PgPool, Postgres, Row, Transaction};
 
 use crate::{
-    mapping::{OutboxEventDiscriminator, outbox_event_discriminator_from_str},
+    mapping::{
+        OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS, OutboxEventDiscriminator, input_position_from_numeric,
+        outbox_event_discriminator_from_str,
+    },
     outbox::{
         DispatchedModelCallDisposition, DispatchedModelCallState, DispatchedOutboxEvent,
         DispatchedOutboxEventKind, OutboxDispatchError,
@@ -150,6 +154,21 @@ impl SessionTimelineRepository {
             transaction.commit().await?;
             return Ok(None);
         };
+        let requires_nonempty_window = match &anchor {
+            TimelineWindowAnchor::First
+            | TimelineWindowAnchor::Latest
+            | TimelineWindowAnchor::Around(_) => true,
+            TimelineWindowAnchor::Before(address) => descriptor
+                .bounds
+                .first
+                .is_some_and(|first| *address > first),
+            TimelineWindowAnchor::After(address) => descriptor
+                .bounds
+                .latest
+                .is_some_and(|latest| *address < latest),
+        };
+        let requires_first_bound = matches!(&anchor, TimelineWindowAnchor::First);
+        let requires_latest_bound = matches!(&anchor, TimelineWindowAnchor::Latest);
         let fetch_limit = i64::from(limits.max_items()) + 1;
         let rows = match anchor {
             TimelineWindowAnchor::First => {
@@ -218,8 +237,38 @@ impl SessionTimelineRepository {
             items.push(item);
         }
         items.sort_by_key(|item| item.address);
+        if items
+            .windows(2)
+            .any(|pair| pair[0].address == pair[1].address)
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window addresses").into());
+        }
+        if requires_nonempty_window && items.is_empty() {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window items").into());
+        }
         let first = items.first().map(|item| item.address);
         let latest = items.last().map(|item| item.address);
+        if (requires_first_bound && first != descriptor.bounds.first)
+            || (requires_latest_bound && latest != descriptor.bounds.latest)
+            || first
+                .is_some_and(|loaded| descriptor.bounds.first.is_none_or(|bound| loaded < bound))
+            || latest
+                .is_some_and(|loaded| descriptor.bounds.latest.is_none_or(|bound| loaded > bound))
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window bounds").into());
+        }
+        let item_count = u64::try_from(items.len())
+            .map_err(|_| SessionTimelineCorruption::InvalidOrdinal("window totals"))?;
+        if item_count > descriptor.sizes.item_count
+            || u64::from(projected_bytes) > descriptor.sizes.projected_structured_bytes
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window totals").into());
+        }
+        if item_count == descriptor.sizes.item_count
+            && (first != descriptor.bounds.first || latest != descriptor.bounds.latest)
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window bounds").into());
+        }
         let continuation_before = match first.zip(descriptor.bounds.first) {
             Some((loaded, bound)) if loaded > bound => TimelineContinuation::MoreAt(loaded),
             _ => TimelineContinuation::Exhausted,
@@ -416,7 +465,7 @@ impl SessionTimelineReader for SessionTimelineRepository {
     }
 }
 
-const DETAIL_ENVELOPE_BYTES: u32 = 128;
+const DETAIL_ENVELOPE_BYTES: u32 = timeline_detail_envelope_bytes();
 
 const TURN_DETAIL_ADDRESSES_SQL: &str = r#"
 WITH turn_events AS (
@@ -670,6 +719,7 @@ async fn load_detail_event(
         let row = sqlx::query(
             r#"
 SELECT event.turn_id,
+       accepted.acceptance_position,
        octet_length(accepted.content_text)::numeric AS total_bytes,
        substring(
            convert_to(accepted.content_text, 'UTF8')
@@ -735,6 +785,8 @@ SELECT event.turn_id,
         .fetch_optional(&mut **transaction)
         .await?
         .ok_or(SessionTimelineCorruption::MissingDetailRecord)?;
+        input_position_from_numeric(row.try_get("acceptance_position")?)
+            .map_err(|_| SessionTimelineCorruption::InvalidOrdinal("input acceptance position"))?;
         let total_bytes = nonnegative(row.try_get("total_bytes")?, "input byte length")?;
         if offset > total_bytes {
             return Err(SessionTimelineRepositoryError::InvalidDetailQuery);
@@ -822,8 +874,12 @@ async fn project_detail_event(
                 DispatchedOutboxEventKind::ModelCallTransition { turn, call, state } => {
                     require_cursor_field(cursor, TimelineBodyField::ModelResponse, 0)?;
                     let response_offset = cursor.map_or(0, |cursor| cursor.offset_bytes);
-                    let include_terminal_evidence =
-                        matches!(state, DispatchedModelCallState::Terminal(_));
+                    let include_terminal_evidence = match state {
+                        DispatchedModelCallState::Prepared
+                        | DispatchedModelCallState::InFlight
+                        | DispatchedModelCallState::CancellationRequested => false,
+                        DispatchedModelCallState::Terminal(_) => true,
+                    };
                     let row = load_model_detail(
                         transaction,
                         *call,
@@ -854,7 +910,7 @@ async fn project_detail_event(
                             request_context_items: row.request_context_items,
                             response,
                             usage: row.usage,
-                            cause_code: row.cause_code,
+                            provider_failure_cause: row.provider_failure_cause,
                         },
                         continuation,
                     )
@@ -885,7 +941,16 @@ async fn project_detail_event(
                 DispatchedOutboxEventKind::TurnReconciliationRequired { turn, .. } => {
                     terminal_turn_body(*turn, "reconciliation_required", cursor)?
                 }
-                _ => {
+                DispatchedOutboxEventKind::SessionCreated
+                | DispatchedOutboxEventKind::SessionModelSettingsChanged(_)
+                | DispatchedOutboxEventKind::TurnModelSettingsResolved(_)
+                | DispatchedOutboxEventKind::GoalTurnRetired { .. }
+                | DispatchedOutboxEventKind::ToolBatchTransition { .. }
+                | DispatchedOutboxEventKind::ToolApprovalDecided { .. }
+                | DispatchedOutboxEventKind::ContextCompacted { .. }
+                | DispatchedOutboxEventKind::RunnerStateTransition { .. }
+                | DispatchedOutboxEventKind::DelegationUpdate(_)
+                | DispatchedOutboxEventKind::DelegationWake(_) => {
                     require_no_body_cursor(cursor)?;
                     (SessionTimelineDetailBody::EventFact { kind }, None)
                 }
@@ -1005,7 +1070,7 @@ struct ModelDetailRow {
     request_context_items: u64,
     response: Option<ModelResponseSlice>,
     usage: TimelineModelUsage,
-    cause_code: Option<String>,
+    provider_failure_cause: Option<ProviderModelCallFailureCause>,
 }
 
 struct ModelResponseSlice {
@@ -1142,12 +1207,34 @@ SELECT substring(
                 None
             },
         },
-        cause_code: if include_terminal_evidence {
-            row.try_get("terminal_provider_failure_cause")?
+        provider_failure_cause: if include_terminal_evidence {
+            row.try_get::<Option<String>, _>("terminal_provider_failure_cause")?
+                .map(|value| provider_failure_cause_from_str(&value))
+                .transpose()?
         } else {
             None
         },
     })
+}
+
+fn provider_failure_cause_from_str(
+    value: &str,
+) -> Result<ProviderModelCallFailureCause, SessionTimelineRepositoryError> {
+    if value == "credential_rejected" {
+        return Ok(ProviderModelCallFailureCause::CredentialRejected);
+    }
+    match value {
+        "permission_denied" => Ok(ProviderModelCallFailureCause::PermissionDenied),
+        "invalid_request" => Ok(ProviderModelCallFailureCause::InvalidRequest),
+        "target_not_found" => Ok(ProviderModelCallFailureCause::TargetNotFound),
+        "request_too_large" => Ok(ProviderModelCallFailureCause::RequestTooLarge),
+        "rate_limited" => Ok(ProviderModelCallFailureCause::RateLimited),
+        "quota_exhausted" => Ok(ProviderModelCallFailureCause::QuotaExhausted),
+        "overloaded" => Ok(ProviderModelCallFailureCause::Overloaded),
+        "provider_internal" => Ok(ProviderModelCallFailureCause::ProviderInternal),
+        "unrecognized" => Ok(ProviderModelCallFailureCause::Unrecognized),
+        value => Err(SessionTimelineCorruption::UnsupportedEventKind(value.to_owned()).into()),
+    }
 }
 
 fn call_session_uuid(row: &sqlx::postgres::PgRow) -> Result<uuid::Uuid, sqlx::Error> {
@@ -1392,20 +1479,39 @@ async fn load_descriptor(
         .checked_sub(first.sequence().get())
         .and_then(|span| span.checked_add(1));
     if first > latest
+        || (item_count == 1 && first != latest)
         || latest.sequence().get() > observed_through
         || address_span.is_none_or(|span| item_count > span)
     {
         return Err(SessionTimelineCorruption::InvalidOrdinal("timeline bounds").into());
+    }
+    let projected_structured_bytes = nonnegative(
+        row.try_get("structured_bytes")?,
+        "projected structured bytes",
+    )?;
+    let minimum_item_bytes = u64::from(PROJECTED_ITEM_ENVELOPE_BYTES)
+        .checked_add(OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS.0)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let maximum_item_bytes = u64::from(PROJECTED_ITEM_ENVELOPE_BYTES)
+        .checked_add(OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS.1)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let minimum_structured_bytes = item_count
+        .checked_mul(minimum_item_bytes)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let maximum_structured_bytes = item_count
+        .checked_mul(maximum_item_bytes)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    if projected_structured_bytes < minimum_structured_bytes
+        || projected_structured_bytes > maximum_structured_bytes
+    {
+        return Err(SessionTimelineCorruption::InvalidOrdinal("projected structured bytes").into());
     }
     Ok(Some(SessionTimelineDescriptor {
         session,
         sizes: SessionTimelineSizeFacts {
             item_count,
             projected_text_bytes: nonnegative(row.try_get("text_bytes")?, "projected text bytes")?,
-            projected_structured_bytes: nonnegative(
-                row.try_get("structured_bytes")?,
-                "projected structured bytes",
-            )?,
+            projected_structured_bytes,
             referenced_blob_count: 0,
             referenced_blob_bytes: 0,
         },

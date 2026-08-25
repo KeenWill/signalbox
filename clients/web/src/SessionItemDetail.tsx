@@ -117,7 +117,7 @@ const DetailRecord = ({ detail }: { detail: DetailItem }) => {
           </div>
           <div>
             <dt>Cause</dt>
-            <dd>{body.cause_code ?? 'not reported'}</dd>
+            <dd>{body.provider_failure_cause ?? 'not reported'}</dd>
           </div>
           <div>
             <dt>Request context items</dt>

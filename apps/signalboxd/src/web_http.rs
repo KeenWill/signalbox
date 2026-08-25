@@ -34,20 +34,21 @@ use signalbox_application::{
     TimelineDetailLimits, TimelineModelCallDisposition, TimelineModelCallState,
     TimelineTextExcerpt, TimelineTurnLifecycleKind, TimelineWindowAnchor, TimelineWindowLimits,
 };
-use signalbox_domain::{SessionId, TurnId};
+use signalbox_domain::{ProviderModelCallFailureCause, SessionId, TurnId};
 use signalbox_persistence::outbox::OutboxDispatchError;
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
-    WebContractBootstrap, WebContractExample, WebSessionId, WebSessionTimelineDescriptor,
-    WebSessionTimelineDetail, WebSessionTimelineDetailBody, WebSessionTimelineDetailPage,
-    WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress, WebTimelineBlobReference,
-    WebTimelineBodyContinuation, WebTimelineBodyField, WebTimelineDetailContinuation,
-    WebTimelineEventSequence, WebTimelineModelCallDisposition, WebTimelineModelCallState,
-    WebTimelineModelUsage, WebTimelineTextExcerpt, WebTimelineTurnLifecycleKind, WebU64,
+    WebBlobId, WebContractBootstrap, WebContractExample, WebProviderModelCallFailureCause,
+    WebSessionId, WebSessionTimelineDescriptor, WebSessionTimelineDetail,
+    WebSessionTimelineDetailBody, WebSessionTimelineDetailPage, WebSessionTimelineEventKind,
+    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
+    WebSessionWorkFacts, WebTimelineAddress, WebTimelineBlobReference, WebTimelineBodyContinuation,
+    WebTimelineBodyField, WebTimelineDetailContinuation, WebTimelineEventSequence,
+    WebTimelineModelCallDisposition, WebTimelineModelCallState, WebTimelineModelUsage,
+    WebTimelineTextExcerpt, WebTimelineTurnLifecycleKind, WebU64,
 };
 use sqlx::PgPool;
 use tokio::{net::TcpListener, sync::watch};
@@ -517,7 +518,10 @@ async fn session_timeline_item_detail(
         .read_item_details(session, address, cursor, limits)
         .await
     {
-        Ok(Some(page)) => Json(detail_page_dto(page)).into_response(),
+        Ok(Some(page)) => match detail_page_dto(page) {
+            Ok(page) => Json(page).into_response(),
+            Err(error) => error.into_response(),
+        },
         Ok(None) => timeline_detail_not_found(),
         Err(error) => repository_projection_error(error),
     }
@@ -557,7 +561,10 @@ async fn session_timeline_turn_detail(
         .read_turn_details(session, turn, cursor, limits)
         .await
     {
-        Ok(Some(page)) => Json(detail_page_dto(page)).into_response(),
+        Ok(Some(page)) => match detail_page_dto(page) {
+            Ok(page) => Json(page).into_response(),
+            Err(error) => error.into_response(),
+        },
         Ok(None) => timeline_detail_not_found(),
         Err(error) => repository_projection_error(error),
     }
@@ -604,7 +611,10 @@ async fn session_timeline_region_detail(
         .read_region_details(session, first, through, cursor, limits)
         .await
     {
-        Ok(Some(page)) => Json(detail_page_dto(page)).into_response(),
+        Ok(Some(page)) => match detail_page_dto(page) {
+            Ok(page) => Json(page).into_response(),
+            Err(error) => error.into_response(),
+        },
         Ok(None) => timeline_detail_not_found(),
         Err(error) => repository_projection_error(error),
     }
@@ -762,8 +772,7 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
-        session_id: WebSessionId::from_canonical(descriptor.session.into_uuid().to_string())
-            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+        session_id: WebSessionId::from_uuid_bytes(*descriptor.session.into_uuid().as_bytes()),
         sizes: WebSessionTimelineSizeFacts {
             item_count: WebU64::from_u64(descriptor.sizes.item_count),
             projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
@@ -795,8 +804,7 @@ fn window_dto(
         TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
     };
     Ok(WebSessionTimelineWindow {
-        session_id: WebSessionId::from_canonical(window.session.into_uuid().to_string())
-            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+        session_id: WebSessionId::from_uuid_bytes(*window.session.into_uuid().as_bytes()),
         items: window
             .items
             .into_iter()
@@ -812,19 +820,23 @@ fn window_dto(
     })
 }
 
-fn detail_page_dto(page: SessionTimelineDetailPage) -> WebSessionTimelineDetailPage {
-    WebSessionTimelineDetailPage {
-        session_id: page.session.into_uuid().to_string(),
+fn detail_page_dto(
+    page: SessionTimelineDetailPage,
+) -> Result<WebSessionTimelineDetailPage, SessionTimelineRequestError> {
+    Ok(WebSessionTimelineDetailPage {
+        session_id: WebSessionId::from_uuid_bytes(*page.session.into_uuid().as_bytes()),
         items: page
             .items
             .into_iter()
-            .map(|item| WebSessionTimelineDetail {
-                address: address_dto(item.address),
-                kind: event_kind_dto(item.kind),
-                body: detail_body_dto(item.body),
-                projected_body_bytes: item.projected_body_bytes,
+            .map(|item| {
+                Ok(WebSessionTimelineDetail {
+                    address: address_dto(item.address),
+                    kind: event_kind_dto(item.kind),
+                    body: detail_body_dto(item.body)?,
+                    projected_body_bytes: item.projected_body_bytes,
+                })
             })
-            .collect(),
+            .collect::<Result<Vec<_>, SessionTimelineRequestError>>()?,
         projected_body_bytes: page.projected_body_bytes,
         continuation: page.continuation.map(|continuation| match continuation {
             TimelineDetailContinuation::MoreAt(address) => WebTimelineDetailContinuation::MoreAt {
@@ -834,26 +846,32 @@ fn detail_page_dto(page: SessionTimelineDetailPage) -> WebSessionTimelineDetailP
                 body: body_continuation_dto(body),
             },
         }),
-    }
+    })
 }
 
-fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailBody {
-    match body {
+fn detail_body_dto(
+    body: SessionTimelineDetailBody,
+) -> Result<WebSessionTimelineDetailBody, SessionTimelineRequestError> {
+    Ok(match body {
         SessionTimelineDetailBody::UserInput {
             turn_id,
             text,
             attachments,
         } => WebSessionTimelineDetailBody::UserInput {
-            turn_id: turn_id.into_uuid().to_string(),
+            turn_id: WebSessionId::from_canonical(turn_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
             text: text_excerpt_dto(text),
             attachments: attachments
                 .into_iter()
-                .map(|reference| WebTimelineBlobReference {
-                    blob_id: reference.blob_id.to_string(),
-                    length_bytes: WebU64::from_u64(reference.length_bytes),
-                    media_type: reference.media_type,
+                .map(|reference| {
+                    Ok(WebTimelineBlobReference {
+                        blob_id: WebBlobId::from_canonical(reference.blob_id.to_string())
+                            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+                        length_bytes: WebU64::from_u64(reference.length_bytes),
+                        media_type: reference.media_type,
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, SessionTimelineRequestError>>()?,
         },
         SessionTimelineDetailBody::ModelCall {
             turn_id,
@@ -863,12 +881,17 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
             request_context_items,
             response,
             usage,
-            cause_code,
+            provider_failure_cause,
         } => WebSessionTimelineDetailBody::ModelCall {
-            turn_id: turn_id.into_uuid().to_string(),
-            model_call_id: model_call_id.into_uuid().to_string(),
+            turn_id: WebSessionId::from_canonical(turn_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
+            model_call_id: WebSessionId::from_canonical(model_call_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
             state: model_call_state_dto(state),
-            model_identity_id: model_identity_id.into_uuid().to_string(),
+            model_identity_id: WebSessionId::from_canonical(
+                model_identity_id.into_uuid().to_string(),
+            )
+            .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
             request_context_items: WebU64::from_u64(request_context_items),
             response: response.map(text_excerpt_dto),
             usage: WebTimelineModelUsage {
@@ -879,14 +902,15 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
                     .map(WebU64::from_u64),
                 cache_read_input_tokens: usage.cache_read_input_tokens.map(WebU64::from_u64),
             },
-            cause_code,
+            provider_failure_cause: provider_failure_cause.map(provider_failure_cause_dto),
         },
         SessionTimelineDetailBody::TurnLifecycle {
             turn_id,
             lifecycle,
             cause_code,
         } => WebSessionTimelineDetailBody::TurnLifecycle {
-            turn_id: turn_id.into_uuid().to_string(),
+            turn_id: WebSessionId::from_canonical(turn_id.into_uuid().to_string())
+                .ok_or(SessionTimelineRequestError::InvalidProjectedSessionId)?,
             lifecycle: match lifecycle {
                 TimelineTurnLifecycleKind::Activated => WebTimelineTurnLifecycleKind::Activated,
                 TimelineTurnLifecycleKind::Terminalized => {
@@ -898,7 +922,7 @@ fn detail_body_dto(body: SessionTimelineDetailBody) -> WebSessionTimelineDetailB
         SessionTimelineDetailBody::EventFact { kind } => WebSessionTimelineDetailBody::EventFact {
             kind: event_kind_dto(kind),
         },
-    }
+    })
 }
 
 fn model_call_state_dto(state: TimelineModelCallState) -> WebTimelineModelCallState {
@@ -925,6 +949,39 @@ fn model_call_state_dto(state: TimelineModelCallState) -> WebTimelineModelCallSt
                 }
             },
         },
+    }
+}
+
+fn provider_failure_cause_dto(
+    cause: ProviderModelCallFailureCause,
+) -> WebProviderModelCallFailureCause {
+    match cause {
+        ProviderModelCallFailureCause::CredentialRejected => {
+            WebProviderModelCallFailureCause::CredentialRejected
+        }
+        ProviderModelCallFailureCause::PermissionDenied => {
+            WebProviderModelCallFailureCause::PermissionDenied
+        }
+        ProviderModelCallFailureCause::InvalidRequest => {
+            WebProviderModelCallFailureCause::InvalidRequest
+        }
+        ProviderModelCallFailureCause::TargetNotFound => {
+            WebProviderModelCallFailureCause::TargetNotFound
+        }
+        ProviderModelCallFailureCause::RequestTooLarge => {
+            WebProviderModelCallFailureCause::RequestTooLarge
+        }
+        ProviderModelCallFailureCause::RateLimited => WebProviderModelCallFailureCause::RateLimited,
+        ProviderModelCallFailureCause::QuotaExhausted => {
+            WebProviderModelCallFailureCause::QuotaExhausted
+        }
+        ProviderModelCallFailureCause::Overloaded => WebProviderModelCallFailureCause::Overloaded,
+        ProviderModelCallFailureCause::ProviderInternal => {
+            WebProviderModelCallFailureCause::ProviderInternal
+        }
+        ProviderModelCallFailureCause::Unrecognized => {
+            WebProviderModelCallFailureCause::Unrecognized
+        }
     }
 }
 
@@ -996,7 +1053,7 @@ pub fn deterministic_test_router() -> Router {
         .route("/mutate", post(deterministic_mutation))
         .route_layer(middleware::from_fn(validate_json_mutation));
     let api = Router::new()
-        .route("/bootstrap", get(contract_bootstrap))
+        .route("/bootstrap", get(deterministic_contract_bootstrap))
         .route("/test/read", get(deterministic_read))
         .route("/test/stream", get(deterministic_stream))
         .nest("/test", mutation)
@@ -1009,6 +1066,12 @@ pub fn deterministic_test_router() -> Router {
 
 async fn contract_bootstrap() -> Json<WebContractBootstrap> {
     Json(WebContractBootstrap::current())
+}
+
+async fn deterministic_contract_bootstrap() -> Json<WebContractBootstrap> {
+    let mut bootstrap = WebContractBootstrap::current();
+    bootstrap.capabilities.bounded_session_timeline = false;
+    Json(bootstrap)
 }
 
 fn deterministic_example() -> WebContractExample {
@@ -1701,6 +1764,84 @@ mod tests {
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["kind"], "transport");
         assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    /// Drives a session read at the loopback gate and reports only the status.
+    ///
+    /// The query is deliberately malformed, which separates the gate from
+    /// everything behind it: `FORBIDDEN` means the gate rejected the
+    /// authority, while `BAD_REQUEST` comes from the handler and is therefore
+    /// reachable only once the gate has admitted the request.
+    async fn session_read_status_for_host(host: &str) -> StatusCode {
+        let request = Request::get(
+            "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?max_items=nope",
+        )
+        .header(header::HOST, host)
+        .body(Body::empty())
+        .expect("the request is valid");
+        production_router(None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn session_reads_admit_loopback_authorities_including_ip_literals() {
+        // `127.0.0.1` is the daemon's own DEFAULT_WEB_BIND_ADDRESS, so a
+        // regression that tightened this branch would 403 the default
+        // deployment. `[::1]` exercises the bracket strip that precedes the
+        // parse, and `127.5.6.7` covers the whole 127.0.0.0/8 loopback range
+        // rather than only the canonical address.
+        for host in [
+            "localhost",
+            "localhost:37231",
+            "LocalHost",
+            "127.0.0.1",
+            "127.0.0.1:37231",
+            "127.5.6.7",
+            "[::1]",
+            "[::1]:37231",
+        ] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::BAD_REQUEST,
+                "`{host}` is a loopback authority and must reach the handler",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_non_loopback_ip_literal_authorities() {
+        // Every authority here parses as an address, so `is_loopback` — not
+        // the `parse::<IpAddr>()` that already turns hostnames away — is what
+        // has to reject them. A regression that loosened the branch to accept
+        // any parseable address would expose session history to any host that
+        // can reach the port.
+        for host in [
+            "10.0.0.5",
+            "10.0.0.5:37231",
+            "192.168.1.20",
+            "[2001:db8::1]",
+            "[2001:db8::1]:37231",
+        ] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "`{host}` parses as a non-loopback address and must be rejected",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_authorities_that_are_neither_localhost_nor_literals() {
+        for host in ["attacker.example", "localhost.attacker.example"] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "`{host}` is neither localhost nor a loopback literal",
+            );
+        }
     }
 
     #[test]

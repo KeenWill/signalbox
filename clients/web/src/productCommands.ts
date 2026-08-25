@@ -139,17 +139,18 @@ const productTimelineCommands = [
   },
 ] as const
 
+// Every id this module redefines. The scenario registry keeps its own definitions for the
+// scenario studio; spreading both would list each product command twice and register its
+// bindings twice.
+const productOverriddenCommandIds: ReadonlySet<string> = new Set([
+  ...productNavigationCommands.map((command) => command.id),
+  ...productTimelineCommands.map((command) => command.id),
+])
+
 export const productCommandRegistry = [
   ...productNavigationCommands,
   ...productTimelineCommands,
-  ...commandRegistry.filter(
-    (command) =>
-      command.id !== 'navigation.open' &&
-      command.id !== 'palette.open' &&
-      command.id !== 'layout.toggle' &&
-      command.id !== 'selection.first' &&
-      command.id !== 'selection.last',
-  ),
+  ...commandRegistry.filter((command) => !productOverriddenCommandIds.has(command.id)),
 ]
 export type ProductCommandId = (typeof productCommandRegistry)[number]['id']
 
