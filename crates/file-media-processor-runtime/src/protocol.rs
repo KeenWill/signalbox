@@ -456,6 +456,7 @@ pub(crate) struct WireReadRequest {
     view: String,
     options: Option<serde_json::Value>,
     continuation: Option<String>,
+    maximum_container_entries: u64,
 }
 
 impl From<&FileMediaProviderReadRequest> for WireReadRequest {
@@ -476,6 +477,7 @@ impl From<&FileMediaProviderReadRequest> for WireReadRequest {
             view: request.view.as_str().to_owned(),
             options,
             continuation,
+            maximum_container_entries: request.maximum_container_entries,
         }
     }
 }
@@ -501,6 +503,7 @@ impl TryFrom<WireReadRequest> for FileMediaProviderReadRequest {
             metadata: BoundedMetadata::try_new(&value.metadata_json).map_err(map_value_error)?,
             view: ReadViewName::try_new(value.view).map_err(map_value_error)?,
             input,
+            maximum_container_entries: value.maximum_container_entries,
         })
     }
 }
@@ -527,8 +530,8 @@ mod tests {
     use signalbox_file_media_runtime::{
         CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProviderDeclaration,
         FileReaderName, FileReaderProviderName, FileReaderRevision, MAX_PROCESSOR_FRAME_BYTES,
-        MAX_TEXT_OR_JSON_BYTES, ProbeDeclaration, ProcessorReadOutput, ReadAccessPattern,
-        ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
+        MAX_TEXT_OR_JSON_BYTES, ProbeDeclaration, ProbeDeclarationInput, ProcessorReadOutput,
+        ReadAccessPattern, ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration,
         ReaderDeclarationInput, ReasonCode, StreamingTextFallback,
     };
 
@@ -574,7 +577,12 @@ mod tests {
                 .iter()
                 .map(|value| CanonicalMediaType::from_str(value).expect("valid media type"))
                 .collect(),
-            probe: ProbeDeclaration::new(1, 0, 1, 1),
+            probe: ProbeDeclaration::new(ProbeDeclarationInput {
+                prefix_bytes: 1,
+                suffix_bytes: 0,
+                range_count: 1,
+                cumulative_bytes: 1,
+            }),
             views: vec![view],
             reason_codes: reason_codes
                 .iter()

@@ -13,11 +13,11 @@ use signalbox_file_media_runtime::{
     FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileMediaRegistry,
     FileReadInput, FileReadRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
     FileUse, InspectionRequest, MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, NeverCancelled,
-    ProbeDeclaration, ProbeStrength, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput,
-    ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds,
-    ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity,
-    ReasonCode, SourceReadError, SourceReadFuture, StreamingTextFallback, ValidationEvidence,
-    VerifiedBlobSource,
+    ProbeDeclaration, ProbeDeclarationInput, ProbeStrength, ProcessorFailure, ProcessorIsolation,
+    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
+    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
+    ReaderIdentity, ReasonCode, SourceReadError, SourceReadFuture, StreamingTextFallback,
+    ValidationEvidence, VerifiedBlobSource,
 };
 
 const SYNTHETIC_MEDIA_TYPE: &str = "application/x-signalbox-synthetic";
@@ -280,7 +280,12 @@ fn registry_with_view_and_container_entries(
         reader: FileReaderName::try_new("fixture").expect("fixture reader name is valid"),
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(SYNTHETIC_MEDIA_TYPE)],
-        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: 4,
+            suffix_bytes: 0,
+            range_count: 0,
+            cumulative_bytes: 4,
+        }),
         views: vec![view],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback: StreamingTextFallback::Disabled,
@@ -329,6 +334,7 @@ fn inspect(
 #[derive(Clone, Copy)]
 enum SelectionProbe {
     Strong,
+    ProvisionalStructural,
     Structural,
     Malformed,
     NoMatch,
@@ -340,6 +346,7 @@ enum SelectionValidation {
     Malformed,
     EncryptedOrLocked,
     NoMatch,
+    DeclaredMissStreamingValidated,
 }
 
 struct SelectionProcessor {
@@ -369,6 +376,10 @@ impl FileMediaProcessor for SelectionProcessor {
                 SelectionProbe::Strong => ProcessorProbeOutput::Candidate {
                     media_type: String::from(SYNTHETIC_MEDIA_TYPE),
                     strength: ProbeStrength::Strong,
+                },
+                SelectionProbe::ProvisionalStructural => ProcessorProbeOutput::Candidate {
+                    media_type: String::from(SYNTHETIC_MEDIA_TYPE),
+                    strength: ProbeStrength::ProvisionalStructuralCandidate,
                 },
                 SelectionProbe::Structural => ProcessorProbeOutput::Candidate {
                     media_type: String::from(SYNTHETIC_MEDIA_TYPE),
@@ -407,8 +418,67 @@ impl FileMediaProcessor for SelectionProcessor {
                     }
                 }
                 SelectionValidation::NoMatch => ProcessorValidationOutput::NoMatch,
+                SelectionValidation::DeclaredMissStreamingValidated => match request.evidence {
+                    ValidationEvidence::DeclaredCandidateStructurallyValidated => {
+                        ProcessorValidationOutput::NoMatch
+                    }
+                    ValidationEvidence::StreamingTextValidation => {
+                        ProcessorValidationOutput::Validated {
+                            media_type: request.media_type.to_string(),
+                            evidence: request.evidence,
+                            metadata_json: String::from(r#"{"synthetic":true}"#),
+                        }
+                    }
+                    ValidationEvidence::StrongSignature
+                    | ValidationEvidence::StructuralValidation => {
+                        return Err(ProcessorFailure::Failed.into());
+                    }
+                },
             })
         })
+    }
+
+    fn read<'a>(
+        &'a self,
+        _reader: &'a ReaderIdentity,
+        _request: FileMediaProviderReadRequest,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
+        Box::pin(async { Err(ProcessorFailure::Failed.into()) })
+    }
+}
+
+struct ProvisionalCollisionProcessor;
+
+impl FileMediaProcessor for ProvisionalCollisionProcessor {
+    fn probe<'a>(
+        &'a self,
+        reader: &'a ReaderIdentity,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorProbeOutput> {
+        Box::pin(async move {
+            let media_type = match reader.provider().as_str() {
+                "first" => SYNTHETIC_MEDIA_TYPE,
+                "second" => OTHER_SYNTHETIC_MEDIA_TYPE,
+                _ => return Err(ProcessorFailure::Failed.into()),
+            };
+            Ok(ProcessorProbeOutput::Candidate {
+                media_type: String::from(media_type),
+                strength: ProbeStrength::ProvisionalStructuralCandidate,
+            })
+        })
+    }
+
+    fn validate<'a>(
+        &'a self,
+        _reader: &'a ReaderIdentity,
+        _request: FileMediaProviderValidationRequest,
+        _source: &'a dyn VerifiedBlobSource,
+        _cancellation: &'a dyn CancellationSignal,
+    ) -> FileMediaProcessorFuture<'a, ProcessorValidationOutput> {
+        Box::pin(async { Ok(ProcessorValidationOutput::NoMatch) })
     }
 
     fn read<'a>(
@@ -445,7 +515,12 @@ fn selection_registry_with_ceilings(
         reader: FileReaderName::try_new("fixture").expect("fixture reader name is valid"),
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(owned_media_type)],
-        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: 4,
+            suffix_bytes: 0,
+            range_count: 0,
+            cumulative_bytes: 4,
+        }),
         views: vec![text_view()],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback,
@@ -667,6 +742,48 @@ fn structural_validation_no_match_is_processor_failure() {
 }
 
 #[test]
+fn provisional_structural_validation_no_match_resumes_fallback() {
+    let outcome = selection_inspection(
+        SelectionProbe::ProvisionalStructural,
+        SelectionValidation::NoMatch,
+        SYNTHETIC_MEDIA_TYPE,
+        SYNTHETIC_MEDIA_TYPE,
+        StreamingTextFallback::Disabled,
+    )
+    .expect("provisional structural validation miss resumes fallback");
+
+    let FileInspection::Unknown { .. } = outcome else {
+        panic!("provisional structural validation miss must become unknown");
+    };
+}
+
+#[test]
+fn all_provisional_collision_misses_resume_fallback() {
+    let source = MemorySource::synthetic();
+    let registry = FileMediaRegistry::try_new(
+        vec![
+            provider_declaration("first", SYNTHETIC_MEDIA_TYPE),
+            provider_declaration("second", OTHER_SYNTHETIC_MEDIA_TYPE),
+        ],
+        FileMediaCeilings::version_one(),
+        ProcessorIsolation::Available,
+    )
+    .expect("distinct provisional claims are registrable");
+
+    let outcome = inspect(
+        &registry,
+        &ProvisionalCollisionProcessor,
+        &source,
+        "unknown",
+    )
+    .expect("all provisional collision misses resume fallback");
+
+    let FileInspection::Unknown { .. } = outcome else {
+        panic!("all provisional collision misses must become unknown");
+    };
+}
+
+#[test]
 fn declared_validation_no_match_becomes_unknown() {
     let outcome = selection_inspection(
         SelectionProbe::NoMatch,
@@ -680,6 +797,23 @@ fn declared_validation_no_match_becomes_unknown() {
     let FileInspection::Unknown { .. } = outcome else {
         panic!("declared validation miss must produce unknown inspection");
     };
+}
+
+#[test]
+fn declared_validation_miss_resumes_streaming_text_fallback() {
+    let inspection = selection_inspection(
+        SelectionProbe::NoMatch,
+        SelectionValidation::DeclaredMissStreamingValidated,
+        "text/plain",
+        "text/plain",
+        StreamingTextFallback::Enabled,
+    )
+    .expect("declared validation miss resumes streaming text fallback");
+
+    assert_eq!(
+        validated_evidence(inspection),
+        ValidationEvidence::StreamingTextValidation
+    );
 }
 
 #[test]
@@ -1041,7 +1175,12 @@ fn provider_declaration(name: &str, owned_media_type: &str) -> FileMediaProvider
         reader: FileReaderName::try_new("fixture").expect("fixture reader name is valid"),
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(owned_media_type)],
-        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: 4,
+            suffix_bytes: 0,
+            range_count: 0,
+            cumulative_bytes: 4,
+        }),
         views: vec![text_view()],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback: StreamingTextFallback::Disabled,
@@ -1175,7 +1314,12 @@ fn oversized_provider_reader_inventory_is_rejected() {
 fn oversized_inspection_probe_byte_budget_is_rejected() {
     let provider =
         FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
-    let probe = ProbeDeclaration::new(1, 0, 0, 262_144);
+    let probe = ProbeDeclaration::new(ProbeDeclarationInput {
+        prefix_bytes: 1,
+        suffix_bytes: 0,
+        range_count: 0,
+        cumulative_bytes: 262_144,
+    });
     let readers = inspection_probe_inventory(&provider, 65, probe);
     let declaration = FileMediaProviderDeclaration::try_new(provider, readers)
         .expect("the provider constructor defers probe budgets to the registry");
@@ -1196,7 +1340,12 @@ fn oversized_inspection_probe_byte_budget_is_rejected() {
 fn oversized_inspection_probe_request_budget_is_rejected() {
     let provider =
         FileReaderProviderName::try_new("synthetic").expect("fixture provider name is valid");
-    let probe = ProbeDeclaration::new(1, 1, 16, 2);
+    let probe = ProbeDeclaration::new(ProbeDeclarationInput {
+        prefix_bytes: 1,
+        suffix_bytes: 1,
+        range_count: 16,
+        cumulative_bytes: 2,
+    });
     let readers = inspection_probe_inventory(&provider, 57, probe);
     let declaration = FileMediaProviderDeclaration::try_new(provider, readers)
         .expect("the provider constructor defers probe budgets to the registry");
@@ -1223,7 +1372,12 @@ fn oversized_inspection_view_inventory_is_rejected() {
         reader: FileReaderName::try_new("fixture").expect("fixture reader name is valid"),
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(SYNTHETIC_MEDIA_TYPE)],
-        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: 4,
+            suffix_bytes: 0,
+            range_count: 0,
+            cumulative_bytes: 4,
+        }),
         views,
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback: StreamingTextFallback::Disabled,
@@ -1364,7 +1518,12 @@ fn reader_declaration_with_view(
         reader: FileReaderName::try_new("fixture").expect("fixture reader name is valid"),
         revision: FileReaderRevision::try_new("1").expect("fixture revision is valid"),
         media_types: vec![media_type(SYNTHETIC_MEDIA_TYPE)],
-        probe: ProbeDeclaration::new(4, 0, 0, 4),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: 4,
+            suffix_bytes: 0,
+            range_count: 0,
+            cumulative_bytes: 4,
+        }),
         views: vec![view],
         reason_codes: vec![ReasonCode::try_new(MALFORMED_REASON).expect("fixture reason is valid")],
         streaming_text_fallback: StreamingTextFallback::Disabled,
@@ -1381,7 +1540,12 @@ fn reader_declaration(
         provider,
         reader,
         owned_media_type,
-        ProbeDeclaration::new(4, 0, 0, 4),
+        ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: 4,
+            suffix_bytes: 0,
+            range_count: 0,
+            cumulative_bytes: 4,
+        }),
     )
 }
 

@@ -276,7 +276,7 @@ fn reader_declaration(
         reader: FileReaderName::try_new(kind.reader())?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(kind.media_type())?],
-        probe: ProbeDeclaration::from_input(ProbeDeclarationInput {
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
             prefix_bytes: PROBE_BYTES,
             suffix_bytes: 0,
             range_count: 1,

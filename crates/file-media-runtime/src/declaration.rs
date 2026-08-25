@@ -20,6 +20,8 @@ const MAX_VIEW_DESCRIPTION_BYTES: usize = 512;
 pub enum ProbeStrength {
     /// Caller declaration nominates a provider but is not evidence.
     DeclaredCandidate,
+    /// A bounded complete prefix is provisional until full validation.
+    ProvisionalStructuralCandidate,
     /// Bounded structure suggests a candidate requiring full validation.
     StructuralCandidate,
     /// A format-owned signature identifies a candidate.
@@ -35,42 +37,27 @@ pub struct ProbeDeclaration {
     cumulative_bytes: u64,
 }
 
-/// Labeled finite source-read envelope for one probe.
+/// Labeled fields for one finite probe envelope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProbeDeclarationInput {
-    /// Bytes available through privileged prefix access.
+    /// Maximum prefix bytes available to the probe.
     pub prefix_bytes: u64,
-    /// Bytes available through privileged suffix access.
+    /// Maximum suffix bytes available to the probe.
     pub suffix_bytes: u64,
-    /// Maximum arbitrary-range requests.
+    /// Maximum exact range requests available to the probe.
     pub range_count: u32,
-    /// Maximum cumulative source bytes.
+    /// Maximum cumulative bytes available to the probe.
     pub cumulative_bytes: u64,
 }
 
 impl ProbeDeclaration {
-    /// Declares one finite probe envelope from labeled source-access budgets.
-    pub const fn from_input(input: ProbeDeclarationInput) -> Self {
+    /// Declares one finite probe envelope from labeled fields.
+    pub const fn new(input: ProbeDeclarationInput) -> Self {
         Self {
             prefix_bytes: input.prefix_bytes,
             suffix_bytes: input.suffix_bytes,
             range_count: input.range_count,
             cumulative_bytes: input.cumulative_bytes,
-        }
-    }
-
-    /// Declares one finite probe envelope. Registry construction checks ceilings.
-    pub const fn new(
-        prefix_bytes: u64,
-        suffix_bytes: u64,
-        range_count: u32,
-        cumulative_bytes: u64,
-    ) -> Self {
-        Self {
-            prefix_bytes,
-            suffix_bytes,
-            range_count,
-            cumulative_bytes,
         }
     }
 
@@ -451,6 +438,8 @@ pub struct FileMediaProviderReadRequest {
     pub view: ReadViewName,
     /// Closed initial-options or continuation input.
     pub input: crate::FileReadInput,
+    /// Maximum entries the registry may admit in any structured container.
+    pub maximum_container_entries: u64,
 }
 
 /// Adapter-owned execution failure inside an isolated worker.
