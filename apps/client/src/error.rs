@@ -441,6 +441,10 @@ impl fmt::Display for RejectionDisplay {
                 formatter,
                 "active_turn_present session={session_id} active_turn={active_turn_id}"
             ),
+            RejectionDetail::CommissionTargetBusy { session_id } => write!(
+                formatter,
+                "commission_target_busy live_session={session_id}"
+            ),
             RejectionDetail::ActiveTurnMismatch {
                 session_id,
                 expected_active_turn_id,
@@ -515,6 +519,18 @@ impl fmt::Display for RejectionDisplay {
             } => write!(
                 formatter,
                 "tool_request_not_in_session session={session_id} request={tool_request_id}"
+            ),
+            RejectionDetail::ToolRequestNotDelegateDenied { tool_request_id } => write!(
+                formatter,
+                "tool_request_not_delegate_denied request={tool_request_id}"
+            ),
+            RejectionDetail::ToolRequestNotTerminallyDenied { tool_request_id } => write!(
+                formatter,
+                "tool_request_not_terminally_denied request={tool_request_id}"
+            ),
+            RejectionDetail::ToolDenialAlreadyOverridden { tool_request_id } => write!(
+                formatter,
+                "tool_denial_already_overridden request={tool_request_id}"
             ),
             RejectionDetail::DelegationRequestNotInTurn {
                 session_id,

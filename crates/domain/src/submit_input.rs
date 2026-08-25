@@ -3636,6 +3636,7 @@ fn terminal_disposition_command(disposition: &TurnDisposition) -> Option<Durable
                     AppliedInterruptState::Applied { proof } => Some(proof.command()),
                 }
             }
+            ReconciliationReason::AutomaticModelCallRecovery { .. } => None,
         },
     }
 }
@@ -3655,6 +3656,7 @@ fn terminal_disposition_matches_turn(disposition: &TurnDisposition, turn: TurnId
                     AppliedInterruptState::Applied { proof } => proof.predecessor() == turn,
                 }
             }
+            ReconciliationReason::AutomaticModelCallRecovery { .. } => true,
         },
     }
 }

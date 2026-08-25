@@ -178,7 +178,14 @@ public struct SignalboxUserInputContent: Codable, Equatable, Sendable {
   public init(from decoder: Decoder) throws {
     var container = try decoder.unkeyedContainer()
     var parts: [SignalboxUserInputPart] = []
-    parts.reserveCapacity(SignalboxProcessProtocol.maximumUserInputParts)
+    // Reserve what the payload actually declares, capped by the retained-parts
+    // bound. Reserving the bound unconditionally would make every one-part
+    // content — the ordinary shape — retain a 256-slot buffer for the life of
+    // the value, so a snapshot admitting many records would hold far more
+    // memory than its retained-byte accounting reports. An absent count
+    // reserves nothing and lets the array grow.
+    let declaredParts = container.count ?? 0
+    parts.reserveCapacity(min(declaredParts, SignalboxProcessProtocol.maximumUserInputParts))
     while !container.isAtEnd && parts.count < SignalboxProcessProtocol.maximumUserInputParts {
       parts.append(try container.decode(SignalboxUserInputPart.self))
     }
@@ -772,6 +779,10 @@ public enum SignalboxToolApprovalEventDecider: Decodable, Equatable, Sendable {
     modelSelectionID: SignalboxCanonicalUUID,
     modelCallID: SignalboxCanonicalUUID
   )
+  case userOverride(
+    commandID: SignalboxCanonicalUUID,
+    overriddenToolRequestID: SignalboxCanonicalUUID
+  )
 
   public init(from decoder: Decoder) throws {
     let tagged = try SignalboxTaggedPayload(from: decoder)
@@ -787,6 +798,15 @@ public enum SignalboxToolApprovalEventDecider: Decodable, Equatable, Sendable {
       self = .delegate(
         modelSelectionID: try decoder.decode("model_selection_id"),
         modelCallID: try decoder.decode("model_call_id")
+      )
+    case "user_override":
+      try tagged.rejectUnadmittedFields(
+        ["type", "command_id", "overridden_tool_request_id"],
+        decoder: decoder
+      )
+      self = .userOverride(
+        commandID: try decoder.decode("command_id"),
+        overriddenToolRequestID: try decoder.decode("overridden_tool_request_id")
       )
     default:
       throw DecodingError.dataCorrupted(
@@ -4263,6 +4283,13 @@ public enum SignalboxProcessSessionEvent: Decodable, Equatable, Sendable {
         shapeMatches = rationale.map(validRationale) ?? false
       case .deny(let reason):
         shapeMatches = reason == nil && (rationale.map(validRationale) ?? false)
+      }
+    case .userOverride:
+      switch decision {
+      case .approve:
+        shapeMatches = rationale == nil
+      case .deny:
+        shapeMatches = false
       }
     }
     guard shapeMatches else {

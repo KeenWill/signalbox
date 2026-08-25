@@ -1210,8 +1210,9 @@ ALTER TABLE durable_command
         OR (command_kind = 'submit_input' AND storage_version = 3)
         OR (command_kind IN (
             'replace_session_metadata', 'decide_tool_request',
-            'review_workflow', 'review_orchestration', 'compact_session',
-            'goal', 'update_session_placement', 'register_workspace',
+            'override_denied_tool_request', 'review_workflow',
+            'review_orchestration', 'compact_session', 'goal',
+            'update_session_placement', 'register_workspace',
             'mint_git_remote', 'withdraw_git_remote') AND storage_version = 1)
     );
 
@@ -1243,6 +1244,43 @@ ALTER TABLE submit_input_command
 ALTER TABLE accepted_input
     DROP COLUMN content_kind,
     DROP COLUMN content_text;
+
+-- `accepted_input.content_text` no longer exists, so the session-timeline
+-- accounting that read `NEW.content_text` on insert has nothing to read. The
+-- accepted text a session projects now lives in that input's ordered content
+-- parts, which are written after their `accepted_input` row inside the same
+-- transaction, so an immediate row trigger would see none of them. Defer the
+-- same one-firing-per-input accounting to commit, when every part is present,
+-- and sum text parts alone: an attachment part carries a digest and bounded
+-- declarations, never projected user text. The conversion above ran before
+-- this trigger existed, so converted rows are not counted twice.
+DROP TRIGGER accepted_input_updates_timeline_fact ON accepted_input;
+
+CREATE OR REPLACE FUNCTION append_session_timeline_input_bytes()
+RETURNS trigger LANGUAGE plpgsql
+SET search_path FROM CURRENT AS $$
+DECLARE
+    accepted_text_bytes bigint;
+BEGIN
+    SELECT COALESCE(sum(octet_length(convert_to(text_value, 'UTF8'))), 0)
+      INTO accepted_text_bytes
+      FROM accepted_input_content_part
+     WHERE accepted_input_id = NEW.accepted_input_id
+       AND part_kind = 'text';
+    -- Submission later acquires the allocator through lifecycle/outbox work.
+    -- Preserve the global allocator-then-session-fact lock order here too.
+    PERFORM 1 FROM outbox_sequence_state WHERE singleton FOR UPDATE;
+    UPDATE session_timeline_fact
+       SET projected_text_bytes = projected_text_bytes + accepted_text_bytes
+     WHERE session_id = NEW.session_id;
+    RETURN NULL;
+END
+$$;
+
+CREATE CONSTRAINT TRIGGER accepted_input_updates_timeline_fact
+AFTER INSERT ON accepted_input
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION append_session_timeline_input_bytes();
 
 -- Retain the closed local cause of a guarded unsent attachment-preparation
 -- failure separately from definitive provider-error evidence.

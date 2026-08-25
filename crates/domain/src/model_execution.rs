@@ -1565,7 +1565,16 @@ impl PreparedModelCallRequest {
 
     /// Iterates over the exact ordered semantic frontier.
     pub fn frontier_entries(&self) -> impl ExactSizeIterator<Item = &SemanticTranscriptEntry> {
-        self.frontier_entries.iter()
+        self.frontier_entry_slice().iter()
+    }
+
+    /// Borrows the exact ordered semantic frontier.
+    ///
+    /// Rendering projects and bounds the frontier before cloning any of it,
+    /// which a borrow of the stored order supports and an owning copy of the
+    /// same entries would defeat by duplicating every payload's content first.
+    pub const fn frontier_entry_slice(&self) -> &[SemanticTranscriptEntry] {
+        &self.frontier_entries
     }
 
     /// Borrows the exact user content for a frontier origin.
@@ -4241,7 +4250,8 @@ fn initial_tool_approval_matches_posture(
             | InitialToolApproval::SessionBlanket
             | InitialToolApproval::PolicyAuto
             | InitialToolApproval::Human
-            | InitialToolApproval::Delegated,
+            | InitialToolApproval::Delegated
+            | InitialToolApproval::UserOverride { .. },
         )
         | (
             DangerousToolAutoApproval::Disabled,
@@ -4249,7 +4259,8 @@ fn initial_tool_approval_matches_posture(
             | InitialToolApproval::AlwaysConfirm
             | InitialToolApproval::PolicyAuto
             | InitialToolApproval::Human
-            | InitialToolApproval::Delegated,
+            | InitialToolApproval::Delegated
+            | InitialToolApproval::UserOverride { .. },
         ) => true,
     }
 }
@@ -4444,6 +4455,64 @@ pub(crate) fn apply_interrupt_to_recovery_wait(
     }
     let marker =
         ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), proof);
+    Ok(ReconciliationRequiredModelCallTurn {
+        session: active_turn.session(),
+        turn: active_turn.turn(),
+        call,
+        attempt,
+        disposition: TurnDisposition::ReconciliationRequired { marker },
+        terminal_snapshot,
+        reclassified_pending_steering,
+    })
+}
+
+pub(crate) fn apply_automatic_model_call_reconciliation(
+    active_turn: ActivatedTurn,
+    call: EndedModelCall,
+    attempt: EndedTurnAttempt,
+    source_snapshot: ResolvedContextFrontierSnapshot,
+    recovery_attempt: std::num::NonZeroU32,
+    identities: AmbiguousModelCallTurnIdentities,
+) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError> {
+    let ActiveTurnPhase::AwaitingRecoveryDecision {
+        ambiguous_operations,
+        applied_interrupt,
+    } = active_turn.phase()
+    else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    if ambiguous_operations.operation_count() != 1
+        || !ambiguous_operations.contains(crate::IssuedOperationRef::ModelCall(call.id()))
+        || call.turn() != active_turn.turn()
+        || call.attempt() != attempt.id()
+        || call.disposition() != ModelCallDisposition::Ambiguous
+        || source_snapshot.frontier().owning_session() != active_turn.session()
+        || call.frontier() != source_snapshot.frontier()
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    let terminal_snapshot = source_snapshot
+        .derive_appending_candidate(identities.terminal_frontier, Vec::new())
+        .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+    if !matches!(
+        attempt.end(),
+        AttemptEnd::WithoutStop {
+            disposition: UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost,
+        }
+    ) {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    }
+    let marker = match applied_interrupt {
+        Some(proof) => {
+            ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), *proof)
+        }
+        None => ReconciliationMarker::from_automatic_model_call_recovery(
+            ambiguous_operations.clone(),
+            recovery_attempt,
+        ),
+    };
     Ok(ReconciliationRequiredModelCallTurn {
         session: active_turn.session(),
         turn: active_turn.turn(),
@@ -5071,9 +5140,9 @@ mod tests {
         ToolExecutionErrorKind, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
         TranscriptAncestry, UserContentPart,
         test_support::{
-            accepted_input_id, context_frontier_id, direct, model_call_id, provider_model_identity,
-            semantic_transcript_entry_id, session_id, tool_attempt_id, tool_request_id,
-            turn_attempt_id, turn_id,
+            accepted_input_id, command_id, context_frontier_id, direct, model_call_id,
+            provider_model_identity, semantic_transcript_entry_id, session_id, tool_attempt_id,
+            tool_request_id, turn_attempt_id, turn_id,
         },
     };
 
@@ -5120,6 +5189,32 @@ mod tests {
         assert!(initial_tool_approval_matches_posture(
             DangerousToolAutoApproval::ApproveAll,
             InitialToolApproval::Delegated,
+        ));
+    }
+
+    /// A consumed user override is admitted wherever its `Delegated` base
+    /// selection is: the override substitutes for the judge, not for the
+    /// blanket, so neither frozen blanket posture contradicts it.
+    #[test]
+    fn user_override_approval_is_admitted_when_blanket_posture_is_disabled() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::Disabled,
+            InitialToolApproval::UserOverride {
+                command: command_id(1),
+                denied_request: tool_request_id(2),
+            },
+        ));
+    }
+
+    /// See [`user_override_approval_is_admitted_when_blanket_posture_is_disabled`].
+    #[test]
+    fn user_override_approval_is_admitted_under_dangerous_blanket_posture() {
+        assert!(initial_tool_approval_matches_posture(
+            DangerousToolAutoApproval::ApproveAll,
+            InitialToolApproval::UserOverride {
+                command: command_id(1),
+                denied_request: tool_request_id(2),
+            },
         ));
     }
 

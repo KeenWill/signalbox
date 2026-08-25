@@ -112,6 +112,13 @@ def main() -> int:
         local_socket_path = (
             root / "apps" / "signalboxd" / "src" / "local_socket.rs"
         )
+        convergence_runtime_path = (
+            root
+            / "apps"
+            / "signalboxd"
+            / "src"
+            / "convergence_sweep_runtime.rs"
+        )
         violation_lines = (
             "The owner approves this tool.",
             "The owners approve this tool.",
@@ -187,6 +194,13 @@ def main() -> int:
         local_socket_lines = (
             "fn tool_is_approved(owner: u32) -> bool { owner == HUMAN_USER_ID }",
             "fn owner_access() -> bool { true } // human who approves tools",
+        )
+        convergence_runtime_lines = (
+            "query PullRequestConvergence($namespace: String!) {",
+            "  repository(owner: $namespace, name: $name) {",
+            "    headRepository { name_with_owner: nameWithOwner }",
+            "let slug = pull.pointer(\"/headRepository/name_with_owner\");",
+            "let owner = the_human_who_approves_tools;",
         )
         imported_lines = (
             "struct EntryFixture {",
@@ -289,6 +303,9 @@ def main() -> int:
         local_socket_path.write_text(
             fixture_text(local_socket_lines), encoding="utf-8"
         )
+        convergence_runtime_path.write_text(
+            fixture_text(convergence_runtime_lines), encoding="utf-8"
+        )
         imported.write_text(fixture_text(imported_lines), encoding="utf-8")
         application_import.parent.mkdir(parents=True, exist_ok=True)
         application_import.write_text(
@@ -328,6 +345,7 @@ def main() -> int:
             "docs/spec/review-workflows.md",
             "docs/spec/tool-loop.md",
             "apps/signalboxd/src/local_socket.rs",
+            "apps/signalboxd/src/convergence_sweep_runtime.rs",
         )
         rejected = run_checker(root)
         assert rejected.returncode == 1, (
@@ -347,6 +365,11 @@ def main() -> int:
             ),
             *expected_diagnostics(
                 "apps/signalboxd/src/local_socket.rs", local_socket_lines
+            ),
+            *expected_diagnostics(
+                "apps/signalboxd/src/convergence_sweep_runtime.rs",
+                convergence_runtime_lines,
+                convergence_runtime_lines[-1:],
             ),
             *expected_diagnostics(
                 "docs/spec/review-workflows.md", reviewed_domain_lines
@@ -451,6 +474,9 @@ def main() -> int:
             "}\n"
             "fn guarded_bind_listens_only_with_owner_access() {}\n",
             encoding="utf-8",
+        )
+        convergence_runtime_path.write_text(
+            fixture_text(convergence_runtime_lines[:-1]), encoding="utf-8"
         )
         imported.write_text(fixture_text(imported_lines[:-1]), encoding="utf-8")
         application_import.write_text(
