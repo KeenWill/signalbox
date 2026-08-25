@@ -233,11 +233,12 @@ CREATE TABLE web_usage_call_projection (
         DEFERRABLE INITIALLY DEFERRED
 );
 
--- The projected call kind and ownership must correlate with the canonical
--- call records: the identity foreign key alone accepts any existing
--- model_call_id regardless of its kind or owner, and the projection is
--- append-only, so a direct insert storing an ordinary call under another kind
--- or session would misclassify or misattribute the physical call permanently.
+-- The projected call kind, session, and turn must correlate with the
+-- canonical call records: the identity foreign key alone accepts any existing
+-- model_call_id regardless of its kind or its owning session, and the
+-- projection is append-only, so a direct insert storing an ordinary call
+-- under another kind or session would misclassify or misattribute the
+-- physical call permanently.
 -- The identity vocabulary spells the ordinary kind 'ordinary' where the
 -- projection spells it 'model_call'.
 CREATE FUNCTION require_web_usage_source_correlation()
