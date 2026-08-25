@@ -1,14 +1,5 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
-} as const
+import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 
 const approvalSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c61'
 const blockedSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c62'
@@ -21,7 +12,7 @@ const attentionFixture = {
   summaries: [
     {
       action: 'decide_approval',
-      current_turn_id: 'turn-approval',
+      current_turn_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c65',
       goal_block: null,
       judge: { actionable: '2', completed: '7', escalated: '1', failed: '0' },
       last_activity: { kind: 'approval_judge', unix_milliseconds: '1787342400000' },
@@ -30,7 +21,7 @@ const attentionFixture = {
     },
     {
       action: 'provide_goal_need',
-      current_turn_id: 'turn-blocked',
+      current_turn_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c66',
       goal_block: {
         generation: '3',
         need_summary: 'Choose the repository that should receive the release branch.',

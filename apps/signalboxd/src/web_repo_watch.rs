@@ -21,7 +21,7 @@ use signalbox_application::{
     RepoWatchOperatorEvent, RepoWatchOperatorSettlement, RepoWatchPagePosition,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestOperations, RepoWatchPullRequestPage,
     RepoWatchPullRequestSession, RepoWatchPullRequestSessionPage, RepoWatchQueuedObligation,
-    RepoWatchRepositoryStatus, RepoWatchRepositoryStatusPage, RepoWatchReviewDecision,
+    RepoWatchRepositoryStatus, RepoWatchRepositoryStatusPage, RepoWatchReviewStatus,
     RepoWatchSessionCursor, RepoWatchSessionPurpose, RepoWatchSingletonKey,
     RepoWatchWebhookActivity, RepoWatchWebhookDisposition, RepoWatchWebhookWindow,
     RepoWatchWorkPage,
@@ -699,12 +699,10 @@ fn pull_request_dto(
             RepoWatchChecksStatus::Failing => WebRepoWatchChecksStatus::Failing,
         },
         review_decision: match pull_request.review_decision {
-            RepoWatchReviewDecision::None => WebRepoWatchReviewDecision::None,
-            RepoWatchReviewDecision::Commented => WebRepoWatchReviewDecision::Commented,
-            RepoWatchReviewDecision::Approved => WebRepoWatchReviewDecision::Approved,
-            RepoWatchReviewDecision::ChangesRequested => {
-                WebRepoWatchReviewDecision::ChangesRequested
-            }
+            RepoWatchReviewStatus::None => WebRepoWatchReviewDecision::None,
+            RepoWatchReviewStatus::Commented => WebRepoWatchReviewDecision::Commented,
+            RepoWatchReviewStatus::Approved => WebRepoWatchReviewDecision::Approved,
+            RepoWatchReviewStatus::ChangesRequested => WebRepoWatchReviewDecision::ChangesRequested,
         },
         stale_review_count: pull_request.stale_review_count.to_string(),
         unresolved_thread_count: pull_request.unresolved_thread_count.to_string(),

@@ -12,12 +12,17 @@ import {
 import { lazy, StrictMode, Suspense } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
+import { HttpImportApi } from './imports/api'
+import { ImportsWorkspace } from './imports/ImportsWorkspace'
+import { ScenarioImportApi } from './imports/scenario'
 import { ProductApp } from './ProductApp'
 import { type ProductRouteId, productRoutes } from './product'
-import { store } from './state'
+import { selectApp, store } from './state'
 import './app.css'
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> })
+const httpImportApi = new HttpImportApi()
+const scenarioImportApi = new ScenarioImportApi()
 const ScenarioWorkspace = lazy(() =>
   import('./App').then((module) => ({ default: module.Workspace })),
 )
@@ -34,17 +39,25 @@ const productRoute = createRoute({
     if (!productRoutes.some((route) => route.id === candidate)) {
       return <Navigate to="/$surface" params={{ surface: 'attention' }} replace />
     }
+    if (candidate === 'imports') {
+      return <ImportsWorkspace api={httpImportApi} scenario={false} />
+    }
     return <ProductApp surface={candidate as ProductRouteId} />
   },
 })
 const scenarioRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/scenario/$scenarioId',
-  component: () => (
-    <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
-      <ScenarioWorkspace scenarioId={scenarioRoute.useParams().scenarioId} />
-    </Suspense>
-  ),
+  component: () => {
+    const { scenarioId } = scenarioRoute.useParams()
+    return scenarioId === 'imports' ? (
+      <ImportsWorkspace api={scenarioImportApi} scenario />
+    ) : (
+      <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
+        <ScenarioWorkspace scenarioId={scenarioId} />
+      </Suspense>
+    )
+  },
 })
 const router = createRouter({
   routeTree: rootRoute.addChildren([indexRoute, productRoute, scenarioRoute]),
@@ -67,6 +80,10 @@ declare module '@tanstack/react-router' {
 
 const root = document.getElementById('root')
 if (!root) throw new Error('Missing web application root')
+
+const initialPresentation = selectApp(store.getState())
+document.documentElement.dataset.theme = initialPresentation.theme
+document.documentElement.dataset.density = initialPresentation.density
 
 createRoot(root).render(
   <StrictMode>

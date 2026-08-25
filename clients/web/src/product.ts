@@ -18,11 +18,10 @@ import {
   type WebRepoWatchWorkPage,
 } from './generated/web-contract.mjs'
 
-// The version-one browser contract fixes both transport ceilings at 65,536 bytes.
+// The browser contract fixes both transport ceilings at 65,536 bytes. The generated bootstrap
+// decoder owns the contract identity, capability, and limit pin.
 const MAX_JSON_BODY_BYTES = 65_536
 const MAX_ATTENTION_EVENT_BYTES = 65_536
-const EXPECTED_CONTRACT_NAME = 'signalbox.web-http'
-const EXPECTED_CONTRACT_VERSION = '1'
 const MAX_POSTGRES_BIGINT = 9_223_372_036_854_775_807n
 const MAX_UNSIGNED_BIGINT = 18_446_744_073_709_551_615n
 const MAX_POSTGRES_INTEGER = 2_147_483_647
@@ -68,13 +67,8 @@ const validateAttentionPage = (
     }
     previous = session
   }
-  const continuationCursor = page.continuation_after_session_id
-  if (continuationCursor != null) {
-    const continuation = canonicalUuid(continuationCursor, 'attention continuation')
-    if (continuation !== previous) {
-      throw new TypeError('attention continuation does not equal the returned page boundary')
-    }
-  }
+  // `decodeWebAttentionSnapshot` already pins the continuation to the last
+  // returned identity; only the request-relative advance is checked here.
   return page
 }
 
@@ -328,23 +322,6 @@ const validateActivityContinuations = (
   return page
 }
 
-const requireCompatibleBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
-  if (
-    bootstrap.contract.name !== EXPECTED_CONTRACT_NAME ||
-    bootstrap.contract.version !== EXPECTED_CONTRACT_VERSION ||
-    !bootstrap.capabilities.bounded_json ||
-    !bootstrap.capabilities.same_origin_json_mutations ||
-    !bootstrap.capabilities.ndjson_streaming ||
-    bootstrap.limits.max_json_body_bytes !== MAX_JSON_BODY_BYTES ||
-    bootstrap.limits.max_ndjson_item_bytes !== MAX_ATTENTION_EVENT_BYTES
-  ) {
-    throw new TypeError(
-      'bootstrap contract identity, capabilities, or limits are incompatible with this client',
-    )
-  }
-  return bootstrap
-}
-
 const readBoundedJson = async (response: Response): Promise<unknown> => {
   if (!response.body) throw new TypeError('JSON response has no body')
   const reader = response.body.getReader()
@@ -426,6 +403,15 @@ export const productRoutes = [
 
 export type ProductRouteId = (typeof productRoutes)[number]['id']
 
+export type ProductSurfaceState =
+  | { kind: 'browser-local'; authority: 'browser preferences' }
+  | { kind: 'server-backed'; owningTrack: string; facts: readonly string[] }
+  | {
+      kind: 'committed-unimplemented'
+      owningTrack: string
+      facts: readonly string[]
+    }
+
 export interface RepoWatchHeldCursor {
   heldSinceUnixMicroseconds: string
   dispatchId: string
@@ -499,6 +485,91 @@ export class ProductRequestError extends Error {
   }
 }
 
+export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> = {
+  attention: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#992 attention projections',
+    facts: ['prioritized attention reads'],
+  },
+  sessions: {
+    kind: 'server-backed',
+    owningTrack: '#991 session projections',
+    facts: ['bounded session descriptors', 'stable-address timeline windows'],
+  },
+  search: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#994 search and usage reads',
+    facts: ['cross-session search reads'],
+  },
+  activity: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['system activity reads'],
+  },
+  runners: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['runner discovery reads'],
+  },
+  reviews: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['review discovery reads'],
+  },
+  imports: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#995 discovery reads',
+    facts: ['import discovery reads'],
+  },
+  usage: {
+    kind: 'committed-unimplemented',
+    owningTrack: '#994 search and usage reads',
+    facts: ['usage aggregation reads'],
+  },
+  settings: { kind: 'browser-local', authority: 'browser preferences' },
+}
+
+export const productSurfaceCacheLabel = (surface: ProductRouteId): string | null => {
+  switch (productSurfaceStates[surface].kind) {
+    case 'browser-local':
+      return 'Local settings'
+    case 'server-backed':
+      return 'Bounded query'
+    case 'committed-unimplemented':
+      return null
+  }
+}
+
+export class BootstrapContractError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'BootstrapContractError'
+  }
+}
+
+// The bootstrap contains only contract identity, capabilities, and limits. Keep a hard response
+// ceiling independent of the untrusted limits inside that response.
+export const MAX_BOOTSTRAP_RESPONSE_BYTES = 65_536
+
+const readBoundedBody = async (response: Response): Promise<string> => {
+  if (!response.body) return ''
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let body = ''
+  let received = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    received += value.byteLength
+    if (received > MAX_BOOTSTRAP_RESPONSE_BYTES) {
+      await reader.cancel()
+      throw new BootstrapContractError('bootstrap response exceeds the byte limit')
+    }
+    body += decoder.decode(value, { stream: true })
+  }
+  return body + decoder.decode()
+}
+
 export class SameOriginProductTransport implements ProductTransport, RepoWatchProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
     const response = await this.fetchResponse('/api/bootstrap', {
@@ -507,7 +578,14 @@ export class SameOriginProductTransport implements ProductTransport, RepoWatchPr
       signal,
     })
     if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
-    return requireCompatibleBootstrap(decodeWebContractBootstrap(await readBoundedJson(response)))
+    const body = await readBoundedBody(response)
+    try {
+      return decodeWebContractBootstrap(JSON.parse(body))
+    } catch (error) {
+      throw new BootstrapContractError('bootstrap response violates the web contract', {
+        cause: error,
+      })
+    }
   }
 
   async readAttention(

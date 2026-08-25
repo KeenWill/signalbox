@@ -1,15 +1,18 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ProductRequestError, SameOriginProductTransport } from './product'
+import {
+  BootstrapContractError,
+  MAX_BOOTSTRAP_RESPONSE_BYTES,
+  ProductRequestError,
+  productRoutes,
+  productSurfaceCacheLabel,
+  productSurfaceStates,
+  SameOriginProductTransport,
+} from './product'
+import { webContractBootstrapFixture } from './product.fixture'
+import { hasValidSessionTimelineContract } from './session-timeline/model'
 
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: { max_json_body_bytes: 65_536, max_ndjson_item_bytes: 65_536 },
-} as const
+// The generated contract is authored in Rust; keep one fixture for every browser test.
+const bootstrapFixture = webContractBootstrapFixture
 
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
 const previousSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6c'
@@ -19,7 +22,7 @@ const attentionFixture = {
   summaries: [
     {
       action: 'decide_approval',
-      current_turn_id: 'turn-31',
+      current_turn_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c70',
       goal_block: null,
       judge: { actionable: '2', completed: '7', escalated: '1', failed: '0' },
       last_activity: { kind: 'approval_judge', unix_milliseconds: '1724200000000' },
@@ -63,12 +66,12 @@ describe('SameOriginProductTransport', () => {
   it('decodes the Rust-authored bootstrap contract', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(JSON.stringify(bootstrapFixture))),
+      vi.fn(async () => new Response(JSON.stringify(webContractBootstrapFixture))),
     )
 
     const bootstrap = await new SameOriginProductTransport().readBootstrap()
 
-    expect(bootstrap).toEqual(bootstrapFixture)
+    expect(bootstrap).toEqual(webContractBootstrapFixture)
   })
 
   it('fails closed when the daemon returns an unknown contract shape', async () => {
@@ -78,7 +81,29 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'bootstrap.contract',
+      BootstrapContractError,
+    )
+  })
+
+  it('rejects malformed JSON as a contract failure', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('{')),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'violates the web contract',
+    )
+  })
+
+  it('rejects a bootstrap response above the fixed byte ceiling', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('x'.repeat(MAX_BOOTSTRAP_RESPONSE_BYTES + 1))),
+    )
+
+    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+      'exceeds the byte limit',
     )
   })
 
@@ -96,8 +121,11 @@ describe('SameOriginProductTransport', () => {
       ),
     )
 
-    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
-      'identity, capabilities, or limits are incompatible',
+    const failure = await new SameOriginProductTransport().readBootstrap().catch((error) => error)
+
+    expect(failure).toBeInstanceOf(BootstrapContractError)
+    expect(String((failure as Error).cause)).toContain(
+      'bootstrap carries an incompatible web contract',
     )
   })
 
@@ -115,7 +143,10 @@ describe('SameOriginProductTransport', () => {
       ),
     )
 
-    await expect(new SameOriginProductTransport().readBootstrap()).rejects.toThrow(
+    const failure = await new SameOriginProductTransport().readBootstrap().catch((error) => error)
+
+    expect(failure).toBeInstanceOf(BootstrapContractError)
+    expect(String((failure as Error).cause)).toContain(
       'bootstrap carries an incompatible web contract',
     )
   })
@@ -185,7 +216,7 @@ describe('SameOriginProductTransport', () => {
     )
 
     await expect(new SameOriginProductTransport().readAttention(previousSessionId)).rejects.toThrow(
-      'attention continuation does not equal the returned page boundary',
+      'attention_snapshot.continuation_after_session_id must be the last returned session identity',
     )
   })
 
@@ -337,7 +368,7 @@ describe('SameOriginProductTransport', () => {
 
     await expect(
       new SameOriginProductTransport().readRepoWatchActivity('example/repository'),
-    ).rejects.toThrow('activity_page')
+    ).rejects.toThrow('webrepowatchactivitypage.invented must be absent')
   })
 
   it('rejects an oversized JSON response before parsing it', async () => {
@@ -593,5 +624,65 @@ describe('SameOriginProductTransport', () => {
     const events = new SameOriginProductTransport().followAttention()[Symbol.asyncIterator]()
 
     await expect(events.next()).rejects.toThrow('attention stream ended with an incomplete item')
+  })
+})
+
+describe('product surface availability', () => {
+  it('requires bounded JSON before enabling timeline reads', () => {
+    expect(
+      hasValidSessionTimelineContract({
+        ...webContractBootstrapFixture,
+        capabilities: { ...webContractBootstrapFixture.capabilities, bounded_json: false },
+      }),
+    ).toBe(false)
+  })
+
+  it('rejects timeline capability with unusable semantic limits', () => {
+    expect(hasValidSessionTimelineContract(webContractBootstrapFixture)).toBe(true)
+    expect(
+      hasValidSessionTimelineContract({
+        ...webContractBootstrapFixture,
+        limits: { ...webContractBootstrapFixture.limits, max_timeline_window_items: 0 },
+      }),
+    ).toBe(false)
+    expect(
+      hasValidSessionTimelineContract({
+        ...webContractBootstrapFixture,
+        limits: { ...webContractBootstrapFixture.limits, max_timeline_window_bytes: 65_537 },
+      }),
+    ).toBe(false)
+  })
+
+  it('defines one typed authority state for every product route', () => {
+    expect(productSurfaceStates).toHaveProperty(productRoutes[0].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[1].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[2].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[3].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[4].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[5].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[6].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[7].id)
+    expect(productSurfaceStates).toHaveProperty(productRoutes[8].id)
+  })
+
+  it('keeps Settings browser-local instead of implying daemon authority', () => {
+    expect(productSurfaceStates.settings).toEqual({
+      kind: 'browser-local',
+      authority: 'browser preferences',
+    })
+  })
+
+  it('marks the available Session timeline facts as server-backed', () => {
+    expect(productSurfaceStates.sessions).toEqual({
+      kind: 'server-backed',
+      owningTrack: '#991 session projections',
+      facts: ['bounded session descriptors', 'stable-address timeline windows'],
+    })
+  })
+
+  it('reports cache ownership only for implemented surfaces', () => {
+    expect(productSurfaceCacheLabel('sessions')).toBe('Bounded query')
+    expect(productSurfaceCacheLabel('settings')).toBe('Local settings')
+    expect(productSurfaceCacheLabel('attention')).toBeNull()
   })
 })

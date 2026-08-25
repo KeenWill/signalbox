@@ -35,6 +35,10 @@ use crate::{
         SubmitInputCorruption, SubmitInputRepositoryError, decode_goal_origin_configuration,
         load_scheduling_projection,
     },
+    workspace_instructions::{
+        CountedActivationInstructionEvidence, WorkspaceInstructionRepository,
+        WorkspaceInstructionRepositoryError,
+    },
 };
 
 /// Which fresh activation identity collided with an existing durable identity.
@@ -196,6 +200,8 @@ pub enum CommitActivationPreviewError {
     Activation(StartEligibleTurnRepositoryError),
     /// The exact initial model-call checkpoint could not be persisted.
     ModelCall(crate::model_execution::ModelCallRepositoryError),
+    /// Complete instruction evidence could not join the activation commit.
+    WorkspaceInstructions(WorkspaceInstructionRepositoryError),
 }
 
 impl fmt::Display for CommitActivationPreviewError {
@@ -203,6 +209,7 @@ impl fmt::Display for CommitActivationPreviewError {
         match self {
             Self::Activation(error) => error.fmt(formatter),
             Self::ModelCall(error) => error.fmt(formatter),
+            Self::WorkspaceInstructions(error) => error.fmt(formatter),
         }
     }
 }
@@ -212,6 +219,7 @@ impl Error for CommitActivationPreviewError {
         match self {
             Self::Activation(error) => Some(error),
             Self::ModelCall(error) => Some(error),
+            Self::WorkspaceInstructions(error) => Some(error),
         }
     }
 }
@@ -221,6 +229,7 @@ impl ClassifyOperatorFailure for CommitActivationPreviewError {
         match self {
             Self::Activation(error) => error.operator_failure_class(),
             Self::ModelCall(error) => error.operator_failure_class(),
+            Self::WorkspaceInstructions(error) => error.operator_failure_class(),
         }
     }
 }
@@ -323,6 +332,7 @@ impl StartEligibleTurnRepository {
         preview: PreparedActivationPreview,
         call: ModelCallId,
         model_calls: &crate::model_execution::PostgresModelCallRepository,
+        instruction_evidence: Option<CountedActivationInstructionEvidence<'_>>,
     ) -> Result<CommitActivationPreviewOutcome, CommitActivationPreviewError> {
         let session = preview.prepared.turn().session();
         let mut transaction = self
@@ -369,6 +379,14 @@ impl StartEligibleTurnRepository {
         let activated = insert_prepared_activation(&mut transaction, current)
             .await
             .map_err(CommitActivationPreviewError::Activation)?;
+        if let Some(evidence) = instruction_evidence {
+            WorkspaceInstructionRepository::record_counted_activation_in_transaction(
+                &mut transaction,
+                evidence,
+            )
+            .await
+            .map_err(CommitActivationPreviewError::WorkspaceInstructions)?;
+        }
         model_calls
             .checkpoint_counted_activation_in_transaction(&mut transaction, session, call)
             .await
@@ -425,6 +443,39 @@ impl StartEligibleTurnTransaction for StartEligibleTurnRepository {
         identities: AcceptedInputTurnActivationIdentities,
     ) -> Result<StartEligibleTurnOutcome, Self::Error> {
         StartEligibleTurnRepository::handle(self, session, identities).await
+    }
+
+    async fn handle_with_activation_observer(
+        &mut self,
+        session: SessionId,
+        identities: AcceptedInputTurnActivationIdentities,
+        observer: std::sync::Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> Result<StartEligibleTurnOutcome, Self::Error> {
+        let mut transaction = self.pool.begin().await?;
+        let decision = handle_in_transaction(&mut transaction, session, identities).await;
+
+        match decision {
+            Ok(TransactionDecision::Commit(outcome)) => {
+                if let StartEligibleTurnOutcome::Activated(activated) = &outcome {
+                    observer(activated.turn());
+                }
+                transaction.commit().await.map_err(|error| {
+                    let commit_ambiguous = commit_failure_is_ambiguous(&error);
+                    StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous)
+                })?;
+                Ok(outcome)
+            }
+            Ok(TransactionDecision::Rollback(outcome)) => {
+                transaction.rollback().await?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                if let Err(rollback_error) = transaction.rollback().await {
+                    return Err(rollback_error.into());
+                }
+                Err(error)
+            }
+        }
     }
 }
 

@@ -172,3 +172,91 @@ async fn oversized_change_burst_requires_resync() -> Result<(), Box<dyn Error>> 
     drop(container);
     Ok(())
 }
+
+/// Direct attention publishers and outbox publishers share the canonical
+/// allocator row, so their cursor order follows their commit order.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn attention_and_outbox_publishers_share_commit_order() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    create_attention_session(&pool, 0).await?;
+    let first_session = Uuid::from_u128(FLEET_SEED + FLEET_SIZE);
+    let second_session = Uuid::from_u128(FLEET_SEED + FLEET_SIZE + 1);
+
+    let mut first_transaction = pool.begin().await?;
+    let first_sequence: i64 = sqlx::query_scalar(
+        "INSERT INTO operator_attention_change (session_id, fact_kind)
+         VALUES ($1, 'turn')
+         RETURNING change_sequence",
+    )
+    .bind(first_session)
+    .fetch_one(&mut *first_transaction)
+    .await?;
+    let second = tokio::spawn({
+        let pool = pool.clone();
+        async move {
+            create_attention_session(&pool, 1)
+                .await
+                .expect("the concurrent session publisher succeeds");
+        }
+    });
+
+    assert!(
+        blocked_backends_reached(&pool, 1).await?,
+        "the outbox publisher must wait for the earlier attention publisher"
+    );
+    first_transaction.commit().await?;
+    second.await?;
+
+    let second_sequence: i64 = sqlx::query_scalar(
+        "SELECT min(change_sequence)
+           FROM operator_attention_change
+          WHERE session_id = $1",
+    )
+    .bind(second_session)
+    .fetch_one(&pool)
+    .await?;
+    assert!(first_sequence < second_sequence);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn delegated_session_backfill_uses_creation_placement_time() -> Result<(), Box<dyn Error>> {
+    const DELEGATED_BACKFILL_SEED: u128 = 0xa771_0000;
+
+    let (container, pool, _database_url) = postgres_before_attention_migration().await?;
+    let fixture = prepare_canonical_raw_delegation(&pool, DELEGATED_BACKFILL_SEED).await?;
+    let mut setup = pool.begin().await?;
+    insert_raw_delegation_with_update(&mut setup, fixture).await?;
+    setup.commit().await?;
+    let migration = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == 202608250800)
+        .expect("the attention migration is registered");
+    let mut connection = pool.acquire().await?;
+    connection.apply("_sqlx_migrations", migration).await?;
+    drop(connection);
+    let (fact_kind, uses_creation_time): (String, bool) = sqlx::query_as(
+        "SELECT attention.fact_kind,
+                attention.recorded_at = placement.recorded_at
+           FROM operator_attention_change AS attention
+           JOIN session_placement_event AS placement
+             ON placement.session_id = attention.session_id
+            AND placement.version = 1
+          WHERE attention.session_id = $1",
+    )
+    .bind(fixture.child.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(fact_kind, "session");
+    assert!(uses_creation_time);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
