@@ -18,8 +18,8 @@ use symphonia::{
 };
 
 use crate::{
-    AdapterFormat, Id3Footer, MAX_AUDIO_SOURCE_BYTES, id3_audio_offset, id3_tag_layout,
-    options_are_empty, source, valid_id3_footer, valid_mp3_frame_header,
+    AUDIO_WHOLE_SOURCE_RANGES, AdapterFormat, Id3Footer, MAX_AUDIO_SOURCE_BYTES, id3_audio_offset,
+    id3_tag_layout, options_are_empty, source, valid_id3_footer, valid_mp3_frame_header,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,8 +153,13 @@ pub(crate) async fn read(
     if request.view.as_str() != "metadata" || !valid_input {
         return Ok(ProcessorReadOutput::InvalidViewArguments);
     }
-    let Some(bytes) =
-        source::read_complete(source, cancellation, MAX_AUDIO_SOURCE_BYTES, 512).await?
+    let Some(bytes) = source::read_complete(
+        source,
+        cancellation,
+        MAX_AUDIO_SOURCE_BYTES,
+        AUDIO_WHOLE_SOURCE_RANGES,
+    )
+    .await?
     else {
         return Ok(ProcessorReadOutput::SourceTooLarge {
             maximum_bytes: MAX_AUDIO_SOURCE_BYTES,

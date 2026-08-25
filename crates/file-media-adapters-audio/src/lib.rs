@@ -12,7 +12,7 @@ use signalbox_file_media_runtime::{
     ProbeDeclaration, ProbeDeclarationInput, ProcessorProbeOutput, ProcessorReadOutput,
     ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
     ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
-    StreamingTextFallback, VerifiedBlobSource,
+    StreamingTextFallback, ValidationDeclaration, VerifiedBlobSource,
 };
 
 const PROVIDER_NAME: &str = "signalbox_audio";
@@ -23,6 +23,11 @@ const AUDIO_PROBE_CUMULATIVE_BYTES: u64 = 78;
 
 /// Hard safety ceiling bounding whole-source worker memory while admitting ordinary audio.
 pub const MAX_AUDIO_SOURCE_BYTES: u64 = 64 * 1_024 * 1_024;
+/// Exact-range budget for one whole-source audio read. Validation and the metadata view both
+/// stream the complete source in `MAX_PROCESSOR_FRAME_BYTES / 2` chunks, so the declared envelope
+/// must cover `MAX_AUDIO_SOURCE_BYTES` at that granularity.
+pub(crate) const AUDIO_WHOLE_SOURCE_RANGES: u32 = 512;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AdapterFormat {
     Wav,
@@ -475,6 +480,7 @@ fn reader(
             range_count: 2,
             cumulative_bytes: AUDIO_PROBE_CUMULATIVE_BYTES,
         }),
+        validation: ValidationDeclaration::new(MAX_AUDIO_SOURCE_BYTES, AUDIO_WHOLE_SOURCE_RANGES),
         views: vec![metadata_view()?],
         reason_codes: reasons,
         streaming_text_fallback: StreamingTextFallback::Disabled,
@@ -487,7 +493,7 @@ fn metadata_view() -> Result<ReadViewDeclaration, Box<dyn Error + Send + Sync>> 
         String::from("Decodes the audio and returns its channel count and sample rate."),
         CanonicalJsonObjectSchema::try_new(r#"{"additionalProperties":false,"type":"object"}"#)?,
         ReadAccessPattern::Streaming {
-            maximum_ranges: 512,
+            maximum_ranges: AUDIO_WHOLE_SOURCE_RANGES,
         },
         ReadViewBounds::Structured {
             source_bytes: MAX_AUDIO_SOURCE_BYTES,
