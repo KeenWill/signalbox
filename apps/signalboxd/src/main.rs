@@ -955,10 +955,33 @@ fn report_repository_watch_runtime_defect(error: &RepositoryWatchRuntimeError) {
     );
 }
 
+/// Classifies a lease-expiry failure without flattening commit ambiguity.
+///
+/// An ambiguous commit may already have applied the goal stop and the
+/// expiration receipt, so operator telemetry must not present the
+/// expiration transaction as safe to retry; corruption stays fail-closed.
+fn repository_watch_lease_expiry_failure_class(
+    error: &RepoWatchDispatchRepositoryError,
+) -> OperatorFailureClass {
+    match error {
+        RepoWatchDispatchRepositoryError::CommitAmbiguous(_) => {
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            }
+        }
+        RepoWatchDispatchRepositoryError::Corruption(_) => {
+            OperatorFailureClass::FailClosedCorruption
+        }
+        _ => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        },
+    }
+}
+
 fn report_repository_watch_lease_expiry_failure(error: &RepoWatchDispatchRepositoryError) {
     tracing::error!(
         phase = ?RuntimePhase::Runtime,
-        failure_class = ?OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+        failure_class = ?repository_watch_lease_expiry_failure_class(error),
         cause = %error,
         "global repository-watch lease expiry reconciliation failed"
     );

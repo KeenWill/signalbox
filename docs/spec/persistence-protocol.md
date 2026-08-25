@@ -887,13 +887,39 @@ Locks per transaction, in acquisition order:
   child. When it is, they lock the immutable parent/child session pair
   `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
   scheduler lock. This is the shared prefix for any path that can record a child
-  result. **Committed unimplemented functionality.** No present migration or
-  repository operation stores pool state, capacity reservations, or availability
-  waits, so the credential-pool locks described in the rest of this bullet are
-  the protocol its implementing child must follow, not a guarantee this build
-  provides. This bullet is the whole of that protocol: which objects each
-  credential-pool transaction takes, in what order, and in which mode is stated
-  here and nowhere else.
+  result. **Committed unimplemented functionality — instruction admitted-set
+  head.** No present migration or repository operation stores an admitted set,
+  so the admitted-set locks stated here, in the tool-loop bullet below, and in
+  the `ReplaceSessionDefaults` bullet below are the protocol their implementing
+  child must follow. This inventory, not the contract pages that name the
+  transactions, is where their order and mode are fixed. The instruction
+  eligibility freeze that
+  [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#the-activation-transaction)
+  adds to `StartEligibleTurn`, and the session-eligibility replacement command,
+  take the session's admitted-set head immediately after the `session_scheduler`
+  row, before the `session_current_defaults` pointer row, and before any
+  credential-pool action-head, capacity-, or cursor-row lock. The mode follows
+  what the transaction does to the head, and neither of these writes it:
+  `FOR SHARE` for the activation freeze, which only snapshots the head and its
+  retained rendered rows into the turn-start manifest, and `FOR SHARE` for the
+  eligibility replacement, which reads the admitted identities to reject a
+  forbidden removal and then affects only later eligibility snapshots. An
+  eligibility replacement is neither an unload nor an admission transition, so
+  it must not advance the head: advancing it would mint an admitted-set hash
+  with no admission behind it and change the provenance later manifests
+  authenticate. `FOR UPDATE` on the head belongs to the admission that appends
+  an `InstructionAdmission`, and to nothing else in this build. The
+  repository-wide order is therefore scheduler row, then admitted-set head, then
+  the `session_current_defaults` pointer row, then the credential-pool objects
+  below; no path may take a scheduler lock while holding an admitted-set head,
+  or take an admitted-set head while holding a pointer row, an action-head, a
+  capacity row, or a cursor row. **Committed unimplemented functionality.** No
+  present migration or repository operation stores pool state, capacity
+  reservations, or availability waits, so the credential-pool locks described in
+  the rest of this bullet are the protocol its implementing child must follow,
+  not a guarantee this build provides. This bullet is the whole of that
+  protocol: which objects each credential-pool transaction takes, in what order,
+  and in which mode is stated here and nowhere else.
   [The credential-availability machine](credential-availability.md#the-credential-availability-machine)
   names the transaction that commits each selection ending, which is how a
   reader arrives at the right sentence below; it states no locks of its own and
@@ -982,16 +1008,32 @@ Locks per transaction, in acquisition order:
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
   projection plus continuation preparation, and their authoritative rereads):
-  the `session_scheduler` row `FOR UPDATE` is the first and only Rust-issued
-  explicit lock. An unseen decision command first claims the user-global
-  registry; after resolving the request's owning session it takes that scheduler
-  lock before reading or mutating the active tool batch. A replay resolves
-  entirely from the command registry and receipt and takes no lifecycle lock.
-  Guarded `turn_lifecycle`, `turn_attempt`, `tool_attempt`, and model-call
-  updates then serialize under the scheduler lock; their foreign keys may take
-  implicit `KEY SHARE` locks on parent rows. At decision commit, the deferred
-  authority trigger takes the `tool_request` row `FOR UPDATE` after the
-  scheduler lock and before checking that no nonterminal judge remains.
+  the `session_scheduler` row `FOR UPDATE` is the first and, for every presently
+  implemented path, the only Rust-issued explicit lock. An unseen decision
+  command first claims the user-global registry; after resolving the request's
+  owning session it takes that scheduler lock before reading or mutating the
+  active tool batch. A replay resolves entirely from the command registry and
+  receipt and takes no lifecycle lock. Guarded `turn_lifecycle`, `turn_attempt`,
+  `tool_attempt`, and model-call updates then serialize under the scheduler
+  lock; their foreign keys may take implicit `KEY SHARE` locks on parent rows.
+  At decision commit, the deferred authority trigger takes the `tool_request`
+  row `FOR UPDATE` after the scheduler lock and before checking that no
+  nonterminal judge remains. **Committed unimplemented functionality —
+  instruction admission effect.** The instruction-admission effect that
+  [tool loop](tool-loop.md#serialized-staged-execution) adds to the
+  result-commit transaction takes the session's admitted-set head `FOR UPDATE`,
+  because that transaction appends an `InstructionAdmission`. It takes it at the
+  position fixed in the `StartEligibleTurn` bullet above: immediately after the
+  `session_scheduler` row and before any credential-pool object. That same
+  transaction then takes the `session_current_defaults` pointer row `FOR SHARE`,
+  at the pointer row's own position after the head, because admission validates
+  the retained region against the currently installed defaults epoch and not
+  only against the turn's pin; `FOR SHARE` excludes the `FOR UPDATE` a
+  replacement takes, so an admission and a replacement cannot interleave between
+  that check and either commit. The result-commit transaction is therefore the
+  only tool-loop transaction that takes explicit locks beyond the scheduler row;
+  no other tool-loop transaction in this bullet takes the head or the pointer
+  row, and none of them may take the scheduler row while already holding either.
 
 - **Approval-judge transactions** (prepare, authorize, complete, and fail):
   preparation, authorization, and failure take the `session_scheduler` row
@@ -1081,7 +1123,21 @@ Locks per transaction, in acquisition order:
   the same lock: a current expected version rolls back the command claim and
   applies nothing, while a mismatch records the typed rejection. The
   `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
-  through the non-deferrable session foreign key.
+  through the non-deferrable session foreign key. **Committed unimplemented
+  functionality — instruction-aware replacement.** The retained-region check
+  that
+  [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
+  adds to this command needs two further locks, and they precede the pointer row
+  rather than following it, because the established order everywhere else is
+  scheduler row before `session_current_defaults` pointer row. The complete
+  sequence is the `session_scheduler` row `FOR UPDATE`, then the session's
+  admitted-set head `FOR SHARE` — the replacement only reads the retained
+  region, and `FOR SHARE` already excludes the `FOR UPDATE` an admission takes —
+  then the `session_current_defaults` pointer row `FOR UPDATE` as above. All
+  three are held until the successor epoch commits, so an admission or an
+  activation falls wholly before or after the replacement and cannot invalidate
+  the evidence it checked. This is the same head-lock position the
+  `StartEligibleTurn` bullet fixes: immediately after the scheduler row.
 
 - **ReplaceSessionMetadata**: the target session row is locked
   `FOR NO KEY UPDATE` before the complete satellite snapshot is replaced. This

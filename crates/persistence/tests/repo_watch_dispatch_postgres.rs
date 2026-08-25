@@ -6138,7 +6138,7 @@ async fn startup_drain_exhausts_more_than_sixteen_removed_repository_leases()
         sqlx::query_scalar("SELECT count(*) FROM repo_watch_dispatch_start_lease_expiration")
             .fetch_one(&fixture.pool)
             .await?;
-    assert_eq!(expiration_count, 17);
+    assert_eq!(usize::try_from(expiration_count)?, fixture.sessions.len());
     Ok(())
 }
 

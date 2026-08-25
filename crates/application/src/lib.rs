@@ -32,6 +32,7 @@ mod tool_loop;
 mod tool_loop_ports;
 mod turn_liveness;
 mod update_session_placement;
+mod workspace_instructions;
 
 pub use approval_judge::{
     ApprovalJudgeAuthorization, ApprovalJudgeBranchAuthority, ApprovalJudgeBranchAuthorityInput,
@@ -212,4 +213,8 @@ pub use turn_liveness::{
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
     UpdateSessionPlacementTransaction,
+};
+pub use workspace_instructions::{
+    InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
+    InstructionDiscoveryRoot, InstructionDiscoverySnapshot, discover_workspace_instructions,
 };

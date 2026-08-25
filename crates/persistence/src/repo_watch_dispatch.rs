@@ -840,6 +840,16 @@ impl PostgresRepoWatchDispatchStore {
     where
         NextCommandId: FnMut() -> DurableCommandId,
     {
+        // This selection runs unlocked, so the configured repository task can
+        // retire the candidate before `process_next_expired_start_lease` takes
+        // the repository lock and repeats the identical predicate. That race is
+        // benign — the work happened — so a vanished candidate resumes the
+        // drain. Only a repository that vanishes twice without any intervening
+        // progress is a real predicate disagreement between the two queries,
+        // which still fails closed. Progress clears the set, and each pass
+        // either retires a lease or retires a repository from this drain, so
+        // the loop still terminates.
+        let mut vanished: BTreeSet<String> = BTreeSet::new();
         loop {
             let repository: Option<String> = sqlx::query_scalar(
                 "SELECT origin.repository
@@ -898,18 +908,24 @@ impl PostgresRepoWatchDispatchStore {
                 .process_next_expired_start_lease(&repository, &mut next_command_id)
                 .await
             {
-                Ok(true) => {}
+                Ok(true) => {
+                    vanished.clear();
+                }
                 Ok(false) => {
-                    return Err(RepoWatchDispatchRepositoryError::Corruption(
-                        "selected pending dispatch start lease disappeared",
-                    ));
+                    if !vanished.insert(repository.as_str().to_owned()) {
+                        return Err(RepoWatchDispatchRepositoryError::Corruption(
+                            "selected pending dispatch start lease disappeared",
+                        ));
+                    }
                 }
                 Err(RepoWatchDispatchRepositoryError::GoalCutoff(
                     crate::goal::GoalRepositoryError::Corruption(_),
                 ))
                 | Err(RepoWatchDispatchRepositoryError::Corruption(
                     "expired dispatch start lease references a missing session",
-                )) => {}
+                )) => {
+                    vanished.clear();
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -1669,14 +1685,23 @@ impl PostgresRepoWatchDispatchStore {
                     .bind(template_digest)
                     .execute(&mut *transaction)
                     .await?;
+                    // The start window opens when admission is recorded, not
+                    // when this transaction began: `transaction_timestamp()`
+                    // predates the repository and singleton lock waits and
+                    // every session prepared above, so a delayed dispatch
+                    // would commit leases that are already expiring against
+                    // the `clock_timestamp()` every expiry check reads. One
+                    // `clock_timestamp()` per row feeds both columns so a
+                    // lease always spans exactly its configured duration.
                     sqlx::query(
                         "INSERT INTO repo_watch_dispatch_start_lease
-                            (dispatch_id, action_ordinal, session_id, expires_at)
-                         VALUES (
+                            (dispatch_id, action_ordinal, session_id,
+                             leased_at, expires_at)
+                         SELECT
                             $1, $2, $3,
-                            transaction_timestamp()
-                                + $4 * INTERVAL '1 millisecond'
-                         )",
+                            admitted.at,
+                            admitted.at + $4 * INTERVAL '1 millisecond'
+                           FROM (SELECT clock_timestamp() AS at) AS admitted",
                     )
                     .bind(dispatch_id.as_uuid())
                     .bind(ordinal)

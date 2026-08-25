@@ -82,7 +82,7 @@ pub use configuration::{
     DaemonToolConfiguration, DerivedModelCallCost, FileCredentialAccess, HubModelConfiguration,
     HubModelConfigurationError, MAX_CONVERGENCE_SWEEP_COOL_OFF, MAX_CONVERGENCE_SWEEP_INTERVAL,
     ModelAdapter, ModelBillingRates, OPENAI_CREDENTIAL_REFERENCE, RepositoryWatchConfiguration,
-    WatchedRepositoryConfiguration,
+    WatchedRepositoryConfiguration, WorkspaceInstructionConfiguration,
 };
 pub use context_guard::{ContextGuardedTurnPass, ContextGuardedTurnPassError};
 pub use convergence_sweep_runtime::{
@@ -92,8 +92,9 @@ pub use conversation_introspection::{
     ConversationIntrospectionError, PostgresConversationIntrospection,
 };
 pub use credential_pools::{
-    CredentialDelivery, CredentialPool, CredentialPoolAction, CredentialPoolExhaustion,
-    CredentialPoolMember, CredentialPoolTieBreak, CredentialPoolTrigger, CredentialProfile,
+    CredentialDelivery, CredentialHomeAdmissionFailure, CredentialPool, CredentialPoolAction,
+    CredentialPoolExhaustion, CredentialPoolMember, CredentialPoolTieBreak, CredentialPoolTrigger,
+    CredentialProfile,
 };
 pub use daemon_tools::{
     BaseDaemonCredentialInputs, ConfiguredApprovalPostureError, DaemonToolCatalog,

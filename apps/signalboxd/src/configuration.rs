@@ -16,16 +16,17 @@ use rust_decimal::Decimal;
 use signalbox_application::scheduler_pass_admission_cap;
 use signalbox_domain::{
     AnthropicServiceTier, BranchName, CheckConclusion, CodexCliServiceTier, DirectModelSelection,
-    FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, LabelName, MergeableState,
-    ModelAlias, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
-    ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence, ModelTargetCatalog,
-    ModelTargetDefinition, OpenAiServiceTier, ProviderModelIdentity, PullRequestNumber,
-    ReasoningLevel, RepoWatchAuthorLogin, RepoWatchEventKindNameV1, RepoWatchLabelMatcher,
-    RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion,
-    RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration, RepositorySlug,
-    ResolvedProviderTarget, ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
-    ToolName, UnsupportedModelSetting, ValidatedModelSettings,
+    FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, InstructionPath, LabelName,
+    MergeableState, ModelAlias, ModelCapabilities, ModelCapabilityCatalog,
+    ModelCapabilityDefinition, ModelSelectionRequest, ModelSettingsOverlay,
+    ModelSettingsPrecedence, ModelTargetCatalog, ModelTargetDefinition, OpenAiServiceTier,
+    ProviderModelIdentity, PullRequestNumber, ReasoningLevel, RepoWatchAuthorLogin,
+    RepoWatchEventKindNameV1, RepoWatchLabelMatcher, RepoWatchLabelMatcherInput,
+    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchTemplateContextDeclaration, RepositorySlug, ResolvedProviderTarget, ServiceTier,
+    SessionTemplateName, SettingOverlay, ToolApprovalPosture, ToolName, UnsupportedModelSetting,
+    ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -175,7 +176,7 @@ impl ModelAdapter {
         match self {
             Self::Anthropic | Self::OpenAi => matches!(delivery, "file"),
             Self::ClaudeCli => matches!(delivery, "ambient" | "file"),
-            Self::CodexCli => matches!(delivery, "ambient"),
+            Self::CodexCli => matches!(delivery, "ambient" | "codex_home"),
         }
     }
 
@@ -431,6 +432,19 @@ pub struct DaemonToolConfiguration {
     workspace_root: PathBuf,
     git_identity: GitIdentity,
     exec_supervisor_executable: PathBuf,
+}
+
+/// Explicit non-workspace instruction roots registered by deployment configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceInstructionConfiguration {
+    roots: Box<[InstructionPath]>,
+}
+
+impl WorkspaceInstructionConfiguration {
+    /// Returns explicit roots in deterministic configuration order.
+    pub fn roots(&self) -> &[InstructionPath] {
+        &self.roots
+    }
 }
 
 impl DaemonToolConfiguration {
@@ -729,6 +743,7 @@ pub struct HubModelConfiguration {
     approval_judge_selection: Option<DirectModelSelection>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
+    workspace_instructions: WorkspaceInstructionConfiguration,
     scheduler_max_in_flight_passes: Option<usize>,
 }
 
@@ -773,6 +788,7 @@ impl HubModelConfiguration {
                 "approval_judge",
                 "repository_watch",
                 "blob_storage",
+                "workspace_instructions",
                 "scheduler",
             ],
         )?;
@@ -867,6 +883,8 @@ impl HubModelConfiguration {
             .get("repository_watch")
             .map(parse_repository_watch_configuration)
             .transpose()?;
+        let workspace_instructions =
+            parse_workspace_instruction_configuration(document.get("workspace_instructions"))?;
         let models = document
             .get("models")
             .and_then(|item| item.as_array_of_tables())
@@ -931,21 +949,9 @@ impl HubModelConfiguration {
                     continue;
                 }
             };
-            // Codex still carries one credential reference into its runtime,
-            // so two families preferring different profiles cannot both be
-            // served. Claude now receives the complete adapter-scoped catalog
-            // and resolves each operation's pinned reference, so differing
-            // preferences are admitted; the retained value is only the
-            // runtime's default for an operation that pins nothing.
-            if adapter == ModelAdapter::CodexCli
-                && adapter_profile
-                    .as_ref()
-                    .is_some_and(|profile| profile != &credential_profile)
-            {
-                return Err(
-                    HubModelConfigurationError::ConflictingAdapterCredentialProfiles { adapter },
-                );
-            }
+            // CLI runtimes receive their complete adapter-scoped delivery
+            // catalogs. The retained value is only the default for an ambient
+            // operation that pins no catalog member.
             adapter_profile.get_or_insert_with(|| Arc::clone(&credential_profile));
             let entry = AdapterMapping {
                 adapter,
@@ -1392,6 +1398,7 @@ impl HubModelConfiguration {
             approval_judge_selection,
             repository_watch,
             blob_storage,
+            workspace_instructions,
             scheduler_max_in_flight_passes,
         })
     }
@@ -1649,6 +1656,14 @@ impl HubModelConfiguration {
                     configuration.working_directory.clone(),
                     CredentialReference::new(credential_profile),
                 );
+                runtime_configuration = runtime_configuration.with_credential_homes(
+                    self.credential_profiles.values().filter_map(|profile| {
+                        let CredentialDelivery::CodexHome { path, .. } = profile.delivery() else {
+                            return None;
+                        };
+                        Some((CredentialReference::new(profile.name()), path.to_path_buf()))
+                    }),
+                );
                 runtime_configuration.model_capabilities = self.runtime_model_capability_catalog();
                 CodexCliRuntime::new(runtime_configuration)
             })
@@ -1773,6 +1788,11 @@ impl HubModelConfiguration {
         self.daemon_tools.as_ref()
     }
 
+    /// Returns explicit roots whose content is discoverable but not eligible by default.
+    pub const fn workspace_instructions(&self) -> &WorkspaceInstructionConfiguration {
+        &self.workspace_instructions
+    }
+
     /// Reports whether the configuration contains one direct selection key.
     pub fn contains_selection(&self, selection: DirectModelSelection) -> bool {
         self.direct_selections.contains(&selection)
@@ -1815,6 +1835,47 @@ pub(crate) fn checked_in_example_configuration()
         EXAMPLE_EXEC_SUPERVISOR,
         executable.to_string_lossy().as_ref(),
     ))
+}
+
+fn parse_workspace_instruction_configuration(
+    item: Option<&Item>,
+) -> Result<WorkspaceInstructionConfiguration, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(WorkspaceInstructionConfiguration {
+            roots: Box::new([]),
+        });
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+    reject_unknown_fields(table, &["version", "registered_roots"])
+        .map_err(|_| HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+    if table.get("version").and_then(Item::as_integer) != Some(1) {
+        return Err(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration);
+    }
+    let values = table
+        .get("registered_roots")
+        .and_then(Item::as_array)
+        .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+    if values.len() > 64 {
+        return Err(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration);
+    }
+    let mut roots = Vec::with_capacity(values.len());
+    let mut unique = BTreeSet::new();
+    for value in values {
+        let value = value
+            .as_str()
+            .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+        let root = InstructionPath::try_new(value.to_owned())
+            .map_err(|_| HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+        if !unique.insert(root.clone()) {
+            return Err(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration);
+        }
+        roots.push(root);
+    }
+    Ok(WorkspaceInstructionConfiguration {
+        roots: roots.into_boxed_slice(),
+    })
 }
 
 fn parse_repository_watch_configuration(
@@ -3388,6 +3449,13 @@ pub enum HubModelConfigurationError {
     /// A credential profile named no delivery, or its delivery's own fields
     /// were absent or malformed.
     InvalidCredentialDelivery,
+    /// One member's Codex home failed path/directory admission.
+    InvalidCredentialHome {
+        /// Non-secret profile reference identifying the failed member.
+        credential_profile: Arc<str>,
+        /// Closed startup failure class; never path or auth material.
+        failure: crate::credential_pools::CredentialHomeAdmissionFailure,
+    },
     /// A credential profile named a delivery its adapter does not admit.
     UnsupportedCredentialDelivery {
         /// Build-provided adapter whose admitted deliveries were checked.
@@ -3548,6 +3616,8 @@ pub enum HubModelConfigurationError {
     InvalidWebFetchPolicy,
     /// The optional version-one repository-watch section was malformed.
     InvalidRepositoryWatchConfiguration,
+    /// The optional version-one workspace-instruction section was malformed.
+    InvalidWorkspaceInstructionConfiguration,
     /// The convergence sweep names no loaded session template.
     UnknownConvergenceSweepTemplate {
         /// Exact missing template name.
@@ -3603,6 +3673,20 @@ impl fmt::Display for HubModelConfigurationError {
                 "model configuration names unknown convergence template `{template}`"
             );
         }
+        // Startup telemetry formats this value, so the failing member and the
+        // closed admission cause must both survive. The path never appears, as
+        // `configuration-and-credentials.md#the-codex_home-delivery` requires.
+        if let Self::InvalidCredentialHome {
+            credential_profile,
+            failure,
+        } = self
+        {
+            return write!(
+                formatter,
+                "model configuration credential profile `{credential_profile}` names an unavailable Codex credential home: {}",
+                failure.cause()
+            );
+        }
         formatter.write_str(match self {
             Self::Read => "model configuration file could not be read",
             Self::InvalidDocument => "model configuration is not valid TOML",
@@ -3632,6 +3716,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidCredentialDelivery => {
                 "model configuration contains an invalid credential delivery"
+            }
+            Self::InvalidCredentialHome { .. } => {
+                "model configuration contains an unavailable Codex credential home"
             }
             Self::UnsupportedCredentialDelivery { .. } => {
                 "model configuration names a credential delivery its adapter does not admit"
@@ -3750,6 +3837,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidRepositoryWatchConfiguration => {
                 "model configuration contains invalid repository-watch settings"
+            }
+            Self::InvalidWorkspaceInstructionConfiguration => {
+                "model configuration contains invalid workspace-instruction settings"
             }
             Self::UnknownConvergenceSweepTemplate { .. } => {
                 "model configuration names an unknown convergence template"
@@ -4034,6 +4124,7 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const EAGER_WATCH_RULE_ID: &str = "merge-forward-on-base-advance";
     const EAGER_WATCH_HEAD_PATTERN: &str = "^agent/.+$";
     const WATCH_TEMPLATE: &str = "merge-forward";
+    const REGISTERED_INSTRUCTION_ROOT: &str = "/srv/signalbox/instruction-library";
     const CONFIGURATION: &str = r#"
 version = 1
 
@@ -6996,25 +7087,104 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
     }
 
     #[test]
-    fn configuration_rejects_a_delivery_this_build_supplies_no_surface_for() {
+    fn configuration_admits_an_existing_nonempty_credential_home() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-a");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
         let credential_home = CONFIGURATION.replace(
             "delivery = \"ambient\"",
-            "delivery = \"codex_home\"\ncodex_home = \"/var/lib/signalbox/codex/account-a\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = {:?}",
+                home.to_string_lossy()
+            ),
+        );
+
+        let parsed = HubModelConfiguration::parse(&credential_home)
+            .expect("existing nonempty synthetic home is admitted");
+        assert_eq!(
+            parsed
+                .credential_profile(CODEX_SUBSCRIPTION_PROFILE)
+                .expect("Codex profile remains present")
+                .delivery()
+                .path(),
+            Some(&home)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_relative_credential_home_with_a_typed_member_error() {
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            "delivery = \"codex_home\"\ncodex_home = \"relative/account-a\"",
         );
 
         assert_eq!(
             HubModelConfiguration::parse(&credential_home).err(),
-            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
-                delivery: Arc::from("codex_home"),
+            Some(HubModelConfigurationError::InvalidCredentialHome {
+                credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
+                failure: crate::CredentialHomeAdmissionFailure::InvalidPath,
             })
         );
     }
 
     #[test]
-    fn configuration_validates_an_undelivered_credential_home_before_refusing_it() {
+    fn configuration_rejects_a_missing_credential_home_with_a_typed_member_error() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let missing = temporary.path().join("missing-account");
         let credential_home = CONFIGURATION.replace(
             "delivery = \"ambient\"",
-            "delivery = \"codex_home\"\ncodex_home = \"relative/account-a\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = {:?}",
+                missing.to_string_lossy()
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::InvalidCredentialHome {
+                credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
+                failure: crate::CredentialHomeAdmissionFailure::MissingOrNotDirectory,
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_an_empty_credential_home_with_a_typed_member_error() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let empty = temporary.path().join("empty-account");
+        std::fs::create_dir(&empty).expect("empty synthetic home is created");
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = {:?}",
+                empty.to_string_lossy()
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&credential_home).err(),
+            Some(HubModelConfigurationError::InvalidCredentialHome {
+                credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
+                failure: crate::CredentialHomeAdmissionFailure::EmptyDirectory,
+            })
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_a_credential_home_concurrency_bound_until_reservations_exist() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-a");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
+        let credential_home = CONFIGURATION.replace(
+            "delivery = \"ambient\"",
+            &format!(
+                "delivery = \"codex_home\"\ncodex_home = {:?}\nmax_concurrent_invocations = {MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS}",
+                home.to_string_lossy()
+            ),
         );
 
         assert_eq!(
@@ -7024,31 +7194,17 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
     }
 
     #[test]
-    fn configuration_admits_the_largest_credential_home_concurrency_bound() {
-        // The bound is capped because a contended wait durably names every live
-        // reservation holding it. At the cap the grammar admits the field, so
-        // the profile reaches its undelivered refusal rather than a range one.
-        let credential_home = CONFIGURATION.replace(
-            "delivery = \"ambient\"",
-            &format!(
-                "delivery = \"codex_home\"\ncodex_home = \"/srv/account-a\"\nmax_concurrent_invocations = {MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS}"
-            ),
-        );
-
-        assert_eq!(
-            HubModelConfiguration::parse(&credential_home).err(),
-            Some(HubModelConfigurationError::UndeliveredCredentialDelivery {
-                delivery: Arc::from("codex_home"),
-            })
-        );
-    }
-
-    #[test]
     fn configuration_rejects_a_credential_home_concurrency_bound_past_its_cap() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-a");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
         let credential_home = CONFIGURATION.replace(
             "delivery = \"ambient\"",
             &format!(
-                "delivery = \"codex_home\"\ncodex_home = \"/srv/account-a\"\nmax_concurrent_invocations = {}",
+                "delivery = \"codex_home\"\ncodex_home = {:?}\nmax_concurrent_invocations = {}",
+                home.to_string_lossy(),
                 MAX_CREDENTIAL_HOME_CONCURRENT_INVOCATIONS + 1
             ),
         );
@@ -7069,7 +7225,10 @@ members = [{ profile = "anthropic-primary", priority = 1, weight = 3 }]"#,
 
         assert_eq!(
             HubModelConfiguration::parse(&credential_home).err(),
-            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+            Some(HubModelConfigurationError::InvalidCredentialHome {
+                credential_profile: Arc::from(CODEX_SUBSCRIPTION_PROFILE),
+                failure: crate::CredentialHomeAdmissionFailure::InvalidPath,
+            })
         );
     }
 
@@ -7514,6 +7673,122 @@ delivery = "ambient""#,
         assert_eq!(
             HubModelConfiguration::parse(&duplicate_ambient).err(),
             Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_mixed_ambient_and_home_delivery_for_codex() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-b");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
+        let mixed_delivery = CONFIGURATION.replace(
+            r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            &format!(
+                r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_profiles]]
+name = "codex-subscription-overflow"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "codex_home"
+codex_home = {:?}"#,
+                home.to_string_lossy()
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&mixed_delivery).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_rejects_mixed_home_and_ambient_delivery_for_codex_in_reverse_order() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-b");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
+        let mixed_delivery = CONFIGURATION.replace(
+            r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            &format!(
+                r#"[[credential_profiles]]
+name = "codex-subscription-overflow"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "codex_home"
+codex_home = {:?}
+
+[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+                home.to_string_lossy()
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&mixed_delivery).err(),
+            Some(HubModelConfigurationError::InvalidCredentialDelivery)
+        );
+    }
+
+    #[test]
+    fn configuration_admits_a_claude_ambient_profile_declared_before_a_codex_home() {
+        let temporary = tempfile::tempdir().expect("synthetic home root is created");
+        let home = temporary.path().join("account-b");
+        std::fs::create_dir(&home).expect("synthetic home is created");
+        std::fs::write(home.join("fixture-marker"), "synthetic")
+            .expect("synthetic home is nonempty");
+        // The Claude `ambient` profile precedes the Codex home in table order,
+        // which is the arrangement an adapter-blind conflict scan rejects.
+        let cross_adapter = CONFIGURATION.replace(
+            r#"[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "ambient""#,
+            &format!(
+                r#"[[credential_profiles]]
+name = "claude-subscription-primary"
+adapter = "claude_cli"
+billing_kind = "subscription"
+delivery = "ambient"
+
+[[credential_profiles]]
+name = "codex-subscription-primary"
+adapter = "codex_cli"
+billing_kind = "subscription"
+delivery = "codex_home"
+codex_home = {:?}"#,
+                home.to_string_lossy()
+            ),
+        );
+
+        let parsed = HubModelConfiguration::parse(&cross_adapter)
+            .expect("a Claude ambient profile does not contest a Codex credential home");
+        assert_eq!(
+            parsed
+                .credential_profile(CODEX_SUBSCRIPTION_PROFILE)
+                .expect("Codex profile remains present")
+                .delivery()
+                .path(),
+            Some(&home)
         );
     }
 
@@ -8079,6 +8354,38 @@ context_window_tokens = 200000
         assert_eq!(
             HubModelConfiguration::parse(&dangling).err(),
             Some(HubModelConfigurationError::DanglingAlias)
+        );
+    }
+
+    #[test]
+    fn configuration_admits_explicit_workspace_instruction_roots() {
+        let configured = format!(
+            "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = [\"{REGISTERED_INSTRUCTION_ROOT}\"]\n"
+        );
+        let configuration = HubModelConfiguration::parse(&configured)
+            .expect("one canonical explicit instruction root is admitted");
+        assert_eq!(configuration.workspace_instructions().roots().len(), 1);
+        assert_eq!(
+            configuration.workspace_instructions().roots()[0].as_str(),
+            REGISTERED_INSTRUCTION_ROOT
+        );
+    }
+
+    #[test]
+    fn configuration_defaults_instruction_roots_to_empty() {
+        let configuration = HubModelConfiguration::parse(CONFIGURATION)
+            .expect("the base fixture omits explicit instruction roots");
+        assert!(configuration.workspace_instructions().roots().is_empty());
+    }
+
+    #[test]
+    fn configuration_rejects_relative_instruction_roots() {
+        let relative = format!(
+            "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = [\"relative/root\"]\n"
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&relative).err(),
+            Some(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)
         );
     }
 
