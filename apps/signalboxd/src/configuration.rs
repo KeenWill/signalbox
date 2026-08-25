@@ -16,16 +16,17 @@ use rust_decimal::Decimal;
 use signalbox_application::scheduler_pass_admission_cap;
 use signalbox_domain::{
     AnthropicServiceTier, BranchName, CheckConclusion, CodexCliServiceTier, DirectModelSelection,
-    FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, LabelName, MergeableState,
-    ModelAlias, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
-    ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence, ModelTargetCatalog,
-    ModelTargetDefinition, OpenAiServiceTier, ProviderModelIdentity, PullRequestNumber,
-    ReasoningLevel, RepoWatchAuthorLogin, RepoWatchEventKindNameV1, RepoWatchLabelMatcher,
-    RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
-    RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion,
-    RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration, RepositorySlug,
-    ResolvedProviderTarget, ServiceTier, SessionTemplateName, SettingOverlay, ToolApprovalPosture,
-    ToolName, UnsupportedModelSetting, ValidatedModelSettings,
+    FastMode, FastModeOverlay, FastModeSupport, FrozenAliasDefinition, InstructionPath, LabelName,
+    MergeableState, ModelAlias, ModelCapabilities, ModelCapabilityCatalog,
+    ModelCapabilityDefinition, ModelSelectionRequest, ModelSettingsOverlay,
+    ModelSettingsPrecedence, ModelTargetCatalog, ModelTargetDefinition, OpenAiServiceTier,
+    ProviderModelIdentity, PullRequestNumber, ReasoningLevel, RepoWatchAuthorLogin,
+    RepoWatchEventKindNameV1, RepoWatchLabelMatcher, RepoWatchLabelMatcherInput,
+    RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern, RepoWatchRule,
+    RepoWatchRuleActionV1, RepoWatchRuleId, RepoWatchRuleVersion, RepoWatchSingletonScope,
+    RepoWatchTemplateContextDeclaration, RepositorySlug, ResolvedProviderTarget, ServiceTier,
+    SessionTemplateName, SettingOverlay, ToolApprovalPosture, ToolName, UnsupportedModelSetting,
+    ValidatedModelSettings,
 };
 use signalbox_model_provider_runtime::{RuntimeModelCatalog, RuntimeModelDefinition};
 use signalbox_model_runtime::{
@@ -433,6 +434,19 @@ pub struct DaemonToolConfiguration {
     exec_supervisor_executable: PathBuf,
 }
 
+/// Explicit non-workspace instruction roots registered by deployment configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceInstructionConfiguration {
+    roots: Box<[InstructionPath]>,
+}
+
+impl WorkspaceInstructionConfiguration {
+    /// Returns explicit roots in deterministic configuration order.
+    pub fn roots(&self) -> &[InstructionPath] {
+        &self.roots
+    }
+}
+
 impl DaemonToolConfiguration {
     /// Absolute root pinned into both workspace tool families.
     pub fn workspace_root(&self) -> &Path {
@@ -729,6 +743,7 @@ pub struct HubModelConfiguration {
     approval_judge_selection: Option<DirectModelSelection>,
     repository_watch: Option<RepositoryWatchConfiguration>,
     blob_storage: Option<BlobStorageConfiguration>,
+    workspace_instructions: WorkspaceInstructionConfiguration,
     scheduler_max_in_flight_passes: Option<usize>,
 }
 
@@ -773,6 +788,7 @@ impl HubModelConfiguration {
                 "approval_judge",
                 "repository_watch",
                 "blob_storage",
+                "workspace_instructions",
                 "scheduler",
             ],
         )?;
@@ -867,6 +883,8 @@ impl HubModelConfiguration {
             .get("repository_watch")
             .map(parse_repository_watch_configuration)
             .transpose()?;
+        let workspace_instructions =
+            parse_workspace_instruction_configuration(document.get("workspace_instructions"))?;
         let models = document
             .get("models")
             .and_then(|item| item.as_array_of_tables())
@@ -1380,6 +1398,7 @@ impl HubModelConfiguration {
             approval_judge_selection,
             repository_watch,
             blob_storage,
+            workspace_instructions,
             scheduler_max_in_flight_passes,
         })
     }
@@ -1769,6 +1788,11 @@ impl HubModelConfiguration {
         self.daemon_tools.as_ref()
     }
 
+    /// Returns explicit roots whose content is discoverable but not eligible by default.
+    pub const fn workspace_instructions(&self) -> &WorkspaceInstructionConfiguration {
+        &self.workspace_instructions
+    }
+
     /// Reports whether the configuration contains one direct selection key.
     pub fn contains_selection(&self, selection: DirectModelSelection) -> bool {
         self.direct_selections.contains(&selection)
@@ -1811,6 +1835,47 @@ pub(crate) fn checked_in_example_configuration()
         EXAMPLE_EXEC_SUPERVISOR,
         executable.to_string_lossy().as_ref(),
     ))
+}
+
+fn parse_workspace_instruction_configuration(
+    item: Option<&Item>,
+) -> Result<WorkspaceInstructionConfiguration, HubModelConfigurationError> {
+    let Some(item) = item else {
+        return Ok(WorkspaceInstructionConfiguration {
+            roots: Box::new([]),
+        });
+    };
+    let table = item
+        .as_table()
+        .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+    reject_unknown_fields(table, &["version", "registered_roots"])
+        .map_err(|_| HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+    if table.get("version").and_then(Item::as_integer) != Some(1) {
+        return Err(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration);
+    }
+    let values = table
+        .get("registered_roots")
+        .and_then(Item::as_array)
+        .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+    if values.len() > 64 {
+        return Err(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration);
+    }
+    let mut roots = Vec::with_capacity(values.len());
+    let mut unique = BTreeSet::new();
+    for value in values {
+        let value = value
+            .as_str()
+            .ok_or(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+        let root = InstructionPath::try_new(value.to_owned())
+            .map_err(|_| HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)?;
+        if !unique.insert(root.clone()) {
+            return Err(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration);
+        }
+        roots.push(root);
+    }
+    Ok(WorkspaceInstructionConfiguration {
+        roots: roots.into_boxed_slice(),
+    })
 }
 
 fn parse_repository_watch_configuration(
@@ -3551,6 +3616,8 @@ pub enum HubModelConfigurationError {
     InvalidWebFetchPolicy,
     /// The optional version-one repository-watch section was malformed.
     InvalidRepositoryWatchConfiguration,
+    /// The optional version-one workspace-instruction section was malformed.
+    InvalidWorkspaceInstructionConfiguration,
     /// The convergence sweep names no loaded session template.
     UnknownConvergenceSweepTemplate {
         /// Exact missing template name.
@@ -3770,6 +3837,9 @@ impl fmt::Display for HubModelConfigurationError {
             }
             Self::InvalidRepositoryWatchConfiguration => {
                 "model configuration contains invalid repository-watch settings"
+            }
+            Self::InvalidWorkspaceInstructionConfiguration => {
+                "model configuration contains invalid workspace-instruction settings"
             }
             Self::UnknownConvergenceSweepTemplate { .. } => {
                 "model configuration names an unknown convergence template"
@@ -4054,6 +4124,7 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const EAGER_WATCH_RULE_ID: &str = "merge-forward-on-base-advance";
     const EAGER_WATCH_HEAD_PATTERN: &str = "^agent/.+$";
     const WATCH_TEMPLATE: &str = "merge-forward";
+    const REGISTERED_INSTRUCTION_ROOT: &str = "/srv/signalbox/instruction-library";
     const CONFIGURATION: &str = r#"
 version = 1
 
@@ -8283,6 +8354,38 @@ context_window_tokens = 200000
         assert_eq!(
             HubModelConfiguration::parse(&dangling).err(),
             Some(HubModelConfigurationError::DanglingAlias)
+        );
+    }
+
+    #[test]
+    fn configuration_admits_explicit_workspace_instruction_roots() {
+        let configured = format!(
+            "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = [\"{REGISTERED_INSTRUCTION_ROOT}\"]\n"
+        );
+        let configuration = HubModelConfiguration::parse(&configured)
+            .expect("one canonical explicit instruction root is admitted");
+        assert_eq!(configuration.workspace_instructions().roots().len(), 1);
+        assert_eq!(
+            configuration.workspace_instructions().roots()[0].as_str(),
+            REGISTERED_INSTRUCTION_ROOT
+        );
+    }
+
+    #[test]
+    fn configuration_defaults_instruction_roots_to_empty() {
+        let configuration = HubModelConfiguration::parse(CONFIGURATION)
+            .expect("the base fixture omits explicit instruction roots");
+        assert!(configuration.workspace_instructions().roots().is_empty());
+    }
+
+    #[test]
+    fn configuration_rejects_relative_instruction_roots() {
+        let relative = format!(
+            "{CONFIGURATION}\n[workspace_instructions]\nversion = 1\nregistered_roots = [\"relative/root\"]\n"
+        );
+        assert_eq!(
+            HubModelConfiguration::parse(&relative).err(),
+            Some(HubModelConfigurationError::InvalidWorkspaceInstructionConfiguration)
         );
     }
 
