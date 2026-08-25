@@ -6166,6 +6166,10 @@ pub trait DeterministicBlobProducer {
         inputs: &[BlobDigest],
         transformation: &BlobTransformation,
     ) -> impl Future<Output = Result<Box<[BlobDigest]>, Self::Error>> + Send;
+    fn outputs_retrievable(
+        &mut self,
+        outputs: &[BlobDigest],
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
 }
 
 pub struct DeterministicBlobDerivationRequest { /* private */ }
