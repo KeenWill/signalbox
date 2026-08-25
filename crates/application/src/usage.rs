@@ -867,28 +867,43 @@ impl UsageAggregateGroup {
     }
 }
 
-/// An aggregate result that exceeded the hard group ceiling.
+/// An aggregate result that exceeded a hard aggregate ceiling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UsageAggregateGroupOverflowError {
-    /// Groups the reader tried to return.
-    pub returned_groups: usize,
+pub enum UsageAggregateReportError {
+    /// The result carried more groups than the hard group ceiling.
+    GroupOverflow {
+        /// Groups the reader tried to return.
+        returned_groups: usize,
+    },
+    /// The result's groups together represent more source calls than one
+    /// aggregate read may consume.
+    SourceCallOverflow {
+        /// Source calls the groups claim to represent.
+        represented_calls: u128,
+    },
 }
 
-impl fmt::Display for UsageAggregateGroupOverflowError {
+impl fmt::Display for UsageAggregateReportError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "usage aggregate carries {} groups, over the {} ceiling",
-            self.returned_groups,
-            max_usage_aggregate_groups()
-        )
+        match self {
+            Self::GroupOverflow { returned_groups } => write!(
+                formatter,
+                "usage aggregate carries {returned_groups} groups, over the {} ceiling",
+                max_usage_aggregate_groups()
+            ),
+            Self::SourceCallOverflow { represented_calls } => write!(
+                formatter,
+                "usage aggregate represents {represented_calls} source calls, over the {} ceiling",
+                max_usage_aggregate_calls()
+            ),
+        }
     }
 }
 
-impl std::error::Error for UsageAggregateGroupOverflowError {}
+impl std::error::Error for UsageAggregateReportError {}
 
 /// Bounded aggregate result with explicit truncation, within the hard group
-/// ceiling by construction.
+/// and source-call ceilings by construction.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UsageAggregateReport {
     groups: Vec<UsageAggregateGroup>,
@@ -896,15 +911,23 @@ pub struct UsageAggregateReport {
 }
 
 impl UsageAggregateReport {
-    /// Accepts only a result within the hard group ceiling.
+    /// Accepts only a result within the hard group and source-call ceilings.
     pub fn new(
         groups: Vec<UsageAggregateGroup>,
         completeness: UsageAggregateCompleteness,
-    ) -> Result<Self, UsageAggregateGroupOverflowError> {
+    ) -> Result<Self, UsageAggregateReportError> {
         if groups.len() > usize::from(max_usage_aggregate_groups()) {
-            return Err(UsageAggregateGroupOverflowError {
+            return Err(UsageAggregateReportError::GroupOverflow {
                 returned_groups: groups.len(),
             });
+        }
+        // At most 256 u64 counts, so the u128 sum cannot overflow.
+        let represented_calls: u128 = groups
+            .iter()
+            .map(|group| u128::from(group.call_count()))
+            .sum();
+        if represented_calls > u128::from(max_usage_aggregate_calls()) {
+            return Err(UsageAggregateReportError::SourceCallOverflow { represented_calls });
         }
         Ok(Self {
             groups,
@@ -1137,8 +1160,31 @@ mod tests {
                 vec![group; over_ceiling],
                 UsageAggregateCompleteness::Truncated,
             ),
-            Err(UsageAggregateGroupOverflowError {
+            Err(UsageAggregateReportError::GroupOverflow {
                 returned_groups: over_ceiling,
+            })
+        );
+    }
+
+    #[test]
+    fn aggregate_report_rejects_results_over_the_source_call_ceiling() {
+        let group = UsageAggregateGroup::new(
+            aggregate_key_fixture(),
+            u64::from(max_usage_aggregate_calls()) + 1,
+            UsageAggregateTokenAxes {
+                input: Some(11),
+                output: None,
+                cache_creation_input: None,
+                cache_read_input: None,
+            },
+            UsageCacheNormalization::Safe,
+        )
+        .expect("fixture sums agree with declared coverage");
+
+        assert_eq!(
+            UsageAggregateReport::new(vec![group], UsageAggregateCompleteness::Truncated),
+            Err(UsageAggregateReportError::SourceCallOverflow {
+                represented_calls: u128::from(max_usage_aggregate_calls()) + 1,
             })
         );
     }

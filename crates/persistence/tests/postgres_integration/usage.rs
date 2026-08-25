@@ -705,6 +705,27 @@ async fn projection_rejects_evidence_contradicting_the_source_call() -> Result<(
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn projection_timestamps_are_bounded_to_the_shared_representable_range()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let recorded_at_constraint: String = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid)
+           FROM pg_constraint
+          WHERE conrelid = 'web_usage_call_projection'::regclass
+            AND conname = 'web_usage_recorded_at_representable'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(recorded_at_constraint.contains("1970-01-01"));
+    assert!(recorded_at_constraint.contains("9999-12-31"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn context_compaction_usage_axes_have_the_canonical_u64_ceiling() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;

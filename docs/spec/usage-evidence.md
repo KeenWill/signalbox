@@ -75,7 +75,14 @@ calls. Time ranges are half-open: the lower boundary is inclusive and the upper
 boundary is exclusive. Missing boundaries mean unbounded in that direction.
 Empty and reversed ranges are rejected when constructed, and accepted timestamps
 are limited to the shared PostgreSQL/`time` representable range through
-`9999-12-31T23:59:59.999999Z`.
+`9999-12-31T23:59:59.999999Z`. The stored projection time is constrained to the
+same range at the table boundary, so an unrepresentable or infinite timestamp
+cannot become an immutable row that fails matching reads closed.
+
+An aggregate report additionally cannot represent more source calls than the
+hard source-call ceiling: the group counts are summed at construction, so a
+reader cannot claim a complete result that consumed more history than one
+aggregate read may.
 
 ## Detail pagination
 

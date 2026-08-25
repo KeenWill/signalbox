@@ -189,6 +189,14 @@ CREATE TABLE web_usage_call_projection (
         ),
     CONSTRAINT web_usage_turn_shape
         CHECK ((call_kind = 'context_compaction') = (turn_id IS NULL)),
+    -- The shared PostgreSQL/time representable range the read adapter
+    -- decodes; an out-of-range or infinite stored time would make every
+    -- matching read fail closed on an immutable append-only row.
+    CONSTRAINT web_usage_recorded_at_representable
+        CHECK (
+            recorded_at >= '1970-01-01T00:00:00Z'::timestamptz
+            AND recorded_at <= '9999-12-31T23:59:59.999999Z'::timestamptz
+        ),
     CONSTRAINT web_usage_token_axes_u64
         CHECK (
             (

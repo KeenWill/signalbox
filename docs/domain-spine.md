@@ -6816,8 +6816,9 @@ impl UsageAggregateGroup {
     pub const fn cache_normalization(&self) -> UsageCacheNormalization;
 }
 
-pub struct UsageAggregateGroupOverflowError {
-    pub returned_groups: usize,
+pub enum UsageAggregateReportError {
+    GroupOverflow { returned_groups: usize },
+    SourceCallOverflow { represented_calls: u128 },
 }
 
 pub struct UsageAggregateReport { /* private */ }
@@ -6825,7 +6826,7 @@ impl UsageAggregateReport {
     pub fn new(
         groups: Vec<UsageAggregateGroup>,
         completeness: UsageAggregateCompleteness,
-    ) -> Result<Self, UsageAggregateGroupOverflowError>;
+    ) -> Result<Self, UsageAggregateReportError>;
     pub fn groups(&self) -> &[UsageAggregateGroup];
     pub const fn completeness(&self) -> UsageAggregateCompleteness;
 }
