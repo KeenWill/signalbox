@@ -31,6 +31,10 @@ Bounded direct metadata and range reads, replica fallback classification,
 non-waiting process admission, and the terminal read commands are verified
 against this implementing change (`agent/blob-storage-read-wire`).
 
+The canonical multipart domain algebra and ordered process-protocol vocabulary
+are verified against this implementing change
+(`agent/blob-storage-multipart-algebra`).
+
 Same-origin browser delivery, immutable derivation provenance, and lazy isolated
 image derivatives are verified against this PR (`agent/web-blob-delivery`).
 
@@ -425,11 +429,13 @@ They send the selected representation media type, exact `Content-Length`,
 quoted canonical digest, and
 `Cache-Control: public, max-age=31536000, immutable`. `If-None-Match` admits the
 matching strong or weak spelling and returns `304`; `If-Range` applies a range
-only for the matching strong ETag. Exactly one canonical closed, open-ended, or
-suffix byte range is admitted and returns `206` plus `Content-Range`; multiple,
-malformed, zero-suffix, and unsatisfied ranges return `416` plus
-`bytes */{length}`. `HEAD` returns the same status and headers without opening
-or sending blob bytes.
+only for the matching strong ETag, and a failed condition makes every `Range`
+field the request carries inapplicable — repeated fields included — so the full
+representation is served. Once the condition admits the field, exactly one
+canonical closed, open-ended, or suffix byte range is admitted and returns `206`
+plus `Content-Range`; multiple, malformed, zero-suffix, and unsatisfied ranges
+return `416` plus `bytes */{length}`. `HEAD` returns the same status and
+headers, bounded read admission included, without opening or sending blob bytes.
 
 A `BlobDerivation` is an immutable ordered relation from one through sixteen
 input digests to one through sixteen output digests. It records a stable

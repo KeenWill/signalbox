@@ -942,6 +942,8 @@ pub struct WebSearchResult {
 #[serde(deny_unknown_fields)]
 pub struct WebSearchPage {
     pub results: Vec<WebSearchResult>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation: Option<WebSearchCursor>,
 }
 
@@ -1182,6 +1184,7 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
 
     let mut search_page_schema = schemars::schema_for!(WebSearchPage).to_value();
     search_page_schema["properties"]["results"]["maxItems"] = json!(max_search_page_items());
+    make_property_nullable(&mut search_page_schema, "continuation")?;
     let search_page_schema = canonical_schema(search_page_schema);
 
     Ok(vec![

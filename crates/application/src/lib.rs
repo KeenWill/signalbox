@@ -164,7 +164,8 @@ pub use scheduler::{
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
     SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
-    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_pass_admission_cap,
+    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_ordinary_pass_limit,
+    scheduler_pass_admission_cap,
 };
 pub use search::{
     MAX_SEARCH_HIGHLIGHTS_PER_RESULT, SearchArtifactId, SearchArtifactProjection,
