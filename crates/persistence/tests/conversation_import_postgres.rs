@@ -10,6 +10,7 @@ use std::{
     env,
     error::Error,
     fs,
+    num::NonZeroU32,
     path::{Path, PathBuf},
 };
 
@@ -34,6 +35,10 @@ use signalbox_persistence::{
     conversation_import::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
+    },
+    conversation_import_discovery::{
+        ImportedConversationDiscoveryRepository, ImportedConversationPageRequest,
+        ImportedEntryWindowAnchor,
     },
     disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels, local_test_connection_options, migrate,
@@ -301,13 +306,13 @@ async fn insert_imported_source_scaffolding(
          VALUES
             ('10000000-0000-4000-8000-000000000039', 1,
              '20000000-0000-4000-8000-000000000039', 1, 1,
-             'attested_user', decode('01', 'hex'), decode('01', 'hex')),
+             'attested_user', decode('02010100', 'hex'), decode('01', 'hex')),
             ('10000000-0000-4000-8000-000000000039', 2,
              '20000000-0000-4000-8000-000000000040', 1, 2,
-             'attested_assistant', decode('02', 'hex'), decode('02', 'hex')),
+             'attested_assistant', decode('02010100', 'hex'), decode('02', 'hex')),
             ('10000000-0000-4000-8000-000000000039', 3,
              '20000000-0000-4000-8000-000000000041', 1, 3,
-             'attested_user', decode('03', 'hex'), decode('03', 'hex'));",
+             'attested_user', decode('02010100', 'hex'), decode('03', 'hex'));",
     )
     .execute(&mut **transaction)
     .await?;
@@ -1847,7 +1852,7 @@ async fn inv001_late_entry_identity_constraint_is_typed_collision() -> Result<()
     )
     .bind(Uuid::from_u128(0xa10))
     .bind(existing_entry.into_uuid())
-    .bind(vec![1_u8])
+    .bind(vec![2_u8, 1, 1, 0])
     .bind(vec![1_u8])
     .execute(&mut *transaction)
     .await
@@ -2327,5 +2332,188 @@ fn collect_transcripts(path: &Path, files: &mut Vec<PathBuf>) -> Result<(), ()> 
             files.push(child);
         }
     }
+    Ok(())
+}
+
+fn jsonl_record_bytes(source: &str) -> usize {
+    source.lines().map(str::len).sum()
+}
+
+/// Issue #995: an exclusive UUID keyset remains bounded and duplicate-free
+/// when imports are committed on both sides of its cursor.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn imported_discovery_pages_stay_stable_under_concurrent_additions()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let first_conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x100));
+    let second_conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x300));
+    let third_conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x500));
+    let behind_cursor = ImportedConversationId::from_uuid(Uuid::from_u128(0x200));
+    let ahead_of_cursor = ImportedConversationId::from_uuid(Uuid::from_u128(0x400));
+    let page_limit = NonZeroU32::new(2).ok_or("page fixture limit must be nonzero")?;
+    let mut importer = ImportConversationService::new(
+        FixedIds::for_conversations([
+            first_conversation,
+            second_conversation,
+            third_conversation,
+            behind_cursor,
+            ahead_of_cursor,
+        ]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    importer
+        .execute(br#"{"type":"user","message":{"content":"first"}}"#)
+        .await?;
+    importer
+        .execute(br#"{"type":"user","message":{"content":"second"}}"#)
+        .await?;
+    importer
+        .execute(br#"{"type":"user","message":{"content":"third"}}"#)
+        .await?;
+    let discovery = ImportedConversationDiscoveryRepository::new(pool.clone());
+    let first_page = discovery
+        .list(ImportedConversationPageRequest {
+            after: None,
+            format: None,
+            source_session_id: None,
+            source_session_maximum_bytes: NonZeroU32::new(512)
+                .ok_or("source-session fixture bound must be nonzero")?,
+            limit: page_limit,
+        })
+        .await?;
+
+    assert_eq!(first_page.items.len(), page_limit.get() as usize);
+    assert_eq!(first_page.items[0].conversation, first_conversation);
+    assert_eq!(first_page.items[1].conversation, second_conversation);
+    assert_eq!(first_page.next_after, Some(second_conversation));
+
+    importer
+        .execute(br#"{"type":"user","message":{"content":"behind"}}"#)
+        .await?;
+    importer
+        .execute(br#"{"type":"user","message":{"content":"ahead"}}"#)
+        .await?;
+    let second_page = discovery
+        .list(ImportedConversationPageRequest {
+            after: first_page.next_after,
+            format: None,
+            source_session_id: None,
+            source_session_maximum_bytes: NonZeroU32::new(512)
+                .ok_or("source-session fixture bound must be nonzero")?,
+            limit: page_limit,
+        })
+        .await?;
+
+    assert_eq!(second_page.items.len(), page_limit.get() as usize);
+    assert_eq!(second_page.items[0].conversation, ahead_of_cursor);
+    assert_eq!(second_page.items[1].conversation, third_conversation);
+    assert_ne!(second_page.items[0].conversation, behind_cursor);
+    assert_eq!(second_page.next_after, None);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Issue #995: descriptors project size and source facts while an arbitrary
+/// entry read decodes only its requested immutable region.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn imported_discovery_describes_and_windows_without_complete_reconstitution()
+-> Result<(), Box<dyn Error>> {
+    const FIRST_TEXT: &str = "first imported observation";
+    const SECOND_TEXT: &str = "second imported observation";
+    const THIRD_TEXT: &str = "third imported observation";
+    const SOURCE_SESSION: &str = "discovery-source";
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let conversation = ImportedConversationId::from_uuid(Uuid::from_u128(0x900));
+    let source = format!(
+        "{{\"sessionId\":\"{SOURCE_SESSION}\",\"type\":\"user\",\"message\":{{\"content\":\"{FIRST_TEXT}\"}}}}\n\
+         {{\"sessionId\":\"{SOURCE_SESSION}\",\"type\":\"assistant\",\"message\":{{\"content\":\"{SECOND_TEXT}\"}}}}\n\
+         {{\"sessionId\":\"{SOURCE_SESSION}\",\"type\":\"user\",\"message\":{{\"content\":\"{THIRD_TEXT}\"}}}}"
+    );
+    let mut importer = ImportConversationService::new(
+        FixedIds::for_conversations([conversation]),
+        ClaudeCodeJsonlConverter,
+        ImportedConversationRepository::new(pool.clone()),
+    );
+    importer.execute(source.as_bytes()).await?;
+    let discovery = ImportedConversationDiscoveryRepository::new(pool.clone());
+    let descriptor = discovery
+        .descriptor(
+            conversation,
+            NonZeroU32::new(512).ok_or("source-session fixture bound must be nonzero")?,
+        )
+        .await?
+        .ok_or("descriptor fixture import must exist")?;
+
+    assert_eq!(descriptor.conversation, conversation);
+    assert_eq!(
+        descriptor
+            .source_session_id
+            .as_ref()
+            .map(|evidence| evidence.leading_text.as_str()),
+        Some(SOURCE_SESSION)
+    );
+    assert_eq!(descriptor.raw_record_count, 3);
+    assert_eq!(descriptor.entry_count, 3);
+    assert_eq!(
+        descriptor.sizes.raw_source_bytes,
+        jsonl_record_bytes(&source) as u64
+    );
+    assert!(descriptor.sizes.normalized_source_record_bytes > 0);
+    assert!(descriptor.sizes.normalized_entry_bytes > 0);
+    assert_eq!(descriptor.first.position, 1);
+    assert_eq!(descriptor.latest.position, descriptor.entry_count);
+
+    let exact_source_page = discovery
+        .list(ImportedConversationPageRequest {
+            after: None,
+            format: None,
+            source_session_id: Some(SOURCE_SESSION.as_bytes().to_vec()),
+            source_session_maximum_bytes: NonZeroU32::new(512)
+                .ok_or("source-session fixture bound must be nonzero")?,
+            limit: NonZeroU32::new(1).ok_or("exact-source fixture limit must be nonzero")?,
+        })
+        .await?;
+
+    assert_eq!(exact_source_page.items.len(), 1);
+    assert_eq!(exact_source_page.items[0].conversation, conversation);
+    assert_eq!(
+        exact_source_page.items[0]
+            .source_session_id
+            .as_ref()
+            .map(|evidence| evidence.leading_text.as_str()),
+        Some(SOURCE_SESSION)
+    );
+    assert!(exact_source_page.items[0].source_session_digest.is_some());
+    assert_eq!(exact_source_page.next_after, None);
+
+    let maximum_items = NonZeroU32::new(3).ok_or("window fixture bound must be nonzero")?;
+    let window = discovery
+        .entry_window(
+            conversation,
+            ImportedEntryWindowAnchor::Position(2),
+            1,
+            1,
+            maximum_items,
+            NonZeroU32::new(512).ok_or("entry-text fixture bound must be nonzero")?,
+        )
+        .await?
+        .ok_or("window fixture import must exist")?;
+
+    assert_eq!(window.items.len(), maximum_items.get() as usize);
+    assert_eq!(window.first_position, descriptor.first.position);
+    assert_eq!(window.anchor_position, 2);
+    assert_eq!(window.last_position, descriptor.latest.position);
+    assert_eq!(window.items[0].frontier, descriptor.first);
+    assert_eq!(window.items[2].frontier, descriptor.latest);
+    assert!(!window.has_before);
+    assert!(!window.has_after);
+
+    pool.close().await;
+    drop(container);
     Ok(())
 }

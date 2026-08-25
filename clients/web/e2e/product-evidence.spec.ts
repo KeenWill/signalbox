@@ -1,15 +1,13 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
-import { webContractBootstrapFixture } from '../src/product.fixture'
+// The shared fixture is the single copy kept aligned with WebContractBootstrap::current();
+// readBootstrap now rejects any bootstrap whose limits contradict it.
+import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 
 interface RouteEvidence {
   path: string
   title: string
   snapshot: string
 }
-
-// The shared fixture is the single copy kept aligned with WebContractBootstrap::current();
-// readBootstrap now rejects any bootstrap whose limits contradict it.
-const bootstrapFixture = webContractBootstrapFixture
 
 const sessionEvidenceFixture = {
   id: '00000000-0000-0000-0000-000000000991',

@@ -169,8 +169,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — one hundred five files, `202607180001`
-through `202608240101` — embedded by `sqlx::migrate!` as the static `MIGRATOR`
+`crates/persistence/migrations/` — one hundred nine files, `202607180001`
+through `202608250700` — embedded by `sqlx::migrate!` as the static `MIGRATOR`
 and applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations`
 ledger records applied files with checksums (the integration tests read the
 ledger directly); serialization of concurrent migration runs is SQLx dependency

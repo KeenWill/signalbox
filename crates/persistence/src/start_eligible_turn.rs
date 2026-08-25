@@ -306,6 +306,10 @@ impl StartEligibleTurnRepository {
             transaction.rollback().await?;
             return Ok(CommitActivationPreviewOutcome::Stale);
         }
+        if dispatch_start_lease_is_expired(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        }
         let Some(current) = prepare_preview(&mut transaction, session, preview.identities).await?
         else {
             transaction.rollback().await?;
@@ -350,6 +354,17 @@ impl StartEligibleTurnRepository {
                 .map_err(StartEligibleTurnRepositoryError::from)
                 .map_err(CommitActivationPreviewError::Activation)?;
         if !session_exists || scheduler_session.is_none() {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        }
+        if dispatch_start_lease_is_expired(&mut transaction, session)
+            .await
+            .map_err(CommitActivationPreviewError::Activation)?
+        {
             transaction
                 .rollback()
                 .await
@@ -820,6 +835,17 @@ async fn prepare_delegated_wake_preview(
     })
 }
 
+async fn dispatch_start_lease_is_expired(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, StartEligibleTurnRepositoryError> {
+    sqlx::query_scalar(crate::lock_inventory::EXPIRED_DISPATCH_START_LEASE)
+        .bind(session_id_to_uuid(session))
+        .fetch_one(connection)
+        .await
+        .map_err(Into::into)
+}
+
 async fn handle_in_transaction(
     connection: &mut PgConnection,
     requested_session: SessionId,
@@ -847,6 +873,11 @@ async fn handle_in_transaction(
         if session_exists {
             return Err(StartEligibleTurnCorruption::Missing("session scheduler row").into());
         }
+        return Ok(TransactionDecision::Rollback(
+            StartEligibleTurnOutcome::NoEligibleTurn,
+        ));
+    }
+    if dispatch_start_lease_is_expired(connection, requested_session).await? {
         return Ok(TransactionDecision::Rollback(
             StartEligibleTurnOutcome::NoEligibleTurn,
         ));
