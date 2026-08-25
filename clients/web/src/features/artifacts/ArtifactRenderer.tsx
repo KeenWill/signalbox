@@ -63,7 +63,10 @@ export const derivativeDigest = (view: WebBlobAvailableView): string | undefined
 const readAsciiTag = (bytes: Uint8Array, offset: number, length = 4): string =>
   String.fromCharCode(...bytes.subarray(offset, offset + length))
 
-const readGifFrameDimensions = (bytes: Uint8Array): { width: number; height: number } | null => {
+// Report the logical screen, not the frame: a browser decodes a GIF onto the full canvas and
+// composites the frame into it, so the canvas is what actually gets allocated. Returning frame
+// extents would let a 1x1 frame on a 10000x10000 canvas slip past the inline pixel ceiling.
+const readGifCanvasDimensions = (bytes: Uint8Array): { width: number; height: number } | null => {
   if (bytes.length < 13 || !readAsciiTag(bytes, 0, 6).startsWith('GIF8')) return null
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   const canvasWidth = view.getUint16(6, true)
@@ -94,7 +97,10 @@ const readGifFrameDimensions = (bytes: Uint8Array): { width: number; height: num
     if (width === 0 || height === 0 || left + width > canvasWidth || top + height > canvasHeight) {
       return null
     }
-    return { width, height }
+    return {
+      width: Math.max(canvasWidth, left + width),
+      height: Math.max(canvasHeight, top + height),
+    }
   }
   return null
 }
@@ -107,7 +113,7 @@ export const readImageDimensions = (
     return { width: view.getUint32(16), height: view.getUint32(20) }
   }
   if (bytes.length >= 6 && readAsciiTag(bytes, 0, 6).startsWith('GIF8'))
-    return readGifFrameDimensions(bytes)
+    return readGifCanvasDimensions(bytes)
   if (
     bytes.length >= 25 &&
     readAsciiTag(bytes, 0) === 'RIFF' &&

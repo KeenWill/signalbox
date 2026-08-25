@@ -114,13 +114,29 @@ describe('artifact renderer compatibility', () => {
     expect(readImageDimensions(bytes)).toEqual({ width: 800, height: 600 })
   })
 
-  it('reads bounded GIF dimensions for pixel admission', () => {
+  it('reads the GIF logical screen for pixel admission', () => {
+    // 640x480 logical screen carrying a smaller 320x240 frame: the browser allocates the screen.
     const bytes = new Uint8Array([
       0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x80, 0x02, 0xe0, 0x01, 0x00, 0x00, 0x00, 0x2c, 0x00,
       0x00, 0x00, 0x00, 0x40, 0x01, 0xf0, 0x00, 0x00,
     ])
 
-    expect(readImageDimensions(bytes)).toEqual({ width: 320, height: 240 })
+    expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
+  })
+
+  it('applies the pixel ceiling to an oversized GIF screen behind a tiny frame', () => {
+    // 10000x10000 logical screen with a single 1x1 frame: reporting the frame would let roughly
+    // 100 million pixels past MAX_INLINE_ORIGINAL_PIXELS.
+    const bytes = new Uint8Array([
+      0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x10, 0x27, 0x10, 0x27, 0x00, 0x00, 0x00, 0x2c, 0x00,
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+    ])
+
+    const dimensions = readImageDimensions(bytes)
+    expect(dimensions).toEqual({ width: 10_000, height: 10_000 })
+    expect((dimensions?.width ?? 0) * (dimensions?.height ?? 0)).toBeGreaterThan(
+      MAX_INLINE_ORIGINAL_PIXELS,
+    )
   })
 
   it('rejects a GIF frame outside its declared logical screen', () => {
