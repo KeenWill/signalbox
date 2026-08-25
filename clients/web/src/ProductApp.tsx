@@ -567,7 +567,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
                   : 'Checking contract…'}
             </span>
           )}
-          {bootstrap.isError && (
+          {surface !== 'settings' && bootstrap.isError && (
             <button
               type="button"
               className="bootstrap-retry"
