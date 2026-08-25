@@ -21,7 +21,7 @@ path = "tests/isolation.rs"
 required-features = ["test-worker"]
 
 [dependencies]
-base64 = "0.22.1"
+base64 = "0.23.0"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = { version = "1.0.140", features = ["unbounded_depth"] }
 sha2 = "0.10.9"

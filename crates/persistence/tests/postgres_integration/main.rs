@@ -28,6 +28,9 @@ mod session_timeline;
 mod tool_round_lifecycle;
 mod turn_activation;
 mod turn_liveness;
+mod workspace_instruction_authority;
+mod workspace_instruction_migration;
+mod workspace_instructions;
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
@@ -167,6 +170,7 @@ use signalbox_persistence::{
         SubmitInputRepositoryError,
     },
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
+    workspace_instructions::CountedActivationInstructionEvidence,
 };
 use signalbox_tools_plan::{
     PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanDependencyCycle, PlanEntryId,
@@ -1800,6 +1804,42 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
     Ok((container, pool, database_url))
 }
 
+async fn record_empty_instruction_manifest(
+    pool: &PgPool,
+    session: SessionId,
+) -> Result<(), Box<dyn Error>> {
+    let turn = TurnId::from_uuid(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT turn_id FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active'",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(pool)
+        .await?,
+    );
+    let snapshot = signalbox_application::discover_workspace_instructions(Vec::new());
+    let manifest = signalbox_domain::TurnInstructionManifest::empty_turn_start(
+        signalbox_domain::TurnInstructionManifestId::from_uuid(turn.into_uuid()),
+        session,
+        turn,
+    );
+    let outcome =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        )
+        .record_turn_start(
+            signalbox_domain::InstructionDiscoveryId::from_uuid(turn.into_uuid()),
+            manifest,
+            &snapshot,
+            || unreachable!("an empty discovery needs no bundle identity"),
+        )
+        .await?;
+    assert!(!matches!(
+        outcome,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::TurnUnavailable
+    ));
+    Ok(())
+}
+
 async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>>
 {
     let container = Postgres::default()
@@ -1856,6 +1896,37 @@ async fn postgres_before_approval_event_migration()
     }
     drop(connection);
     Ok((container, pool, database_url))
+}
+
+async fn postgres_before_workspace_instruction_migration()
+-> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let (container, pool, database_url) = unmigrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < 202608140001)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+    Ok((container, pool, database_url))
+}
+
+async fn apply_workspace_instruction_migration(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .filter(|migration| migration.version >= 202608140001)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    Ok(())
 }
 
 async fn insert_pre_approval_tool_request(
@@ -2090,6 +2161,7 @@ async fn activate_earliest_queued_turn(
     else {
         panic!("the earliest queued origin must activate through the production service");
     };
+    record_empty_instruction_manifest(pool, SessionId::from_uuid(activation.session)).await?;
     match *activated {
         signalbox_domain::ActivatedTurn::Accepted(activated) => Ok(Box::new(activated)),
         signalbox_domain::ActivatedTurn::Delegated(_) => {
@@ -4292,6 +4364,7 @@ async fn activate_delegated_result_fixture(
     else {
         return Err("the delegated result fixture activation changed".into());
     };
+    record_empty_instruction_manifest(pool, child).await?;
     Ok((parent, child, child_turn, spawning_request, selection))
 }
 
@@ -4410,6 +4483,7 @@ async fn authorize_delegated_successor_model_call_fixture(
         },
     )
     .await?;
+    record_empty_instruction_manifest(pool, child).await?;
 
     let repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
