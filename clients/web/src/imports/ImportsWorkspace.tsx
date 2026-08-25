@@ -447,7 +447,7 @@ export function ImportsWorkspace({
     (errorNamesRetainedCommand ? retryableContinuationFailure : continuationAmbiguous)
   const ambiguousContinuationFailure = commandRetainedForRetry && continuationAmbiguous
 
-  const continueAt = (relationship: WebImportedSessionRelationship) => {
+  const continueAt = async (relationship: WebImportedSessionRelationship) => {
     if (
       !continuationAvailable ||
       !selectedFrontier ||
@@ -456,32 +456,42 @@ export function ImportsWorkspace({
     ) {
       return
     }
-    // Recheck storage at admission: another tab may have retained a command after this
-    // tab's last snapshot, and its outcome may still be ambiguous.
-    const concurrentlyRetained = readRetainedCommand(queryScope)
-    if (concurrentlyRetained !== null) {
-      setPendingCommand(concurrentlyRetained)
-      setContinuationAmbiguous(true)
-      return
+    const admit = () => {
+      // Recheck storage at admission: another tab may have retained a command after this
+      // tab's last snapshot, and its outcome may still be ambiguous.
+      const concurrentlyRetained = readRetainedCommand(queryScope)
+      if (concurrentlyRetained !== null) {
+        setPendingCommand(concurrentlyRetained)
+        setContinuationAmbiguous(true)
+        return
+      }
+      const request: WebImportContinuationRequest = {
+        command_id: crypto.randomUUID(),
+        frontier: selectedFrontier,
+        relationship,
+        initial_model_selection:
+          modelKind === 'direct'
+            ? { kind: 'direct', selection_id: modelSelectionId.trim() }
+            : { kind: 'alias', alias_id: modelSelectionId.trim() },
+      }
+      // The POST leaves the browser only after the exact payload is durably retained:
+      // sending first would let a reload destroy the sole copy of a command the daemon
+      // may commit.
+      if (!retainCommand(request)) {
+        setRetentionFailed(true)
+        return
+      }
+      setRetentionFailed(false)
+      setContinuationAmbiguous(false)
+      continuation.mutate(request)
     }
-    const request: WebImportContinuationRequest = {
-      command_id: crypto.randomUUID(),
-      frontier: selectedFrontier,
-      relationship,
-      initial_model_selection:
-        modelKind === 'direct'
-          ? { kind: 'direct', selection_id: modelSelectionId.trim() }
-          : { kind: 'alias', alias_id: modelSelectionId.trim() },
+    // The recheck and retention write are one atomic admission: a cross-tab lock keeps a
+    // second tab from passing the recheck before the first tab's retained slot is visible.
+    if (navigator.locks) {
+      await navigator.locks.request(retainedCommandStoragePrefix(queryScope), async () => admit())
+    } else {
+      admit()
     }
-    // The POST leaves the browser only after the exact payload is durably retained: sending
-    // first would let a reload destroy the sole copy of a command the daemon may commit.
-    if (!retainCommand(request)) {
-      setRetentionFailed(true)
-      return
-    }
-    setRetentionFailed(false)
-    setContinuationAmbiguous(false)
-    continuation.mutate(request)
   }
 
   return (
@@ -717,7 +727,7 @@ export function ImportsWorkspace({
                   <div className="continuation-actions">
                     <button
                       type="button"
-                      onClick={() => continueAt('resume')}
+                      onClick={() => void continueAt('resume')}
                       disabled={
                         !continuationAvailable ||
                         !selectedFrontier ||
@@ -730,7 +740,7 @@ export function ImportsWorkspace({
                     </button>
                     <button
                       type="button"
-                      onClick={() => continueAt('fork')}
+                      onClick={() => void continueAt('fork')}
                       disabled={
                         !continuationAvailable ||
                         !selectedFrontier ||
