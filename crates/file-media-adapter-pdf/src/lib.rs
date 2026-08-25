@@ -12,10 +12,11 @@ use signalbox_file_media_runtime::{
     CancellationSignal, CanonicalJsonObjectSchema, CanonicalMediaType, FileMediaProvider,
     FileMediaProviderDeclaration, FileMediaProviderFailure, FileMediaProviderFuture,
     FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileReadInput,
-    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration, ProbeStrength,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
-    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
-    ReaderIdentity, ReasonCode, StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
+    FileReaderName, FileReaderProviderName, FileReaderRevision, ProbeDeclaration,
+    ProbeDeclarationInput, ProbeStrength, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
+    ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
+    StreamingTextFallback, ValidationEvidence, VerifiedBlobSource,
 };
 
 const MEDIA_TYPE: &str = "application/pdf";
@@ -348,12 +349,12 @@ pub fn declaration() -> Result<FileMediaProviderDeclaration, Box<dyn Error>> {
         reader: FileReaderName::try_new(READER_NAME)?,
         revision: FileReaderRevision::try_new(READER_REVISION)?,
         media_types: vec![CanonicalMediaType::from_str(MEDIA_TYPE)?],
-        probe: ProbeDeclaration::new(
-            PDF_HEADER_BYTES,
-            PDF_TRAILER_BYTES,
-            signalbox_file_media_runtime::MAX_PROBE_RANGES,
-            VALIDATION_SOURCE_BYTES,
-        ),
+        probe: ProbeDeclaration::new(ProbeDeclarationInput {
+            prefix_bytes: PDF_HEADER_BYTES,
+            suffix_bytes: PDF_TRAILER_BYTES,
+            range_count: signalbox_file_media_runtime::MAX_PROBE_RANGES,
+            cumulative_bytes: VALIDATION_SOURCE_BYTES,
+        }),
         views: vec![text_view, metadata_view],
         reason_codes: vec![
             ReasonCode::try_new(MALFORMED_REASON)?,
