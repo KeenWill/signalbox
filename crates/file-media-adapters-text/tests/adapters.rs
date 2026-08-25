@@ -503,6 +503,19 @@ async fn completed_json_prefix_with_split_utf8_suffix_uses_text_fallback()
 }
 
 #[tokio::test]
+async fn nonprovisional_json_prefix_with_later_trailing_prose_is_malformed()
+-> Result<(), Box<dyn Error>> {
+    let mut bytes = b"{\"padding\":\"".to_vec();
+    bytes.resize(4_097, b'a');
+    bytes.extend_from_slice(b"\"} prose");
+    let source = MemorySource::new(bytes);
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_malformed_reason(inspection, "malformed_json");
+    Ok(())
+}
+
+#[tokio::test]
 async fn json_probe_handles_a_utf8_scalar_split_at_its_boundary() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::json_with_scalar_split_at_probe_boundary());
 
@@ -655,6 +668,21 @@ async fn declared_header_only_csv_validates() -> Result<(), Box<dyn Error>> {
 }
 
 #[tokio::test]
+async fn declared_header_only_csv_preserves_the_column_limit_reason() -> Result<(), Box<dyn Error>>
+{
+    let mut header = (0..257)
+        .map(|index| format!("column{index}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    header.push('\n');
+    let source = MemorySource::new(header.into_bytes());
+
+    let inspection = support::inspect(&source, "text/csv").await?;
+    support::assert_malformed_reason(inspection, "column_limit_exceeded");
+    Ok(())
+}
+
+#[tokio::test]
 async fn malformed_quoted_csv_uses_the_text_fallback() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::new(fixtures::csv_with_quotes_inside_unquoted_field());
 
@@ -717,6 +745,15 @@ async fn comma_bearing_prose_uses_the_text_fallback() -> Result<(), Box<dyn Erro
     )
     .await?;
     support::assert_text(result, &expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn complete_csv_probe_validates_all_records_before_claiming() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(b"a,b\nc,d\nplain prose\n".to_vec());
+
+    let inspection = support::inspect(&source, "text/plain").await?;
+    support::assert_validated_media(inspection, "text/plain");
     Ok(())
 }
 

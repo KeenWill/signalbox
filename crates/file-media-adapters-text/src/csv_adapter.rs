@@ -71,7 +71,8 @@ pub(crate) async fn inspect(
             let declared_csv_shape = matches!(
                 request.evidence,
                 ValidationEvidence::DeclaredCandidateStructurallyValidated
-            ) && has_declared_record_evidence(&text);
+            ) && (has_declared_record_evidence(&text)
+                || reason == "column_limit_exceeded" && is_header_only_csv(&text));
             if declared_csv_shape {
                 return Ok(malformed(reason));
             }
@@ -175,8 +176,14 @@ fn parse_table(text: &str, maximum_container_entries: u64) -> Result<CsvTable, &
 }
 
 pub(crate) fn has_record_structure(text: &str, extent: ProbeExtent) -> bool {
-    let Some(evidence) = first_two_strict_records(text, extent) else {
-        return false;
+    let evidence = match extent {
+        ProbeExtent::CompleteSource => text,
+        ProbeExtent::TruncatedPrefix => {
+            let Some(evidence) = first_two_strict_records(text, extent) else {
+                return false;
+            };
+            evidence
+        }
     };
     if !quotes_are_well_formed(evidence) || has_blank_record(evidence) {
         return false;
@@ -196,6 +203,7 @@ pub(crate) fn has_record_structure(text: &str, extent: ProbeExtent) -> bool {
         return false;
     };
     second.len() == first.len()
+        && records.all(|record| record.is_ok_and(|record| record.len() == first.len()))
 }
 
 fn has_declared_record_structure(text: &str) -> bool {
@@ -231,6 +239,16 @@ fn has_declared_record_evidence(text: &str) -> bool {
     }
     let remainder = text[first_end..].trim_start_matches(['\r', '\n']);
     !remainder.is_empty()
+}
+
+fn is_header_only_csv(text: &str) -> bool {
+    let Some(first_end) = text.find(['\r', '\n']) else {
+        return false;
+    };
+    first_end > 0
+        && text[first_end..].trim_matches(['\r', '\n']).is_empty()
+        && quotes_are_well_formed(text)
+        && !has_blank_record(text)
 }
 
 fn first_two_strict_records(text: &str, extent: ProbeExtent) -> Option<&str> {

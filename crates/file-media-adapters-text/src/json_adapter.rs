@@ -12,7 +12,8 @@ use signalbox_file_media_runtime::{
 };
 
 use crate::{
-    JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, STRUCTURED_VIEW_NAME, read_input_is_empty, source,
+    JSON_MEDIA_TYPE, MAX_TEXT_FAMILY_BYTES, PROBE_PREFIX_BYTES, STRUCTURED_VIEW_NAME,
+    read_input_is_empty, source,
 };
 
 pub(crate) async fn probe(
@@ -124,6 +125,7 @@ pub(crate) async fn inspect(
     };
     if validate_json(&text).is_err() {
         if matches!(request.evidence, ValidationEvidence::StructuralValidation)
+            && initial_probe_was_provisional(text.as_bytes())
             && has_complete_json_prefix_with_trailing_content(&text)
         {
             return Ok(ProcessorValidationOutput::NoMatch);
@@ -297,6 +299,13 @@ fn has_complete_json_prefix_with_trailing_content(text: &str) -> bool {
     deserializer.disable_recursion_limit();
     serde::de::IgnoredAny::deserialize(serde_stacker::Deserializer::new(&mut deserializer))
         .is_ok_and(|_| deserializer.end().is_err())
+}
+
+fn initial_probe_was_provisional(bytes: &[u8]) -> bool {
+    usize::try_from(PROBE_PREFIX_BYTES)
+        .ok()
+        .and_then(|length| bytes.get(..length))
+        .is_some_and(is_complete_json_probe_document)
 }
 
 fn is_json_number_prefix(text: &str) -> bool {
