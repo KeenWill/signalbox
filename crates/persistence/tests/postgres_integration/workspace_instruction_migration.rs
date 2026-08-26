@@ -232,6 +232,21 @@ async fn inv061_workspace_instruction_migration_backfills_a_terminal_model_call(
     .execute(&mut *transaction)
     .await?;
     let call = Uuid::from_u128(0x6855);
+    // Seeding under `session_replication_role = 'replica'` suppresses every
+    // user trigger, including the global identity reservation
+    // `202607290401_context_compaction.sql` attaches to every `model_call`
+    // insert. A historical installation of this vintage therefore always
+    // carries the reserved identity row this insert states explicitly; a
+    // `model_call` without one is a state no installation can hold, and later
+    // migrations that correlate a projection against the canonical identity
+    // would otherwise read a fixture artifact rather than a real database.
+    sqlx::query(
+        "INSERT INTO model_call_identity (model_call_id, call_kind)
+         VALUES ($1, 'ordinary')",
+    )
+    .bind(call)
+    .execute(&mut *transaction)
+    .await?;
     sqlx::query(
         "INSERT INTO model_call
             (model_call_id, turn_id, session_id, turn_attempt_id,
