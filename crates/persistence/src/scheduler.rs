@@ -1,6 +1,6 @@
 //! PostgreSQL reconciliation sweep for the application scheduler.
 
-use std::{error::Error, fmt};
+use std::{collections::HashSet, error::Error, fmt};
 
 use signalbox_application::{
     ClassifyOperatorFailure, EligibilitySweep, EligibilitySweepBatch, OperatorFailureClass,
@@ -12,8 +12,10 @@ use crate::mapping::{session_id_from_uuid, session_id_to_uuid};
 
 const RECONCILIATION_PAGE_SIZE: i64 = 16;
 
-fn next_page_state(rows: &[(SessionId, SessionId)]) -> (Option<SessionId>, Option<SessionId>) {
-    let Some((last_session, scan_through)) = rows.last().copied() else {
+fn next_page_state(
+    rows: &[(SessionId, SessionId, bool)],
+) -> (Option<SessionId>, Option<SessionId>) {
+    let Some((last_session, scan_through, _)) = rows.last().copied() else {
         return (None, None);
     };
     if rows.len() == RECONCILIATION_PAGE_SIZE as usize && last_session != scan_through {
@@ -86,7 +88,7 @@ impl PostgresEligibilitySweep {
     ) -> Result<EligibilitySweepBatch, PostgresEligibilitySweepError> {
         let after = self.after.map(session_id_to_uuid);
         let scan_through = self.scan_through.map(session_id_to_uuid);
-        let rows = sqlx::query_as::<_, (Uuid, Uuid)>(
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, bool)>(
             "WITH candidates AS (
                 SELECT queued.session_id
                   FROM turn_lifecycle AS queued
@@ -103,6 +105,30 @@ impl PostgresEligibilitySweep {
                           AND NOT active.delegation_runtime_terminal
                  )
                  GROUP BY queued.session_id
+                UNION
+                SELECT lease.session_id
+                  FROM repo_watch_dispatch_start_lease AS lease
+                 WHERE lease.expires_at > clock_timestamp()
+                   AND NOT EXISTS (
+                       SELECT 1 FROM model_call AS call
+                        WHERE call.session_id = lease.session_id
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM repo_watch_dispatch_start_lease_expiration AS expired
+                        WHERE expired.dispatch_id = lease.dispatch_id
+                          AND expired.action_ordinal = lease.action_ordinal
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM repo_watch_dispatch_start_lease_quarantine AS quarantined
+                        WHERE quarantined.dispatch_id = lease.dispatch_id
+                          AND quarantined.action_ordinal = lease.action_ordinal
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1 FROM repo_watch_dispatch_release AS released
+                        WHERE released.dispatch_id = lease.dispatch_id
+                   )
                 UNION
                 SELECT terminal.session_id
                   FROM turn_lifecycle AS terminal
@@ -143,6 +169,18 @@ impl PostgresEligibilitySweep {
                    AND NOT active.delegation_runtime_terminal
                    AND prepared.state_kind = 'prepared'
                  GROUP BY active.session_id
+                UNION
+                SELECT active.session_id
+                  FROM turn_lifecycle AS active
+                 WHERE active.state_kind = 'active'
+                   AND NOT active.delegation_runtime_terminal
+                   AND EXISTS (
+                        SELECT 1
+                          FROM model_call AS call
+                         WHERE call.session_id = active.session_id
+                           AND call.turn_id = active.turn_id
+                           AND call.state_kind = 'prepared'
+                   )
                 UNION
                 SELECT active.session_id
                   FROM turn_lifecycle AS active
@@ -199,7 +237,17 @@ impl PostgresEligibilitySweep {
                       LIMIT 1)
                 ) AS scan_through
              )
-             SELECT candidates.session_id, bounded.scan_through
+             SELECT candidates.session_id, bounded.scan_through,
+                    EXISTS (
+                        SELECT 1
+                          FROM repo_watch_dispatch_start_lease AS lease
+                         WHERE lease.session_id = candidates.session_id
+                           AND lease.expires_at > clock_timestamp()
+                           AND NOT EXISTS (SELECT 1 FROM model_call AS call WHERE call.session_id = lease.session_id)
+                           AND NOT EXISTS (SELECT 1 FROM repo_watch_dispatch_start_lease_expiration AS expired WHERE expired.dispatch_id = lease.dispatch_id AND expired.action_ordinal = lease.action_ordinal)
+                           AND NOT EXISTS (SELECT 1 FROM repo_watch_dispatch_start_lease_quarantine AS quarantined WHERE quarantined.dispatch_id = lease.dispatch_id AND quarantined.action_ordinal = lease.action_ordinal)
+                           AND NOT EXISTS (SELECT 1 FROM repo_watch_dispatch_release AS released WHERE released.dispatch_id = lease.dispatch_id)
+                    ) AS dispatch_start
                FROM candidates
                CROSS JOIN bounded
               WHERE bounded.scan_through IS NOT NULL
@@ -216,18 +264,24 @@ impl PostgresEligibilitySweep {
 
         let rows = rows
             .into_iter()
-            .map(|(session, scan_through)| {
+            .map(|(session, scan_through, dispatch_start)| {
                 (
                     session_id_from_uuid(session),
                     session_id_from_uuid(scan_through),
+                    dispatch_start,
                 )
             })
             .collect::<Vec<_>>();
         let next_state = next_page_state(&rows);
         let continuation = next_state.0.is_some();
         (self.after, self.scan_through) = next_state;
-        Ok(EligibilitySweepBatch::new(
-            rows.into_iter().map(|(session, _)| session).collect(),
+        let dispatch_starts = rows
+            .iter()
+            .filter_map(|(session, _, priority)| (*priority).then_some(*session))
+            .collect::<HashSet<_>>();
+        Ok(EligibilitySweepBatch::with_dispatch_starts(
+            rows.into_iter().map(|(session, _, _)| session).collect(),
+            dispatch_starts,
             continuation,
         ))
     }
@@ -262,12 +316,12 @@ mod tests {
         let continuing = sessions
             .iter()
             .copied()
-            .map(|session| (session, beyond_page))
+            .map(|session| (session, beyond_page, false))
             .collect::<Vec<_>>();
         let cycle_end = sessions
             .iter()
             .copied()
-            .map(|session| (session, *sessions.last().expect("page is nonempty")))
+            .map(|session| (session, *sessions.last().expect("page is nonempty"), false))
             .collect::<Vec<_>>();
 
         assert_eq!(

@@ -446,6 +446,28 @@ class WorkflowAgreementTests(unittest.TestCase):
         self.assertEqual(len(failures), 1)
         self.assertIn("outside", failures[0])
 
+    def test_file_media_isolation_run_is_allowed(self) -> None:
+        self.assertEqual(
+            self.disagreements(
+                AGREEING_WORKFLOW
+                + "      - run: cargo test --no-fail-fast -p "
+                "signalbox-file-media-processor-runtime --features test-worker "
+                "--test isolation -- --ignored\n"
+            ),
+            [],
+        )
+
+    def test_other_file_media_ignored_target_is_reported(self) -> None:
+        failures = self.disagreements(
+            AGREEING_WORKFLOW
+            + "      - run: cargo test --no-fail-fast -p "
+            "signalbox-file-media-processor-runtime --features test-worker "
+            "--test other-isolation -- --ignored\n"
+        )
+
+        self.assertEqual(len(failures), 1)
+        self.assertIn("outside", failures[0])
+
     def test_a_backslash_continued_ignored_run_is_reported(self) -> None:
         failures = self.disagreements(
             AGREEING_WORKFLOW

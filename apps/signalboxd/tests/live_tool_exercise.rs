@@ -294,7 +294,12 @@ async fn run_live_smoke() -> SmokeResult {
         InProcessAttemptDispatchGate::default(),
         provider,
     )
-    .with_tool_loop(tool_gate, tool_catalog, tool_executor);
+    .with_tool_loop(tool_gate, tool_catalog, tool_executor)
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        pool.clone(),
+        None,
+        Vec::new(),
+    ));
 
     run_automatic_turn(
         &pool,

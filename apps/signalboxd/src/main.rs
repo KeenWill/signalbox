@@ -41,6 +41,7 @@ use signalbox_model_runtime_anthropic::{
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 use signalbox_persistence::{
     blob::BlobCatalogRepository,
+    convergence_sweep::PostgresConvergenceSweepStore,
     conversation_import::backfill_imported_conversation_display_titles,
     migrate,
     model_execution::PostgresModelCallRepository,
@@ -57,15 +58,16 @@ use signalboxd::runner_protocol_runtime::{
 use signalboxd::{
     ActivatedTurnPass, AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs,
     BlobStoreRegistry, BlobTools, CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError,
-    DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
-    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
-    GitHubCodeHostTransport, HubModelConfiguration, HubModelConfigurationError,
-    LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter,
-    OtlpRuntime, PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
-    ProcessRuntimeError, PrometheusServer, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
-    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime,
+    ConvergenceSweepRuntime, DaemonToolCatalog, DaemonToolComposition, DaemonTools,
+    DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
+    FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
+    HubModelConfigurationError, LocalProcessListener, LocalSocketError,
+    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
+    RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    TurnLivenessRuntime, WorkspaceInstructionRuntime,
     model_adapter::ConfiguredModelRuntime,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
@@ -627,6 +629,8 @@ enum RuntimeTaskExit {
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
+    RepositoryWatchLeaseExpiry(Result<(), RepoWatchDispatchRepositoryError>),
+    ConvergenceSweep,
     WebHttp(Result<(), WebHttpRuntimeError>),
     TurnLiveness,
 }
@@ -669,6 +673,8 @@ enum RuntimeTaskDefect {
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
     RepositoryWatchCompletedBeforeShutdown,
+    RepositoryWatchLeaseExpiryCompletedBeforeShutdown,
+    ConvergenceSweepCompletedBeforeShutdown,
     WebHttpCompletedBeforeShutdown,
     TurnLivenessCompletedBeforeShutdown,
     TaskCancelled,
@@ -685,6 +691,12 @@ impl RuntimeTaskDefect {
             Self::RunnerCompletedBeforeShutdown => "runner_runtime_completed_before_shutdown",
             Self::RepositoryWatchCompletedBeforeShutdown => {
                 "repository_watch_completed_before_shutdown"
+            }
+            Self::RepositoryWatchLeaseExpiryCompletedBeforeShutdown => {
+                "repository_watch_lease_expiry_completed_before_shutdown"
+            }
+            Self::ConvergenceSweepCompletedBeforeShutdown => {
+                "convergence_sweep_completed_before_shutdown"
             }
             Self::WebHttpCompletedBeforeShutdown => "web_http_completed_before_shutdown",
             Self::TurnLivenessCompletedBeforeShutdown => "turn_liveness_completed_before_shutdown",
@@ -828,10 +840,10 @@ async fn await_while_guarded<T>(
 
 async fn disarm_staging_sweep_unless_guarded(
     database: &mut FencedHubDatabase,
-    registry: &Option<Arc<BlobStoreRegistry>>,
+    registry: &mut Option<Arc<BlobStoreRegistry>>,
 ) {
     if database.check_guard().await.is_err()
-        && let Some(registry) = registry.as_ref()
+        && let Some(registry) = registry.as_mut()
     {
         registry.disarm_staging_sweep();
     }
@@ -945,6 +957,38 @@ fn report_repository_watch_runtime_defect(error: &RepositoryWatchRuntimeError) {
     );
 }
 
+/// Classifies a lease-expiry failure without flattening commit ambiguity.
+///
+/// An ambiguous commit may already have applied the goal stop and the
+/// expiration receipt, so operator telemetry must not present the
+/// expiration transaction as safe to retry; corruption stays fail-closed.
+fn repository_watch_lease_expiry_failure_class(
+    error: &RepoWatchDispatchRepositoryError,
+) -> OperatorFailureClass {
+    match error {
+        RepoWatchDispatchRepositoryError::CommitAmbiguous(_) => {
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            }
+        }
+        RepoWatchDispatchRepositoryError::Corruption(_) => {
+            OperatorFailureClass::FailClosedCorruption
+        }
+        _ => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        },
+    }
+}
+
+fn report_repository_watch_lease_expiry_failure(error: &RepoWatchDispatchRepositoryError) {
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        failure_class = ?repository_watch_lease_expiry_failure_class(error),
+        cause = %error,
+        "global repository-watch lease expiry reconciliation failed"
+    );
+}
+
 fn report_web_http_runtime_failure(error: &WebHttpRuntimeError) {
     tracing::error!(
         phase = ?RuntimePhase::Runtime,
@@ -983,6 +1027,8 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
+        | Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Ok(())))
+        | Ok(RuntimeTaskExit::ConvergenceSweep)
         | Ok(RuntimeTaskExit::WebHttp(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness) => RuntimeTaskCompletion::Clean,
         Ok(RuntimeTaskExit::Process(Err(error))) => {
@@ -996,6 +1042,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         Ok(RuntimeTaskExit::RepositoryWatch(Err(error))) => {
             report_repository_watch_runtime_defect(&error);
             RuntimeTaskCompletion::Defect
+        }
+        Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Err(error))) => {
+            report_repository_watch_lease_expiry_failure(&error);
+            RuntimeTaskCompletion::Failed
         }
         Ok(RuntimeTaskExit::WebHttp(Err(error))) => {
             report_web_http_runtime_failure(&error);
@@ -1195,6 +1245,11 @@ async fn run_hub(
             })?;
         repository_watch
             .validate_template_contexts(&declarations)
+            .and_then(|()| {
+                repository_watch.validate_convergence_template(
+                    template_configuration.summaries().map(|(name, _)| name),
+                )
+            })
             .map_err(|error| {
                 erase_startup_cause(
                     RuntimePhase::Configuration,
@@ -1352,8 +1407,8 @@ async fn run_hub(
             model_configuration.web_fetch_egress_policy(),
         ),
     };
-    let (mut tool_catalog, mut tool_executor) = match tools {
-        Ok(tools) => tools.into_parts(),
+    let tools = match tools {
+        Ok(tools) => tools,
         Err(error) => {
             let failure = erase_startup_cause(
                 RuntimePhase::Configuration,
@@ -1363,6 +1418,15 @@ async fn run_hub(
             return Err(failure);
         }
     };
+    let workspace_instruction_runtime = WorkspaceInstructionRuntime::new(
+        pool.clone(),
+        tools.workspace_instruction_root_resolver(),
+        model_configuration
+            .workspace_instructions()
+            .roots()
+            .to_vec(),
+    );
+    let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
     let migration_pool = pool.clone();
     let scan_pool = pool.clone();
@@ -1413,7 +1477,7 @@ async fn run_hub(
                 tracing::warn!(
                     phase = ?RuntimePhase::StartupScan,
                     session = %session.into_uuid(),
-                    "session holds its slot awaiting a user reconciliation decision"
+                    "session holds its slot awaiting a durable recovery decision"
                 );
             }
             Ok(())
@@ -1438,6 +1502,24 @@ async fn run_hub(
                     .repositories()
                     .iter()
                     .map(|repository| repository.repository().clone())
+                    .collect()
+            });
+    let configured_convergence_targets =
+        model_configuration
+            .repository_watch()
+            .map_or_else(Vec::new, |configuration| {
+                if configuration.convergence_sweep().is_none() {
+                    return Vec::new();
+                }
+                configuration
+                    .repositories()
+                    .iter()
+                    .flat_map(|repository| {
+                        repository
+                            .convergence_pull_requests()
+                            .iter()
+                            .map(|pull_request| (repository.repository().clone(), *pull_request))
+                    })
                     .collect()
             });
     let repository_watch_store = PostgresRepoWatchDispatchStore::new(
@@ -1492,7 +1574,7 @@ async fn run_hub(
             return Ok(ShutdownOutcome::GuardLost);
         }
     };
-    let blob_store_registry = blob_store_registry.map(Arc::new);
+    let mut blob_store_registry = blob_store_registry.map(Arc::new);
     let blob_tools = match BlobTools::try_new(
         BlobCatalogRepository::new(pool.clone()),
         blob_store_registry.clone(),
@@ -1544,7 +1626,7 @@ async fn run_hub(
                 SanitizedStartupCause::Static("runner_catalog_construction_failed"),
             );
             drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1563,7 +1645,7 @@ async fn run_hub(
                 SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
             );
             drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1586,7 +1668,7 @@ async fn run_hub(
                 SanitizedStartupCause::Socket(&error),
             );
             drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1601,34 +1683,47 @@ async fn run_hub(
             );
             let _ = runner_listener.cleanup();
             drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
         }
     };
-    let web_http_runtime = match WebHttpRuntime::bind(web_configuration).await {
-        Ok(runtime) => runtime,
-        Err(_) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::SocketBinding,
-                SanitizedStartupCause::Static("web_http_listener_bind_failed"),
-            );
-            let _ = listener.cleanup();
-            let _ = runner_listener.cleanup();
-            disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
-        }
-    };
+    let web_http_runtime =
+        match WebHttpRuntime::bind(web_configuration, pool.clone(), model_configuration.clone())
+            .await
+        {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::SocketBinding,
+                    SanitizedStartupCause::Static("web_http_listener_bind_failed"),
+                );
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        };
     tracing::info!(
         phase = ?RuntimePhase::SocketBinding,
         "daemon startup phase completed"
     );
     let repository_watch_reconciliation = async {
         repository_watch_store
+            .process_pending_expired_start_leases(|| {
+                DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+            })
+            .await?;
+        repository_watch_store
             .process_pending_lifecycle_cutoffs(|| DurableCommandId::from_uuid(uuid::Uuid::now_v7()))
+            .await?;
+        repository_watch_store
+            .process_pending_convergence_cutoffs(|| {
+                DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+            })
             .await
     };
     match await_while_guarded(&mut database, repository_watch_reconciliation).await {
@@ -1641,7 +1736,7 @@ async fn run_hub(
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
             drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1680,7 +1775,7 @@ async fn run_hub(
                 let _ = listener.cleanup();
                 let _ = runner_listener.cleanup();
                 drop(blob_executor);
-                disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
+                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
                 drop(blob_store_registry);
                 let _ = database.close().await;
                 return Err(failure);
@@ -1688,6 +1783,60 @@ async fn run_hub(
         },
         None => None,
     };
+    let convergence_sweep_runtime = match model_configuration.repository_watch() {
+        Some(configuration) => match ConvergenceSweepRuntime::try_new(
+            pool.clone(),
+            configuration,
+            template_configuration.clone(),
+            model_configuration.clone(),
+            eligibility_nudge.clone(),
+        ) {
+            Ok(runtime) => runtime,
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static(
+                        "convergence_sweep_transport_construction_failed",
+                    ),
+                );
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        },
+        None => None,
+    };
+    let convergence_sweep_store = PostgresConvergenceSweepStore::new(pool.clone());
+    let convergence_target_admission =
+        convergence_sweep_store.reconcile_configured_targets(&configured_convergence_targets);
+    match await_while_guarded(&mut database, convergence_target_admission).await {
+        GuardedAwait::Completed(Ok(())) => {}
+        GuardedAwait::Completed(Err(_)) => {
+            let failure = erase_startup_cause(
+                RuntimePhase::StartupScan,
+                SanitizedStartupCause::Static("convergence_target_admission_failed"),
+            );
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+        GuardedAwait::GuardLost => {
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            if let Some(registry) = blob_store_registry.as_ref() {
+                registry.disarm_staging_sweep();
+            }
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Ok(ShutdownOutcome::GuardLost);
+        }
+    }
     // Every fallible construction above has succeeded, so the revisions this
     // consumes belong to a daemon that reaches its runtime. A startup that
     // failed earlier retired and activated nothing, leaving the previous
@@ -1711,7 +1860,7 @@ async fn run_hub(
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
             drop(blob_executor);
-            disarm_staging_sweep_unless_guarded(&mut database, &blob_store_registry).await;
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
             return Err(failure);
@@ -1743,8 +1892,8 @@ async fn run_hub(
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
         None => process_runtime,
     };
-    let process_runtime = match blob_store_registry.as_ref() {
-        Some(registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
+    let process_runtime = match blob_store_registry {
+        Some(ref registry) => process_runtime.with_blob_store_registry(Arc::clone(registry)),
         None => process_runtime,
     };
     let provider = provider.with_text_delta_sink(process_runtime.provider_text_delta_sink());
@@ -1756,20 +1905,19 @@ async fn run_hub(
     .with_session_credentials(model_configuration.credential_family_catalog())
     .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
     .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets());
+    let provider = AttachmentPreparingModelCallProvider::new(
+        UsageLimitedModelCallProvider::new(provider, &model_configuration),
+        scheduler_pool.clone(),
+        blob_store_registry.clone(),
+    );
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
             model_repository,
             InProcessAttemptDispatchGate::default(),
-            UsageLimitedModelCallProvider::new(
-                AttachmentPreparingModelCallProvider::new(
-                    provider,
-                    scheduler_pool.clone(),
-                    blob_store_registry.clone(),
-                ),
-                &model_configuration,
-            ),
+            provider,
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
+        .with_workspace_instructions(workspace_instruction_runtime)
         .with_approval_judge(
             approval_judge_model,
             model_configuration.configured_approval_judge_selection(),
@@ -1786,7 +1934,8 @@ async fn run_hub(
             StartEligibleTurnRepository::new(scheduler_pool.clone()),
         ),
         execution,
-    );
+    )
+    .with_occupancy_recovery(scheduler_pool.clone(), eligibility_nudge.clone());
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),
         StaleActiveTurnBound::hard_ceiling(),
@@ -1808,6 +1957,9 @@ async fn run_hub(
         },
         None => SchedulerLoop::new(work_source, pass),
     };
+    if let Some((metrics, _server)) = prometheus_runtime.as_ref() {
+        scheduler = scheduler.with_occupancy_observer(Arc::new(metrics.clone()));
+    }
     if let Some(limit) = scheduler_max_in_flight_passes {
         tracing::info!(
             max_in_flight_passes = limit,
@@ -1818,6 +1970,11 @@ async fn run_hub(
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
+    let (
+        repository_watch_lease_expiry_shutdown,
+        mut repository_watch_lease_expiry_shutdown_receiver,
+    ) = watch::channel(false);
+    let (convergence_sweep_shutdown, convergence_sweep_shutdown_receiver) = watch::channel(false);
     let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
     let mut runtime_tasks = JoinSet::new();
@@ -1846,6 +2003,41 @@ async fn run_hub(
                     .run(repository_watch_shutdown_receiver)
                     .await,
             )
+        });
+    }
+    let repository_watch_lease_expiry_store = repository_watch_store.clone();
+    runtime_tasks.spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let outcome = loop {
+            select! {
+                changed = repository_watch_lease_expiry_shutdown_receiver.changed() => {
+                    if changed.is_err()
+                        || *repository_watch_lease_expiry_shutdown_receiver.borrow_and_update()
+                    {
+                        break Ok(());
+                    }
+                }
+                _ = ticker.tick() => {
+                    if let Err(error) = repository_watch_lease_expiry_store
+                        .process_pending_expired_start_leases(|| {
+                            DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+                        })
+                        .await
+                    {
+                        break Err(error);
+                    }
+                }
+            }
+        };
+        RuntimeTaskExit::RepositoryWatchLeaseExpiry(outcome)
+    });
+    if let Some(convergence_sweep_runtime) = convergence_sweep_runtime {
+        runtime_tasks.spawn(async move {
+            convergence_sweep_runtime
+                .run(convergence_sweep_shutdown_receiver)
+                .await;
+            RuntimeTaskExit::ConvergenceSweep
         });
     }
     runtime_tasks.spawn(async move {
@@ -1901,6 +2093,22 @@ async fn run_hub(
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Err(error)))) => {
+                        report_repository_watch_lease_expiry_failure(&error);
+                        RuntimeStopCause::RuntimeFailed
+                    }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Ok(())))) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::RepositoryWatchLeaseExpiryCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    Some(Ok(RuntimeTaskExit::ConvergenceSweep)) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::ConvergenceSweepCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::WebHttp(Err(error)))) => {
                         report_web_http_runtime_failure(&error);
                         RuntimeStopCause::RuntimeFailed
@@ -1944,6 +2152,8 @@ async fn run_hub(
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
             let _ = repository_watch_shutdown.send(true);
+            let _ = repository_watch_lease_expiry_shutdown.send(true);
+            let _ = convergence_sweep_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
             let _ = turn_liveness_shutdown.send(true);
             let (drain, components_clean) = drain_runtime_tasks(
