@@ -17,13 +17,14 @@ use signalbox_application::{
     CommissionDispatchRequest, CommissionedDispatchFence, ModelCallCredentialReference,
     RepoWatchBranchHead, RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
     RepoWatchConvergenceVerdict, RepoWatchDispatchService, RepoWatchDispatchTransaction,
-    RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
-    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate,
-    RepoWatchReviewDecision, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchTemplateResolver, RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome,
-    StartEligibleTurnService, UuidV7CommissionedDispatchIdGenerator,
-    UuidV7RepoWatchDispatchIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObligationReadiness,
+    RepoWatchObservation, RepoWatchPagePosition, RepoWatchPullRequestLifecycle,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
+    RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome, StartEligibleTurnService,
+    UuidV7CommissionedDispatchIdGenerator, UuidV7RepoWatchDispatchIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName,
@@ -84,6 +85,7 @@ use signalbox_persistence::{
     repo_watch_dispatch_obligation::{
         RepoWatchDispatchObligation, RepoWatchDispatchRetryPolicy, RepoWatchObligationParkRelease,
     },
+    repo_watch_operations::PostgresRepoWatchOperations,
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
@@ -208,6 +210,11 @@ const TEMPLATE_MODEL_SELECTION_ID: u128 = 901;
 const APPROVAL_JUDGE_PROVIDER_ID: u128 = 902;
 const FIXTURE_CREDENTIAL_REFERENCE: &str = "fixture-credential";
 const CLOSED_RESULT_ID_OFFSET: u128 = 0x2_000_000;
+/// These operator reads turn on dispatch, settlement, and commission order,
+/// never on how many automatic resumptions a deployment still owes, so they
+/// state the unbounded automatic-resume budget instead of a number their story
+/// never uses.
+const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -4064,6 +4071,50 @@ async fn current_head_achievement_seals_without_requeue() -> Result<(), Box<dyn 
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_repository_status_reads_the_latest_achieved_settlement_projection()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    declare_dispatched_goal_achieved(&fixture, 0, 0x50_410).await?;
+
+    let statuses =
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+            .repository_statuses(None)
+            .await?;
+
+    assert_eq!(
+        statuses.repositories[0]
+            .last_automation_settlement
+            .as_ref()
+            .map(|settlement| settlement.dispatch),
+        Some(fixture.dispatch_id)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_pull_request_reads_the_latest_achieved_settlement_projection()
+-> Result<(), Box<dyn Error>> {
+    let fixture = dispatch_fixture_for(one_action_rule(Duration::ZERO)?).await?;
+    declare_dispatched_goal_achieved(&fixture, 0, 0x50_420).await?;
+
+    let pull_requests =
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+            .pull_requests(fixture.repository.clone(), None)
+            .await?;
+
+    assert_eq!(
+        pull_requests.pull_requests[0]
+            .last_automation_settlement
+            .as_ref()
+            .map(|settlement| settlement.dispatch),
+        Some(fixture.dispatch_id)
+    );
+    Ok(())
+}
+
 /// A merge-forward dispatch moves the head it was dispatched against, so the
 /// exact-head seal must compare the state a batch delivered rather than the
 /// event that originated it. The obligation successor replays that still-
@@ -6237,6 +6288,210 @@ async fn dispatch_batch_creates_every_session_and_audit_row_atomically()
     Ok(())
 }
 
+async fn occupied_operations_fixture()
+-> Result<(DispatchFixture, PostgresRepoWatchOperations), Box<dyn Error>> {
+    let fixture = dispatch_fixture().await?;
+    let occupied = evaluate_second_conflict(&fixture).await?;
+    let reader =
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+
+    assert_eq!(occupied, RepoWatchRuleEvaluationOutcome::Occupied);
+    Ok((fixture, reader))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_repository_status_counts_held_and_queued_work() -> Result<(), Box<dyn Error>> {
+    let (fixture, reader) = occupied_operations_fixture().await?;
+    let statuses = reader.repository_statuses(None).await?;
+    let projected_held_count: i64 = sqlx::query_scalar(
+        "SELECT held_count
+           FROM repo_watch_current_repository_held_count
+          WHERE repository = $1",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let projected_count: i64 = sqlx::query_scalar(
+        "SELECT obligation_count
+           FROM repo_watch_current_repository_obligation_count
+          WHERE repository = $1",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert_eq!(statuses.repositories.len(), 1);
+    assert_eq!(statuses.repositories[0].held_slot_count, 1);
+    assert_eq!(statuses.repositories[0].queued_obligation_count, 1);
+    assert_eq!(projected_held_count, 1);
+    assert_eq!(projected_count, 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn releasing_a_dispatch_removes_its_projected_repository_held_count()
+-> Result<(), Box<dyn Error>> {
+    let (fixture, reader) = occupied_operations_fixture().await?;
+    sqlx::query("INSERT INTO repo_watch_dispatch_release (dispatch_id) VALUES ($1)")
+        .bind(fixture.dispatch_id.as_uuid())
+        .execute(&fixture.pool)
+        .await?;
+    let projected: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM repo_watch_current_repository_held_count
+             WHERE repository = $1
+        )",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let statuses = reader.repository_statuses(None).await?;
+
+    assert!(!projected);
+    assert_eq!(statuses.repositories[0].held_slot_count, 0);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_repository_status_reads_the_latest_actionable_event_projection()
+-> Result<(), Box<dyn Error>> {
+    let (fixture, reader) = occupied_operations_fixture().await?;
+    let work = reader
+        .work(
+            fixture.repository.clone(),
+            RepoWatchPagePosition::Exhausted,
+            RepoWatchPagePosition::Start,
+        )
+        .await?;
+    let statuses = reader.repository_statuses(None).await?;
+
+    assert_eq!(
+        statuses.repositories[0]
+            .last_actionable_event
+            .as_ref()
+            .map(|event| event.id),
+        Some(work.queued_obligations[0].latest_event)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_pull_request_counts_held_and_queued_work() -> Result<(), Box<dyn Error>> {
+    let (fixture, reader) = occupied_operations_fixture().await?;
+    let projected: (i64, i64) = sqlx::query_as(
+        "SELECT held_count, obligation_count
+           FROM repo_watch_current_pull_request_work_count
+          WHERE repository = $1",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
+    let pull_requests = reader
+        .pull_requests(fixture.repository.clone(), None)
+        .await?;
+
+    assert_eq!(pull_requests.pull_requests.len(), 1);
+    assert_eq!(pull_requests.pull_requests[0].held_slot_count, 1);
+    assert_eq!(pull_requests.pull_requests[0].queued_obligation_count, 1);
+    assert_eq!(projected, (1, 1));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_pull_request_reads_the_latest_actionable_event_projection()
+-> Result<(), Box<dyn Error>> {
+    let (fixture, reader) = occupied_operations_fixture().await?;
+    let work = reader
+        .work(
+            fixture.repository.clone(),
+            RepoWatchPagePosition::Exhausted,
+            RepoWatchPagePosition::Start,
+        )
+        .await?;
+    let pull_requests = reader
+        .pull_requests(fixture.repository.clone(), None)
+        .await?;
+
+    assert_eq!(
+        pull_requests.pull_requests[0]
+            .last_actionable_event
+            .as_ref()
+            .map(|event| event.id),
+        Some(work.queued_obligations[0].latest_event)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_work_lists_held_slots_and_queued_obligations() -> Result<(), Box<dyn Error>> {
+    let (fixture, reader) = occupied_operations_fixture().await?;
+    let work = reader
+        .work(
+            fixture.repository.clone(),
+            RepoWatchPagePosition::Start,
+            RepoWatchPagePosition::Start,
+        )
+        .await?;
+
+    assert_eq!(work.held_slots.len(), 1);
+    assert_eq!(work.queued_obligations.len(), 1);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_pull_request_sessions_preserve_commission_order() -> Result<(), Box<dyn Error>> {
+    let (fixture, reader) = occupied_operations_fixture().await?;
+    let sessions = reader
+        .pull_request_sessions(
+            fixture.repository.clone(),
+            pull_request_number(&fixture.event),
+            None,
+        )
+        .await?;
+
+    assert_eq!(sessions.sessions.len(), fixture.sessions.len());
+    assert_eq!(sessions.sessions[0].attention.session, fixture.sessions[1]);
+    assert_eq!(sessions.sessions[1].attention.session, fixture.sessions[0]);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operator_activity_retains_queued_and_dispatched_event_identities()
+-> Result<(), Box<dyn Error>> {
+    let (fixture, reader) = occupied_operations_fixture().await?;
+    let work = reader
+        .work(
+            fixture.repository.clone(),
+            RepoWatchPagePosition::Start,
+            RepoWatchPagePosition::Start,
+        )
+        .await?;
+    let activity = reader
+        .activity(
+            fixture.repository.clone(),
+            RepoWatchPagePosition::Start,
+            RepoWatchPagePosition::Exhausted,
+        )
+        .await?;
+
+    assert_eq!(activity.events.len(), 3);
+    assert_eq!(
+        activity.events[0].id,
+        work.queued_obligations[0].latest_event
+    );
+    assert_eq!(activity.events[1].id, fixture.event.id());
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn equal_event_rule_recovery_replays_the_original_sessions() -> Result<(), Box<dyn Error>> {
@@ -7620,10 +7875,17 @@ async fn dispatch_obligation_waits_visibly_through_configured_cooldown()
     )
     .fetch_one(&fixture.pool)
     .await?;
+    let projected_eligible_at_is_future: bool = sqlx::query_scalar(
+        "SELECT eligible_at > clock_timestamp()
+           FROM repo_watch_current_singleton_cooldown",
+    )
+    .fetch_one(&fixture.pool)
+    .await?;
 
     assert!(obligation.is_none());
     assert_eq!(visible.matched_event_count, 1);
     assert!(visible.eligible_at_is_future);
+    assert!(projected_eligible_at_is_future);
     assert!(!visible.ready);
     Ok(())
 }
@@ -7648,9 +7910,20 @@ async fn rule_deactivation_settles_its_outstanding_dispatch_obligation()
     )
     .fetch_one(&fixture.pool)
     .await?;
+    let projected: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM repo_watch_current_repository_obligation_count
+             WHERE repository = $1
+        )",
+    )
+    .bind(fixture.repository.as_str())
+    .fetch_one(&fixture.pool)
+    .await?;
 
     assert_eq!(outstanding, 0);
     assert_eq!(settlement, "deactivated");
+    assert!(!projected);
     Ok(())
 }
 
@@ -8257,6 +8530,31 @@ async fn repository_watch_observes_operator_commission_target_ownership()
             .await?
             .is_none(),
         "a live external blocker keeps the obligation out of the dispatch loader"
+    );
+
+    // The operator read has to agree with the loader it describes. A live
+    // external blocker leaves no occupying dispatch and no cooldown, so a
+    // readiness recomputed without that term would announce work as ready that
+    // admission refuses.
+    let blocked_work =
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+            .work(
+                repository.clone(),
+                RepoWatchPagePosition::Exhausted,
+                RepoWatchPagePosition::Start,
+            )
+            .await?;
+
+    assert_eq!(
+        blocked_work
+            .queued_obligations
+            .iter()
+            .map(|obligation| obligation.readiness.clone())
+            .collect::<Vec<_>>(),
+        vec![RepoWatchObligationReadiness::ExternallyBlocked {
+            sessions: vec![fixture.session],
+        }],
+        "the operator read names the live external session holding the obligation"
     );
 
     let stopped = GoalRepository::new(fixture.pool.clone())
