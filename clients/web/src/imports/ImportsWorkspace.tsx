@@ -279,6 +279,8 @@ export function ImportsWorkspace({
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () =>
         document.querySelector<HTMLElement>('[aria-label="Imported source entries"]')?.focus(),
       importEntryIds,

@@ -435,6 +435,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       dispatch,
       getState: store.getState,
       timelineIds: surfaceContext === null ? timelineIds : surfaceContext.timelineIds,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
       focusTimeline: surfaceContext?.focusTimeline ?? (() => timelineRef.current?.focus()),
       loadTimelineWindow: (anchor) =>
