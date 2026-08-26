@@ -42,6 +42,10 @@ Registry-first attachment catalog admission, distinct-digest byte accounting,
 and durable typed rejection replay are verified against this implementing change
 (`agent/blob-storage-attachment-admission`).
 
+Prospective rendered-frontier attachment accounting and affected queued-input
+revalidation are verified against this implementing change
+(`agent/blob-storage-attachment-frontier-admission`).
+
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
 configuration and routing, the ingest and read lifecycle, the blob wire

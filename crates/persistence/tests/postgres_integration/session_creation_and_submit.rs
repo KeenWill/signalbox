@@ -3959,13 +3959,24 @@ async fn inv012_attachment_byte_bound_rejection_replays_exactly() -> Result<(), 
     Ok(())
 }
 
-/// INV-089: a newly queued input is rejected when the complete prospective
-/// rendered frontier, rather than either input alone, exceeds the attachment
-/// verification bound.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_queued_input_checks_the_complete_prospective_attachment_frontier()
--> Result<(), Box<dyn Error>> {
+struct QueuedFrontierFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SubmitInputRepository,
+    session: SessionId,
+    first_digest: BlobDigest,
+    second_digest: BlobDigest,
+    maximum: u64,
+}
+
+impl QueuedFrontierFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_digest = BlobDigest::digest(b"first prospective attachment");
     let second_digest = BlobDigest::digest(b"second prospective attachment");
@@ -3998,44 +4009,115 @@ async fn inv089_queued_input_checks_the_complete_prospective_attachment_frontier
     CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
         .handle(prepared(0xb332, 0xb331, direct(0xb333)))
         .await?;
+    let repository =
+        SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(maximum);
+    Ok(QueuedFrontierFixture {
+        container,
+        pool,
+        repository,
+        session,
+        first_digest,
+        second_digest,
+        maximum,
+    })
+}
+
+/// INV-089: a newly queued input is rejected when the complete prospective
+/// rendered frontier, rather than either input alone, exceeds the attachment
+/// verification bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_queued_input_checks_the_complete_prospective_attachment_frontier()
+-> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture().await?;
     let delivery = DeliveryRequest::StartWhenNoActiveTurn {
         configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
     };
-    let repository =
-        SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(maximum);
     let first = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
-        session,
-        attachment_content(first_digest),
+        fixture.session,
+        attachment_content(fixture.first_digest),
         delivery,
     );
-    assert!(matches!(
-        repository
-            .handle(
-                first,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(_)
-        ))
-    ));
+    assert!(
+        matches!(
+            fixture
+                .repository
+                .handle(
+                    first,
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+                    Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the first seven-byte attachment must remain within the ten-byte bound"
+    );
     let second = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
-        session,
-        attachment_content(second_digest),
+        fixture.session,
+        attachment_content(fixture.second_digest),
+        delivery,
+    );
+
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                second,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: fixture.maximum,
+            },
+        ))
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: a prospective queued-frontier rejection replays exactly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_queued_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture().await?;
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
+                fixture.session,
+                attachment_content(fixture.first_digest),
+                delivery,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+        )
+        .await?;
+    let rejected = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
+        fixture.session,
+        attachment_content(fixture.second_digest),
         delivery,
     );
     let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
         SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
-            maximum_bytes: maximum,
+            maximum_bytes: fixture.maximum,
         },
     ));
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
-                second.clone(),
+                rejected.clone(),
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
                 Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
             )
@@ -4043,26 +4125,17 @@ async fn inv089_queued_input_checks_the_complete_prospective_attachment_frontier
         expected
     );
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
-                second,
+                rejected,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb33a)),
                 Some(TurnId::from_uuid(Uuid::from_u128(0xb33b))),
             )
             .await?,
         expected
     );
-    let effects: (i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1),
-                (SELECT count(*) FROM queued_input_origin WHERE session_id = $1)",
-    )
-    .bind(session.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(effects, (1, 1));
-
-    pool.close().await;
-    drop(container);
+    fixture.finish().await;
     Ok(())
 }
 
@@ -4200,16 +4273,83 @@ async fn inv012_retained_attachment_maximum_requires_its_rejection_kind()
     Ok(())
 }
 
-/// INV-089: pending steering is rejected when it would make a queued
-/// successor's eventual rendered frontier exceed the attachment bound. Two
-/// successors are queued in canonical order: after the steering transition the
-/// earlier one's prospective frontier still fits and only the later one
-/// exceeds the bound, so every affected queued frontier has to be recomputed
-/// rather than just the first.
+/// INV-089: a rejected queued frontier rolls back every provisional accepted
+/// input and queue-origin effect.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
+async fn inv089_queued_frontier_rejection_rolls_back_provisional_effects()
 -> Result<(), Box<dyn Error>> {
+    let fixture = queued_frontier_fixture().await?;
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb334)),
+                fixture.session,
+                attachment_content(fixture.first_digest),
+                delivery,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+        )
+        .await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
+                fixture.session,
+                attachment_content(fixture.second_digest),
+                delivery,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb338)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb339))),
+        )
+        .await?;
+    #[derive(sqlx::FromRow)]
+    struct QueuedFrontierEffectCounts {
+        accepted_inputs: i64,
+        queued_origins: i64,
+    }
+    let effects = sqlx::query_as::<_, QueuedFrontierEffectCounts>(
+        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1)
+                    AS accepted_inputs,
+                (SELECT count(*) FROM queued_input_origin WHERE session_id = $1)
+                    AS queued_origins",
+    )
+    .bind(fixture.session.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+    assert_eq!(effects.accepted_inputs, 1);
+    assert_eq!(effects.queued_origins, 1);
+
+    fixture.finish().await;
+    Ok(())
+}
+
+struct SteeringFrontierFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    repository: SubmitInputRepository,
+    session: SessionId,
+    active_turn: TurnId,
+    queued_digest: BlobDigest,
+    later_queued_digest: BlobDigest,
+    steering_digest: BlobDigest,
+    maximum: u64,
+}
+
+impl SteeringFrontierFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let queued_digest = BlobDigest::digest(b"queued prospective attachment");
     let later_queued_digest = BlobDigest::digest(b"later queued prospective attachment");
@@ -4276,63 +4416,161 @@ async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
         },
     )
     .await?;
+    Ok(SteeringFrontierFixture {
+        container,
+        pool,
+        repository,
+        session,
+        active_turn,
+        queued_digest,
+        later_queued_digest,
+        steering_digest,
+        maximum,
+    })
+}
+
+/// INV-089: pending steering is rejected when it would make a queued
+/// successor's eventual rendered frontier exceed the attachment bound. Two
+/// successors are queued in canonical order: after the steering transition the
+/// earlier one's prospective frontier still fits and only the later one
+/// exceeds the bound, so every affected queued frontier has to be recomputed
+/// rather than just the first.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
+-> Result<(), Box<dyn Error>> {
+    let fixture = steering_frontier_fixture().await?;
     let queued = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
-        session,
-        attachment_content(queued_digest),
+        fixture.session,
+        attachment_content(fixture.queued_digest),
         DeliveryRequest::AfterCurrentTurn {
-            expected_active_turn: active_turn,
+            expected_active_turn: fixture.active_turn,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
-    assert!(matches!(
-        repository
-            .handle(
-                queued,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(_)
-        ))
-    ));
+    assert!(
+        matches!(
+            fixture
+                .repository
+                .handle(
+                    queued,
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+                    Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the queued seven-byte attachment must remain within the twenty-byte bound"
+    );
     let later_queued = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0xb360)),
-        session,
-        attachment_content(later_queued_digest),
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb370)),
+        fixture.session,
+        attachment_content(fixture.later_queued_digest),
         DeliveryRequest::AfterCurrentTurn {
-            expected_active_turn: active_turn,
+            expected_active_turn: fixture.active_turn,
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
-    assert!(matches!(
-        repository
-            .handle(
-                later_queued,
-                AcceptedInputId::from_uuid(Uuid::from_u128(0xb361)),
-                Some(TurnId::from_uuid(Uuid::from_u128(0xb362))),
-            )
-            .await?,
-        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-            SubmitInputAppliedResult::TurnOrigin(_)
-        ))
-    ));
+    assert!(
+        matches!(
+            fixture
+                .repository
+                .handle(
+                    later_queued,
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0xb371)),
+                    Some(TurnId::from_uuid(Uuid::from_u128(0xb372))),
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the queued pair must total fourteen bytes, within the twenty-byte bound"
+    );
     let steering = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
-        session,
-        attachment_content(steering_digest),
+        fixture.session,
+        attachment_content(fixture.steering_digest),
         DeliveryRequest::NextSafePoint {
-            expected_active_turn: active_turn,
+            expected_active_turn: fixture.active_turn,
+        },
+    );
+
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                steering,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: fixture.maximum,
+            },
+        ))
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-012: a prospective steering-frontier rejection replays exactly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_steering_frontier_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
+    let fixture = steering_frontier_fixture().await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
+                fixture.session,
+                attachment_content(fixture.queued_digest),
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: fixture.active_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+        )
+        .await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb370)),
+                fixture.session,
+                attachment_content(fixture.later_queued_digest),
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: fixture.active_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb371)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb372))),
+        )
+        .await?;
+    let steering = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
+        fixture.session,
+        attachment_content(fixture.steering_digest),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: fixture.active_turn,
         },
     );
     let expected = SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
         SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
-            maximum_bytes: maximum,
+            maximum_bytes: fixture.maximum,
         },
     ));
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
                 steering.clone(),
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
@@ -4342,7 +4580,8 @@ async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
         expected
     );
     assert_eq!(
-        repository
+        fixture
+            .repository
             .handle(
                 steering,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb34f)),
@@ -4351,18 +4590,315 @@ async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
             .await?,
         expected
     );
-    let effects: (i64, i64, i64) = sqlx::query_as(
-        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1),
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-089: a rejected steering frontier rolls back the provisional pending
+/// steering while preserving the active and queued origins.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_steering_frontier_rejection_rolls_back_provisional_effects()
+-> Result<(), Box<dyn Error>> {
+    let fixture = steering_frontier_fixture().await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb34a)),
+                fixture.session,
+                attachment_content(fixture.queued_digest),
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: fixture.active_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+        )
+        .await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb370)),
+                fixture.session,
+                attachment_content(fixture.later_queued_digest),
+                DeliveryRequest::AfterCurrentTurn {
+                    expected_active_turn: fixture.active_turn,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb371)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb372))),
+        )
+        .await?;
+    fixture
+        .repository
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
+                fixture.session,
+                attachment_content(fixture.steering_digest),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: fixture.active_turn,
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34e)),
+            None,
+        )
+        .await?;
+    #[derive(sqlx::FromRow)]
+    struct SteeringFrontierEffectCounts {
+        accepted_inputs: i64,
+        queued_successor_origins: i64,
+        pending_steering: i64,
+    }
+    let effects = sqlx::query_as::<_, SteeringFrontierEffectCounts>(
+        "SELECT (SELECT count(*) FROM accepted_input WHERE session_id = $1)
+                    AS accepted_inputs,
                 (SELECT count(*) FROM queued_input_origin WHERE session_id = $1
-                    AND turn_id <> $2),
+                    AND turn_id <> $2) AS queued_successor_origins,
                 (SELECT count(*) FROM accepted_input WHERE session_id = $1
-                    AND disposition_kind = 'pending_steering')",
+                    AND disposition_kind = 'pending_steering') AS pending_steering",
     )
-    .bind(session.into_uuid())
-    .bind(active_turn.into_uuid())
-    .fetch_one(&pool)
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.active_turn.into_uuid())
+    .fetch_one(&fixture.pool)
     .await?;
-    assert_eq!(effects, (3, 2, 0));
+    assert_eq!(effects.accepted_inputs, 3);
+    assert_eq!(effects.queued_successor_origins, 2);
+    assert_eq!(effects.pending_steering, 0);
+
+    fixture.finish().await;
+    Ok(())
+}
+
+/// Base identity for the accepted-input executing-batch scenario. Arbitrary:
+/// it only has to leave `checkpoint_tool_batch_with_approval`'s derived
+/// identities distinct from every other fixture in this file.
+const TOOL_BATCH_FIXTURE_SEED: u128 = 0xb360;
+/// Base identity for the delegated executing-batch scenario. Arbitrary, and
+/// far enough above [`TOOL_BATCH_FIXTURE_SEED`] that the two fixtures' derived
+/// identities cannot meet.
+const DELEGATED_BATCH_FIXTURE_SEED: u128 = 0xb380;
+/// Seed offsets for identities these scenarios introduce. Each is arbitrary
+/// and only has to be distinct from the fixture's own identities.
+const STORE_NAMESPACE: u128 = 0x200;
+const SECOND_STORE_NAMESPACE: u128 = 0x201;
+const QUEUED_COMMAND: u128 = 0x202;
+const QUEUED_ACCEPTED_INPUT: u128 = 0x203;
+const QUEUED_TURN_CANDIDATE: u128 = 0x204;
+const STEERING_COMMAND: u128 = 0x205;
+const STEERING_ACCEPTED_INPUT: u128 = 0x206;
+const LATER_STEERING_COMMAND: u128 = 0x207;
+const LATER_STEERING_ACCEPTED_INPUT: u128 = 0x208;
+const TOOL_REQUEST: u128 = 0x209;
+const TOOL_CALL_ENTRY: u128 = 0x20a;
+const YIELDED_FRONTIER: u128 = 0x20b;
+const CONTINUATION_ATTEMPT: u128 = 0x20c;
+/// Each catalogued attachment in these scenarios. Load-bearing: one fits under
+/// [`TOOL_BATCH_ATTACHMENT_MAXIMUM`] and two do not.
+const RETAINED_ATTACHMENT_LENGTH: u64 = 7;
+const TOOL_BATCH_ATTACHMENT_MAXIMUM: u64 = 10;
+
+/// INV-089: a turn executing a tool batch keeps the `running` phase while the
+/// call that produced the batch is already terminal, so prospective
+/// attachment accounting reads the batch's yielded frontier instead of
+/// rejecting the submission it cannot reconstitute.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_executing_tool_batch_admits_a_bounded_attachment_queue()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let (fixture, _, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        TOOL_BATCH_FIXTURE_SEED,
+        &[("current_time", "{}")],
+        InitialToolApproval::PolicyAuto,
+    )
+    .await?;
+    let digest = BlobDigest::digest(b"tool batch prospective attachment");
+    catalog_verified_blob(
+        &pool,
+        digest,
+        RETAINED_ATTACHMENT_LENGTH,
+        "prospective_tool_batch",
+        Uuid::from_u128(TOOL_BATCH_FIXTURE_SEED + STORE_NAMESPACE),
+        "queued",
+    )
+    .await?;
+    let queued = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(TOOL_BATCH_FIXTURE_SEED + QUEUED_COMMAND)),
+        fixture.session,
+        attachment_content(digest),
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: fixture.turn,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+
+    assert!(
+        matches!(
+            SubmitInputRepository::new(pool.clone())
+                .with_attachment_maximum_bytes(TOOL_BATCH_ATTACHMENT_MAXIMUM)
+                .handle(
+                    queued,
+                    AcceptedInputId::from_uuid(Uuid::from_u128(
+                        TOOL_BATCH_FIXTURE_SEED + QUEUED_ACCEPTED_INPUT,
+                    )),
+                    Some(TurnId::from_uuid(Uuid::from_u128(
+                        TOOL_BATCH_FIXTURE_SEED + QUEUED_TURN_CANDIDATE,
+                    ))),
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the queued seven-byte attachment must remain within the ten-byte bound"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-089: a delegated turn executing a tool batch keeps the `running` phase
+/// with no cancellation-requested call, and a delegation origin owns no
+/// accepted-input turn in the scheduling projection. The batch's yielded
+/// frontier and the steering pending against that turn are still retained
+/// context, so their attachments are charged against the bound rather than
+/// being replaced by the earliest queued base.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_delegated_executing_tool_batch_charges_its_retained_attachment()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture =
+        authorize_delegated_model_call_fixture(&pool, DELEGATED_BATCH_FIXTURE_SEED).await?;
+    let turn = fixture.authorized.turn();
+    let request =
+        ToolRequestId::from_uuid(Uuid::from_u128(DELEGATED_BATCH_FIXTURE_SEED + TOOL_REQUEST));
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from("current_time")).expect("valid fixture tool name"),
+                NormalizedToolArguments::try_from_provider_text(String::from("{}"))
+                    .expect("bounded fixture arguments"),
+            ),
+        )])
+        .expect("the proposal forms a tool-using response");
+    let outcome = fixture
+        .repository
+        .apply_terminal_observation(
+            fixture.child,
+            fixture
+                .authorized
+                .observation_correlation()
+                .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools {
+                    response,
+                }),
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        DELEGATED_BATCH_FIXTURE_SEED + TOOL_CALL_ENTRY,
+                    )),
+                    request,
+                    InitialToolApproval::PolicyAuto,
+                )],
+                ContextFrontierId::from_uuid(Uuid::from_u128(
+                    DELEGATED_BATCH_FIXTURE_SEED + YIELDED_FRONTIER,
+                )),
+                Some(TurnAttemptId::from_uuid(Uuid::from_u128(
+                    DELEGATED_BATCH_FIXTURE_SEED + CONTINUATION_ATTEMPT,
+                ))),
+            )),
+            |_| panic!("the delegated fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    assert!(
+        matches!(
+            &outcome,
+            ModelCallTerminalOutcome::ToolRound(round)
+                if matches!(round.next_phase(), ActiveTurnPhase::Running { .. })
+        ),
+        "the delegated fixture reaches a tool round whose automatically approved batch executes under the running phase"
+    );
+
+    let retained_digest = BlobDigest::digest(b"delegated retained attachment");
+    let later_steering_digest = BlobDigest::digest(b"delegated later steering attachment");
+    catalog_verified_blob(
+        &pool,
+        retained_digest,
+        RETAINED_ATTACHMENT_LENGTH,
+        "delegated_batch_retained",
+        Uuid::from_u128(DELEGATED_BATCH_FIXTURE_SEED + STORE_NAMESPACE),
+        "retained",
+    )
+    .await?;
+    catalog_verified_blob(
+        &pool,
+        later_steering_digest,
+        RETAINED_ATTACHMENT_LENGTH,
+        "delegated_batch_later_steering",
+        Uuid::from_u128(DELEGATED_BATCH_FIXTURE_SEED + SECOND_STORE_NAMESPACE),
+        "later_steering",
+    )
+    .await?;
+    let repository = SubmitInputRepository::new(pool.clone())
+        .with_attachment_maximum_bytes(TOOL_BATCH_ATTACHMENT_MAXIMUM);
+    assert!(
+        matches!(
+            repository
+                .handle(
+                    SubmitInput::new(
+                        DurableCommandId::from_uuid(Uuid::from_u128(
+                            DELEGATED_BATCH_FIXTURE_SEED + STEERING_COMMAND,
+                        )),
+                        fixture.child,
+                        attachment_content(retained_digest),
+                        DeliveryRequest::NextSafePoint {
+                            expected_active_turn: turn,
+                        },
+                    ),
+                    AcceptedInputId::from_uuid(Uuid::from_u128(
+                        DELEGATED_BATCH_FIXTURE_SEED + STEERING_ACCEPTED_INPUT,
+                    )),
+                    None,
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::PendingSteering(_)
+            ))
+        ),
+        "the retained seven-byte attachment must remain within the ten-byte bound"
+    );
+    assert_eq!(
+        repository
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(
+                        DELEGATED_BATCH_FIXTURE_SEED + LATER_STEERING_COMMAND,
+                    )),
+                    fixture.child,
+                    attachment_content(later_steering_digest),
+                    DeliveryRequest::NextSafePoint {
+                        expected_active_turn: turn,
+                    },
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(
+                    DELEGATED_BATCH_FIXTURE_SEED + LATER_STEERING_ACCEPTED_INPUT,
+                )),
+                None,
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: TOOL_BATCH_ATTACHMENT_MAXIMUM,
+            }
+        ))
+    );
 
     pool.close().await;
     drop(container);
