@@ -2341,8 +2341,11 @@ where
     ExecRunner: ProcessRunner,
 {
     /// Installs the executor matching the composed blob-read declarations.
-    pub fn with_blob_executor(mut self, executor: BlobToolExecutor) -> Self {
-        self.blob = Some(executor);
+    ///
+    /// An absent executor is the unconfigured deployment, whose catalog never
+    /// received the declarations either.
+    pub fn with_blob_executor(mut self, executor: Option<BlobToolExecutor>) -> Self {
+        self.blob = executor;
         self
     }
 }

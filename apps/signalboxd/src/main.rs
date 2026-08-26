@@ -1575,35 +1575,42 @@ async fn run_hub(
         }
     };
     let mut blob_store_registry = blob_store_registry.map(Arc::new);
-    let blob_tools = match BlobTools::try_new(
-        BlobCatalogRepository::new(pool.clone()),
-        blob_store_registry.clone(),
-    ) {
-        Ok(tools) => tools,
-        Err(_) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("blob_read_tool_construction_failed"),
-            );
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
-        }
-    };
-    let (blob_catalog, blob_executor) = blob_tools.into_parts();
-    tool_catalog = match tool_catalog.with_compiled_catalog(blob_catalog) {
-        Ok(catalog) => catalog,
-        Err(_) => {
-            let failure = erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static("blob_read_tool_catalog_conflict"),
-            );
-            drop(blob_executor);
-            drop(blob_store_registry);
-            let _ = database.close().await;
-            return Err(failure);
-        }
-    };
+    // The family is model-facing only where blob storage exists: an absent
+    // registry means no configuration and an empty catalog, so advertising
+    // `blob_metadata` and `blob_read` would declare tools no request can use.
+    let mut blob_executor = None;
+    if blob_store_registry.is_some() {
+        let blob_tools = match BlobTools::try_new(
+            BlobCatalogRepository::new(pool.clone()),
+            blob_store_registry.clone(),
+        ) {
+            Ok(tools) => tools,
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("blob_read_tool_construction_failed"),
+                );
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        };
+        let (blob_catalog, executor) = blob_tools.into_parts();
+        tool_catalog = match tool_catalog.with_compiled_catalog(blob_catalog) {
+            Ok(catalog) => catalog,
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("blob_read_tool_catalog_conflict"),
+                );
+                drop(executor);
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        };
+        blob_executor = Some(executor);
+    }
     tool_catalog =
         match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
             Ok(catalog) => catalog,

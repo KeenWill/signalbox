@@ -37,6 +37,8 @@ CREATE INDEX blob_read_tool_charge_admitted_turn_idx
     WHERE admitted;
 
 ALTER TABLE tool_attempt
+    -- Supersedes tool_attempt_error_kind_closed from
+    -- 202607250001_tool_loop.sql.
     DROP CONSTRAINT tool_attempt_error_kind_closed;
 
 ALTER TABLE tool_attempt
