@@ -1188,8 +1188,19 @@ async fn monitor_webhook_drain(
             WEBHOOK_DRAIN_MONITOR_INTERVAL,
             Instant::now(),
         );
-        let stall_threshold = match load_webhook_attempt_deadlines(&cursor_store, &repository).await
-        {
+        // The sizing read acquires a pooled connection and queries, for the
+        // same reason the inspection below is raced with shutdown: its own
+        // ten-second bound is still ten seconds this child would hold the
+        // supervisor while PostgreSQL was unresponsive.
+        let Some(sized) = run_until_shutdown(
+            &mut shutdown,
+            load_webhook_attempt_deadlines(&cursor_store, &repository),
+        )
+        .await
+        else {
+            return;
+        };
+        let stall_threshold = match sized {
             Ok(deadlines) => deadlines.stall_threshold(),
             Err(error) => {
                 tracing::error!(
@@ -2916,8 +2927,11 @@ impl RepositoryWatchTask {
         };
         let (events, identity_frontier) =
             primary_committed_occurrences(&self.repository, &baseline, &observation)?;
-        let compacted =
-            compact_cursor_observation(&observation, &baseline.merged_pull_request_baselines)?;
+        let compacted = compact_cursor_observation(
+            &observation,
+            Some(&baseline.observation),
+            &baseline.merged_pull_request_baselines,
+        )?;
         // A primary delivery records no event projection. Parity compares
         // projections against poll-produced rows, and this delivery's own commit
         // is the durable row; projecting it too would leave a permanent
@@ -3169,6 +3183,7 @@ impl RepositoryWatchTask {
         .map_err(|_| RepositoryWatchAttemptError::Differ)?;
         let compacted = compact_cursor_observation(
             &observation,
+            Some(cursor.candidate().observation()),
             cursor.candidate().merged_pull_request_baselines(),
         )?;
         Ok(PreparedTargetedRefreshOutcome::Prepared(
@@ -3658,8 +3673,11 @@ impl RepositoryWatchTask {
                 RepositoryWatchAttemptError::IdentityFrontier
             }
         })?;
-        let compacted =
-            compact_cursor_observation(&polled.observation, merged_pull_request_baselines)?;
+        let compacted = compact_cursor_observation(
+            &polled.observation,
+            previous,
+            merged_pull_request_baselines,
+        )?;
         let retained_pull_requests = compacted
             .observation
             .state()
@@ -7100,14 +7118,30 @@ struct CompactedCursorObservation {
 
 fn compact_cursor_observation(
     observation: &RepoWatchObservation,
+    previous: Option<&RepoWatchObservation>,
     retained_merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
 ) -> Result<CompactedCursorObservation, RepositoryWatchAttemptError> {
     let state = observation.state();
-    let mut merged_pull_request_baselines = retained_merged_baselines
-        .iter()
-        .cloned()
+    // A storage-version-three cursor carries its merged pull requests in full
+    // and no baselines at all, and a complete poll fetches only listed open
+    // pull requests and previously open ones, so those merged entries are
+    // absent from `observation`. Deriving baselines from the current
+    // observation alone would drop exactly the state the migration preserved
+    // for this commit to compact. Seed from the prior observation first so the
+    // retained baselines and the current observation below still win wherever
+    // they carry a fresher form of the same pull request.
+    let mut merged_pull_request_baselines = previous
+        .into_iter()
+        .flat_map(|previous| previous.state().pull_requests())
+        .filter_map(RepoWatchMergedPullRequestBaselineV1::from_merged_state)
         .map(|baseline| (baseline.number(), baseline))
         .collect::<BTreeMap<_, _>>();
+    merged_pull_request_baselines.extend(
+        retained_merged_baselines
+            .iter()
+            .cloned()
+            .map(|baseline| (baseline.number(), baseline)),
+    );
     for pull_request in state.pull_requests() {
         if let Some(baseline) =
             RepoWatchMergedPullRequestBaselineV1::from_merged_state(pull_request)
@@ -12585,7 +12619,7 @@ mod tests {
         let observation =
             observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Merged).await;
 
-        let compacted = compact_cursor_observation(&observation, &[])
+        let compacted = compact_cursor_observation(&observation, None, &[])
             .expect("fixture observation compacts canonically");
 
         assert!(compacted.observation.state().pull_requests().is_empty());
@@ -12608,12 +12642,37 @@ mod tests {
         );
     }
 
+    /// A storage-version-three cursor migrated to version four holds its merged
+    /// pull requests in full and no baselines. A complete poll fetches only
+    /// listed open pull requests and previously open ones, so that merged entry
+    /// is absent from the polled observation. Compacting the polled observation
+    /// alone would drop it without leaving the baseline the migration promises,
+    /// and the next post-merge hydration would then have nothing to compare.
+    #[tokio::test]
+    async fn a_durable_cursor_seeds_baselines_from_migrated_merged_pull_requests() {
+        let previous = observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Merged).await;
+        let polled = compact_cursor_observation(&previous, None, &[])
+            .expect("fixture observation compacts canonically")
+            .observation;
+        assert!(polled.state().pull_requests().is_empty());
+
+        let compacted = compact_cursor_observation(&polled, Some(&previous), &[])
+            .expect("fixture observation compacts canonically");
+
+        assert_eq!(compacted.merged_pull_request_baselines.len(), 1);
+        assert_eq!(
+            compacted.merged_pull_request_baselines[0].number(),
+            previous.state().pull_requests()[0].context().number()
+        );
+        assert!(compacted.observation.state().pull_requests().is_empty());
+    }
+
     #[tokio::test]
     async fn a_durable_cursor_retains_closed_unmerged_pull_request_details() {
         let observation =
             observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Closed).await;
 
-        let compacted = compact_cursor_observation(&observation, &[])
+        let compacted = compact_cursor_observation(&observation, None, &[])
             .expect("fixture observation compacts canonically");
 
         assert_eq!(
