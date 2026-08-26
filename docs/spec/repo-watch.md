@@ -438,10 +438,11 @@ A compact baseline remains while the merged pull request's recurring streams
 remain in the identity frontier. Evicting the baseline alone would make a later
 refresh look like an initial observation and synthesize occurrences for facts
 that did not change; releasing it therefore belongs to the same future
-subject-lifecycle mechanism as releasing those streams. Every merged baseline
-owns at least its terminal pull-request-kind stream, so the existing
-1,000,000-stream safety ceiling also bounds the number of retained baseline
-subjects meanwhile.
+subject-lifecycle mechanism as releasing those streams. A pull request first
+observed after merge need not have produced an occurrence stream yet, so the
+cursor independently refuses more than 1,000,000 retained baseline subjects. The
+frontier's existing 1,000,000-stream safety ceiling continues to bound the
+recurring streams those subjects own.
 
 No lifecycle releases a stream today, and none may be added without deciding
 which subject provably produces no further occurrence. A merged pull request is
@@ -1533,10 +1534,11 @@ identity and receipt time only and never the admitted body. That cadence is
 anchored, so a slow inspection does not push the next one out by its own
 duration, and the inspection is bounded at ten seconds so a connection pool
 exhausted by wedged repositories produces a closed timeout cause rather than
-silence; once the oldest delivery has remained undispositioned for one minute it
-emits an error-level stall signal with the repository, delivery identity,
-receipt sequence, pending age, and closed stall cause. Because the observer is
-not the serialized drain task, a task wedged in polling, projection,
+silence; once the oldest delivery has remained undispositioned beyond the
+payload-derived threshold pinned for that queue head (between one and fifteen
+minutes), it emits an error-level stall signal with the repository, delivery
+identity, receipt sequence, pending age, and closed stall cause. Because the
+observer is not the serialized drain task, a task wedged in polling, projection,
 disposition, or dispatch cannot silence that signal, and the observer's own
 inspection is cancelled by shutdown so an unresponsive database cannot hold
 daemon termination.

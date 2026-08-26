@@ -892,6 +892,12 @@ impl RepoWatchMergedPullRequestBaselineV1 {
             .threads
             .sort_by(|left, right| left.thread().cmp(right.thread()));
         reject_duplicate_threads(&input.threads)?;
+        input.reactions.retain(|reaction| {
+            input
+                .signal_reviewers
+                .binary_search(reaction.reactor())
+                .is_ok()
+        });
         input.reactions.sort_by(|left, right| {
             (
                 reaction_subject_sort_key(left.subject()),
@@ -1323,6 +1329,7 @@ impl RepoWatchObservation {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RepoWatchRepositoryStateError {
     DuplicatePullRequest(PullRequestNumber),
+    MergedPullRequestBaselineLimit,
     DuplicateCheckSuite(GitHubObjectId),
     DuplicateCheckRun(GitHubObjectId),
     DuplicateReview(GitHubObjectId),
@@ -1339,6 +1346,9 @@ impl fmt::Display for RepoWatchRepositoryStateError {
         match self {
             Self::DuplicatePullRequest(number) => {
                 write!(formatter, "duplicate pull request {}", number.get())
+            }
+            Self::MergedPullRequestBaselineLimit => {
+                formatter.write_str("repository-watch cursor exceeds 1000000 merged baselines")
             }
             Self::DuplicateCheckSuite(id) => {
                 write!(formatter, "duplicate check suite {}", id.get())
@@ -5237,6 +5247,19 @@ mod tests {
             result,
             Err(RepoWatchRepositoryStateError::DuplicateThread(duplicate))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn compact_merged_baseline_excludes_reactions_from_non_signal_reviewers()
+    -> Result<(), Box<dyn Error>> {
+        let mut input = merged_baseline_input()?;
+        input.signal_reviewers = vec![reviewer(REPLACEMENT_REVIEWER)?];
+        input.reactions = vec![reaction()?];
+
+        let baseline = RepoWatchMergedPullRequestBaselineV1::try_new(input)?;
+
+        assert!(baseline.reactions().is_empty());
         Ok(())
     }
 

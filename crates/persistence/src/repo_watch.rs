@@ -102,6 +102,20 @@ pub struct RepoWatchCursorCandidate {
     merged_pull_request_baselines: Box<[RepoWatchMergedPullRequestBaselineV1]>,
 }
 
+// The compact collection is independently bounded because a pull request first
+// observed after merge need not yet own an occurrence stream in the frontier.
+// numeric-bound: guard - prevents merged-subject fan-out from growing the cursor without limit
+const MAX_REPO_WATCH_MERGED_PULL_REQUEST_BASELINES: usize = 1_000_000;
+
+fn validate_merged_pull_request_baseline_count(
+    count: usize,
+) -> Result<(), RepoWatchRepositoryStateError> {
+    if count > MAX_REPO_WATCH_MERGED_PULL_REQUEST_BASELINES {
+        return Err(RepoWatchRepositoryStateError::MergedPullRequestBaselineLimit);
+    }
+    Ok(())
+}
+
 impl RepoWatchCursorCandidate {
     pub fn new(observation: RepoWatchObservation) -> Self {
         Self {
@@ -127,11 +141,26 @@ impl RepoWatchCursorCandidate {
         event_identity_frontier: RepoWatchEventIdentityFrontierV1,
         mut merged_pull_request_baselines: Vec<RepoWatchMergedPullRequestBaselineV1>,
     ) -> Result<Self, RepoWatchRepositoryStateError> {
+        validate_merged_pull_request_baseline_count(merged_pull_request_baselines.len())?;
         merged_pull_request_baselines.sort_by_key(RepoWatchMergedPullRequestBaselineV1::number);
         for adjacent in merged_pull_request_baselines.windows(2) {
             if adjacent[0].number() == adjacent[1].number() {
                 return Err(RepoWatchRepositoryStateError::DuplicatePullRequest(
                     adjacent[0].number(),
+                ));
+            }
+        }
+        for baseline in &merged_pull_request_baselines {
+            if observation
+                .state()
+                .pull_requests()
+                .binary_search_by_key(&baseline.number(), |pull_request| {
+                    pull_request.context().number()
+                })
+                .is_ok()
+            {
+                return Err(RepoWatchRepositoryStateError::DuplicatePullRequest(
+                    baseline.number(),
                 ));
             }
         }
@@ -3636,6 +3665,72 @@ mod tests {
                 candidate.observation().clone(),
                 candidate.event_identity_frontier().clone(),
                 vec![baseline.clone(), baseline],
+            );
+
+        assert_eq!(
+            result,
+            Err(RepoWatchRepositoryStateError::DuplicatePullRequest(number))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn merged_pull_request_baseline_count_has_a_fixed_upper_bound() {
+        assert_eq!(
+            validate_merged_pull_request_baseline_count(
+                MAX_REPO_WATCH_MERGED_PULL_REQUEST_BASELINES
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_merged_pull_request_baseline_count(
+                MAX_REPO_WATCH_MERGED_PULL_REQUEST_BASELINES + 1
+            ),
+            Err(RepoWatchRepositoryStateError::MergedPullRequestBaselineLimit)
+        );
+    }
+
+    #[test]
+    fn cursor_candidate_rejects_a_pull_request_in_full_and_compact_state()
+    -> Result<(), Box<dyn Error>> {
+        let candidate = merged_baseline_candidate()?;
+        let baseline = candidate.merged_pull_request_baselines()[0].clone();
+        let number = baseline.number();
+        let pull_request = RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
+            context: PullRequestEventContext::new(PullRequestEventContextInput {
+                number,
+                head_sha: baseline.head_sha().clone(),
+                head_repository: RepositorySlug::try_new(String::from("owner/repository"))?,
+                base_branch: BranchName::try_new(String::from("main"))?,
+                head_branch: BranchName::try_new(String::from("merged"))?,
+                title: PullRequestTitle::try_new(String::from("merged pull request"))?,
+                body: PullRequestBody::try_new(String::new())?,
+                labels: Vec::new(),
+                draft: false,
+                author: None,
+            }),
+            lifecycle: signalbox_application::RepoWatchPullRequestLifecycle::Merged,
+            mergeable_state: baseline.mergeable_state(),
+            completed_check_suites: Vec::new(),
+            completed_check_runs: Vec::new(),
+            reviews: Vec::new(),
+            threads: Vec::new(),
+            reactions: Vec::new(),
+        })?;
+        let observation = RepoWatchObservation::new(
+            Vec::new(),
+            RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
+                pull_requests: vec![pull_request],
+                workflow_runs: Vec::new(),
+                branch_heads: Vec::new(),
+            })?,
+        );
+
+        let result =
+            RepoWatchCursorCandidate::try_with_event_identity_frontier_and_merged_baselines(
+                observation,
+                RepoWatchEventIdentityFrontierV1::default(),
+                vec![baseline],
             );
 
         assert_eq!(
