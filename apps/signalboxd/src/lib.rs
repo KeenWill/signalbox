@@ -45,6 +45,7 @@ use tokio::{
 
 use tracing::Instrument;
 pub mod approval_judge_eval;
+mod attachment_preparation_runtime;
 mod blob_read_runtime;
 mod blob_storage_configuration;
 mod blob_storage_runtime;
@@ -74,6 +75,7 @@ pub mod web_http;
 mod web_imports;
 mod workspace_instruction_runtime;
 
+pub use attachment_preparation_runtime::AttachmentPreparingModelCallProvider;
 pub use blob_storage_configuration::{
     BlobStorageClass, BlobStorageConfiguration, BlobStorageConfigurationError,
     BlobStoreConfiguration,
@@ -1836,6 +1838,7 @@ impl<Provider> PostgresProviderModelExecution<Provider> {
                     ModelCallExecutionOutcome::Checkpointed(_)
                     | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
+                    | ModelCallExecutionOutcome::AttachmentUnavailable
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
@@ -2539,7 +2542,8 @@ where
                     | ModelCallExecutionOutcome::ToolRoundLimitAlreadyCommitted(_) => {
                         return Ok(());
                     }
-                    ModelCallExecutionOutcome::NoWork => return Ok(()),
+                    ModelCallExecutionOutcome::NoWork
+                    | ModelCallExecutionOutcome::AttachmentUnavailable => return Ok(()),
                     ModelCallExecutionOutcome::ObservationCommitted(_)
                     | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => {
                         run_tools = true;
@@ -2743,6 +2747,7 @@ impl PostgresScriptedModelExecution {
                     ModelCallExecutionOutcome::Checkpointed(_)
                     | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => continue,
                     ModelCallExecutionOutcome::NoWork
+                    | ModelCallExecutionOutcome::AttachmentUnavailable
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)

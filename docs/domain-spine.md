@@ -2342,6 +2342,12 @@ pub enum AttachmentKind {
     File,
 }
 
+pub struct AttachmentBlobFact { /* private */ }
+impl AttachmentBlobFact {
+    pub const fn new(digest: BlobDigest, byte_length: NonZeroU64) -> Self;
+    // accessors: digest(), byte_length()
+}
+
 pub struct DeclaredMediaType(/* private String */);
 impl DeclaredMediaType {
     pub const MAX_BYTES: usize;
@@ -2431,6 +2437,14 @@ impl SubmitInput {
         delivery: DeliveryRequest,
     ) -> Self;
     pub fn prepare_session_not_found(self) -> PreparedSubmitInput;
+    pub fn prepare_attachment_blob_not_found(
+        self,
+        digest: BlobDigest,
+    ) -> PreparedSubmitInput;
+    pub fn prepare_attachment_byte_budget_exceeded(
+        self,
+        maximum_bytes: u64,
+    ) -> PreparedSubmitInput;
     pub fn prepare_when_no_active_turn(
         self,
         session: &Session,
@@ -2509,6 +2523,12 @@ impl SubmitInputPendingSteeringAppliedResult {
 }
 
 pub enum SubmitInputRejectedResult {
+    AttachmentBlobNotFound {
+        digest: BlobDigest,
+    },
+    AttachmentByteBudgetExceeded {
+        maximum_bytes: u64,
+    },
     SessionNotFound {
         session: SessionId,
     },
@@ -2638,6 +2658,12 @@ pub struct SubmitInputAppliedTurnOriginReconstitutionInput {
 pub struct SubmitInputAppliedPendingSteeringReconstitutionInput {
     /* public named command, result, source-turn, and accepted-input facts */
 }
+pub struct SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput {
+    /* public named command, actor, session, and unavailable-digest facts */
+}
+pub struct SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput {
+    /* public named command, actor, session, and maximum-byte facts */
+}
 pub struct SubmitInputRejectedSessionNotFoundReconstitutionInput {
     /* public named command, actor, and absent-session facts */
 }
@@ -2675,6 +2701,12 @@ impl SubmitInputReconstitutionInput {
     ) -> Self;
     pub fn applied_pending_steering(
         input: SubmitInputAppliedPendingSteeringReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_attachment_blob_not_found(
+        input: SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_attachment_byte_budget_exceeded(
+        input: SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
     ) -> Self;
     pub fn rejected_safe_point_unavailable_while_stopping(
         input: SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
@@ -2716,6 +2748,8 @@ pub enum SubmitInputReconstitutionFailure {
     AppliedDeliveryIsNotTurnOrigin,
     AppliedDeliveryIsNotNextSafePoint,
     ResultSessionMismatch,
+    AttachmentDigestMismatch,
+    AttachmentBudgetMismatch,
     AcceptedCommandMismatch,
     AcceptedInputMismatch,
     AcceptedSessionMismatch,
@@ -3536,6 +3570,9 @@ impl AcceptedInputSchedulingProjection {
     ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
     pub fn earliest_queued_turn(&self)
         -> Option<&AcceptedInputTurnSchedulingProjection>;
+    pub fn earliest_queued_rendered_base_origins(
+        &self,
+    ) -> Option<Result<Vec<AcceptedInputId>, ContextFrontierProjectionFailure>>;
     pub fn resolved_snapshot(
         &self,
         snapshot: ContextFrontierId,
@@ -4069,6 +4106,10 @@ impl ModelCallExecutionReconstitutionInput {
         self,
         call_snapshot: ResolvedContextFrontierReconstitutionInput,
     ) -> Self;
+    pub fn with_attachment_blob_facts(
+        self,
+        facts: Vec<AttachmentBlobFact>,
+    ) -> Self;
     pub fn with_continuation_snapshot(
         self,
         continuation_snapshot: ResolvedContextFrontierReconstitutionInput,
@@ -4233,7 +4274,7 @@ impl PreparedSteeringConsumption {
 pub struct PreparedModelCallRequest { /* private */ }
 // accessors: session(), turn(), attempt(), dangerous_tool_auto_approval(),
 // model_settings(), call(), frontier_entries(), frontier_entry_slice(),
-// origin_content()
+// origin_content(), attachment_byte_length()
 pub enum ModelCallResumeFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub enum ModelCallAuthorizationFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub struct ModelCallAuthorizationError { /* private */ }
@@ -6816,6 +6857,25 @@ impl ModelCallCredentialReference {
     pub fn as_str(&self) -> &str;
 }
 
+pub enum ModelUserContentPart {
+    Text(NonEmptyUnicodeText),
+    AttachmentStub(ModelAttachmentStub),
+}
+impl ModelUserContentPart {
+    pub fn as_str(&self) -> &str;
+}
+
+pub struct ModelUserContent { /* private */ }
+impl ModelUserContent {
+    // accessors: parts(), single_text()
+}
+
+pub struct ModelAttachmentStub { /* private */ }
+impl ModelAttachmentStub {
+    pub fn as_str(&self) -> &str;
+}
+// Debug is content-redacted.
+
 pub enum ModelConversationMessage {
     ModelIdentityChanged {
         source: SemanticTranscriptEntryRef,
@@ -6901,8 +6961,14 @@ impl PreparedModelOperation {
         tools: Box<[ToolDefinition]>,
         tool_entries: &[ResolvedToolConversationEntry],
     ) -> Result<Self, ModelFrontierRenderingError>;
-    // accessors: request(), credential_reference(), system_prompt(), messages(), tools()
+    // accessors: request(), credential_reference(), system_prompt(), messages(), tools(),
+    // attachment_digests()
 }
+
+pub fn render_model_user_content(
+    content: UserContent,
+    attachment_byte_length: impl FnMut(BlobDigest) -> Option<NonZeroU64>,
+) -> Result<ModelUserContent, ModelFrontierRenderingError>;
 
 pub enum ModelFrontierRenderingError {
     MissingOriginContent {
@@ -6957,6 +7023,7 @@ pub trait FailPreparedModelCallTransaction {
         session: SessionId,
         call: ModelCallId,
         cause: PreparedModelCallFailureCause,
+        attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> impl Future<Output = Result<FailedModelCallTurn, Self::Error>> + Send
@@ -6966,6 +7033,7 @@ pub trait FailPreparedModelCallTransaction {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
     ) -> impl Future<Output = Result<RetainedPreparedFailureStatus, Self::Error>> + Send;
 }
 
@@ -7072,10 +7140,18 @@ pub enum RetainedModelCallObservationStatus {
 
 pub struct RetainedModelCallExecutionState { /* private */ }
 
+pub enum AttachmentPreparationFailure {
+    TooLarge { maximum_bytes: u64 },
+    Missing,
+    Corrupt,
+    Unavailable,
+}
+
 pub enum ModelCallCapabilityPreparation<Capability> {
     Ready(Capability),
     Cancelled,
     KnownFailure,
+    AttachmentFailure(AttachmentPreparationFailure),
 }
 
 pub enum ModelCallInputTokenCount {
@@ -7143,6 +7219,7 @@ pub enum ModelCallExecutionOutcome {
     Checkpointed(ModelCallId),
     TargetUnavailable(Box<FailedModelCallTurn>),
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
+    AttachmentUnavailable,
     CapabilityFailureAlreadyCommitted(ModelCallId),
     ToolRoundLimitReached(Box<FailedModelCallTurn>),
     ToolRoundLimitAlreadyCommitted(ModelCallId),
@@ -11766,8 +11843,8 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: model_settings                             | 25                               |
 | domain: accepted_input                             | 5                                |
 | domain: delivery_request                           | 2                                |
-| domain: user_content                               | 14                               |
-| domain: submit_input                               | 34                               |
+| domain: user_content                               | 15                               |
+| domain: submit_input                               | 36                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
 | domain: repo_watch                                 | 51                               |
 | domain: turn_lifecycle                             | 10                               |
@@ -11792,7 +11869,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **843 (+12 free fn)**            |
+| **signalbox-domain total**                         | **846 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
@@ -11802,7 +11879,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
-| application: model_execution                       | 36 (incl. 8 traits)              |
+| application: model_execution                       | 41 (incl. 8 traits)              |
 | application: tool_loop                             | 27 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
 | application: session_delegation                    | 1 (incl. 1 trait)                |
@@ -11822,4 +11899,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 13                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **341 (+12 free fn)**            |
+| **signalbox-application total**                    | **346 (+12 free fn)**            |

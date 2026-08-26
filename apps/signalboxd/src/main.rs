@@ -55,17 +55,18 @@ use signalboxd::runner_protocol_runtime::{
     RunnerRegistrationFailureCause,
 };
 use signalboxd::{
-    ActivatedTurnPass, BaseDaemonCredentialInputs, BlobStoreRegistry,
-    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, ConvergenceSweepRuntime,
-    DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
-    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
-    GitHubCodeHostTransport, HubModelConfiguration, HubModelConfigurationError,
-    LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter,
-    OtlpRuntime, PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
-    ProcessRuntimeError, PrometheusServer, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
-    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime, WorkspaceInstructionRuntime,
+    ActivatedTurnPass, AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs,
+    BlobStoreRegistry, CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError,
+    ConvergenceSweepRuntime, DaemonToolCatalog, DaemonToolComposition, DaemonTools,
+    DaemonToolsConstructionError, FatalExecutionSupervisor, FencedHubDatabase,
+    FencedHubDatabaseError, FileCredentialAccess, GitHubCodeHostTransport, HubModelConfiguration,
+    HubModelConfigurationError, LocalProcessListener, LocalSocketError,
+    MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime, PostgresGoalPassDisposition,
+    PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError, PrometheusServer,
+    RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    TurnLivenessRuntime, WorkspaceInstructionRuntime,
     model_adapter::ConfiguredModelRuntime,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
@@ -1863,11 +1864,16 @@ async fn run_hub(
     .with_session_credentials(model_configuration.credential_family_catalog())
     .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
     .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets());
+    let provider = AttachmentPreparingModelCallProvider::new(
+        UsageLimitedModelCallProvider::new(provider, &model_configuration),
+        scheduler_pool.clone(),
+        blob_store_registry.clone(),
+    );
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
             model_repository,
             InProcessAttemptDispatchGate::default(),
-            UsageLimitedModelCallProvider::new(provider, &model_configuration),
+            provider,
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
         .with_workspace_instructions(workspace_instruction_runtime)

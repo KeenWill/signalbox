@@ -4583,6 +4583,16 @@ pub enum RejectionDetail {
         /// Absent target.
         session_id: CanonicalUuid,
     },
+    /// An attachment digest had no catalogued verified replica.
+    AttachmentBlobNotFound {
+        /// The unavailable immutable byte identity.
+        digest: CanonicalBlobDigest,
+    },
+    /// Distinct attachment bytes exceeded the deployment admission ceiling.
+    AttachmentByteBudgetExceeded {
+        /// Configured maximum aggregate byte count.
+        maximum_bytes: PositiveCanonicalU64,
+    },
     /// The placement head advanced beyond the caller-observed version.
     SessionPlacementCurrentVersionMismatch {
         session_id: CanonicalUuid,
@@ -4934,6 +4944,8 @@ impl RejectionDetail {
             | Self::BlobReadRangeOutOfBounds { .. }
             | Self::BulkIngestAlreadyInProgress { .. }
             | Self::SessionNotFound { .. }
+            | Self::AttachmentBlobNotFound { .. }
+            | Self::AttachmentByteBudgetExceeded { .. }
             | Self::UnsupportedReasoningLevel { .. }
             | Self::UnsupportedFastMode { .. }
             | Self::UnsupportedServiceTier { .. }
@@ -5083,10 +5095,16 @@ pub enum FailedModelCallDisposition {
     Cancelled,
 }
 
-/// Closed provider-error classifications exposed to clients.
+/// Closed terminal model-call failure classifications exposed to clients.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailedModelCallCause {
+    /// Distinct rendered attachments exceeded the deployment verification bound.
+    AttachmentTooLarge,
+    /// No recorded replica contained a required rendered attachment.
+    AttachmentMissing,
+    /// Recorded replicas failed attachment identity verification.
+    AttachmentCorrupt,
     /// The provider rejected the request credential.
     CredentialRejected,
     /// The credential lacked permission.
@@ -5132,8 +5150,7 @@ impl FailedTerminalModelCall {
         }
     }
 
-    /// Constructs one known-failed call with its closed provider-error
-    /// classification.
+    /// Constructs one known-failed call with its closed failure classification.
     pub const fn known_failed_with_cause(
         model_call_id: CanonicalUuid,
         cause: FailedModelCallCause,
@@ -5155,7 +5172,7 @@ impl FailedTerminalModelCall {
         self.disposition
     }
 
-    /// Returns the closed provider-error classification when retained.
+    /// Returns the closed failure classification when retained.
     pub const fn cause(&self) -> Option<FailedModelCallCause> {
         self.cause
     }
@@ -5192,7 +5209,7 @@ impl<'de> Deserialize<'de> for FailedTerminalModelCall {
         let raw = RawFailedTerminalModelCall::deserialize(deserializer)?;
         if raw.cause.is_some() && raw.disposition != FailedModelCallDisposition::KnownFailed {
             return Err(serde::de::Error::custom(
-                "provider failure cause requires a known-failed disposition",
+                "failure cause requires a known-failed disposition",
             ));
         }
         Ok(Self {
@@ -5926,13 +5943,6 @@ pub enum TranscriptEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptTextEntry {
-    /// User input text.
-    User {
-        /// Exact accepted input.
-        accepted_input_id: CanonicalUuid,
-        /// Origin turn.
-        turn_id: CanonicalUuid,
-    },
     /// Committed assistant text.
     Assistant {
         /// Owning turn.
@@ -7936,6 +7946,21 @@ pub enum ServerMessage {
         /// Exact marker payload.
         entry: TranscriptEntry,
     },
+    /// One atomic native user entry with exact ordered multipart content.
+    TranscriptUserEntry {
+        /// Zero-based frontier member index.
+        entry_index: CanonicalU64,
+        /// Entry source session.
+        source_session_id: CanonicalUuid,
+        /// Semantic entry identity.
+        entry_id: CanonicalUuid,
+        /// Exact accepted input.
+        accepted_input_id: CanonicalUuid,
+        /// Origin turn.
+        turn_id: CanonicalUuid,
+        /// Canonical ordered user content.
+        content: UserInputContent,
+    },
     /// Begins one text-bearing frontier member.
     TranscriptTextEntry {
         /// Zero-based frontier member index.
@@ -8201,6 +8226,7 @@ impl ServerMessage {
                 &approval.decider,
                 &approval.rationale,
             )?,
+            Self::TranscriptUserEntry { content, .. } => content.validate()?,
             Self::GoalTransitionApplied {
                 event_ordinal,
                 generation,
@@ -9051,6 +9077,8 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
             last.value() == u64::MAX
         }
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::AttachmentBlobNotFound { .. }
+        | RejectionDetail::AttachmentByteBudgetExceeded { .. }
         | RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
@@ -9156,6 +9184,8 @@ fn validate_conversation_import_detail(
             }
         },
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::AttachmentBlobNotFound { .. }
+        | RejectionDetail::AttachmentByteBudgetExceeded { .. }
         | RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
@@ -11587,6 +11617,53 @@ mod tests {
     }
 
     #[test]
+    fn inv033_transcript_user_entry_round_trips_ordered_multipart_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            .parse::<CanonicalBlobDigest>()?;
+        assert_server_message_round_trip(
+            request(31)?,
+            ServerMessage::TranscriptUserEntry {
+                entry_index: CanonicalU64::new(0),
+                source_session_id: uuid(1),
+                entry_id: uuid(2),
+                accepted_input_id: uuid(3),
+                turn_id: uuid(4),
+                content: UserInputContent::from_parts(vec![
+                    UserInputPart::Text {
+                        text: String::from("inspect "),
+                    },
+                    UserInputPart::Attachment {
+                        digest,
+                        kind: UserAttachmentKind::Image,
+                        media_type: String::from("image/png"),
+                        display_filename: Some(String::from("chart.png")),
+                    },
+                    UserInputPart::Text {
+                        text: String::from(" carefully"),
+                    },
+                ]),
+            },
+            r#"{"type":"transcript_user_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000002","accepted_input_id":"00000000-0000-0000-0000-000000000003","turn_id":"00000000-0000-0000-0000-000000000004","content":[{"type":"text","text":"inspect "},{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png","display_filename":"chart.png"},{"type":"text","text":" carefully"}]}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_transcript_user_entry_rejects_malformed_multipart_content() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_user_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000002","accepted_input_id":"00000000-0000-0000-0000-000000000003","turn_id":"00000000-0000-0000-0000-000000000004","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}]}}"#,
+        );
+    }
+
+    #[test]
+    fn attachment_byte_budget_rejection_requires_a_positive_maximum() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"error","code":"rejected","message":"attachment budget exceeded","detail":{"type":"rejected","rejection":{"type":"attachment_byte_budget_exceeded","maximum_bytes":"0"}}}}"#,
+        );
+    }
+
+    #[test]
     fn inv033_read_transcript_round_trips_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
@@ -12255,6 +12332,71 @@ mod tests {
             r#"{"type":"transcript_turn","turn_id":"00000000-0000-0000-0000-000000000001","acceptance_position":"1","model_settings":null,"state":{"type":"failed","terminal_frontier_id":"00000000-0000-0000-0000-000000000002","terminal_attempt_id":"00000000-0000-0000-0000-000000000003","terminal_model_call":{"model_call_id":"00000000-0000-0000-0000-000000000004","disposition":"known_failed","cause":"quota_exhausted"}}}"#,
         )?;
         Ok(())
+    }
+
+    fn assert_attachment_failure_cause_round_trip(
+        cause: FailedModelCallCause,
+        spelling: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let encoded = encode_server_line(&ServerFrame {
+            version: ProtocolVersion::One,
+            request_id: request(92)?,
+            message: ServerMessage::TranscriptTurn {
+                turn_id: uuid(1),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::Failed {
+                    terminal_frontier_id: uuid(2),
+                    terminal_attempt_id: Some(uuid(3)),
+                    terminal_model_call: Some(FailedTerminalModelCall::known_failed_with_cause(
+                        uuid(4),
+                        cause,
+                    )),
+                },
+            },
+        })?;
+        assert!(std::str::from_utf8(&encoded)?.contains(&format!("\"cause\":\"{spelling}\"")));
+        let decoded = decode_server_line(&encoded)?;
+        let ServerMessage::TranscriptTurn {
+            state:
+                TurnState::Failed {
+                    terminal_model_call: Some(call),
+                    ..
+                },
+            ..
+        } = decoded.message
+        else {
+            panic!("attachment failure fixture keeps its terminal call");
+        };
+        assert_eq!(call.cause(), Some(cause));
+        Ok(())
+    }
+
+    #[test]
+    fn attachment_too_large_round_trips_as_a_closed_wire_classification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_attachment_failure_cause_round_trip(
+            FailedModelCallCause::AttachmentTooLarge,
+            "attachment_too_large",
+        )
+    }
+
+    #[test]
+    fn attachment_missing_round_trips_as_a_closed_wire_classification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_attachment_failure_cause_round_trip(
+            FailedModelCallCause::AttachmentMissing,
+            "attachment_missing",
+        )
+    }
+
+    #[test]
+    fn attachment_corrupt_round_trips_as_a_closed_wire_classification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_attachment_failure_cause_round_trip(
+            FailedModelCallCause::AttachmentCorrupt,
+            "attachment_corrupt",
+        )
     }
 
     #[test]

@@ -16,30 +16,30 @@ use std::{
 
 use rust_decimal::Decimal;
 use signalbox_application::{
-    AuthorizeModelCallOutcome, AuthorizeModelCallTransaction, AvailabilitySuccessorOutcome,
-    ClassifyOperatorFailure, CommitModelCallObservationTransaction, CredentialPoolExhaustedOutcome,
-    FailPreparedModelCallTransaction, ModelCallAuthorizationReread, ModelCallCredentialReference,
-    ModelCallObservationCommitOutcome, ModelCallTerminalIdentityCandidates, OperatorFailureClass,
-    PrepareModelCallOutcome, PrepareModelCallTransaction, PrepareToolContinuationOutcome,
-    ResolvedToolConversationEntry, RetainedModelCallObservationStatus,
-    RetainedPreparedFailureStatus,
+    AttachmentPreparationFailure, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
+    AvailabilitySuccessorOutcome, ClassifyOperatorFailure, CommitModelCallObservationTransaction,
+    CredentialPoolExhaustedOutcome, FailPreparedModelCallTransaction, ModelCallAuthorizationReread,
+    ModelCallCredentialReference, ModelCallObservationCommitOutcome,
+    ModelCallTerminalIdentityCandidates, OperatorFailureClass, PrepareModelCallOutcome,
+    PrepareModelCallTransaction, PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
+    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus,
 };
 use signalbox_domain::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, ActiveTurnPhase,
     ActiveTurnSchedulingReconstitutionInput, AmbiguousModelCallTurn, AssistantResponsePart,
-    AssistantText, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn, CancelledModelCallTurn,
-    CancelledToolRoundModelCallTurn, CompletedModelCallTurn, ConsumedSteeringReconstitutionInput,
-    CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
-    DelegatedModelCallRecoveryReconstitutionInput, DelegatedTurnActivationInput,
-    DelegatedWakeTurnActivationInput, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
-    DelegationOutcomeReason, DirectModelSelection, DurableCommandId,
-    EmptyTurnInstructionManifestEvidence, FailedModelCallTurn, FailedModelCallTurnIdentities,
-    FastMode, FrozenAliasDefinition, FrozenModelSelection, InstructionDigest, ModelAlias,
-    ModelCallDisposition, ModelCallExecution, ModelCallExecutionReconstitutionFailure,
-    ModelCallExecutionReconstitutionInput, ModelCallId, ModelCallOriginContent,
-    ModelCallPreparationFailure, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
-    ModelTargetCatalog, ModelTargetDefinition, PendingSteeringInput,
+    AssistantText, AttachmentBlobFact, AuthorizedModelCall, AvailabilitySuccessorModelCallTurn,
+    BlobDigest, CancelledModelCallTurn, CancelledToolRoundModelCallTurn, CompletedModelCallTurn,
+    ConsumedSteeringReconstitutionInput, CorrelatedModelCallTerminalObservation,
+    CredentialPoolExhaustedModelCallTurn, DelegatedModelCallRecoveryReconstitutionInput,
+    DelegatedTurnActivationInput, DelegatedWakeTurnActivationInput, DelegationContent,
+    DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason, DirectModelSelection,
+    DurableCommandId, EmptyTurnInstructionManifestEvidence, FailedModelCallTurn,
+    FailedModelCallTurnIdentities, FastMode, FrozenAliasDefinition, FrozenModelSelection,
+    InstructionDigest, ModelAlias, ModelCallDisposition, ModelCallExecution,
+    ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput, ModelCallId,
+    ModelCallOriginContent, ModelCallPreparationFailure, ModelCallReconstitutionInput,
+    ModelCallReconstitutionState, ModelCallTerminalIdentities, ModelCallTerminalObservation,
+    ModelCallTerminalOutcome, ModelTargetCatalog, ModelTargetDefinition, PendingSteeringInput,
     PendingSteeringReclassificationIdentity, PinnedProviderTargetReconstitutionInput,
     PreparedDelegatedTurnActivation, PreparedModelCallRequest, PreparedToolResultProjection,
     ProviderModelCallFailureCause, ProviderModelIdentity, ProviderReportedTokenUsage,
@@ -593,6 +593,8 @@ impl PostgresModelCallRepository {
             .collect::<Result<Vec<_>, ModelCallRepositoryError>>()?;
         let origin_contents =
             load_origin_contents(&mut transaction, &frontier_entries, &[], &[]).await?;
+        let attachment_blob_facts =
+            load_attachment_blob_facts(&mut transaction, &origin_contents).await?;
         let tool_result_correlations =
             load_tool_result_correlations(&mut transaction, &frontier_entries).await?;
         let tool_denial_correlations =
@@ -606,6 +608,7 @@ impl PostgresModelCallRepository {
             None,
             Vec::new(),
         )
+        .with_attachment_blob_facts(attachment_blob_facts)
         .with_tool_result_correlations(tool_result_correlations)
         .with_tool_denial_correlations(tool_denial_correlations)
         .reconstitute()
@@ -994,6 +997,7 @@ impl PostgresModelCallRepository {
                         &failed,
                         ProviderReportedTokenUsage::unreported(),
                         None,
+                        None,
                     )
                     .await?;
                     return Ok((
@@ -1374,6 +1378,7 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         mut next_reclassified_turn: NextTurn,
     ) -> Result<FailedModelCallTurn, ModelCallRepositoryError>
@@ -1403,6 +1408,7 @@ impl PostgresModelCallRepository {
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
                 None,
+                attachment_failure,
             )
             .await?;
             Ok(failed)
@@ -1416,13 +1422,28 @@ impl PostgresModelCallRepository {
         &self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
     ) -> Result<RetainedPreparedFailureStatus, ModelCallRepositoryError> {
         let mut transaction = self.pool.begin().await?;
         let result = async {
             lock_session(&mut transaction, session).await?;
-            let stored = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, Option<String>)>(
+            let stored = sqlx::query_as::<
+                _,
+                (
+                    Uuid,
+                    Uuid,
+                    Uuid,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<Decimal>,
+                ),
+            >(
                 "SELECT turn_id, turn_attempt_id, context_frontier_id, state_kind,
-                        terminal_disposition_kind
+                        terminal_disposition_kind, terminal_provider_failure_cause,
+                        terminal_attachment_preparation_failure_cause,
+                        terminal_attachment_preparation_failure_maximum_bytes
                    FROM model_call
                   WHERE session_id = $1
                     AND model_call_id = $2",
@@ -1434,7 +1455,16 @@ impl PostgresModelCallRepository {
             .ok_or(ModelCallCorruption::Missing(
                 "retained prepared-failure model call",
             ))?;
-            let (turn, attempt, source_frontier, state, disposition) = stored;
+            let (
+                turn,
+                attempt,
+                source_frontier,
+                state,
+                disposition,
+                provider_failure_cause,
+                stored_attachment_failure,
+                stored_attachment_maximum,
+            ) = stored;
             match (state.as_str(), disposition.as_deref()) {
                 ("prepared", None) => {
                     let execution = require_exact_call(
@@ -1449,6 +1479,29 @@ impl PostgresModelCallRepository {
                     Ok(RetainedPreparedFailureStatus::Pending)
                 }
                 ("terminal", Some("known_failed")) => {
+                    let (expected_attachment_failure, expected_attachment_maximum) =
+                        match attachment_failure {
+                            Some(AttachmentPreparationFailure::TooLarge { maximum_bytes }) => (
+                                Some("too_large"),
+                                Some(Decimal::from(maximum_bytes)),
+                            ),
+                            Some(AttachmentPreparationFailure::Missing) => (Some("missing"), None),
+                            Some(AttachmentPreparationFailure::Corrupt) => (Some("corrupt"), None),
+                            Some(AttachmentPreparationFailure::Unavailable) => {
+                                return Err(ModelCallRepositoryError::InvalidTransition(
+                                    "retryable attachment unavailability cannot have a terminal closure",
+                                ));
+                            }
+                            None => (None, None),
+                        };
+                    if provider_failure_cause.is_some()
+                        || stored_attachment_failure.as_deref() != expected_attachment_failure
+                        || stored_attachment_maximum != expected_attachment_maximum
+                    {
+                        return Err(ModelCallRepositoryError::InvalidTransition(
+                            "retained capability failure durable cause changed",
+                        ));
+                    }
                     let transition_history_matches = sqlx::query_scalar::<_, bool>(
                         "SELECT
                             EXISTS (
@@ -2379,6 +2432,7 @@ where
                 &failed,
                 ProviderReportedTokenUsage::unreported(),
                 None,
+                None,
             )
             .await?;
             return Ok(PrepareToolContinuationOutcome::TargetUnavailable(Box::new(
@@ -2508,6 +2562,7 @@ where
         &failed,
         ProviderReportedTokenUsage::unreported(),
         None,
+        None,
     )
     .await?;
     Ok(failed)
@@ -2552,6 +2607,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         session: SessionId,
         call: ModelCallId,
         _cause: signalbox_application::PreparedModelCallFailureCause,
+        attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> Result<FailedModelCallTurn, Self::Error>
@@ -2562,6 +2618,7 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
             self,
             session,
             call,
+            attachment_failure,
             identities,
             next_reclassified_turn,
         )
@@ -2572,8 +2629,10 @@ impl FailPreparedModelCallTransaction for PostgresModelCallRepository {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
     ) -> Result<RetainedPreparedFailureStatus, Self::Error> {
-        self.reread_prepared_failure(session, call).await
+        self.reread_prepared_failure(session, call, attachment_failure)
+            .await
     }
 }
 
@@ -4232,6 +4291,7 @@ async fn require_live_execution_with_targets(
         active_turn.consumed_steering(),
     )
     .await?;
+    let attachment_blob_facts = load_attachment_blob_facts(connection, &origin_contents).await?;
     let tool_result_correlations =
         load_tool_result_correlations(connection, &frontier_entries).await?;
     let tool_denial_correlations =
@@ -4273,6 +4333,7 @@ async fn require_live_execution_with_targets(
         pinned_target,
         calls,
     )
+    .with_attachment_blob_facts(attachment_blob_facts)
     .with_tool_result_correlations(tool_result_correlations)
     .with_tool_denial_correlations(tool_denial_correlations);
     if availability_successor {
@@ -5142,7 +5203,9 @@ async fn load_origin_contents(
         .collect::<Vec<_>>();
     let rows = sqlx::query(
         "SELECT accepted.accepted_input_id, accepted.accepting_command_id,
-                accepted.content_text, goal.turn_id AS goal_turn_id
+                accepted_input_content_parts_json(accepted.accepted_input_id)
+                    AS content_parts,
+                goal.turn_id AS goal_turn_id
            FROM accepted_input AS accepted
            LEFT JOIN goal_turn AS goal
              ON goal.accepted_input_id = accepted.accepted_input_id
@@ -5168,7 +5231,7 @@ async fn load_origin_contents(
         if pending_by_accepted.contains_key(&accepted)
             || consumed_by_accepted.contains_key(&accepted)
         {
-            let content = UserContent::try_text(required(&row, "content_text")?)
+            let content = crate::user_content::decode(required(&row, "content_parts")?)
                 .map_err(|_| ModelCallCorruption::Inconsistent("steering content"))?;
             if steering_content_by_accepted
                 .insert(accepted, content)
@@ -5192,7 +5255,7 @@ async fn load_origin_contents(
                 StoredAcceptedInputProvenance::Command(command)
             }
             (None, Some(_)) => {
-                let content = UserContent::try_text(required(&row, "content_text")?)
+                let content = crate::user_content::decode(required(&row, "content_parts")?)
                     .map_err(|_| ModelCallCorruption::Inconsistent("goal input content"))?;
                 StoredAcceptedInputProvenance::Goal(content)
             }
@@ -5259,6 +5322,59 @@ async fn load_origin_contents(
                 return Err(ModelCallCorruption::Inconsistent("accepted content identity").into());
             }
             Ok(content)
+        })
+        .collect()
+}
+
+async fn load_attachment_blob_facts(
+    connection: &mut PgConnection,
+    origin_contents: &[ModelCallOriginContent],
+) -> Result<Vec<AttachmentBlobFact>, ModelCallRepositoryError> {
+    let digests = origin_contents
+        .iter()
+        .flat_map(|origin| origin.content().parts())
+        .filter_map(|part| match part {
+            signalbox_domain::UserContentPart::Attachment { digest, .. } => Some(*digest),
+            signalbox_domain::UserContentPart::Text { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    if digests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let encoded = digests
+        .iter()
+        .map(|digest| digest.as_bytes().to_vec())
+        .collect::<Vec<_>>();
+    let rows = sqlx::query(
+        "SELECT digest, byte_length
+           FROM blob
+          WHERE digest = ANY($1::bytea[])
+          ORDER BY digest",
+    )
+    .bind(&encoded)
+    .fetch_all(&mut *connection)
+    .await?;
+    if rows.len() != digests.len() {
+        return Err(ModelCallCorruption::Missing("attachment blob catalog fact").into());
+    }
+    rows.into_iter()
+        .map(|row| {
+            let bytes: Vec<u8> = row.try_get("digest")?;
+            let digest = BlobDigest::from_bytes(bytes.try_into().map_err(|_| {
+                ModelCallCorruption::Inconsistent("attachment blob catalog digest")
+            })?);
+            if !digests.contains(&digest) {
+                return Err(
+                    ModelCallCorruption::Inconsistent("attachment blob catalog inventory").into(),
+                );
+            }
+            let length = positive_u64_from_numeric(row.try_get("byte_length")?).map_err(|_| {
+                ModelCallCorruption::Inconsistent("attachment blob catalog byte length")
+            })?;
+            let length = NonZeroU64::new(length).ok_or(ModelCallCorruption::Inconsistent(
+                "attachment blob catalog byte length",
+            ))?;
+            Ok(AttachmentBlobFact::new(digest, length))
         })
         .collect()
 }
@@ -6688,6 +6804,7 @@ async fn persist_terminal_outcome_with_usage(
                 failed,
                 usage,
                 provider_failure_cause,
+                None,
             )
             .await
         }
@@ -6725,10 +6842,43 @@ async fn persist_failed_with_delegated_child_result(
     failed: &FailedModelCallTurn,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    attachment_failure: Option<AttachmentPreparationFailure>,
 ) -> Result<(), ModelCallRepositoryError> {
     lock_delegated_child_result_frontier(connection, failed.session(), failed.turn()).await?;
-    persist_failed(connection, failed, usage, provider_failure_cause).await?;
+    persist_failed(
+        connection,
+        failed,
+        usage,
+        provider_failure_cause,
+        attachment_failure,
+    )
+    .await?;
     persist_delegated_child_result(connection, &DelegationOutcome::from_failed_child(failed)).await
+}
+
+/// Encodes the durable evidence a definitive attachment-preparation failure
+/// carries into the statement that terminalizes its call.
+///
+/// `model_call_changes_are_guarded` raises on every update whose OLD row is
+/// already terminal, so this evidence is only writable by the same
+/// Prepared-to-terminal `UPDATE` that closes the call; a follow-up statement
+/// would abort the whole failure transaction and leave the call open.
+/// `Unavailable` is retryable and so never terminalizes a prepared call.
+fn encode_attachment_preparation_failure(
+    failure: AttachmentPreparationFailure,
+) -> Result<(&'static str, Option<Decimal>), ModelCallRepositoryError> {
+    match failure {
+        AttachmentPreparationFailure::TooLarge { maximum_bytes } => {
+            Ok(("too_large", Some(Decimal::from(maximum_bytes))))
+        }
+        AttachmentPreparationFailure::Missing => Ok(("missing", None)),
+        AttachmentPreparationFailure::Corrupt => Ok(("corrupt", None)),
+        AttachmentPreparationFailure::Unavailable => {
+            Err(ModelCallRepositoryError::InvalidTransition(
+                "retryable attachment unavailability cannot terminalize a prepared call",
+            ))
+        }
+    }
 }
 
 pub(crate) async fn persist_automatic_reconciliation(
@@ -7386,6 +7536,7 @@ async fn persist_availability_successor(
         successor.predecessor_call(),
         usage,
         Some(cause),
+        None,
     )
     .await?;
     persist_ended_attempt(
@@ -7492,6 +7643,7 @@ async fn persist_credential_pool_exhaustion(
         connection,
         exhausted.failed(),
         ProviderReportedTokenUsage::unreported(),
+        None,
         None,
     )
     .await?;
@@ -7950,6 +8102,7 @@ async fn persist_failed(
     failed: &FailedModelCallTurn,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    attachment_failure: Option<AttachmentPreparationFailure>,
 ) -> Result<(), ModelCallRepositoryError> {
     if let Some(call) = failed.call() {
         persist_ended_call_with_provider_failure_cause(
@@ -7959,8 +8112,14 @@ async fn persist_failed(
             call,
             usage,
             provider_failure_cause,
+            attachment_failure,
         )
         .await?;
+    } else if attachment_failure.is_some() {
+        return Err(ModelCallCorruption::Inconsistent(
+            "attachment-preparation failure without a model call",
+        )
+        .into());
     }
     persist_ended_attempt(
         connection,
@@ -8423,8 +8582,10 @@ async fn persist_ended_call(
     call: &signalbox_domain::EndedModelCall,
     usage: ProviderReportedTokenUsage,
 ) -> Result<(), ModelCallRepositoryError> {
-    persist_ended_call_with_provider_failure_cause(connection, session, turn, call, usage, None)
-        .await
+    persist_ended_call_with_provider_failure_cause(
+        connection, session, turn, call, usage, None, None,
+    )
+    .await
 }
 
 async fn persist_ended_call_with_provider_failure_cause(
@@ -8434,8 +8595,12 @@ async fn persist_ended_call_with_provider_failure_cause(
     call: &signalbox_domain::EndedModelCall,
     usage: ProviderReportedTokenUsage,
     provider_failure_cause: Option<ProviderModelCallFailureCause>,
+    attachment_failure: Option<AttachmentPreparationFailure>,
 ) -> Result<(), ModelCallRepositoryError> {
     let usage = encode_token_usage(usage);
+    let attachment_failure = attachment_failure
+        .map(encode_attachment_preparation_failure)
+        .transpose()?;
     let rows = sqlx::query(
         "UPDATE model_call
             SET state_kind = 'terminal',
@@ -8444,11 +8609,13 @@ async fn persist_ended_call_with_provider_failure_cause(
                 usage_output_tokens = $3,
                 usage_cache_creation_input_tokens = $4,
                 usage_cache_read_input_tokens = $5,
-                terminal_provider_failure_cause = $6
-          WHERE model_call_id = $7
-            AND turn_id = $8
-            AND session_id = $9
-            AND turn_attempt_id = $10
+                terminal_provider_failure_cause = $6,
+                terminal_attachment_preparation_failure_cause = $7,
+                terminal_attachment_preparation_failure_maximum_bytes = $8
+          WHERE model_call_id = $9
+            AND turn_id = $10
+            AND session_id = $11
+            AND turn_attempt_id = $12
             AND state_kind <> 'terminal'
             AND terminal_disposition_kind IS NULL",
     )
@@ -8458,6 +8625,8 @@ async fn persist_ended_call_with_provider_failure_cause(
     .bind(usage.cache_creation_input_tokens)
     .bind(usage.cache_read_input_tokens)
     .bind(provider_failure_cause.map(encode_provider_failure_cause))
+    .bind(attachment_failure.map(|(cause, _)| cause))
+    .bind(attachment_failure.and_then(|(_, maximum_bytes)| maximum_bytes))
     .bind(call.id().into_uuid())
     .bind(turn_id_to_uuid(turn))
     .bind(session_id_to_uuid(session))
