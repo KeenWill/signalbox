@@ -5,6 +5,7 @@ use std::{
     error::Error,
     fmt,
     num::{NonZeroU16, NonZeroU32, NonZeroU64},
+    time::Duration,
 };
 
 use rust_decimal::Decimal;
@@ -713,6 +714,59 @@ impl PostgresRepoWatchStore {
             .transpose()
     }
 
+    /// How long ago this repository last completed a full provider sweep.
+    ///
+    /// `None` means no sweep is on record, which a first-ever watch and a
+    /// repository carried across the introduction of this record share: both
+    /// poll immediately. The elapsed time is computed by PostgreSQL from the
+    /// same clock that stamped the row, so a daemon whose own clock disagrees
+    /// with the database cannot shift the poll schedule.
+    pub async fn load_complete_poll_age(
+        &self,
+        repository: &RepositorySlug,
+    ) -> Result<Option<Duration>, RepoWatchStoreError> {
+        let elapsed_seconds = sqlx::query_scalar::<_, i64>(
+            "SELECT GREATEST(EXTRACT(EPOCH FROM (now() - completed_at)), 0)::bigint
+               FROM repo_watch_complete_poll
+              WHERE repository = $1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        elapsed_seconds
+            .map(|seconds| {
+                u64::try_from(seconds)
+                    .map(Duration::from_secs)
+                    .map_err(|_| {
+                        RepoWatchStoreError::Corruption(
+                            RepoWatchPersistenceCorruption::InvalidCursorField("completed_at"),
+                        )
+                    })
+            })
+            .transpose()
+    }
+
+    /// Records that a full provider sweep reached its commit.
+    ///
+    /// Stamped inside that commit's own transaction, so a sweep whose commit is
+    /// rolled back — a generation conflict, most of all — leaves the previous
+    /// deadline in force rather than deferring the sweep it never performed.
+    async fn record_complete_poll_in_transaction(
+        transaction: &mut Transaction<'_, Postgres>,
+        repository: &RepositorySlug,
+    ) -> Result<(), RepoWatchStoreError> {
+        sqlx::query(
+            "INSERT INTO repo_watch_complete_poll (repository)
+             VALUES ($1)
+             ON CONFLICT (repository)
+             DO UPDATE SET completed_at = transaction_timestamp()",
+        )
+        .bind(repository.as_str())
+        .execute(&mut **transaction)
+        .await?;
+        Ok(())
+    }
+
     pub async fn commit(
         &self,
         repository: &RepositorySlug,
@@ -745,6 +799,15 @@ impl PostgresRepoWatchStore {
             .bind(repository.as_str())
             .execute(&mut *transaction)
             .await?;
+        // Convergence assessments are produced by the complete provider sweep
+        // and by nothing else, so their presence is what identifies this commit
+        // as that sweep. Stamped before the branching below because every path
+        // that commits has completed the sweep — including one that finds the
+        // cursor unchanged, which writes no generation at all and so cannot be
+        // measured from the cursor.
+        if assessments.is_some() {
+            Self::record_complete_poll_in_transaction(&mut transaction, repository).await?;
+        }
         let current = load_cursor_in_transaction(&mut transaction, repository).await?;
         let current_generation = current.as_ref().map(RepoWatchCursor::generation);
         if current_generation != request.expected_generation() {

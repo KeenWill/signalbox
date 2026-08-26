@@ -1041,6 +1041,113 @@ async fn cursor_events_assessment_and_seal_commit_atomically() -> Result<(), Box
     Ok(())
 }
 
+/// A restarting daemon measures what is left of its poll cadence from this
+/// record, so only the complete provider sweep may write it. The cursor cannot
+/// stand in: a targeted webhook refresh commits generations of its own, and a
+/// sweep that finds the repository unchanged commits none at all, so neither the
+/// newest generation's age nor its existence measures the sweep cadence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn only_a_complete_sweep_records_the_poll_cadence() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let first_generation = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, baseline.clone(), Vec::new()),
+            )
+            .await?,
+    );
+
+    let after_webhook_commit = store.load_complete_poll_age(&repository).await?;
+
+    let current_observation = observation(Some(INITIAL_HEAD))?;
+    let mut current_frontier = baseline.event_identity_frontier().clone();
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(baseline.observation()),
+        &current_observation,
+        &mut current_frontier,
+        &mut FixedEventIds::default(),
+    )?;
+    let current = RepoWatchCursorCandidate::with_event_identity_frontier(
+        current_observation,
+        current_frontier,
+    );
+    let swept_generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(Some(first_generation), current.clone(), events),
+                &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let after_sweep = store.load_complete_poll_age(&repository).await?;
+    let swept_at = recorded_complete_poll(&pool).await?;
+
+    // A sweep whose commit conflicts never observed the repository completely,
+    // so it must leave the previous deadline in force.
+    let conflicted = store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                candidate(Some(CHANGED_HEAD))?,
+                Vec::new(),
+            ),
+            &[merge_ready_assessment(CHANGED_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let after_conflict = recorded_complete_poll(&pool).await?;
+
+    // A sweep that finds the repository unchanged writes no cursor generation
+    // and is still the completed sweep the cadence measures.
+    let unchanged = store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(swept_generation), current, Vec::new()),
+            &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let after_unchanged = recorded_complete_poll(&pool).await?;
+
+    assert_eq!(
+        after_webhook_commit, None,
+        "a cursor generation is not evidence that a sweep completed"
+    );
+    assert!(
+        after_sweep.is_some(),
+        "the completed sweep records the cadence the next restart reads"
+    );
+    assert!(matches!(
+        conflicted,
+        RepoWatchCommitOutcome::Conflict { .. }
+    ));
+    assert_eq!(
+        after_conflict, swept_at,
+        "a rolled-back sweep leaves the previous deadline in force"
+    );
+    assert!(matches!(unchanged, RepoWatchCommitOutcome::Unchanged(_)));
+    assert_ne!(
+        after_unchanged, swept_at,
+        "an unchanged sweep still completed, and commits no generation to measure"
+    );
+    Ok(())
+}
+
+async fn recorded_complete_poll(pool: &PgPool) -> Result<Option<String>, Box<dyn Error>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT completed_at::text FROM repo_watch_complete_poll WHERE repository = $1",
+    )
+    .bind(REPOSITORY)
+    .fetch_optional(pool)
+    .await?)
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn assessment_threads_must_match_the_committed_cursor() -> Result<(), Box<dyn Error>> {

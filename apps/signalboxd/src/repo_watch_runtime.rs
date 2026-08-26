@@ -14,7 +14,8 @@ use std::{
 use reqwest::{
     Client, Method, Response, StatusCode, Url,
     header::{
-        ACCEPT, AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderValue, IF_NONE_MATCH, LINK, USER_AGENT,
+        ACCEPT, AUTHORIZATION, CONTENT_TYPE, ETAG, HeaderMap, HeaderValue, IF_NONE_MATCH, LINK,
+        RETRY_AFTER, USER_AGENT,
     },
     redirect::Policy,
 };
@@ -184,6 +185,19 @@ const WEBHOOK_CURSOR_SIZING_TIMEOUT: Duration = Duration::from_secs(10);
 // performs it, so remaining work re-arms its own wake after this bounded
 // quantum instead of holding the worker across poll deadlines.
 const WEBHOOK_DRAIN_PAGE_LIMIT: usize = 1;
+// How many consecutive webhook preemptions one still-due complete poll yields
+// to before it runs uninterruptibly. The termination argument for preemption is
+// that a bounded page stops re-arming once it observes no remainder, but while
+// authenticated deliveries keep the durable backlog nonempty every successful
+// page requests a continuation, the next fresh sweep observes that wake, and the
+// poll is preempted again: at ingress meeting or exceeding drain throughput the
+// authoritative completeness sweep never commits, and the facts outside the
+// webhook mapping — reactions, missed deliveries — stop being reconciled for as
+// long as the backlog lasts. Eight pages carry a merge batch's worth of
+// deliveries at WEBHOOK_PENDING_PAGE_SIZE each before the sweep takes its turn;
+// remaining backlog re-arms the scheduler immediately after it.
+// numeric-bound: guard - prevents sustained webhook ingress from starving the complete poll
+const MAX_CONSECUTIVE_POLL_PREEMPTIONS: u32 = 8;
 // One repository scheduling phase may settle this many cutoff or dispatch
 // records before returning to the webhook-aware outer loop. The remaining work
 // is durable and re-arms that loop; bounding the phase prevents an event backlog
@@ -613,6 +627,26 @@ impl WebhookPollInterrupt {
     }
 }
 
+/// Whether a still-due complete poll may yield to webhook admission again.
+///
+/// A drain retry in backoff already suppresses admission preemption so the
+/// retry deadline stays authoritative. Beyond that, consecutive preemptions of
+/// the same due poll are counted and bounded: each one drains a bounded page and
+/// returns the poll to a fresh interruptible pass, so nothing in that cycle ends
+/// it while ingress keeps the durable backlog nonempty. Suppression does not
+/// discard the wake — it is latched, and the scheduler admits it as ordinary
+/// webhook work as soon as the sweep commits.
+const fn poll_webhook_interrupt(
+    backing_off: bool,
+    consecutive_preemptions: u32,
+) -> WebhookPollInterrupt {
+    if backing_off || consecutive_preemptions >= MAX_CONSECUTIVE_POLL_PREEMPTIONS {
+        WebhookPollInterrupt::Suppressed
+    } else {
+        WebhookPollInterrupt::Enabled
+    }
+}
+
 async fn await_poll_or_interrupt<F>(
     poll: F,
     shutdown: &mut watch::Receiver<bool>,
@@ -914,12 +948,38 @@ enum WebhookAttemptPhase {
 
 impl WebhookAttemptPhase {
     /// The outcome a cancellation during this step reports.
-    const fn cancelled_outcome(self, error: RepositoryWatchAttemptError) -> WebhookAttemptOutcome {
+    ///
+    /// The drain performs its own post-terminal dispatch work, which the phase
+    /// alone cannot separate from projection: that window sits inside the drain
+    /// and is marked by `dispatch_in_flight` instead. The delivery it follows is
+    /// already terminal and will not be reloaded, so a cancellation there is the
+    /// surrounding dispatch work's failure exactly as one after the drain is —
+    /// reporting it as a drain failure would grow the projection backoff, and
+    /// suppress admission wakes and poll drains for up to its cap, while no
+    /// projection remained.
+    const fn cancelled_outcome(
+        self,
+        error: RepositoryWatchAttemptError,
+        dispatch_in_flight: bool,
+    ) -> WebhookAttemptOutcome {
         match self {
             Self::BeforeDrain => WebhookAttemptOutcome::FailedBeforeDrain(error),
+            Self::Drain if dispatch_in_flight => WebhookAttemptOutcome::DrainedThenFailed(error),
             Self::Drain => WebhookAttemptOutcome::DrainFailed(error),
             Self::AfterDrain => WebhookAttemptOutcome::DrainedThenFailed(error),
         }
+    }
+
+    /// Whether a cancellation during this step may have left a durable delivery
+    /// pending, so the next cursor-advancing poll must be fenced.
+    ///
+    /// Only the drain owns pending deliveries. A cancellation there is
+    /// indistinguishable from the drain's own deadline as far as the durable
+    /// queue is concerned: work the drain had loaded may never have reached a
+    /// terminal record, and a complete poll that commits past it would advance
+    /// the cursor over a delivery still waiting to be projected.
+    const fn cancellation_fences_complete_poll(self) -> bool {
+        matches!(self, Self::Drain)
     }
 
     /// The operator-facing label for the cancelled step.
@@ -1072,19 +1132,32 @@ fn next_cadence_deadline(previous: Instant, interval: Duration, now: Instant) ->
     }
 }
 
-/// Schedules a first-ever repository baseline immediately and a warm restart
-/// at the ordinary cadence.
+/// Schedules a first-ever repository baseline immediately and a warm restart at
+/// whatever remains of the ordinary cadence.
 ///
 /// Startup has already drained durable webhook work before reaching this
-/// decision. A durable cursor therefore remains an authoritative baseline
-/// until the next scheduled completeness sweep; paying that same sweep on
-/// every daemon restart would let operational restarts multiply provider quota
-/// independently of the configured poll interval.
-fn initial_poll_deadline(now: Instant, interval: Duration, durable_cursor_exists: bool) -> Instant {
-    if durable_cursor_exists {
-        now + interval
-    } else {
-        now
+/// decision. A completed sweep therefore remains an authoritative baseline until
+/// the next scheduled one; paying that same sweep on every daemon restart would
+/// let operational restarts multiply provider quota independently of the
+/// configured poll interval.
+///
+/// What remains is measured from the durable record of the last completed sweep,
+/// never from this process's own start. Anchoring on startup made the deadline a
+/// full interval away every time, so a daemon restarting more often than a
+/// repository's interval — the tight deployment cycle this scheduling was
+/// written for — never reached it at all: a polling-only repository's signal
+/// went unobserved indefinitely, and a webhook-enabled one lost the completeness
+/// sweep for every fact its targeted projections do not cover. A repository
+/// whose last sweep is already older than the interval, or that has none on
+/// record, polls immediately.
+fn initial_poll_deadline(
+    now: Instant,
+    interval: Duration,
+    complete_poll_age: Option<Duration>,
+) -> Instant {
+    match complete_poll_age {
+        Some(age) => now + interval.saturating_sub(age),
+        None => now,
     }
 }
 
@@ -1460,20 +1533,33 @@ impl RepositoryWatchTask {
             }
         }
         let poll_schedule_started = Instant::now();
-        let durable_cursor_exists = match self.store.load_cursor(&self.repository).await {
-            Ok(cursor) => cursor.is_some(),
+        // The lookup acquires a pooled connection and queries, neither of which
+        // this task bounds, and the supervisor joins every child before aborting
+        // the set — an uncancellable await here would hold daemon termination
+        // for as long as PostgreSQL stayed unresponsive.
+        let Some(complete_poll_age) = run_until_shutdown(
+            &mut shutdown,
+            self.store.load_complete_poll_age(&self.repository),
+        )
+        .await
+        else {
+            return;
+        };
+        let complete_poll_age = match complete_poll_age {
+            Ok(age) => age,
             Err(error) => {
                 tracing::warn!(
                     repository = %self.repository.as_str(),
                     cause_code = "repository_watch_startup_cursor_unavailable",
                     error = ?error,
-                    "repository-watch startup could not inspect its durable cursor; an immediate full poll remains scheduled"
+                    "repository-watch startup could not inspect its durable poll cadence; an immediate full poll remains scheduled"
                 );
-                false
+                None
             }
         };
         let mut next_poll =
-            initial_poll_deadline(poll_schedule_started, self.interval, durable_cursor_exists);
+            initial_poll_deadline(poll_schedule_started, self.interval, complete_poll_age);
+        let mut consecutive_poll_preemptions = 0_u32;
         loop {
             if *shutdown.borrow() {
                 return;
@@ -1493,10 +1579,10 @@ impl RepositoryWatchTask {
                     let drain = webhook_retry.poll_drain();
                     let mut drained = None;
                     let mut trailing_failure = None;
-                    let webhook_interrupt = match webhook_retry.is_backing_off() {
-                        true => WebhookPollInterrupt::Suppressed,
-                        false => WebhookPollInterrupt::Enabled,
-                    };
+                    let webhook_interrupt = poll_webhook_interrupt(
+                        webhook_retry.is_backing_off(),
+                        consecutive_poll_preemptions,
+                    );
                     let outcome = self
                         .run_preemptible_attempt_until_shutdown(
                             drain,
@@ -1559,8 +1645,11 @@ impl RepositoryWatchTask {
                             ) {
                                 return;
                             }
+                            consecutive_poll_preemptions =
+                                consecutive_poll_preemptions.saturating_add(1);
                             tracing::debug!(
                                 repository = %self.repository.as_str(),
+                                consecutive_preemptions = consecutive_poll_preemptions,
                                 "repository-watch webhook work preempted a full poll"
                             );
                             // Return the still-due poll to the scheduler rather
@@ -1569,7 +1658,9 @@ impl RepositoryWatchTask {
                             // remains, so each fresh attempt drains another page
                             // before entering an interruptible provider sweep.
                             // Once the page observes no remainder it stops
-                            // re-arming and the complete poll proceeds.
+                            // re-arming and the complete poll proceeds; until
+                            // then the count above is what ends the cycle, since
+                            // sustained ingress alone never does.
                             continue;
                         }
                     };
@@ -1615,6 +1706,9 @@ impl RepositoryWatchTask {
                     if result.is_err_and(RepositoryWatchAttemptError::is_permanent) {
                         return;
                     }
+                    // The poll committed, so the next one starts its own
+                    // preemption budget.
+                    consecutive_poll_preemptions = 0;
                     next_poll = next_cadence_deadline(cycle_started, self.interval, Instant::now());
                 }
                 RepositoryWatchWake::WebhookWork => {
@@ -2136,7 +2230,16 @@ impl RepositoryWatchTask {
             Ok(outcome) => outcome,
             Err(_) => {
                 let phase = self.webhook_attempt_phase;
-                self.finish_cancelled_webhook_attempt().await;
+                let dispatch_in_flight = self.finish_cancelled_webhook_attempt().await;
+                // The drain's own deadline records this; the enclosing attempt
+                // deadline can cancel the same drain — the reconciliation ahead
+                // of it spends the margin between the two bounds — and left
+                // unrecorded the fence in `run_attempt_prelude` never fires, so
+                // the following complete poll commits a cursor past a delivery
+                // this cancellation left pending.
+                if phase.cancellation_fences_complete_poll() {
+                    self.webhook_drain_timed_out = true;
+                }
                 let error = RepositoryWatchAttemptError::WebhookAttemptTimedOut;
                 tracing::error!(
                     repository = %self.repository.as_str(),
@@ -2150,7 +2253,7 @@ impl RepositoryWatchTask {
                 // Cancellation carries no failure of its own, so the cancelled
                 // step decides the outcome: only a drain the deadline
                 // interrupted has earned the growing projection backoff.
-                phase.cancelled_outcome(error)
+                phase.cancelled_outcome(error, dispatch_in_flight)
             }
         }
     }
@@ -2186,7 +2289,14 @@ impl RepositoryWatchTask {
     /// no-interleaving policy. Either deadline can cancel a projected terminal
     /// write, so the carried shadow is settled here rather than at one call
     /// site.
-    async fn finish_cancelled_webhook_attempt(&mut self) {
+    ///
+    /// Reports whether the cancellation landed in the drain's post-terminal
+    /// dispatch window and clears that marker, because nothing else does: a flag
+    /// left set outlives its attempt and makes a later drain timeout report a
+    /// dispatch failure for a projection that never terminalized, clearing the
+    /// projection backoff and re-enabling poll drains.
+    async fn finish_cancelled_webhook_attempt(&mut self) -> bool {
+        let dispatch_in_flight = std::mem::take(&mut self.webhook_dispatch_in_flight);
         if timeout(
             WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT,
             self.poller.drain_fetches(),
@@ -2211,6 +2321,7 @@ impl RepositoryWatchTask {
             self.webhook_shadow_superseded = false;
             self.webhook_terminal_ambiguous = Some(key);
         }
+        dispatch_in_flight
     }
 
     async fn process_webhook_deliveries(&mut self) -> WebhookDrainOutcome {
@@ -2427,7 +2538,7 @@ impl RepositoryWatchTask {
                 // cleanup bounds that join and settles the carried shadow, so
                 // the poller's next attempt drains the same shared set before
                 // it can spawn, preserving the no-interleaving policy.
-                self.finish_cancelled_webhook_attempt().await;
+                let dispatch_in_flight = self.finish_cancelled_webhook_attempt().await;
                 let first_failure = self.webhook_drain_first_failure.take();
                 let projection_failure = self.webhook_drain_projection_failure.take();
                 if let Some(first_failure) = first_failure {
@@ -2445,10 +2556,8 @@ impl RepositoryWatchTask {
                     "repository-watch webhook drain exceeded its attempt deadline"
                 );
                 if let Some(projection_failure) = projection_failure {
-                    self.webhook_dispatch_in_flight = false;
                     WebhookDrainOutcome::ProjectionFailed(projection_failure)
-                } else if self.webhook_dispatch_in_flight {
-                    self.webhook_dispatch_in_flight = false;
+                } else if dispatch_in_flight {
                     WebhookDrainOutcome::DispatchFailedAfterTerminal(first_failure.unwrap_or(error))
                 } else {
                     WebhookDrainOutcome::ProjectionFailed(error)
@@ -4658,13 +4767,56 @@ impl RepositoryWatchAttemptError {
     }
 }
 
-fn rejected_response_error(status: StatusCode) -> RepositoryWatchAttemptError {
+/// Classifies a rejected REST response.
+///
+/// `403` carries two unrelated meanings on this provider, and only one of them
+/// is repository-wide. A throttled request is reported as `403` with the
+/// rate-limit headers set, and stopping the page is right: every later targeted
+/// request would meet the same limit. A credential that is simply not scoped for
+/// one endpoint — the Checks endpoints are the live case — is also `403`, with
+/// no such headers, and is specific to that resource. Treating the second as a
+/// provider outage stops the drain at the same oldest receipt on every retry, so
+/// later payload-only and ignored deliveries behind it are never attempted: an
+/// ordinary under-scoped token becomes a permanent per-repository drain stall.
+fn rejected_response_error(status: StatusCode, headers: &HeaderMap) -> RepositoryWatchAttemptError {
     if status == StatusCode::UNAUTHORIZED {
         RepositoryWatchAttemptError::Credential
-    } else if status == StatusCode::FORBIDDEN
-        || status == StatusCode::TOO_MANY_REQUESTS
+    } else if status == StatusCode::TOO_MANY_REQUESTS
         || status.is_server_error()
+        || (status == StatusCode::FORBIDDEN && response_is_throttled(headers))
     {
+        RepositoryWatchAttemptError::ProviderUnavailable
+    } else {
+        RepositoryWatchAttemptError::Rejected
+    }
+}
+
+/// Whether the provider's own headers say a rejection is a rate limit.
+///
+/// A secondary limit answers with `Retry-After`; a primary limit answers with an
+/// exhausted `X-RateLimit-Remaining`. Neither header accompanies a
+/// permission-scoped rejection, so their absence is what separates the two
+/// meanings of `403` above.
+fn response_is_throttled(headers: &HeaderMap) -> bool {
+    headers.contains_key(RETRY_AFTER)
+        || headers
+            .get("x-ratelimit-remaining")
+            .and_then(|remaining| remaining.to_str().ok())
+            .and_then(|remaining| remaining.trim().parse::<u64>().ok())
+            .is_some_and(|remaining| remaining == 0)
+}
+
+/// Classifies an `HTTP 200` GraphQL error envelope.
+///
+/// Throttling and provider outage are reported through this envelope rather than
+/// a status code, and both are repository-wide: thread hydration runs during
+/// targeted refreshes, so a page that keeps going re-issues the identical doomed
+/// request for every later delivery on it. Every other error type stays
+/// `Rejected` and defers only its own receipt — a query-scoped `INTERNAL`
+/// failure or a missing node is not evidence that a peer's request cannot make
+/// independent progress.
+fn graphql_envelope_error(errors: &[GraphQlError]) -> RepositoryWatchAttemptError {
+    if errors.iter().any(GraphQlError::is_repository_wide) {
         RepositoryWatchAttemptError::ProviderUnavailable
     } else {
         RepositoryWatchAttemptError::Rejected
@@ -5654,7 +5806,7 @@ impl GitHubRepositoryPoller {
                 )
                 .await?;
             if !response.errors.is_empty() {
-                return Err(RepositoryWatchAttemptError::Rejected);
+                return Err(graphql_envelope_error(&response.errors));
             }
             let connection = response
                 .data
@@ -5723,7 +5875,7 @@ impl GitHubRepositoryPoller {
                 )
                 .await?;
             if !response.errors.is_empty() {
-                return Err(RepositoryWatchAttemptError::Rejected);
+                return Err(graphql_envelope_error(&response.errors));
             }
             let pull_request = response
                 .data
@@ -5859,7 +6011,7 @@ impl GitHubRepositoryPoller {
                 )
                 .await?;
             if !response.errors.is_empty() {
-                return Err(RepositoryWatchAttemptError::Rejected);
+                return Err(graphql_envelope_error(&response.errors));
             }
             let pull_request = response
                 .data
@@ -6046,7 +6198,7 @@ impl GitHubRepositoryPoller {
             )
             .await?;
         if !response.errors.is_empty() {
-            return Err(RepositoryWatchAttemptError::Rejected);
+            return Err(graphql_envelope_error(&response.errors));
         }
         let review = response
             .data
@@ -6083,7 +6235,7 @@ impl GitHubRepositoryPoller {
                 )
                 .await?;
             if !response.errors.is_empty() {
-                return Err(RepositoryWatchAttemptError::Rejected);
+                return Err(graphql_envelope_error(&response.errors));
             }
             let review = response
                 .data
@@ -6637,7 +6789,10 @@ impl GitHubRepositoryPoller {
             return Ok(accepted);
         }
         if response.status() != StatusCode::OK {
-            return Err(rejected_response_error(response.status()));
+            return Err(rejected_response_error(
+                response.status(),
+                response.headers(),
+            ));
         }
         // The cached pair stays in place while this body is read and parsed.
         // Two open pull requests sharing a head SHA fetch the same check-suite
@@ -7420,7 +7575,26 @@ struct GraphQlEnvelope<T> {
 }
 
 #[derive(Clone, Deserialize)]
-struct GraphQlError {}
+struct GraphQlError {
+    // The provider's closed error taxonomy. Absent on a query the server
+    // rejected without one, which is target-specific by construction.
+    #[serde(rename = "type", default)]
+    error_type: Option<String>,
+}
+
+impl GraphQlError {
+    /// The error types that describe the repository's provider rather than the
+    /// query, so no later request on the page can succeed either.
+    const REPOSITORY_WIDE_TYPES: [&'static str; 2] = ["RATE_LIMITED", "SERVICE_UNAVAILABLE"];
+
+    fn is_repository_wide(&self) -> bool {
+        self.error_type.as_deref().is_some_and(|error_type| {
+            Self::REPOSITORY_WIDE_TYPES
+                .iter()
+                .any(|wide| wide.eq_ignore_ascii_case(error_type))
+        })
+    }
+}
 
 #[derive(Clone, Deserialize)]
 struct ThreadData {
@@ -7751,35 +7925,38 @@ mod tests {
 
     use super::{
         CheckConclusion, ChecksOutcome, ConvergenceCheck, EntityTag, FileCredentialAccess,
-        GitHubRepositoryPoller, ListedPullRequest, MAX_CACHED_WIRE_BYTES,
-        MAX_CHECK_SUITES_PER_COMMIT_CHECK_RUN_SEARCH, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
+        GitHubRepositoryPoller, GraphQlError, HeaderMap, HeaderValue, ListedPullRequest,
+        MAX_CACHED_WIRE_BYTES, MAX_CHECK_SUITES_PER_COMMIT_CHECK_RUN_SEARCH,
+        MAX_CONCURRENT_PULL_REQUEST_FETCHES, MAX_CONSECUTIVE_POLL_PREEMPTIONS,
         MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
         PollAttemptWait, PollCache, PreparedTargetedRefresh, PullRequestSettlement, PullResponse,
-        ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
-        RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchEventKindNameV1,
-        RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-        RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
-        RepoWatchRepositoryStateInput, RepoWatchReviewDecision, RepoWatchReviewObservation,
+        RETRY_AFTER, ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead,
+        RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
+        RepoWatchCursorGeneration, RepoWatchEventKindNameV1, RepoWatchObservation,
+        RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+        RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+        RepoWatchReviewDecision, RepoWatchReviewObservation,
         RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
         RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
         RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
         RepositoryWatchRuntimeError, RepositoryWatchTask, RepositoryWatchWake, ResourceKey,
-        ReviewState, TargetedPollOutcome, TargetedPullRequest, TargetedRefreshSettlement, Url,
-        UuidV7RepoWatchEventIdGenerator, WEBHOOK_CURSOR_SIZING_TIMEOUT,
-        WEBHOOK_DRAIN_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_MAX_ATTEMPT_TIMEOUT,
-        WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY,
-        WEBHOOK_DRAIN_TIMEOUT_PAYLOAD_QUANTUM_BYTES, WEBHOOK_DRAIN_TIMEOUT_PER_PAYLOAD_QUANTUM,
-        WEBHOOK_PENDING_PAGE_SIZE, WebhookAttemptDeadlines, WebhookAttemptOutcome,
-        WebhookAttemptPhase, WebhookDrain, WebhookDrainOutcome, WebhookDrainProgress,
-        WebhookDrainRetry, WebhookPayloadPurgeSchedule, WebhookPollInterrupt,
-        WebhookShadowBaseline, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
-        commit_check_run_search_is_complete, compact_cursor_observation, derive_repo_watch_events,
-        dispatch_context_json, initial_poll_deadline, inspect_webhook_drain, next_cadence_deadline,
-        next_repository_wake, normalize_checks_outcome, normalize_pull_request_context, object_id,
+        ReviewState, StatusCode, TargetedPollOutcome, TargetedPullRequest,
+        TargetedRefreshSettlement, Url, UuidV7RepoWatchEventIdGenerator,
+        WEBHOOK_CURSOR_SIZING_TIMEOUT, WEBHOOK_DRAIN_ATTEMPT_TIMEOUT,
+        WEBHOOK_DRAIN_MAX_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_RETRY_DELAY,
+        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WEBHOOK_DRAIN_TIMEOUT_PAYLOAD_QUANTUM_BYTES,
+        WEBHOOK_DRAIN_TIMEOUT_PER_PAYLOAD_QUANTUM, WEBHOOK_PENDING_PAGE_SIZE,
+        WebhookAttemptDeadlines, WebhookAttemptOutcome, WebhookAttemptPhase, WebhookDrain,
+        WebhookDrainOutcome, WebhookDrainProgress, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
+        WebhookPollInterrupt, WebhookShadowBaseline, WorkflowName, WorkflowResponse,
+        await_poll_or_interrupt, commit_check_run_search_is_complete, compact_cursor_observation,
+        derive_repo_watch_events, dispatch_context_json, graphql_envelope_error,
+        initial_poll_deadline, inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
+        normalize_checks_outcome, normalize_pull_request_context, object_id,
         observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
-        record_dispatch_start_nudge_outcome, repository_reconciliation_quantum_exhausted,
-        rule_activation_error, run_until_shutdown, supervise_repository_tasks,
-        targeted_pull_requests,
+        poll_webhook_interrupt, record_dispatch_start_nudge_outcome, rejected_response_error,
+        repository_reconciliation_quantum_exhausted, rule_activation_error, run_until_shutdown,
+        supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
         EligibilityNudgeOutcome, InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
@@ -8021,6 +8198,25 @@ mod tests {
 
     const fn drain_failure() -> Result<(), RepositoryWatchAttemptError> {
         Err(RepositoryWatchAttemptError::Persistence)
+    }
+
+    /// A delivery outside the mapped set, which reaches terminal state without
+    /// a provider request of its own.
+    fn ignored_admission(delivery: u128) -> Result<RepoWatchWebhookAdmission, Box<dyn Error>> {
+        let body = serde_json::json!({
+            "action": "queued",
+            "repository": {"full_name": WATCHED_REPOSITORY},
+        })
+        .to_string()
+        .into_bytes();
+        Ok(RepoWatchWebhookAdmission::try_new(
+            webhook_delivery_key(delivery),
+            RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?,
+            "workflow_job".to_owned(),
+            Some("queued".to_owned()),
+            [WEBHOOK_BODY_DIGEST_FILL; 32],
+            body,
+        )?)
     }
 
     fn synchronize_admission(delivery: u128) -> Result<RepoWatchWebhookAdmission, Box<dyn Error>> {
@@ -8921,6 +9117,7 @@ mod tests {
         status: &'static str,
         entity_tag: Option<&'static str>,
         link: Option<&'static str>,
+        retry_after: Option<&'static str>,
         body: String,
         delay: Duration,
     }
@@ -8935,6 +9132,7 @@ mod tests {
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: None,
+                retry_after: None,
                 body: body.0,
                 delay: Duration::ZERO,
             }
@@ -8949,6 +9147,7 @@ mod tests {
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: Some(NEXT_PAGE_LINK),
+                retry_after: None,
                 body: body.0,
                 delay: Duration::ZERO,
             }
@@ -8963,6 +9162,7 @@ mod tests {
                 status: "200 OK",
                 entity_tag: Some(ENTITY_TAG),
                 link: None,
+                retry_after: None,
                 body: body.0,
                 delay: Duration::ZERO,
             }
@@ -8977,6 +9177,7 @@ mod tests {
                 status: "404 Not Found",
                 entity_tag: None,
                 link: None,
+                retry_after: None,
                 body: String::from("{}"),
                 delay: Duration::ZERO,
             }
@@ -8991,6 +9192,7 @@ mod tests {
                 status: "403 Forbidden",
                 entity_tag: None,
                 link: None,
+                retry_after: None,
                 body: String::from("{}"),
                 delay: Duration::ZERO,
             }
@@ -9005,6 +9207,7 @@ mod tests {
                 status: "304 Not Modified",
                 entity_tag: None,
                 link: None,
+                retry_after: None,
                 body: String::new(),
                 delay: Duration::ZERO,
             }
@@ -9012,6 +9215,16 @@ mod tests {
 
         fn delayed(mut self, delay: Duration) -> Self {
             self.delay = delay;
+            self
+        }
+
+        /// Marks a rejection as the provider's own rate limit.
+        ///
+        /// A secondary limit is what carries this header, and it is what
+        /// separates a throttled `403` from the permission-scoped `403` an
+        /// under-scoped credential receives on one endpoint.
+        fn throttled(mut self) -> Self {
+            self.retry_after = Some("60");
             self
         }
 
@@ -9024,6 +9237,7 @@ mod tests {
                 status: "200 OK",
                 entity_tag: None,
                 link: None,
+                retry_after: None,
                 body: body.0,
                 delay: Duration::ZERO,
             }
@@ -9228,11 +9442,16 @@ mod tests {
             .link
             .map(|value| format!("Link: {value}\r\n"))
             .unwrap_or_default();
+        let retry_after = response
+            .retry_after
+            .map(|value| format!("Retry-After: {value}\r\n"))
+            .unwrap_or_default();
         let encoded = format!(
-            "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 {}\r\nContent-Type: application/json\r\n{}{}{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
             response.status,
             entity_tag,
             link,
+            retry_after,
             response.body.len(),
             response.body,
         );
@@ -11098,17 +11317,41 @@ mod tests {
         let error = RepositoryWatchAttemptError::WebhookAttemptTimedOut;
 
         assert_eq!(
-            WebhookAttemptPhase::BeforeDrain.cancelled_outcome(error),
+            WebhookAttemptPhase::BeforeDrain.cancelled_outcome(error, false),
             WebhookAttemptOutcome::FailedBeforeDrain(error)
         );
         assert_eq!(
-            WebhookAttemptPhase::Drain.cancelled_outcome(error),
+            WebhookAttemptPhase::Drain.cancelled_outcome(error, false),
             WebhookAttemptOutcome::DrainFailed(error)
         );
         assert_eq!(
-            WebhookAttemptPhase::AfterDrain.cancelled_outcome(error),
+            WebhookAttemptPhase::AfterDrain.cancelled_outcome(error, false),
             WebhookAttemptOutcome::DrainedThenFailed(error)
         );
+    }
+
+    /// The drain's own post-terminal dispatch window sits inside the drain
+    /// phase, and its delivery is already terminal. Reporting a cancellation
+    /// there as a drain failure would grow the projection backoff — suppressing
+    /// admission wakes and poll drains to its cap — for a projection that had
+    /// already committed.
+    #[test]
+    fn a_cancelled_post_terminal_dispatch_arms_the_follow_up_instead_of_the_backoff() {
+        let error = RepositoryWatchAttemptError::WebhookAttemptTimedOut;
+
+        assert_eq!(
+            WebhookAttemptPhase::Drain.cancelled_outcome(error, true),
+            WebhookAttemptOutcome::DrainedThenFailed(error)
+        );
+    }
+
+    /// Only the drain owns pending deliveries, so only a cancellation there can
+    /// leave one unprojected behind a cursor a later poll would advance.
+    #[test]
+    fn only_a_cancelled_drain_fences_the_next_cursor_advancing_poll() {
+        assert!(!WebhookAttemptPhase::BeforeDrain.cancellation_fences_complete_poll());
+        assert!(WebhookAttemptPhase::Drain.cancellation_fences_complete_poll());
+        assert!(!WebhookAttemptPhase::AfterDrain.cancellation_fences_complete_poll());
     }
 
     #[test]
@@ -11142,6 +11385,102 @@ mod tests {
 
         assert!(WEBHOOK_CURSOR_SIZING_TIMEOUT < floor.drain);
         assert!(WEBHOOK_CURSOR_SIZING_TIMEOUT < floor.attempt);
+    }
+
+    /// The attempt deadline is the drain deadline plus a margin the leading
+    /// reconciliation spends, so any leading work that outlasts that margin
+    /// makes the outer deadline — not the drain's own — cancel an in-flight
+    /// drain. That cancellation leaves the same pending delivery behind, so it
+    /// owes the same fence: without it the next complete poll advances the
+    /// durable cursor past a delivery nothing has projected.
+    #[tokio::test(start_paused = true)]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn an_attempt_deadline_reached_inside_the_drain_fences_the_next_complete_poll()
+    -> Result<(), Box<dyn Error>> {
+        // A paused clock auto-advances whenever the runtime goes idle, and
+        // container startup spends nearly all of its time waiting on the
+        // container daemon, so keep the clock runnable across setup.
+        let clock_guard = keep_paused_clock_runnable();
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admission).await?;
+        webhook_store
+            .inject_projection_wedge(admission.key(), WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .await?;
+        let mut blocker = pool.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .execute(&mut *blocker)
+            .await?;
+        let mut fixture = webhook_task(&pool).await?;
+        {
+            // The drain deadline is deliberately far beyond the attempt's, so
+            // the cancellation observed below can only be the outer one.
+            let attempt =
+                fixture
+                    .task
+                    .run_webhook_attempt_with_deadlines(WebhookAttemptDeadlines {
+                        drain: Duration::from_secs(600),
+                        attempt: Duration::from_secs(60),
+                        cursor_payload_bytes: 0,
+                    });
+            tokio::pin!(attempt);
+            tokio::select! {
+                () = wait_for_webhook_projection_wedge(&webhook_store) => {}
+                outcome = &mut attempt => {
+                    panic!("the deliberate projection wedge completed early: {outcome:?}");
+                }
+            }
+
+            clock_guard.abort();
+            clock_guard.await.ok();
+            tokio::time::advance(Duration::from_secs(60)).await;
+            assert_eq!(
+                attempt.await,
+                WebhookAttemptOutcome::DrainFailed(
+                    RepositoryWatchAttemptError::WebhookAttemptTimedOut
+                ),
+                "the drain was what the outer deadline interrupted"
+            );
+        }
+        let clock_guard = keep_paused_clock_runnable();
+        assert!(
+            fixture.task.webhook_drain_timed_out,
+            "an outer deadline reached inside the drain records the same timeout the drain's own deadline does"
+        );
+        // Taken and restored so the assertion below isolates the general
+        // timeout fence from the delivery-specific ambiguity fence beside it.
+        let ambiguous = fixture.task.webhook_terminal_ambiguous.take();
+        let mut deferred_drain = None;
+        let mut deferred_dispatch_failure = None;
+        assert_eq!(
+            fixture
+                .task
+                .run_attempt_prelude(
+                    WebhookDrain::Deferred,
+                    &mut deferred_drain,
+                    &mut deferred_dispatch_failure,
+                )
+                .await,
+            Err(RepositoryWatchAttemptError::WebhookDrainTimedOut),
+            "the cancelled drain's pending delivery blocks the cursor-advancing poll"
+        );
+        fixture.task.webhook_terminal_ambiguous = ambiguous;
+        assert!(!webhook_disposition_exists(&webhook_store, admission.key()).await?);
+        let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+            .bind(WEBHOOK_PROJECTION_ADVISORY_LOCK)
+            .fetch_one(&mut *blocker)
+            .await?;
+
+        let retried = fixture.task.process_webhook_deliveries().await;
+
+        assert!(unlocked, "the fixture releases its deliberate drain wedge");
+        assert_eq!(retried, WebhookDrainOutcome::Drained);
+        assert!(webhook_disposition_exists(&webhook_store, admission.key()).await?);
+        clock_guard.abort();
+        clock_guard.await.ok();
+        Ok(())
     }
 
     #[tokio::test]
@@ -11400,9 +11739,9 @@ mod tests {
         let tail = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
         webhook_store.admit(&throttled).await?;
         webhook_store.admit(&tail).await?;
-        let server = ScriptedServer::start(vec![ScriptedResponse::forbidden(RequestTarget(
-            PULL_DETAIL_TARGET.to_owned(),
-        ))])
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::forbidden(RequestTarget(PULL_DETAIL_TARGET.to_owned())).throttled(),
+        ])
         .await;
         let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
 
@@ -11415,6 +11754,42 @@ mod tests {
         );
         assert!(!webhook_disposition_exists(&webhook_store, throttled.key()).await?);
         assert!(!webhook_disposition_exists(&webhook_store, tail.key()).await?);
+        Ok(())
+    }
+
+    /// A credential that lacks permission on one endpoint answers `403` without
+    /// the provider's rate-limit headers. Stopping the page there would break
+    /// the drain at that same oldest receipt on every retry, so every later
+    /// delivery behind it is never attempted — a permanent per-repository stall
+    /// reachable with an ordinary under-scoped token.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_permission_scoped_rejection_leaves_the_rest_of_the_page_attempted()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let unscoped = synchronize_admission(THIRD_WEBHOOK_DELIVERY)?;
+        let tail = ignored_admission(FIRST_WEBHOOK_DELIVERY)?;
+        webhook_store.admit(&unscoped).await?;
+        webhook_store.admit(&tail).await?;
+        let server = ScriptedServer::start(vec![ScriptedResponse::forbidden(RequestTarget(
+            PULL_DETAIL_TARGET.to_owned(),
+        ))])
+        .await;
+        let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
+
+        let attempt = fixture.task.process_webhook_deliveries().await;
+
+        server.finish().await;
+        assert_eq!(
+            attempt,
+            WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Rejected)
+        );
+        assert!(!webhook_disposition_exists(&webhook_store, unscoped.key()).await?);
+        assert!(
+            webhook_disposition_exists(&webhook_store, tail.key()).await?,
+            "the receipt behind the unscoped one is still attempted"
+        );
         Ok(())
     }
 
@@ -12590,7 +12965,7 @@ mod tests {
     fn a_first_repository_baseline_polls_immediately() {
         let now = Instant::now();
 
-        assert_eq!(initial_poll_deadline(now, POLL_INTERVAL, false), now);
+        assert_eq!(initial_poll_deadline(now, POLL_INTERVAL, None), now);
     }
 
     #[test]
@@ -12598,9 +12973,172 @@ mod tests {
         let now = Instant::now();
 
         assert_eq!(
-            initial_poll_deadline(now, POLL_INTERVAL, true),
+            initial_poll_deadline(now, POLL_INTERVAL, Some(Duration::ZERO)),
             now + POLL_INTERVAL
         );
+    }
+
+    /// A restart resumes what the durable record says is left of the cadence.
+    /// Anchoring on this process's start instead would hand every restart a
+    /// fresh full interval.
+    #[test]
+    fn a_warm_restart_waits_only_for_the_remainder_of_the_cadence() {
+        let now = Instant::now();
+        let elapsed = POLL_INTERVAL / 4;
+
+        assert_eq!(
+            initial_poll_deadline(now, POLL_INTERVAL, Some(elapsed)),
+            now + (POLL_INTERVAL - elapsed)
+        );
+    }
+
+    /// Restarts more frequent than the interval must not postpone the
+    /// authoritative sweep: once the durable record is older than the interval,
+    /// the sweep is due no matter how recently this process started.
+    #[test]
+    fn a_restart_polls_immediately_once_the_recorded_sweep_is_older_than_the_interval() {
+        let now = Instant::now();
+
+        assert_eq!(
+            initial_poll_deadline(now, POLL_INTERVAL, Some(POLL_INTERVAL)),
+            now
+        );
+        assert_eq!(
+            initial_poll_deadline(now, POLL_INTERVAL, Some(POLL_INTERVAL * 9)),
+            now
+        );
+    }
+
+    /// A bounded drain page re-arms its wake while durable remainder exists, so
+    /// nothing in the preemption cycle itself ends it: sustained ingress would
+    /// preempt every fresh pass and the complete poll would never commit.
+    #[test]
+    fn consecutive_webhook_preemptions_stop_starving_the_complete_poll() {
+        assert_eq!(
+            poll_webhook_interrupt(false, 0),
+            WebhookPollInterrupt::Enabled
+        );
+        assert_eq!(
+            poll_webhook_interrupt(false, MAX_CONSECUTIVE_POLL_PREEMPTIONS - 1),
+            WebhookPollInterrupt::Enabled
+        );
+        assert_eq!(
+            poll_webhook_interrupt(false, MAX_CONSECUTIVE_POLL_PREEMPTIONS),
+            WebhookPollInterrupt::Suppressed
+        );
+        assert_eq!(
+            poll_webhook_interrupt(false, MAX_CONSECUTIVE_POLL_PREEMPTIONS + 1),
+            WebhookPollInterrupt::Suppressed
+        );
+    }
+
+    /// An owed drain retry keeps its own deadline authoritative regardless of
+    /// how many preemptions the still-due poll has left.
+    #[test]
+    fn a_backing_off_drain_retry_still_suppresses_admission_preemption() {
+        assert_eq!(
+            poll_webhook_interrupt(true, 0),
+            WebhookPollInterrupt::Suppressed
+        );
+    }
+
+    /// A credential that lacks permission on one endpoint answers `403` without
+    /// rate-limit headers. Treating that as a provider outage stops the drain
+    /// page at the same oldest receipt on every retry, so every later delivery
+    /// behind it — payload-only and ignored ones included — is never attempted.
+    #[test]
+    fn a_permission_scoped_rejection_defers_only_its_own_receipt() {
+        let error = rejected_response_error(StatusCode::FORBIDDEN, &HeaderMap::new());
+
+        assert_eq!(error, RepositoryWatchAttemptError::Rejected);
+        assert!(!error.stops_webhook_page());
+    }
+
+    #[test]
+    fn a_throttled_rejection_stops_the_whole_page() {
+        let mut secondary = HeaderMap::new();
+        secondary.insert(RETRY_AFTER, HeaderValue::from_static("60"));
+        let mut primary = HeaderMap::new();
+        primary.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+        let mut remaining = HeaderMap::new();
+        remaining.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
+
+        assert_eq!(
+            rejected_response_error(StatusCode::FORBIDDEN, &secondary),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+        assert_eq!(
+            rejected_response_error(StatusCode::FORBIDDEN, &primary),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+        assert_eq!(
+            rejected_response_error(StatusCode::FORBIDDEN, &remaining),
+            RepositoryWatchAttemptError::Rejected
+        );
+        assert_eq!(
+            rejected_response_error(StatusCode::TOO_MANY_REQUESTS, &HeaderMap::new()),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+        assert_eq!(
+            rejected_response_error(StatusCode::SERVICE_UNAVAILABLE, &HeaderMap::new()),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+        assert_eq!(
+            rejected_response_error(StatusCode::UNAUTHORIZED, &HeaderMap::new()),
+            RepositoryWatchAttemptError::Credential
+        );
+        assert_eq!(
+            rejected_response_error(StatusCode::NOT_FOUND, &HeaderMap::new()),
+            RepositoryWatchAttemptError::Rejected
+        );
+    }
+
+    /// Throttling and provider outage arrive as an `HTTP 200` GraphQL error
+    /// envelope. Classified as a target-specific rejection, thread hydration
+    /// re-issues the identical doomed request for every later delivery on the
+    /// page — the amplification the page-stopping predicate exists to prevent.
+    #[test]
+    fn a_repository_wide_graphql_error_stops_the_whole_page() {
+        let error = graphql_envelope_error(&[graphql_error("RATE_LIMITED")]);
+
+        assert_eq!(error, RepositoryWatchAttemptError::ProviderUnavailable);
+        assert!(error.stops_webhook_page());
+        assert_eq!(
+            graphql_envelope_error(&[graphql_error("SERVICE_UNAVAILABLE")]),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+        assert_eq!(
+            graphql_envelope_error(&[graphql_error("NOT_FOUND"), graphql_error("RATE_LIMITED")]),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+    }
+
+    /// A query-scoped failure is not evidence that a peer's request cannot make
+    /// independent progress, so it defers only its own receipt.
+    #[test]
+    fn a_query_scoped_graphql_error_defers_only_its_own_receipt() {
+        let error = graphql_envelope_error(&[graphql_error("NOT_FOUND"), untyped_graphql_error()]);
+
+        assert_eq!(error, RepositoryWatchAttemptError::Rejected);
+        assert!(!error.stops_webhook_page());
+        assert_eq!(
+            graphql_envelope_error(&[untyped_graphql_error()]),
+            RepositoryWatchAttemptError::Rejected
+        );
+        assert_eq!(
+            graphql_envelope_error(&[graphql_error("INTERNAL")]),
+            RepositoryWatchAttemptError::Rejected
+        );
+    }
+
+    fn graphql_error(error_type: &str) -> GraphQlError {
+        GraphQlError {
+            error_type: Some(error_type.to_owned()),
+        }
+    }
+
+    fn untyped_graphql_error() -> GraphQlError {
+        GraphQlError { error_type: None }
     }
 
     #[tokio::test]
