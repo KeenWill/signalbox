@@ -1296,6 +1296,7 @@ fn decode_webhook_disposition(
     })?;
     Ok(match disposition {
         StoredWebhookDisposition::Projected => RepoWatchWebhookDisposition::Projected,
+        StoredWebhookDisposition::Committed => RepoWatchWebhookDisposition::Committed,
         StoredWebhookDisposition::DuplicateState => RepoWatchWebhookDisposition::DuplicateState,
         StoredWebhookDisposition::Superseded => RepoWatchWebhookDisposition::Superseded,
         StoredWebhookDisposition::Ignored => RepoWatchWebhookDisposition::Ignored,

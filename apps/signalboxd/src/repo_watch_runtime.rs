@@ -26,17 +26,18 @@ use signalbox_application::{
     RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
     RepoWatchConvergenceAssessmentInput, RepoWatchDifferFailureKind, RepoWatchDispatchService,
     RepoWatchDispatchTransaction, RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
-    RepoWatchObservation, RepoWatchObservationApplyV1, RepoWatchPullRequestLifecycle,
-    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchReactionObservation,
-    RepoWatchRepositoryState, RepoWatchRepositoryStateInput, RepoWatchReviewDecision,
-    RepoWatchReviewObservation, RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
-    RepoWatchStaleReviewClearanceCandidate, RepoWatchTargetedRefreshCoalescerV1,
-    RepoWatchTargetedRefreshV1, RepoWatchThreadObservation, RepoWatchThreadState,
-    RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
-    RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
-    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
-    UuidV7RepoWatchEventIdGenerator, apply_repo_watch_observation_patch_v1,
-    derive_repo_watch_events, map_repo_watch_webhook_delivery_v1,
+    RepoWatchObservation, RepoWatchObservationApplyV1, RepoWatchObservationPatchV1,
+    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
+    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+    RepoWatchReviewDecision, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
+    RepoWatchRuleEvaluationOutcome, RepoWatchStaleReviewClearanceCandidate,
+    RepoWatchTargetedRefreshCoalescerV1, RepoWatchTargetedRefreshV1, RepoWatchThreadObservation,
+    RepoWatchThreadState, RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input,
+    RepoWatchWebhookIgnoredReasonV1, RepoWatchWebhookMappedNoChangeV1,
+    RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1, RepoWatchWorkflowRunObservation,
+    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator,
+    apply_repo_watch_observation_patch_v1, derive_repo_watch_events,
+    map_repo_watch_webhook_delivery_v1,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, DurableCommandId,
@@ -50,9 +51,10 @@ use signalbox_domain::{
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
     PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest, RepoWatchCursor,
-    RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchObservedReviewState,
-    RepoWatchPlannedStaleReviewClearance, RepoWatchStaleReviewClearanceOutcome,
-    RepoWatchStaleReviewClearanceRenewal, RepoWatchStoreError,
+    RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchEventProducer,
+    RepoWatchObservedReviewState, RepoWatchPlannedStaleReviewClearance,
+    RepoWatchStaleReviewClearanceOutcome, RepoWatchStaleReviewClearanceRenewal,
+    RepoWatchStoreError,
 };
 use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
@@ -77,7 +79,7 @@ use tokio::{
 use crate::SessionTemplateConfiguration;
 use crate::configuration::{
     FileCredentialAccess, HubModelConfiguration, RepositoryWatchConfiguration,
-    WatchedRepositoryConfiguration,
+    RepositoryWatchWebhookMode, WatchedRepositoryConfiguration,
 };
 use crate::repo_watch_webhook_runtime::{RepoWatchWebhookRuntime, RepoWatchWebhookRuntimeError};
 
@@ -1202,6 +1204,8 @@ struct RepositoryWatchTask {
     webhook_store: PostgresRepoWatchWebhookStore,
     webhook_work: Option<watch::Receiver<()>>,
     webhook_nudge: Option<Arc<watch::Sender<()>>>,
+    /// Whether an authenticated delivery writes the durable cursor itself.
+    webhook_primary: bool,
     webhook_shadow: Option<WebhookShadowBaseline>,
     webhook_shadow_superseded: bool,
     webhook_shadow_supersession_epoch: u64,
@@ -1325,6 +1329,9 @@ impl RepositoryWatchTask {
             eligibility_nudge,
             webhook_work,
             webhook_nudge,
+            webhook_primary: configuration
+                .webhook()
+                .is_some_and(|webhook| webhook.mode() == RepositoryWatchWebhookMode::Primary),
             webhook_shadow: None,
             webhook_shadow_superseded: false,
             webhook_shadow_supersession_epoch: 0,
@@ -2439,6 +2446,10 @@ impl RepositoryWatchTask {
                 )
                 .await
             }
+            RepoWatchWebhookMappingV1::Patch(patch) if self.webhook_primary => {
+                self.process_primary_webhook_patch(pending, patch, page, dispatch_failure)
+                    .await
+            }
             RepoWatchWebhookMappingV1::Patch(patch) => {
                 let cause = self
                     .seed_webhook_shadow()
@@ -2630,6 +2641,217 @@ impl RepositoryWatchTask {
         }
     }
 
+    /// Applies one mapped delivery to the durable cursor under primary mode.
+    ///
+    /// The baseline is the durable cursor rather than an accumulated shadow:
+    /// every applied delivery commits, so the next one reloads a cursor that
+    /// already carries its predecessor. That also supplies the expected
+    /// generation the optimistic commit needs, which an in-memory baseline
+    /// advanced past the cursor could not.
+    async fn process_primary_webhook_patch(
+        &mut self,
+        pending: &PendingRepoWatchWebhookDelivery,
+        patch: RepoWatchObservationPatchV1,
+        page: &mut RepoWatchTargetedRefreshCoalescerV1,
+        dispatch_failure: &mut Option<RepositoryWatchAttemptError>,
+    ) -> Result<(), RepositoryWatchAttemptError> {
+        let cursor = self
+            .store
+            .load_cursor(&self.repository)
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?
+            .ok_or(RepositoryWatchAttemptError::Persistence)?;
+        let baseline = WebhookShadowBaseline::from_cursor(&cursor);
+        let applied = match apply_repo_watch_observation_patch_v1(&baseline.observation, &patch) {
+            Ok(applied) => applied,
+            Err(_) => {
+                return self
+                    .record_webhook_terminal(
+                        pending,
+                        Vec::new(),
+                        RepoWatchWebhookDisposition::Quarantined,
+                        Some("patch_incoherent"),
+                    )
+                    .await;
+            }
+        };
+        let (observation, refreshes) = match applied {
+            RepoWatchObservationApplyV1::DuplicateState => {
+                return self
+                    .record_webhook_terminal(
+                        pending,
+                        Vec::new(),
+                        RepoWatchWebhookDisposition::DuplicateState,
+                        None,
+                    )
+                    .await;
+            }
+            RepoWatchObservationApplyV1::Superseded => {
+                return self
+                    .record_webhook_terminal(
+                        pending,
+                        Vec::new(),
+                        RepoWatchWebhookDisposition::Superseded,
+                        None,
+                    )
+                    .await;
+            }
+            RepoWatchObservationApplyV1::Ignored(reason) => {
+                // Committing nothing is the point: polling could never produce
+                // this fact, so writing it would leave a durable event row for
+                // a subject the complete sweep cannot reconcile toward.
+                return self
+                    .record_webhook_terminal(
+                        pending,
+                        Vec::new(),
+                        RepoWatchWebhookDisposition::Ignored,
+                        Some(webhook_ignored_reason_code(reason)),
+                    )
+                    .await;
+            }
+            RepoWatchObservationApplyV1::Applied(observation) => (observation, Vec::new()),
+            RepoWatchObservationApplyV1::NeedsTargetedRefresh {
+                observation,
+                refreshes,
+            } => (observation, refreshes.into_vec()),
+        };
+        // The provider query runs before anything is recorded, so a transient
+        // fetch failure leaves this delivery pending and retryable rather than
+        // terminal against state the poller never observed.
+        let unissued = page.unissued(&refreshes);
+        let (observation, issued) = match self
+            .prepare_primary_webhook_refresh(&observation, &unissued)
+            .await?
+        {
+            PreparedPrimaryRefreshOutcome::SupersededTarget => {
+                // The provider proved a targeted head stale before anything was
+                // recorded, so the delivery describes state the repository has
+                // already left and the cursor stays exactly as it was.
+                return self
+                    .record_webhook_terminal(
+                        pending,
+                        Vec::new(),
+                        RepoWatchWebhookDisposition::Superseded,
+                        None,
+                    )
+                    .await;
+            }
+            PreparedPrimaryRefreshOutcome::Refreshed {
+                observation,
+                queried,
+            } => (observation, queried),
+        };
+        let (events, identity_frontier) =
+            primary_committed_occurrences(&self.repository, &baseline, &observation)?;
+        // A primary delivery records no event projection. Parity compares
+        // projections against poll-produced rows, and this delivery's own commit
+        // is the durable row; projecting it too would leave a permanent
+        // webhook_only row that no poll can ever match, since the poll starts
+        // from the cursor this commit already advanced. Only the targeted
+        // queries are recorded, and only those actually sent, so neither a
+        // branch-only delivery naming no pull request nor one whose hydration
+        // this page already issued can claim a query the poller never made.
+        let projections = issued
+            .iter()
+            .map(targeted_query_projection)
+            .collect::<Result<Vec<_>, _>>()?;
+        let request = RepoWatchCommitRequest::from_webhook(
+            Some(cursor.generation()),
+            RepoWatchCursorCandidate::with_event_identity_frontier(
+                observation.clone(),
+                identity_frontier.clone(),
+            ),
+            events,
+        );
+        let settlement = self
+            .complete_webhook_cursor_commit(
+                request,
+                pending.key(),
+                projections,
+                WebhookShadowBaseline {
+                    observation,
+                    identity_frontier,
+                },
+            )
+            .await?;
+        // A superseded commit leaves this delivery terminal but never reached
+        // the cursor, so a later delivery for the same pull request on this page
+        // still owes the targeted query this one failed to commit.
+        if settlement == TargetedRefreshSettlement::Landed {
+            page.record_issued(&issued);
+        }
+        self.webhook_dispatch_in_flight = true;
+        let dispatch_result = self.process_dispatches().await;
+        self.webhook_dispatch_in_flight = false;
+        if let Err(error) = dispatch_result {
+            // Carries the identity here because this delivery is already
+            // terminal: it never reaches the drain page's deferral record, and
+            // the classified outcome the attempt reports names only a cause.
+            tracing::warn!(
+                repository = %self.repository.as_str(),
+                hook_id = pending.key().hook_id().get(),
+                delivery_id = %pending.key().delivery_id(),
+                receipt_sequence = pending.receipt().sequence().get(),
+                cause_code = error.cause_code(),
+                "webhook delivery dispatch failed after it reached terminal state"
+            );
+            dispatch_failure.get_or_insert(error);
+        }
+        Ok(())
+    }
+
+    /// Reconciles the pull requests one primary-mode delivery names.
+    ///
+    /// The patched observation is both the staleness baseline and the state the
+    /// fetched pull requests merge into, so facts the payload supplied for
+    /// untargeted subjects — a branch advance, say — survive the refresh.
+    async fn prepare_primary_webhook_refresh(
+        &self,
+        patched: &RepoWatchObservation,
+        refreshes: &[RepoWatchTargetedRefreshV1],
+    ) -> Result<PreparedPrimaryRefreshOutcome, RepositoryWatchAttemptError> {
+        if refreshes.is_empty() {
+            return Ok(PreparedPrimaryRefreshOutcome::Refreshed {
+                observation: patched.clone(),
+                queried: Vec::new(),
+            });
+        }
+        let targets = targeted_pull_requests(patched, refreshes)?;
+        if targets.is_empty() {
+            return Ok(PreparedPrimaryRefreshOutcome::Refreshed {
+                observation: patched.clone(),
+                queried: Vec::new(),
+            });
+        }
+        let (observation, superseded_targets) = match self
+            .poller
+            .poll_targeted_pull_requests_against_cursor(patched, &targets)
+            .await?
+        {
+            TargetedPollOutcome::Observation {
+                observation,
+                superseded_targets,
+            } => (observation, superseded_targets),
+            TargetedPollOutcome::SupersededTarget => {
+                return Ok(PreparedPrimaryRefreshOutcome::SupersededTarget);
+            }
+        };
+        let applied_targets = targets
+            .iter()
+            .filter(|target| !superseded_targets.contains(&target.number))
+            .cloned()
+            .collect::<Vec<_>>();
+        let queried = refreshes
+            .iter()
+            .filter(|refresh| refresh_reaches_a_target(refresh, &applied_targets))
+            .cloned()
+            .collect::<Vec<_>>();
+        Ok(PreparedPrimaryRefreshOutcome::Refreshed {
+            observation,
+            queried,
+        })
+    }
+
     async fn record_webhook_terminal(
         &mut self,
         pending: &PendingRepoWatchWebhookDelivery,
@@ -2789,21 +3011,58 @@ impl RepositoryWatchTask {
         projections: Vec<RepoWatchWebhookProjection>,
         shadow: WebhookShadowBaseline,
     ) -> Result<TargetedRefreshSettlement, RepositoryWatchAttemptError> {
-        let store = self.store.clone();
-        let webhook_store = self.webhook_store.clone();
-        let poller = Arc::clone(&self.poller);
-        let repository = self.repository.clone();
+        // A targeted refresh reconciles through the poller's own credential and
+        // normalizer, so the rows it produces are poll-produced facts even when
+        // a delivery asked for them.
         let request = RepoWatchCommitRequest::new(
             Some(prepared.generation),
             prepared.candidate,
             prepared.events,
         );
-        let terminal = RepoWatchWebhookTerminalRequest::try_new(
-            projections,
-            RepoWatchWebhookDisposition::Projected,
-            None,
-        )
-        .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        self.complete_webhook_cursor_commit(request, key, projections, shadow)
+            .await
+    }
+
+    /// Commits one webhook-driven cursor write and its exact projections as a
+    /// single retained completion that survives cancellation of the outer drain.
+    async fn complete_webhook_cursor_commit(
+        &mut self,
+        request: RepoWatchCommitRequest,
+        key: RepoWatchWebhookDeliveryKey,
+        projections: Vec<RepoWatchWebhookProjection>,
+        shadow: WebhookShadowBaseline,
+    ) -> Result<TargetedRefreshSettlement, RepositoryWatchAttemptError> {
+        let store = self.store.clone();
+        let webhook_store = self.webhook_store.clone();
+        let poller = Arc::clone(&self.poller);
+        let repository = self.repository.clone();
+        // The disposition records what this delivery did, not what mode was
+        // configured (`202608250500_repo_watch_webhook_primary.sql`), and the
+        // commit request already carries that fact: `from_webhook` marks rows a
+        // primary delivery owns, and `new` marks the poll-produced rows a
+        // targeted refresh reconciles through the poller's own credential.
+        //
+        // A committed disposition is the only durable evidence of primary
+        // ownership when the applied observation derived no event, and
+        // recording it here — before the cursor write, where the two-step
+        // handoff already records the terminal row — is what lets the parity
+        // view end its measurement at the repository's first primary commit
+        // instead of at the first webhook-produced event, which a context-only
+        // delivery never writes.
+        //
+        // A shadow-mode targeted refresh reaches this helper too, by way of
+        // `complete_targeted_webhook_projection`. Its rows are poll-produced
+        // and its projections are the shadow observations parity compares
+        // against them, so it stays `Projected`: recording it as committed
+        // would set `primary_start` for the repository and permanently drop
+        // every later poll event from parity in a deployment that never entered
+        // primary mode, ending the very measurement the delivery belongs to.
+        let disposition = match request.producer() {
+            RepoWatchEventProducer::Webhook => RepoWatchWebhookDisposition::Committed,
+            RepoWatchEventProducer::Poll => RepoWatchWebhookDisposition::Projected,
+        };
+        let terminal = RepoWatchWebhookTerminalRequest::try_new(projections, disposition, None)
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
         let supersession_epoch = self.webhook_shadow_supersession_epoch;
         self.webhook_targeted_completion = Some(RetainedTargetedWebhookCompletion::new(
             tokio::spawn(async move {
@@ -3502,6 +3761,17 @@ enum TargetedPollOutcome {
     SupersededTarget,
 }
 
+/// What reconciling a primary-mode delivery's named pull requests produced.
+enum PreparedPrimaryRefreshOutcome {
+    /// The provider proved every targeted head stale; the delivery is superseded.
+    SupersededTarget,
+    /// The observation to commit, and the refreshes a request was issued for.
+    Refreshed {
+        observation: RepoWatchObservation,
+        queried: Vec<RepoWatchTargetedRefreshV1>,
+    },
+}
+
 /// What preparing a targeted refresh decided for the delivery that asked.
 enum PreparedTargetedRefreshOutcome {
     /// No named pull request is carried by the cursor; nothing was queried.
@@ -3539,6 +3809,34 @@ impl WebhookShadowBaseline {
             identity_frontier: cursor.candidate().event_identity_frontier().clone(),
         }
     }
+}
+
+/// Derives the occurrences one primary-mode delivery commits.
+///
+/// Returns the event batch and the frontier it advances to. Primary mode
+/// records no event projection, so this is the only derivation the delivery
+/// performs and the committed rows are what a reader compares against.
+fn primary_committed_occurrences(
+    repository: &RepositorySlug,
+    baseline: &WebhookShadowBaseline,
+    observation: &RepoWatchObservation,
+) -> Result<
+    (
+        Vec<RepoWatchEventOccurrenceV1>,
+        RepoWatchEventIdentityFrontierV1,
+    ),
+    RepositoryWatchAttemptError,
+> {
+    let mut identity_frontier = baseline.identity_frontier.clone();
+    let occurrences = derive_repo_watch_events(
+        repository,
+        Some(&baseline.observation),
+        observation,
+        &mut identity_frontier,
+        &mut UuidV7RepoWatchEventIdGenerator,
+    )
+    .map_err(|_| RepositoryWatchAttemptError::Differ)?;
+    Ok((occurrences, identity_frontier))
 }
 
 /// Derives one delivery's shadow projections and the frontier they advance to.
@@ -7272,7 +7570,7 @@ mod tests {
         error::Error,
         fs,
         io::{self, Write},
-        num::NonZeroU64,
+        num::{NonZeroU16, NonZeroU64},
         path::PathBuf,
         sync::{
             Arc, Mutex,
@@ -7297,21 +7595,22 @@ mod tests {
         MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
         PollAttemptWait, PollCache, PreparedTargetedRefresh, PullRequestSettlement, PullResponse,
         ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
-        RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchObservation,
-        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewDecision,
-        RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState,
-        RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation, RepositorySlug,
-        RepositoryWatchAttemptError, RepositoryWatchChildExit,
-        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
-        RepositoryWatchWake, ResourceKey, ReviewState, TargetedPollOutcome, TargetedPullRequest,
-        TargetedRefreshSettlement, Url, UuidV7RepoWatchEventIdGenerator,
-        WEBHOOK_DRAIN_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY,
-        WEBHOOK_PENDING_PAGE_SIZE, WebhookAttemptOutcome, WebhookAttemptPhase, WebhookDrain,
-        WebhookDrainOutcome, WebhookDrainProgress, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
-        WebhookPollInterrupt, WebhookShadowBaseline, WorkflowName, WorkflowResponse,
-        await_poll_or_interrupt, commit_check_run_search_is_complete, derive_repo_watch_events,
-        dispatch_context_json, initial_poll_deadline, inspect_webhook_drain, next_cadence_deadline,
-        next_repository_wake, normalize_checks_outcome, normalize_pull_request_context, object_id,
+        RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchEventKindNameV1,
+        RepoWatchObservation, RepoWatchPullRequestLifecycle, RepoWatchReactionObservation,
+        RepoWatchReviewDecision, RepoWatchReviewObservation,
+        RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
+        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
+        RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
+        RepositoryWatchRuntimeError, RepositoryWatchTask, RepositoryWatchWake, ResourceKey,
+        ReviewState, TargetedPollOutcome, TargetedPullRequest, TargetedRefreshSettlement, Url,
+        UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_RETRY_DELAY,
+        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WEBHOOK_PENDING_PAGE_SIZE, WebhookAttemptOutcome,
+        WebhookAttemptPhase, WebhookDrain, WebhookDrainOutcome, WebhookDrainProgress,
+        WebhookDrainRetry, WebhookPayloadPurgeSchedule, WebhookPollInterrupt,
+        WebhookShadowBaseline, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
+        commit_check_run_search_is_complete, derive_repo_watch_events, dispatch_context_json,
+        initial_poll_deadline, inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
+        normalize_checks_outcome, normalize_pull_request_context, object_id,
         observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
         record_dispatch_start_nudge_outcome, repository_reconciliation_quantum_exhausted,
         rule_activation_error, run_until_shutdown, supervise_repository_tasks,
@@ -7333,6 +7632,7 @@ mod tests {
         disposable_test_container_labels, local_test_connection_options, migrate,
         repo_watch::{
             PostgresRepoWatchStore, RepoWatchCommitRequest, RepoWatchCursorCandidate,
+            RepoWatchEventPageSize, RepoWatchEventProducer,
             RepoWatchPlannedStaleReviewClearanceFixture, RepoWatchStaleReviewClearanceClaimToken,
             RepoWatchStaleReviewClearanceId,
         },
@@ -7643,6 +7943,7 @@ mod tests {
         Ok(WebhookTaskFixture {
             task: RepositoryWatchTask {
                 webhook_nudge: None,
+                webhook_primary: false,
                 webhook_shadow: None,
                 webhook_shadow_superseded: false,
                 webhook_shadow_supersession_epoch: 0,
@@ -7673,6 +7974,11 @@ mod tests {
             },
             _credential_directory: fixture._credential_directory,
         })
+    }
+
+    fn event_page_size() -> RepoWatchEventPageSize {
+        RepoWatchEventPageSize::try_new(NonZeroU16::new(16).expect("a page size is positive"))
+            .expect("sixteen is within the durable page ceiling")
     }
 
     async fn wait_for_webhook_projection_wedge(store: &PostgresRepoWatchWebhookStore) {
@@ -10201,6 +10507,115 @@ mod tests {
         );
     }
 
+    /// Primary mode's whole point: an authenticated delivery writes the durable
+    /// cursor itself, and the ordinary event rows it produces are attributed to
+    /// the transport that observed them rather than to a poll that never ran.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_primary_webhook_delivery_advances_the_durable_cursor() -> Result<(), Box<dyn Error>>
+    {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admission).await?;
+        let mut fixture = webhook_task(&pool).await?;
+        fixture.task.webhook_primary = true;
+        let repository = fixture.task.repository.clone();
+        let before = fixture
+            .task
+            .store
+            .load_cursor(&repository)
+            .await?
+            .expect("the fixture commits a baseline cursor")
+            .generation();
+
+        let attempt = fixture.task.process_webhook_deliveries().await;
+
+        assert_eq!(attempt, WebhookDrainOutcome::Drained);
+        let disposition = webhook_store
+            .load_disposition(admission.key())
+            .await?
+            .expect("a primary delivery reaches a terminal disposition");
+        assert_eq!(
+            disposition.disposition(),
+            RepoWatchWebhookDisposition::Committed
+        );
+        let after = fixture
+            .task
+            .store
+            .load_cursor(&repository)
+            .await?
+            .expect("the committed cursor is readable")
+            .generation();
+        assert!(
+            after > before,
+            "a primary delivery advances the durable cursor"
+        );
+        // The fixture's baseline commit carries no events, so this page holds
+        // exactly what the delivery wrote.
+        let page = fixture
+            .task
+            .store
+            .load_event_page(&repository, None, event_page_size())
+            .await?;
+        let recorded = page
+            .events()
+            .iter()
+            .map(|event| (event.event().kind().name(), event.producer()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            recorded,
+            vec![(
+                RepoWatchEventKindNameV1::ReviewSubmitted,
+                RepoWatchEventProducer::Webhook
+            )]
+        );
+        // The committed row is the durable record, so a parity projection of
+        // the same occurrence would stand permanently unmatched.
+        assert_eq!(
+            webhook_store
+                .recorded_event_projection_count(admission.key())
+                .await?,
+            0
+        );
+        Ok(())
+    }
+
+    /// Shadow mode is unchanged by primary mode's arrival: no ordinary event row
+    /// and no cursor advance from a payload-derived patch.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_shadow_webhook_delivery_leaves_the_durable_cursor_alone()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admission).await?;
+        let mut fixture = webhook_task(&pool).await?;
+        let repository = fixture.task.repository.clone();
+        let before = fixture
+            .task
+            .store
+            .load_cursor(&repository)
+            .await?
+            .expect("the fixture commits a baseline cursor")
+            .generation();
+
+        let attempt = fixture.task.process_webhook_deliveries().await;
+
+        assert_eq!(attempt, WebhookDrainOutcome::Drained);
+        let after = fixture
+            .task
+            .store
+            .load_cursor(&repository)
+            .await?
+            .expect("the committed cursor is readable")
+            .generation();
+        assert_eq!(after, before);
+        Ok(())
+    }
+
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn one_projection_error_does_not_halt_its_page() -> Result<(), Box<dyn Error>> {
@@ -12397,6 +12812,69 @@ mod tests {
         assert!(
             fixture.task.poller.freshness().is_empty(),
             "a fetch that never reached the cursor authorizes no later reuse"
+        );
+        Ok(())
+    }
+
+    /// A shadow-mode targeted refresh shares the primary path's completion
+    /// helper but is not the repository's promotion: it reconciles through the
+    /// poller's own credential, so the rows it writes are poll-produced and its
+    /// projections are exactly what parity compares against them. Recording it
+    /// as committed would set the repository's `primary_start` and permanently
+    /// drop every later poll event from the measurement it belongs to, in a
+    /// deployment that never entered primary mode.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_shadow_targeted_refresh_records_a_projected_disposition()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admission).await?;
+        let mut fixture = webhook_task(&pool).await?;
+        assert!(
+            !fixture.task.webhook_primary,
+            "the fixture stays in shadow mode"
+        );
+
+        let observation = complete_typed_observation().await;
+        let pull_request = PullRequestNumber::new(
+            NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+        );
+        let prepared = PreparedTargetedRefresh {
+            generation: RepoWatchCursorGeneration::INITIAL,
+            candidate: RepoWatchCursorCandidate::new(review_only_blocked_observation().await),
+            events: Vec::new(),
+            queried: vec![RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request }],
+        };
+
+        let settlement = fixture
+            .task
+            .complete_targeted_webhook_projection(
+                prepared,
+                admission.key(),
+                Vec::new(),
+                WebhookShadowBaseline {
+                    observation,
+                    identity_frontier: RepoWatchEventIdentityFrontierV1::default(),
+                },
+            )
+            .await
+            .expect("the targeted commit settles");
+
+        assert_eq!(
+            settlement,
+            TargetedRefreshSettlement::Landed,
+            "the fixture cursor is at the generation this commit expects"
+        );
+        let disposition = webhook_store
+            .load_disposition(admission.key())
+            .await?
+            .expect("a targeted refresh reaches a terminal disposition");
+        assert_eq!(
+            disposition.disposition(),
+            RepoWatchWebhookDisposition::Projected,
+            "a shadow targeted refresh is not the repository's first primary commit"
         );
         Ok(())
     }
