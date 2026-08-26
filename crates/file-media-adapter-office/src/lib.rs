@@ -165,6 +165,7 @@ impl FileMediaProvider for OfficeProvider {
                 Ok(ProcessorProbeOutput::Candidate {
                     media_type: String::from(kind.media_type()),
                     strength: ProbeStrength::StructuralCandidate,
+                    evidence_bytes: inventory.examined_bytes,
                 })
             } else {
                 Ok(ProcessorProbeOutput::NoMatch)
@@ -386,6 +387,8 @@ struct CentralInventory {
     entries_by_name: Vec<CentralEntry>,
     kinds: Vec<OfficeKind>,
     encrypted: bool,
+    /// Actual cumulative source bytes read while building this inventory.
+    examined_bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -469,9 +472,11 @@ async fn read_central_inventory(
     cancellation: &dyn CancellationSignal,
 ) -> Result<CentralInventory, CentralReadError> {
     require_active(cancellation)?;
+    let mut examined: u64 = 0;
     let source_length = source.byte_length().get();
     let prefix_length = source_length.min(ZIP_PREFIX_BYTES);
     let prefix = read_range(source, 0, prefix_length).await?;
+    examined = examined.saturating_add(prefix_length);
     if !prefix.starts_with(b"PK\x03\x04") {
         return Err(ValidationIssue::Unrecognized.into());
     }
@@ -484,7 +489,9 @@ async fn read_central_inventory(
     } else {
         read_range(source, suffix_start, preceding_length).await?
     };
+    examined = examined.saturating_add(preceding_length);
     suffix.extend(read_range(source, suffix_offset, suffix_length).await?);
+    examined = examined.saturating_add(suffix_length);
     let eocd_relative = find_consistent_eocd(&suffix, suffix_start)
         .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
     let eocd = &suffix[eocd_relative..];
@@ -531,6 +538,7 @@ async fn read_central_inventory(
         return Err(ValidationIssue::Malformed(MALFORMED_REASON).into());
     }
     let central = read_range(source, central_offset, central_size).await?;
+    examined = examined.saturating_add(central_size);
     require_active(cancellation)?;
     let mut inventory = parse_central_directory(&central, entries).map_err(|error| {
         CentralReadError::Validation {
@@ -564,7 +572,9 @@ async fn read_central_inventory(
         }
         if content_types.flags & 1 != 0 || package_relationships.flags & 1 != 0 {
             inventory.kinds = recognized;
-            validate_selected_probe_entries(source, cancellation, &inventory).await?;
+            validate_selected_probe_entries(source, cancellation, &inventory, &mut examined)
+                .await?;
+            inventory.examined_bytes = examined;
             return Ok(inventory);
         }
     }
@@ -574,6 +584,7 @@ async fn read_central_inventory(
         &inventory,
         CONTENT_TYPES,
         CONTENT_TYPES_COMPRESSED_BYTES,
+        &mut examined,
     )
     .await
     {
@@ -599,6 +610,7 @@ async fn read_central_inventory(
         &inventory,
         PACKAGE_RELS,
         PACKAGE_RELS_COMPRESSED_BYTES,
+        &mut examined,
     )
     .await
     {
@@ -618,7 +630,8 @@ async fn read_central_inventory(
         issue,
         kinds: recognized,
     })?;
-    validate_selected_probe_entries(source, cancellation, &inventory).await?;
+    validate_selected_probe_entries(source, cancellation, &inventory, &mut examined).await?;
+    inventory.examined_bytes = examined;
     Ok(inventory)
 }
 
@@ -626,6 +639,7 @@ async fn validate_selected_probe_entries(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
     inventory: &CentralInventory,
+    examined: &mut u64,
 ) -> Result<(), CentralReadError> {
     for kind in &inventory.kinds {
         let entry = inventory
@@ -634,7 +648,7 @@ async fn validate_selected_probe_entries(
             .find(|entry| entry.name == kind.marker())
             .ok_or(ValidationIssue::Malformed(MALFORMED_REASON))?;
         validate_selected_probe_entry(entry)?;
-        let data_offset = read_probe_local_header(source, cancellation, entry).await?;
+        let data_offset = read_probe_local_header(source, cancellation, entry, examined).await?;
         require_range(
             source.byte_length().get(),
             data_offset,
@@ -775,6 +789,7 @@ fn parse_central_directory(
         entries_by_name,
         kinds: Vec::new(),
         encrypted,
+        examined_bytes: 0,
     })
 }
 
@@ -948,6 +963,7 @@ async fn read_probe_entry(
     inventory: &CentralInventory,
     name: &str,
     maximum_compressed_bytes: u64,
+    examined: &mut u64,
 ) -> Result<Vec<u8>, CentralReadError> {
     let entry = inventory
         .entries_by_name
@@ -960,13 +976,14 @@ async fn read_probe_entry(
     {
         return Err(ValidationIssue::Malformed(DECOMPRESSED_SIZE_LIMIT).into());
     }
-    let data_offset = read_probe_local_header(source, cancellation, entry).await?;
+    let data_offset = read_probe_local_header(source, cancellation, entry, examined).await?;
     require_range(
         source.byte_length().get(),
         data_offset,
         entry.compressed_bytes,
     )?;
     let compressed = read_range(source, data_offset, entry.compressed_bytes).await?;
+    *examined = examined.saturating_add(entry.compressed_bytes);
     let bytes = match entry.compression {
         0 => compressed,
         8 => {
@@ -994,6 +1011,7 @@ async fn read_probe_local_header(
     source: &dyn VerifiedBlobSource,
     cancellation: &dyn CancellationSignal,
     entry: &CentralEntry,
+    examined: &mut u64,
 ) -> Result<u64, CentralReadError> {
     require_active(cancellation)?;
     require_range(
@@ -1002,6 +1020,7 @@ async fn read_probe_local_header(
         LOCAL_HEADER_BYTES,
     )?;
     let local = read_range(source, entry.local_offset, LOCAL_HEADER_BYTES).await?;
+    *examined = examined.saturating_add(LOCAL_HEADER_BYTES);
     if local.get(0..4) != Some(b"PK\x03\x04")
         || le_u16(&local, 6)? != entry.flags
         || le_u16(&local, 8)? != entry.compression
@@ -1028,6 +1047,7 @@ async fn read_probe_local_header(
         local_variable_length,
     )?;
     let local_variable = read_range(source, local_name_offset, local_variable_length).await?;
+    *examined = examined.saturating_add(local_variable_length);
     let local_name_length =
         usize::try_from(name_length).map_err(|_| ValidationIssue::Malformed(MALFORMED_REASON))?;
     let local_name = local_variable
@@ -3931,7 +3951,7 @@ mod tests {
             local_offset: 0,
         };
 
-        let result = read_probe_local_header(&source, &NeverCancelled, &entry).await;
+        let result = read_probe_local_header(&source, &NeverCancelled, &entry, &mut 0).await;
 
         assert!(matches!(
             result,
@@ -4009,6 +4029,7 @@ mod tests {
             }],
             kinds: vec![OfficeKind::Docx],
             encrypted: false,
+            examined_bytes: 0,
         };
 
         let result = read_probe_entry(
@@ -4017,6 +4038,7 @@ mod tests {
             &inventory,
             CONTENT_TYPES,
             CONTENT_TYPES_COMPRESSED_BYTES,
+            &mut 0,
         )
         .await;
 
@@ -4042,6 +4064,7 @@ mod tests {
             }],
             kinds: vec![OfficeKind::Docx],
             encrypted: true,
+            examined_bytes: 0,
         };
 
         let entry = inventory
@@ -4199,11 +4222,12 @@ mod tests {
             entries_by_name: vec![entry],
             kinds: vec![OfficeKind::Docx],
             encrypted: false,
+            examined_bytes: 0,
         };
 
         let truncated = BytesSource(header.clone());
         assert!(
-            validate_selected_probe_entries(&truncated, &NeverCancelled, &inventory)
+            validate_selected_probe_entries(&truncated, &NeverCancelled, &inventory, &mut 0)
                 .await
                 .is_err()
         );
@@ -4212,7 +4236,7 @@ mod tests {
         complete_bytes.extend_from_slice(&[0_u8; 64]);
         let complete = BytesSource(complete_bytes);
         assert!(
-            validate_selected_probe_entries(&complete, &NeverCancelled, &inventory)
+            validate_selected_probe_entries(&complete, &NeverCancelled, &inventory, &mut 0)
                 .await
                 .is_ok()
         );

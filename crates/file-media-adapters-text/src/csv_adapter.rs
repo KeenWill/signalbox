@@ -35,6 +35,7 @@ pub(crate) async fn probe(
                 ProbeExtent::CompleteSource => ProbeStrength::StructuralCandidate,
                 ProbeExtent::TruncatedPrefix => ProbeStrength::ProvisionalStructuralCandidate,
             },
+            evidence_bytes: u64::try_from(prefix.len()).map_err(|_| ProcessorFailure::Failed)?,
         })
     } else {
         Ok(ProcessorProbeOutput::NoMatch)

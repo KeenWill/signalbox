@@ -4239,6 +4239,7 @@ pub enum ModelCallExecutionReconstitutionFailure {
     DuplicateOriginContent,
     MissingOriginContent,
     UnreferencedOriginContent,
+    AttachmentBlobFactMismatch,
     ConsumedSteeringMismatch,
     CallOwnershipMismatch,
     CallSelectionMismatch,
@@ -5323,6 +5324,7 @@ pub struct ApprovedToolRequestError { /* private */ }
 pub enum ToolExecutionErrorKind {
     UnknownTool,
     InvalidArguments,
+    PreauthorizationRejected,
     ExecutionFailed,
     ResultTooLarge,
     CrashLost,
@@ -7482,6 +7484,244 @@ impl<Reader: SearchReader> SearchService<Reader> {
 }
 ```
 
+## application: usage
+
+```rust
+pub const fn max_usage_call_page_items() -> u16;
+pub const fn max_usage_aggregate_groups() -> u16;
+pub const fn max_usage_aggregate_calls() -> u16;
+pub const fn max_usage_credential_profile_utf8_bytes() -> u16;
+
+pub struct UsageTimestampError {
+    pub rejected_micros: u64,
+}
+
+pub struct UsageTimestampMicros(/* private u64 */);
+impl UsageTimestampMicros {
+    pub const fn new(value: u64) -> Result<Self, UsageTimestampError>;
+    pub const fn get(self) -> u64;
+}
+
+pub struct UsageTimeRangeError {
+    pub from_inclusive_micros: u64,
+    pub to_exclusive_micros: u64,
+}
+
+pub struct UsageTimeFromInclusive(pub UsageTimestampMicros);
+pub struct UsageTimeToExclusive(pub UsageTimestampMicros);
+
+pub struct UsageTimeRange { /* private */ }
+impl UsageTimeRange {
+    pub const fn all() -> Self;
+    pub const fn new(
+        from_inclusive: Option<UsageTimeFromInclusive>,
+        to_exclusive: Option<UsageTimeToExclusive>,
+    ) -> Result<Self, UsageTimeRangeError>;
+    pub const fn from_inclusive(self) -> Option<UsageTimestampMicros>;
+    pub const fn to_exclusive(self) -> Option<UsageTimestampMicros>;
+}
+
+pub enum UsageCallKind { ModelCall, ApprovalJudge, ContextCompaction }
+
+pub enum UsageCallScope {
+    ModelCall(TurnId),
+    ApprovalJudge(TurnId),
+    ContextCompaction,
+}
+impl UsageCallScope {
+    pub const fn call_kind(self) -> UsageCallKind;
+    pub const fn turn(self) -> Option<TurnId>;
+}
+
+pub enum UsageProvenance { Reported, Estimated }
+pub enum UsageInputTokenSemantics { Unknown, CacheExclusive, CacheInclusive }
+pub enum UsageTokenPresence { Absent, Present }
+
+pub struct UsageTokenCoverage {
+    pub input: UsageTokenPresence,
+    pub output: UsageTokenPresence,
+    pub cache_creation_input: UsageTokenPresence,
+    pub cache_read_input: UsageTokenPresence,
+}
+
+pub struct UsageTokenAxes {
+    pub input: Option<u64>,
+    pub output: Option<u64>,
+    pub cache_creation_input: Option<u64>,
+    pub cache_read_input: Option<u64>,
+}
+impl UsageTokenAxes {
+    pub const fn coverage(self) -> UsageTokenCoverage;
+}
+
+pub struct UsageAggregateTokenAxes {
+    pub input: Option<u128>,
+    pub output: Option<u128>,
+    pub cache_creation_input: Option<u128>,
+    pub cache_read_input: Option<u128>,
+}
+
+pub struct UsageSelection {
+    pub session: Option<SessionId>,
+    pub turn: Option<TurnId>,
+    pub model: Option<ResolvedProviderTarget>,
+    pub provenance: Option<UsageProvenance>,
+    pub call_kind: Option<UsageCallKind>,
+}
+impl UsageSelection {
+    pub const fn all() -> Self;
+}
+
+pub struct UsageQuery {
+    pub time: UsageTimeRange,
+    pub selection: UsageSelection,
+}
+
+pub struct UsageCallPageLimitError {
+    pub rejected_items: u16,
+}
+
+pub struct UsageCallPageLimit(/* private u16 */);
+impl UsageCallPageLimit {
+    pub const fn new(value: u16) -> Result<Self, UsageCallPageLimitError>;
+    pub const fn get(self) -> u16;
+}
+
+pub enum UsageCallOrder { NewestFirst }
+
+pub struct UsageCallCursor {
+    pub recorded_at: UsageTimestampMicros,
+    pub call: ModelCallId,
+}
+
+pub struct UsageCallQuery {
+    pub scope: UsageQuery,
+    pub order: UsageCallOrder,
+    pub limit: UsageCallPageLimit,
+    pub after: Option<UsageCallCursor>,
+}
+
+pub enum UsageCredentialProfileLabelError {
+    Empty,
+    Oversized { rejected_utf8_bytes: usize },
+    UndiscriminatedForm,
+}
+
+pub struct UsageCredentialProfileLabel(/* private String */);
+impl UsageCredentialProfileLabel {
+    pub fn new(label: String) -> Result<Self, UsageCredentialProfileLabelError>;
+    pub fn as_str(&self) -> &str;
+    pub fn into_string(self) -> String;
+}
+
+pub struct UsageCallEvidence {
+    pub scope: UsageCallScope,
+    pub call: ModelCallId,
+    pub session: SessionId,
+    pub model: ResolvedProviderTarget,
+    pub credential_profile: UsageCredentialProfileLabel,
+    pub credential_reference: Option<String>,
+    pub provenance: UsageProvenance,
+    pub input_semantics: UsageInputTokenSemantics,
+    pub tokens: UsageTokenAxes,
+    pub recorded_at: UsageTimestampMicros,
+}
+
+pub enum UsageCallPageContinuation { Exhausted, HasMore }
+
+pub enum UsageCallPageError {
+    Overflow { returned_calls: usize, limit_items: u16 },
+    DanglingContinuation,
+    Misordered { position: usize },
+}
+
+pub struct UsageCallPage { /* private */ }
+impl UsageCallPage {
+    pub fn new(
+        calls: Vec<UsageCallEvidence>,
+        continuation: UsageCallPageContinuation,
+        limit: UsageCallPageLimit,
+    ) -> Result<Self, UsageCallPageError>;
+    pub fn calls(&self) -> &[UsageCallEvidence];
+    pub const fn next(&self) -> Option<UsageCallCursor>;
+}
+
+pub struct UsageAggregateKey {
+    pub call_kind: UsageCallKind,
+    pub model: ResolvedProviderTarget,
+    pub credential_profile: UsageCredentialProfileLabel,
+    pub credential_reference: Option<String>,
+    pub provenance: UsageProvenance,
+    pub input_semantics: UsageInputTokenSemantics,
+    pub coverage: UsageTokenCoverage,
+}
+
+pub enum UsageCacheNormalization { Unsafe, Safe }
+pub enum UsageAggregateCompleteness { Complete, Truncated }
+
+pub enum UsageTokenAxis { Input, Output, CacheCreationInput, CacheReadInput }
+
+pub enum UsageAggregateGroupError {
+    Coverage { axis: UsageTokenAxis, declared: UsageTokenPresence },
+    NormalizationClaim {
+        claimed: UsageCacheNormalization,
+        input_semantics: UsageInputTokenSemantics,
+    },
+}
+
+pub struct UsageAggregateGroup { /* private */ }
+impl UsageAggregateGroup {
+    pub fn new(
+        key: UsageAggregateKey,
+        call_count: u64,
+        tokens: UsageAggregateTokenAxes,
+        cache_normalization: UsageCacheNormalization,
+    ) -> Result<Self, UsageAggregateGroupError>;
+    pub const fn key(&self) -> &UsageAggregateKey;
+    pub const fn call_count(&self) -> u64;
+    pub const fn tokens(&self) -> UsageAggregateTokenAxes;
+    pub const fn cache_normalization(&self) -> UsageCacheNormalization;
+}
+
+pub enum UsageAggregateReportError {
+    GroupOverflow { returned_groups: usize },
+    SourceCallOverflow { represented_calls: u128 },
+}
+
+pub struct UsageAggregateReport { /* private */ }
+impl UsageAggregateReport {
+    pub fn new(
+        groups: Vec<UsageAggregateGroup>,
+        completeness: UsageAggregateCompleteness,
+    ) -> Result<Self, UsageAggregateReportError>;
+    pub fn groups(&self) -> &[UsageAggregateGroup];
+    pub const fn completeness(&self) -> UsageAggregateCompleteness;
+}
+
+pub trait UsageReader {
+    type Error;
+    fn aggregate(&self, query: UsageQuery)
+        -> impl Future<Output = Result<UsageAggregateReport, Self::Error>> + Send;
+    fn calls(&self, query: UsageCallQuery)
+        -> impl Future<Output = Result<UsageCallPage, Self::Error>> + Send;
+}
+
+pub struct UsageService<Reader> { /* private */ }
+impl<Reader> UsageService<Reader> {
+    pub const fn new(reader: Reader) -> Self;
+}
+impl<Reader: UsageReader> UsageService<Reader> {
+    pub async fn aggregate(
+        &self,
+        query: UsageQuery,
+    ) -> Result<UsageAggregateReport, Reader::Error>;
+    pub async fn calls(
+        &self,
+        query: UsageCallQuery,
+    ) -> Result<UsageCallPage, Reader::Error>;
+}
+```
+
 ## application: session_timeline
 
 ```rust
@@ -7644,7 +7884,7 @@ pub enum ModelConversationMessage {
     User {
         source: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
-        content: UserContent,
+        content: ModelUserContent,
     },
     DelegatedTask {
         source: SemanticTranscriptEntryRef,
@@ -7728,6 +7968,9 @@ pub enum ModelFrontierRenderingError {
         entry: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
     },
+    MissingAttachmentBlobFact { digest: BlobDigest },
+    AttachmentStubSerialization,
+    AttachmentStubBoundExceeded,
     DuplicateToolEvidence { entry: SemanticTranscriptEntryRef },
     MissingOrMismatchedToolEvidence { entry: SemanticTranscriptEntryRef },
     UnrenderableToolResult { entry: SemanticTranscriptEntryRef },
@@ -8136,8 +8379,21 @@ pub trait ToolArgumentValidator: Send + Sync {
         &self,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolExecutionErrorDetail>;
+    fn preauthorization(
+        &self,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolExecutionErrorDetail>;
 }
 // implemented for matching Fn(&NormalizedToolArguments) -> Result<(), ToolExecutionErrorDetail>
+
+pub enum ToolPreauthorization {
+    Unmetered,
+    BlobMetadata { digest: BlobDigest },
+    BlobRead {
+        digest: BlobDigest,
+        decoded_bytes: NonZeroU64,
+    },
+}
 
 pub struct CompiledTool { /* private */ }
 impl CompiledTool {
@@ -10063,6 +10319,7 @@ pub enum StartupScanSessionOutcome {
     },
     RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
     ResumableToolBatch { turn: TurnId },
+    ResumablePreparedModelCall { turn: TurnId },
     AwaitingRecoveryDecision { turn: TurnId },
 }
 
@@ -10360,6 +10617,13 @@ pub enum ToolAttemptAuthorizationStatus {
     InFlight(ToolDispatchAuthority),
 }
 
+pub enum ToolAttemptAuthorizationOutcome {
+    Authorized(Box<ToolDispatchAuthority>),
+    PreauthorizationRejected {
+        detail: ToolExecutionErrorDetail,
+    },
+}
+
 pub trait ToolExecutionTransaction {
     type Error: ClassifyOperatorFailure;
     fn load_active_batch(
@@ -10385,7 +10649,8 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> impl Future<Output = Result<ToolDispatchAuthority, Self::Error>> + Send;
+        preauthorization: ToolPreauthorization,
+    ) -> impl Future<Output = Result<ToolAttemptAuthorizationOutcome, Self::Error>> + Send;
     fn reread_ambiguous_authorization(
         &mut self,
         session: SessionId,
@@ -12675,9 +12940,10 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
 | application: search                                | 21 (+4 free fn) (incl. 2 traits) |
+| application: usage                                 | 37 (+4 free fn) (incl. 1 trait)  |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 41 (incl. 8 traits)              |
-| application: tool_loop                             | 27 (incl. 5 traits)              |
+| application: tool_loop                             | 28 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
@@ -12693,7 +12959,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)               |
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
-| application: tool_loop_ports                       | 9 (incl. 3 traits)               |
+| application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **426 (+23 free fn)**            |
+| **signalbox-application total**                    | **465 (+27 free fn)**            |

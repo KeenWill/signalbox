@@ -921,7 +921,8 @@ The transcript therefore remains complete and addressable after compaction. No
 entry or frontier is deleted, replaced, reordered, or rewritten. The
 compaction-call record separately retains the session's current direct model
 selection, resolved provider target, source frontier, physical lifecycle and
-disposition, non-secret credential reference, and each independently optional
+disposition, non-secret credential reference, whether provider-reported input
+tokens include separately reported cache axes, and each independently optional
 provider-reported usage field. Summary production is its own model call; it is
 not assistant output attributed to an accepted-input turn.
 

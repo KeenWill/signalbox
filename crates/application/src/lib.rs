@@ -36,6 +36,7 @@ mod tool_loop;
 mod tool_loop_ports;
 mod turn_liveness;
 mod update_session_placement;
+mod usage;
 mod workspace_instructions;
 
 pub use approval_judge::{
@@ -235,13 +236,14 @@ pub use tool_loop::{
     ToolDefinition, ToolExecutionIdGenerator, ToolExecutionInvocation, ToolExecutionService,
     ToolExecutionServiceError, ToolExecutionServiceOutcome, ToolExecutor, ToolExecutorDisposition,
     ToolExecutorEvidence, ToolInputSchema, ToolInputSchemaError, ToolInputSchemaFailure,
-    UuidV7ToolLoopIdGenerator,
+    ToolPreauthorization, UuidV7ToolLoopIdGenerator,
 };
 pub use tool_loop_ports::{
     DecideToolRequestTransaction, OverrideDeniedToolRequestTransaction,
     PrepareToolContinuationOutcome, ResolvedToolConversationEntry,
-    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationStatus,
-    ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
+    RetainedToolAttemptObservationStatus, ToolAttemptAuthorizationOutcome,
+    ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolCrashClosureIdentities,
+    ToolExecutionTransaction,
 };
 pub use turn_liveness::{
     AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
@@ -253,6 +255,19 @@ pub use turn_liveness::{
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
     UpdateSessionPlacementTransaction,
+};
+pub use usage::{
+    UsageAggregateCompleteness, UsageAggregateGroup, UsageAggregateGroupError, UsageAggregateKey,
+    UsageAggregateReport, UsageAggregateReportError, UsageAggregateTokenAxes,
+    UsageCacheNormalization, UsageCallCursor, UsageCallEvidence, UsageCallKind, UsageCallOrder,
+    UsageCallPage, UsageCallPageContinuation, UsageCallPageError, UsageCallPageLimit,
+    UsageCallPageLimitError, UsageCallQuery, UsageCallScope, UsageCredentialProfileLabel,
+    UsageCredentialProfileLabelError, UsageInputTokenSemantics, UsageProvenance, UsageQuery,
+    UsageReader, UsageSelection, UsageService, UsageTimeFromInclusive, UsageTimeRange,
+    UsageTimeRangeError, UsageTimeToExclusive, UsageTimestampError, UsageTimestampMicros,
+    UsageTokenAxes, UsageTokenAxis, UsageTokenCoverage, UsageTokenPresence,
+    max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_call_page_items,
+    max_usage_credential_profile_utf8_bytes,
 };
 pub use workspace_instructions::{
     InstructionDiscoveryFinding, InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind,
