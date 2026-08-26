@@ -3131,6 +3131,27 @@ const schemas = {
           },
           {
             "additionalProperties": false,
+            "description": "Held by a live independently commissioned session, which owns no\nrepository-watch dispatch identity to report alongside it.",
+            "properties": {
+              "kind": {
+                "const": "externally_blocked",
+                "type": "string"
+              },
+              "session_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "session_ids"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
             "properties": {
               "eligible_at_unix_milliseconds": {
                 "type": [

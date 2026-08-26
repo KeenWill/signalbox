@@ -18,8 +18,8 @@ use signalbox_application::{
     max_repo_watch_activity_page_items, max_repo_watch_operations_page_items,
 };
 use signalbox_domain::{
-    PullRequestNumber, RepoWatchDispatchId, RepoWatchEventId, RepoWatchEventKindNameV1,
-    RepoWatchRuleId, RepositorySlug, SessionId,
+    CommissionedDispatchId, PullRequestNumber, RepoWatchDispatchId, RepoWatchEventId,
+    RepoWatchEventKindNameV1, RepoWatchRuleId, RepositorySlug, SessionId,
 };
 use sqlx::{
     PgPool, Postgres, Row, Transaction,
@@ -573,11 +573,16 @@ SELECT obligation_id, singleton_scope, singleton_repository,
            AS eligible_at,
        COALESCE(effective_eligible_at = 'infinity'::timestamptz, false)
            AS eligibility_is_infinite,
-       occupying_dispatch_id IS NULL
+       -- The view already conjoins every blocker the dispatch loader honours,
+       -- including the live external session that owns no dispatch identity.
+       -- Conjoin it rather than restating it, and add only the failure backoff
+       -- the view does not know about, so this read cannot call an obligation
+       -- ready that admission refuses.
+       obligation.ready
            AND (effective_eligible_at IS NULL
-                OR effective_eligible_at <= clock_timestamp())
-           AND parked_at IS NULL
-           AND failed_attempts < repo_watch_dispatch_attempt_budget() AS ready,
+                OR effective_eligible_at <= clock_timestamp()) AS ready,
+       occupying_dispatch_id IS NULL
+           AND occupying_session_ids IS NOT NULL AS externally_blocked,
        parked_at
   FROM repo_watch_outstanding_dispatch_obligation AS obligation
   CROSS JOIN LATERAL (
@@ -1154,34 +1159,42 @@ fn decode_obligation(row: &PgRow) -> Result<RepoWatchQueuedObligation, RepoWatch
     let eligible_at = row.try_get::<Option<OffsetDateTime>, _>("eligible_at")?;
     let eligibility_is_infinite = row.try_get::<bool, _>("eligibility_is_infinite")?;
     let ready = row.try_get::<bool, _>("ready")?;
+    let externally_blocked = row.try_get::<bool, _>("externally_blocked")?;
+    let occupying_sessions = || -> Result<Vec<SessionId>, sqlx::Error> {
+        Ok(row
+            .try_get::<Option<Vec<Uuid>>, _>("occupying_session_ids")?
+            .unwrap_or_default()
+            .into_iter()
+            .map(SessionId::from_uuid)
+            .collect())
+    };
     let readiness = match (
         parked_at,
         occupying,
+        externally_blocked,
         eligible_at,
         eligibility_is_infinite,
         ready,
     ) {
-        (Some(parked_at), _, _, _, _) => RepoWatchObligationReadiness::Parked {
+        (Some(parked_at), _, _, _, _, _) => RepoWatchObligationReadiness::Parked {
             parked_at: decode_time(parked_at),
         },
-        (None, Some(dispatch), _, _, _) => RepoWatchObligationReadiness::Occupied {
+        (None, Some(dispatch), _, _, _, _) => RepoWatchObligationReadiness::Occupied {
             dispatch: RepoWatchDispatchId::from_uuid(dispatch),
-            sessions: row
-                .try_get::<Option<Vec<Uuid>>, _>("occupying_session_ids")?
-                .unwrap_or_default()
-                .into_iter()
-                .map(SessionId::from_uuid)
-                .collect(),
+            sessions: occupying_sessions()?,
         },
-        (None, None, eligible_at, eligibility_is_infinite, false)
+        (None, None, true, _, _, _) => RepoWatchObligationReadiness::ExternallyBlocked {
+            sessions: occupying_sessions()?,
+        },
+        (None, None, false, eligible_at, eligibility_is_infinite, false)
             if eligible_at.is_some() || eligibility_is_infinite =>
         {
             RepoWatchObligationReadiness::Cooldown {
                 eligible_at: eligible_at.map(decode_time),
             }
         }
-        (None, None, _, _, true) => RepoWatchObligationReadiness::Ready,
-        (None, None, _, _, false) => {
+        (None, None, false, _, _, true) => RepoWatchObligationReadiness::Ready,
+        (None, None, false, _, _, false) => {
             return Err(RepoWatchOperationsCorruption::Invalid("obligation readiness").into());
         }
     };
@@ -1206,16 +1219,23 @@ fn decode_pull_request_session(
 ) -> Result<RepoWatchPullRequestSession, RepoWatchOperationsError> {
     let session = SessionId::from_uuid(row.try_get("session_id")?);
     let purpose_kind: String = row.try_get("purpose_kind")?;
-    let dispatch = RepoWatchDispatchId::from_uuid(row.try_get("dispatch_id")?);
+    // The two arms read the same column from different tables: a rule dispatch
+    // names repo_watch_dispatch_batch, an operator commission names
+    // commissioned_dispatch. They are separate identity spaces, so each arm
+    // wraps the value in its own newtype rather than sharing one.
+    let dispatch: Uuid = row.try_get("dispatch_id")?;
     let template = row.try_get("template_name")?;
     let purpose = match purpose_kind.as_str() {
         "rule_dispatch" => RepoWatchSessionPurpose::RuleDispatch {
-            dispatch,
+            dispatch: RepoWatchDispatchId::from_uuid(dispatch),
             event: RepoWatchEventId::from_uuid(row.try_get("event_id")?),
             rule: decode_rule(row.try_get("rule_id")?)?,
             template,
         },
-        "operator_commission" => RepoWatchSessionPurpose::OperatorCommission { dispatch, template },
+        "operator_commission" => RepoWatchSessionPurpose::OperatorCommission {
+            dispatch: CommissionedDispatchId::from_uuid(dispatch),
+            template,
+        },
         value => {
             return Err(RepoWatchOperationsCorruption::Unsupported {
                 field: "session purpose",

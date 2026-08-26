@@ -6218,7 +6218,7 @@ pub trait AttentionReader {
 
 ## application: repo_watch_operations
 
-````rust
+```rust
 pub const fn max_repo_watch_operations_page_items() -> u16;
 pub const fn max_repo_watch_activity_page_items() -> u16;
 
@@ -6367,6 +6367,7 @@ pub enum RepoWatchObligationReadiness {
         dispatch: RepoWatchDispatchId,
         sessions: Vec<SessionId>,
     },
+    ExternallyBlocked { sessions: Vec<SessionId> },
     Cooldown { eligible_at: Option<SystemTime> },
     Parked { parked_at: SystemTime },
 }
@@ -6416,7 +6417,7 @@ pub enum RepoWatchSessionPurpose {
         template: String,
     },
     OperatorCommission {
-        dispatch: RepoWatchDispatchId,
+        dispatch: CommissionedDispatchId,
         template: String,
     },
 }
@@ -6490,6 +6491,9 @@ pub trait RepoWatchOperationsReader {
         events_before: RepoWatchPagePosition<RepoWatchEventCursor>,
         webhooks_before: RepoWatchPagePosition<u64>,
     ) -> impl Future<Output = Result<RepoWatchActivityPage, Self::Error>> + Send;
+}
+```
+
 ## domain: workspace_instruction
 
 ```rust
@@ -6606,7 +6610,7 @@ impl TurnInstructionManifest {
     // accessors: id(), session(), turn(), eligibility_hash(), admitted_set_hash(),
     // manifest_hash()
 }
-````
+```
 
 ## application: approval_judge
 

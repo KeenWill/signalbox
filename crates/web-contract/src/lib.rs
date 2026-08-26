@@ -1172,6 +1172,11 @@ pub enum WebRepoWatchObligationReadiness {
         dispatch_id: String,
         session_ids: Vec<String>,
     },
+    /// Held by a live independently commissioned session, which owns no
+    /// repository-watch dispatch identity to report alongside it.
+    ExternallyBlocked {
+        session_ids: Vec<String>,
+    },
     Cooldown {
         eligible_at_unix_milliseconds: Option<String>,
     },

@@ -118,6 +118,8 @@ export const readinessLabel = (readiness: ObligationReadiness) => {
       return 'ready'
     case 'occupied':
       return `occupied · dispatch ${readiness.dispatch_id} · sessions ${readiness.session_ids.join(', ') || 'none'}`
+    case 'externally_blocked':
+      return `externally blocked · sessions ${readiness.session_ids.join(', ') || 'none'}`
     case 'cooldown':
       return readiness.eligible_at_unix_milliseconds
         ? `cooldown · eligible ${time(readiness.eligible_at_unix_milliseconds)}`

@@ -271,6 +271,9 @@ export type WebRepoWatchObligationReadiness = {
   readonly kind: "occupied";
   readonly session_ids: ReadonlyArray<string>;
 } | {
+  readonly kind: "externally_blocked";
+  readonly session_ids: ReadonlyArray<string>;
+} | {
   readonly eligible_at_unix_milliseconds?: string | null;
   readonly kind: "cooldown";
 } | {

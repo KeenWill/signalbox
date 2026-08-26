@@ -116,6 +116,12 @@ describe('queued-work readiness labels', () => {
         session_ids: ['session-1', 'session-2'],
       }),
     ).toBe('occupied · dispatch dispatch-1 · sessions session-1, session-2')
+    expect(
+      readinessLabel({
+        kind: 'externally_blocked',
+        session_ids: ['session-3'],
+      }),
+    ).toBe('externally blocked · sessions session-3')
     expect(readinessLabel({ eligible_at_unix_milliseconds: null, kind: 'cooldown' })).toBe(
       'cooldown · eligibility not scheduled',
     )

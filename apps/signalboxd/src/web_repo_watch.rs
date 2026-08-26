@@ -852,6 +852,14 @@ fn readiness_dto(
                     .collect(),
             }
         }
+        RepoWatchObligationReadiness::ExternallyBlocked { sessions } => {
+            WebRepoWatchObligationReadiness::ExternallyBlocked {
+                session_ids: sessions
+                    .into_iter()
+                    .map(|session| session.into_uuid().to_string())
+                    .collect(),
+            }
+        }
         RepoWatchObligationReadiness::Cooldown { eligible_at } => {
             WebRepoWatchObligationReadiness::Cooldown {
                 eligible_at_unix_milliseconds: eligible_at.map(unix_milliseconds).transpose()?,
