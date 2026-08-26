@@ -182,12 +182,11 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — one hundred twenty-six files,
-`202607180001` through `202608251000` — embedded by `sqlx::migrate!` as the
-static `MIGRATOR` and applied through one `migrate(pool)` operation. SQLx's
-`_sqlx_migrations` ledger records applied files with checksums (the integration
-tests read the ledger directly); serialization of concurrent migration runs is
-SQLx dependency
+`crates/persistence/migrations/` — one hundred twenty-six files, `202607180001`
+through `202608251000` — embedded by `sqlx::migrate!` as the static `MIGRATOR`
+and applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations`
+ledger records applied files with checksums (the integration tests read the
+ledger directly); serialization of concurrent migration runs is SQLx dependency
 behavior, relied on but not demonstrated in this repo. `.gitattributes` pins
 migration files to LF so checksums do not vary by platform, and a build script
 re-embeds the set whenever a file changes. The production binary holds the
@@ -1071,8 +1070,8 @@ Locks per transaction, in acquisition order:
   `lock_timeout` before it reads or writes anything, so the only statement that
   budget can interrupt is one waiting for a row and never the commit; opening
   the transaction and installing that budget run beyond client cancellation, and
-  the caller's configured deadline sits above both as the last resort, floored so
-  it cannot expire before the database-side budgets report. Operator
+  the caller's configured deadline sits above both as the last resort, floored
+  so it cannot expire before the database-side budgets report. Operator
   reconciliation uses the same endpoint-before-scheduler prefix, so automatic
   reconciliation never introduces the reverse child-scheduler-to-parent-session
   order.
