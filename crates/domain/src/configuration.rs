@@ -277,8 +277,7 @@ impl SessionConfigurationDefaultsVersion {
 /// One exact session-level system prompt.
 ///
 /// Admission rejects empty text, any text containing U+0000 (which
-/// PostgreSQL text cannot store), and text whose UTF-8 encoding exceeds
-/// [`Self::MAX_UTF8_BYTES`]. Admitted text is never trimmed, normalized,
+/// PostgreSQL text cannot store). Admitted text is never trimmed, normalized,
 /// case-folded, or otherwise rewritten; equality is the exact ordered
 /// scalar sequence. Absence of a prompt is `Option::None` on the owning
 /// defaults value, never an empty prompt.
@@ -297,16 +296,10 @@ impl fmt::Debug for SessionSystemPrompt {
 }
 
 impl SessionSystemPrompt {
-    /// The admission bound in UTF-8 bytes, mirroring the accepted-input
-    /// content bound (docs/spec/sessions-and-transcript.md).
-    pub const MAX_UTF8_BYTES: usize = 1_048_576;
-
     /// Checks the admission rules without rewriting the value.
     pub fn try_new(value: String) -> Result<Self, SessionSystemPromptError> {
         let failure = if value.is_empty() {
             Some(SessionSystemPromptFailure::Empty)
-        } else if value.len() > Self::MAX_UTF8_BYTES {
-            Some(SessionSystemPromptFailure::TooLarge { bytes: value.len() })
         } else if value.contains('\0') {
             Some(SessionSystemPromptFailure::ContainsNull)
         } else {
@@ -334,11 +327,6 @@ impl SessionSystemPrompt {
 pub enum SessionSystemPromptFailure {
     /// The prompt was empty; absence is `None`, never empty text.
     Empty,
-    /// The prompt exceeded the admission bound.
-    TooLarge {
-        /// The observed UTF-8 byte count.
-        bytes: usize,
-    },
     /// The prompt contained U+0000.
     ContainsNull,
 }
@@ -386,11 +374,6 @@ impl std::fmt::Display for SessionSystemPromptError {
             SessionSystemPromptFailure::Empty => {
                 write!(f, "a session system prompt cannot be empty")
             }
-            SessionSystemPromptFailure::TooLarge { bytes } => write!(
-                f,
-                "a session system prompt is {bytes} UTF-8 bytes; the maximum is {}",
-                SessionSystemPrompt::MAX_UTF8_BYTES
-            ),
             SessionSystemPromptFailure::ContainsNull => {
                 write!(f, "a session system prompt cannot contain U+0000")
             }
@@ -1073,31 +1056,16 @@ mod tests {
     };
     use uuid::Uuid;
 
-    /// S34 / INV-046: the session system prompt admits exactly the
-    /// 1,048,576-UTF-8-byte bound, splitting at a multibyte scalar so the
-    /// byte measure is what binds; empty and U+0000-bearing text is rejected
-    /// with the value retained unchanged.
+    /// S34 / INV-046: the domain retains exact prompt text independently of
+    /// deployment policy; empty and U+0000-bearing text is rejected with the
+    /// value retained unchanged.
     #[test]
-    fn s34_inv046_system_prompt_binds_at_the_exact_utf8_byte_bound() {
-        let exact =
-            "y".repeat(SessionSystemPrompt::MAX_UTF8_BYTES - '\u{221a}'.len_utf8()) + "\u{221a}";
-        assert_eq!(exact.len(), SessionSystemPrompt::MAX_UTF8_BYTES);
+    fn s34_inv046_system_prompt_retains_large_exact_utf8_text() {
+        let exact = "y".repeat(2 * 1024 * 1024) + "\u{221a}";
         let admitted =
-            SessionSystemPrompt::try_new(exact.clone()).expect("the exact cap is admitted");
+            SessionSystemPrompt::try_new(exact.clone()).expect("large exact text is admitted");
         assert_eq!(admitted.as_str(), exact);
         assert_eq!(admitted.clone().into_string(), exact);
-
-        let oversized = exact + "y";
-        let oversized_length = oversized.len();
-        let error = SessionSystemPrompt::try_new(oversized.clone())
-            .expect_err("one byte over the cap is rejected");
-        assert_eq!(
-            error.failure(),
-            SessionSystemPromptFailure::TooLarge {
-                bytes: oversized_length,
-            }
-        );
-        assert_eq!(error.value(), oversized);
 
         let empty = SessionSystemPrompt::try_new(String::new())
             .expect_err("absence is None, never empty text");

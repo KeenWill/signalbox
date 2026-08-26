@@ -275,6 +275,13 @@ pub trait BlobStore: Send + Sync {
     /// Opens one recorded object as a stream without materializing it.
     fn open<'a>(&'a self, key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob>;
 
+    /// Verifies one exact object generation, then rewinds and returns that generation.
+    fn open_verified<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+    ) -> BlobStoreFuture<'a, OpenedBlob>;
+
     /// Re-verifies one exact object generation while retaining one bounded range.
     fn open_range<'a>(
         &'a self,

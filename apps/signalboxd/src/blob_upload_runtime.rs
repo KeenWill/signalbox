@@ -286,6 +286,14 @@ mod tests {
             Box::pin(async { Err(BlobStoreError::unavailable("unexpected test open")) })
         }
 
+        fn open_verified<'a>(
+            &'a self,
+            _expected: ExpectedBlob,
+            _key: &'a BlobObjectKey,
+        ) -> BlobStoreFuture<'a, OpenedBlob> {
+            Box::pin(async { Err(BlobStoreError::unavailable("unexpected verified test open")) })
+        }
+
         fn open_range<'a>(
             &'a self,
             _expected: ExpectedBlob,

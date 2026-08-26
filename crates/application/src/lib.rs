@@ -4,6 +4,7 @@
 //! depending inward on `signalbox-domain`.
 
 mod approval_judge;
+mod blob_derivation;
 mod commissioned_dispatch;
 mod convergence_reconciliation;
 mod conversation_import;
@@ -39,6 +40,11 @@ pub use approval_judge::{
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
     ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority,
     ApprovalJudgePullRequestAuthorityInput,
+};
+pub use blob_derivation::{
+    BlobDerivationIdGenerator, BlobDerivationRecordOutcome, BlobDerivationServiceError,
+    BlobDerivationServiceOutcome, BlobDerivationStore, DeterministicBlobDerivationRequest,
+    DeterministicBlobDerivationService, DeterministicBlobProducer, UuidV7BlobDerivationIdGenerator,
 };
 pub use commissioned_dispatch::{
     CommissionDispatchPreparationError, CommissionDispatchRequest, CommissionedDispatchFence,
@@ -153,7 +159,6 @@ pub use scheduler::{
     InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
     SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
     SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_ordinary_pass_limit,
-    scheduler_pass_admission_cap,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{
@@ -207,11 +212,11 @@ pub use tool_loop_ports::{
     ToolExecutionTransaction,
 };
 pub use turn_liveness::{
-    ClaimedModelCallReconciliation, ExhaustedModelCallReconciliation,
-    ModelCallReconciliationAttempt, ModelCallReconciliationBatch,
-    ModelCallReconciliationFailureKind, ModelCallReconciliationOutcome, StaleActiveTurnBound,
-    StaleTurnCandidate, StaleTurnOutcome, TurnLivenessBoundError, TurnLivenessEvidence,
-    TurnLivenessLedger, TurnLivenessScanInterval,
+    AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
+    AutomaticReconciliationFailureKind, AutomaticReconciliationOperation,
+    AutomaticReconciliationOutcome, ClaimedAutomaticReconciliation,
+    ExhaustedAutomaticReconciliation, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
+    TurnLivenessBoundError, TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,

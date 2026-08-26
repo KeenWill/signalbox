@@ -141,7 +141,7 @@ impl CredentialAccess for FixedKey {
 }
 
 fn runtime_for(server_base_url: &str) -> AnthropicRuntime<FixedKey> {
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = server_base_url.to_string();
     AnthropicRuntime::new(config, FixedKey).expect("loopback configuration constructs")
 }
@@ -328,12 +328,12 @@ async fn prepared_capability_retains_its_originating_runtime_settings() {
         \"usage\":{\"output_tokens\":1}}\n\n\
         event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
     let server = CannedServer::serving(vec![http_response("200 OK", &[], sse)]).await;
-    let mut preparing_config = AnthropicConfig::new();
+    let mut preparing_config = AnthropicConfig::new(None);
     preparing_config.base_url = server.base_url.clone();
     preparing_config.sse_record_limit = 1024;
     let preparing_runtime =
         AnthropicRuntime::new(preparing_config, FixedKey).expect("configuration constructs");
-    let mut executing_config = AnthropicConfig::new();
+    let mut executing_config = AnthropicConfig::new(None);
     executing_config.base_url = server.base_url.clone();
     executing_config.sse_record_limit = 16;
     let executing_runtime =
@@ -604,7 +604,7 @@ impl CredentialAccess for CountingKey {
 async fn preparation_resolves_once_sends_nothing_and_execution_does_not_resolve_again() {
     let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
     let resolutions = Arc::new(AtomicUsize::new(0));
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = server.base_url.clone();
     let runtime = AnthropicRuntime::new(
         config,
@@ -638,7 +638,7 @@ async fn preparation_resolves_once_sends_nothing_and_execution_does_not_resolve_
 async fn input_count_rejects_unsupported_settings_before_credential_resolution() {
     let resolutions = Arc::new(AtomicUsize::new(0));
     let runtime = AnthropicRuntime::new(
-        AnthropicConfig::new(),
+        AnthropicConfig::new(None),
         CountingKey {
             resolutions: Arc::clone(&resolutions),
             value: b"key_count_rejected",
@@ -675,7 +675,7 @@ async fn input_count_uses_the_declared_fast_target() {
             BTreeSet::new(),
         ),
     )];
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = server.base_url.clone();
     config.model_capabilities = ModelCapabilityCatalog::try_from_definitions(definitions)
         .expect("fixture capabilities are unique");
@@ -720,7 +720,7 @@ async fn input_count_preserves_reasoning_and_same_target_fast_controls() {
             BTreeSet::new(),
         ),
     )];
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = server.base_url.clone();
     config.model_capabilities = ModelCapabilityCatalog::try_from_definitions(definitions)
         .expect("fixture capabilities are unique");
@@ -760,7 +760,7 @@ impl CredentialAccess for PendingKey {
 #[tokio::test]
 async fn cancellation_during_preparation_creates_no_capability_or_http_traffic() {
     let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = server.base_url.clone();
     let runtime =
         AnthropicRuntime::new(config, PendingKey).expect("loopback configuration constructs");
@@ -772,11 +772,10 @@ async fn cancellation_during_preparation_creates_no_capability_or_http_traffic()
         )
         .await;
 
-    assert!(matches!(
-        outcome,
-        PreparationOutcome::Cancelled { correlation }
-            if correlation == "call-cancel-prepare"
-    ));
+    let PreparationOutcome::Cancelled { correlation } = outcome else {
+        panic!("entry cancellation remains a typed preparation outcome");
+    };
+    assert_eq!(correlation, "call-cancel-prepare");
     assert!(server.recorded_requests().is_empty());
 }
 
@@ -826,7 +825,7 @@ async fn ordinary_validation_and_credential_failures_are_preparation_outcomes() 
         }
     ));
 
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = server.base_url.clone();
     let unavailable =
         AnthropicRuntime::new(config, UnavailableKey).expect("loopback configuration constructs");
@@ -847,7 +846,7 @@ async fn ordinary_validation_and_credential_failures_are_preparation_outcomes() 
 async fn empty_credential_is_an_ordinary_preparation_failure() {
     let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
     let resolutions = Arc::new(AtomicUsize::new(0));
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = server.base_url.clone();
     let runtime = AnthropicRuntime::new(
         config,
@@ -874,7 +873,7 @@ async fn empty_credential_is_an_ordinary_preparation_failure() {
 async fn credential_with_invalid_header_bytes_is_an_ordinary_preparation_failure() {
     let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
     let resolutions = Arc::new(AtomicUsize::new(0));
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = server.base_url.clone();
     let runtime = AnthropicRuntime::new(
         config,
@@ -901,7 +900,7 @@ async fn credential_with_invalid_header_bytes_is_an_ordinary_preparation_failure
 async fn non_utf8_credential_is_an_ordinary_preparation_failure() {
     let server = CannedServer::serving(vec![http_response("200 OK", &[], b"{}")]).await;
     let resolutions = Arc::new(AtomicUsize::new(0));
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = server.base_url.clone();
     let runtime = AnthropicRuntime::new(
         config,
@@ -926,7 +925,7 @@ async fn non_utf8_credential_is_an_ordinary_preparation_failure() {
 
 #[test]
 fn base_url_user_information_is_rejected_at_construction() {
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = "https://user:password@example.com".to_string();
 
     assert!(matches!(
@@ -941,18 +940,18 @@ fn plain_http_requires_a_literal_loopback_ip_host() {
     assert_anthropic_plain_http_rejected("http://localhost:8080");
     assert_anthropic_plain_http_rejected("http://192.0.2.1");
 
-    let mut ipv4_loopback = AnthropicConfig::new();
+    let mut ipv4_loopback = AnthropicConfig::new(None);
     ipv4_loopback.base_url = "http://127.0.0.1:1".to_string();
     assert!(AnthropicRuntime::new(ipv4_loopback, FixedKey).is_ok());
 
-    let mut ipv6_loopback = AnthropicConfig::new();
+    let mut ipv6_loopback = AnthropicConfig::new(None);
     ipv6_loopback.base_url = "http://[::1]:1".to_string();
     assert!(AnthropicRuntime::new(ipv6_loopback, FixedKey).is_ok());
 }
 
 #[track_caller]
 fn assert_anthropic_plain_http_rejected(base_url: &str) {
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = base_url.to_string();
 
     assert!(
@@ -965,17 +964,14 @@ fn assert_anthropic_plain_http_rejected(base_url: &str) {
 }
 
 #[test]
-fn the_default_exchange_timeout_is_ten_minutes() {
-    assert_eq!(
-        AnthropicConfig::new().exchange_timeout,
-        Duration::from_secs(10 * 60)
-    );
+fn exchange_timeout_is_unbounded_until_the_composition_root_sets_policy() {
+    assert_eq!(AnthropicConfig::new(None).exchange_timeout, None);
 }
 
 #[test]
 fn a_zero_exchange_timeout_is_rejected_at_construction() {
-    let mut config = AnthropicConfig::new();
-    config.exchange_timeout = Duration::ZERO;
+    let mut config = AnthropicConfig::new(None);
+    config.exchange_timeout = Some(Duration::ZERO);
 
     assert!(matches!(
         AnthropicRuntime::new(config, FixedKey),
@@ -985,7 +981,7 @@ fn a_zero_exchange_timeout_is_rejected_at_construction() {
 
 #[test]
 fn a_zero_sse_record_limit_is_rejected_at_construction() {
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.sse_record_limit = 0;
 
     assert!(matches!(
@@ -1021,7 +1017,7 @@ async fn inv_035_api_key_rotation_is_visible_to_the_next_preparation() {
     ])
     .await;
     let value = Arc::new(Mutex::new("key_before".to_string()));
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = server.base_url.clone();
     let runtime = AnthropicRuntime::new(config, RotatingKey(Arc::clone(&value)))
         .expect("loopback configuration constructs");
@@ -1052,7 +1048,7 @@ async fn execution_redacts_with_the_exact_credential_captured_by_preparation() {
     }"#;
     let server = CannedServer::serving(vec![http_response("200 OK", &[], body)]).await;
     let value = Arc::new(Mutex::new("key_before".to_string()));
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = server.base_url.clone();
     let runtime = AnthropicRuntime::new(config, RotatingKey(Arc::clone(&value)))
         .expect("loopback configuration constructs");
@@ -1293,7 +1289,7 @@ async fn wrong_error_envelope_discriminator_falls_back_to_http_status() {
 
 #[test]
 fn a_base_url_with_query_or_fragment_fails_construction() {
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = "http://127.0.0.1:1/api?tenant=x".to_string();
 
     let error = AnthropicRuntime::new(config, FixedKey)
@@ -1307,7 +1303,7 @@ fn a_base_url_with_query_or_fragment_fails_construction() {
 
 #[test]
 fn an_authority_less_base_url_fails_construction() {
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = "https://".to_string();
 
     let error = AnthropicRuntime::new(config, FixedKey)
@@ -1327,7 +1323,7 @@ async fn a_base_url_path_is_preserved_when_the_endpoint_is_appended() {
         br#"{"type":"error","error":{"type":"invalid_request_error"}}"#,
     )])
     .await;
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = format!("{}/proxy", server.base_url);
     let runtime =
         AnthropicRuntime::new(config, FixedKey).expect("path-bearing base URL constructs");
@@ -1346,7 +1342,7 @@ async fn a_base_url_path_is_preserved_when_the_endpoint_is_appended() {
 
 #[test]
 fn a_non_http_base_url_scheme_fails_construction() {
-    let mut config = AnthropicConfig::new();
+    let mut config = AnthropicConfig::new(None);
     config.base_url = "file:///tmp".to_string();
 
     let error = AnthropicRuntime::new(config, FixedKey)

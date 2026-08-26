@@ -53,7 +53,11 @@ pub use accepted_input::{
 };
 pub use actor::Actor;
 pub use applied_interrupt::{AppliedInterruptCommandResult, AppliedInterruptProof};
-pub use blob::{BlobDigest, BlobDigestParseError, BlobDigestParseFailure};
+pub use blob::{
+    BlobDerivation, BlobDerivationError, BlobDerivationProducer, BlobDigest, BlobDigestParseError,
+    BlobDigestParseFailure, BlobTransformation, BlobTransformationError, BlobTransformationName,
+    DeterministicBlobDerivationKey,
+};
 pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
@@ -131,10 +135,10 @@ pub use model_execution::{
     AmbiguousModelCallTurn, AmbiguousModelCallTurnIdentities, AuthorizedModelCall,
     AvailabilitySuccessorModelCallTurn, CancelledModelCallTurn, CancelledModelCallTurnIdentities,
     CancelledToolRoundModelCallTurn, CompletedModelCallIdentities, CompletedModelCallTurn,
-    CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
-    FailedModelCallTurn, FailedModelCallTurnIdentities, IssuedModelCallCorrelation,
-    ModelCallAuthorizationError, ModelCallAuthorizationFailure, ModelCallClosureError,
-    ModelCallExecution, ModelCallExecutionReconstitutionError,
+    ContextHeadroomExhaustedModelCallTurn, CorrelatedModelCallTerminalObservation,
+    CredentialPoolExhaustedModelCallTurn, FailedModelCallTurn, FailedModelCallTurnIdentities,
+    IssuedModelCallCorrelation, ModelCallAuthorizationError, ModelCallAuthorizationFailure,
+    ModelCallClosureError, ModelCallExecution, ModelCallExecutionReconstitutionError,
     ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput,
     ModelCallInterruptOutcome, ModelCallOriginContent, ModelCallPreparationError,
     ModelCallPreparationFailure, ModelCallResumeFailure, ModelCallTerminalIdentities,
@@ -301,7 +305,9 @@ pub use submit_input::{
     GoalTurnOriginConstructionInput, NonAcceptedTurnPredecessorReconstitutionInput,
     PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput,
     SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
-    SubmitInputAppliedTurnOriginReconstitutionInput, SubmitInputDirectTurnOriginConstructionInput,
+    SubmitInputAppliedTurnOriginReconstitutionInput,
+    SubmitInputAutomaticReconciliationConstructionInput,
+    SubmitInputDirectTurnOriginConstructionInput,
     SubmitInputInterruptedModelCallReconciliationConstructionInput,
     SubmitInputInterruptedToolReconciliationConstructionInput,
     SubmitInputPendingSteeringAppliedResult, SubmitInputPreparationError,
@@ -378,12 +384,12 @@ pub use turn_eligibility::{
     AcceptedInputTurnSchedulingProjection, AcceptedInputTurnSchedulingRecord,
     AcceptedInputTurnSchedulingRecordState, AcceptedInputTurnSchedulingStatus,
     ActivatedAcceptedInputTurn, ActivatedDelegatedTurn, ActivatedTurn,
-    ActiveTurnSchedulingReconstitutionInput, CancelledTurnExecutionReconstitutionInput,
-    ConsumedSteeringInput, ConsumedSteeringReconstitutionInput,
-    ContinuationRoundReconstitutionInput, DelegatedModelCallRecoveryReconstitutionInput,
-    DelegatedTurnActivationInput, DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState,
-    DelegatedWakeTurnActivationInput, FailedAcceptedInputTurn,
-    FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
+    ActiveTurnSchedulingReconstitutionInput, AutomaticReconciliationAuthority,
+    CancelledTurnExecutionReconstitutionInput, ConsumedSteeringInput,
+    ConsumedSteeringReconstitutionInput, ContinuationRoundReconstitutionInput,
+    DelegatedModelCallRecoveryReconstitutionInput, DelegatedTurnActivationInput,
+    DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegatedWakeTurnActivationInput,
+    FailedAcceptedInputTurn, FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
     PreparedAcceptedInputTurnActivation, PreparedAcceptedInputTurnFailure,
     PreparedDelegatedTurnActivation, PreparedTurnActivation,
     SessionAcceptanceTailEntryReconstitutionInput, SessionAcceptanceTailReconstitutionInput,
@@ -442,6 +448,11 @@ define_identity!(
     ///
     /// This identity does not prove that the command was applied.
     DurableCommandId
+);
+
+define_identity!(
+    /// Identifies one immutable blob-to-blob derivation fact.
+    BlobDerivationId
 );
 
 define_identity!(
