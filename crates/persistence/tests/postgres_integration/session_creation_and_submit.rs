@@ -3057,6 +3057,15 @@ async fn multipart_replay_fixture(
             Some(TurnId::from_uuid(Uuid::from_u128(MULTIPART_TURN_ID))),
         )
         .await?;
+    assert!(
+        matches!(
+            first,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the multipart fixture submission must record an acceptance, not a rejection: {first:?}"
+    );
 
     Ok(MultipartReplayFixture {
         container,
@@ -3067,7 +3076,7 @@ async fn multipart_replay_fixture(
     })
 }
 
-/// INV-012: equal multipart replay returns the original durable receipt.
+/// INV-012: equal multipart replay returns the original durable acceptance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
