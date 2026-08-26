@@ -411,6 +411,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
     staleTime: Number.POSITIVE_INFINITY,
+    enabled: surface !== 'settings',
   })
   const context = useMemo<ProductCommandContext>(
     () => ({
@@ -420,6 +421,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       artifactPreviewIds: [],
       artifactOriginalIds: [],
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
+      configuresTranscriptDetail: surface === 'settings',
       focusTimeline: () => timelineRef.current?.focus(),
       loadTimelineWindow: (anchor) =>
         setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
@@ -518,7 +520,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         windowRequest={windowRequest}
       />
     ) : surface === 'settings' ? (
-      <SettingsSurface />
+      <SettingsSurface context={context} />
     ) : (
       <DeferredSurface surface={surface} />
     )
@@ -548,20 +550,26 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         </header>
         <div className="surface-question">
           <p>{copy.question}</p>
-          <span
-            className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
-            role="status"
-            aria-live="polite"
-          >
-            {bootstrap.isSuccess
-              ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
-              : bootstrap.isError
-                ? bootstrap.error instanceof BootstrapContractError
-                  ? 'Incompatible daemon contract'
-                  : 'Transport unavailable'
-                : 'Checking contract…'}
-          </span>
-          {bootstrap.isError && (
+          {surface === 'settings' ? (
+            <span className="contract-state ready" role="status">
+              Browser-local preferences
+            </span>
+          ) : (
+            <span
+              className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+              role="status"
+              aria-live="polite"
+            >
+              {bootstrap.isSuccess
+                ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
+                : bootstrap.isError
+                  ? bootstrap.error instanceof BootstrapContractError
+                    ? 'Incompatible daemon contract'
+                    : 'Transport unavailable'
+                  : 'Checking contract…'}
+            </span>
+          )}
+          {surface !== 'settings' && bootstrap.isError && (
             <button
               type="button"
               className="bootstrap-retry"
@@ -578,9 +586,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           <span className="eyebrow">Inspector</span>
           <h2>Selection details</h2>
           <p>
-            {selectionEvidence === null
-              ? 'Select an available operational record to inspect its server-provided evidence.'
-              : 'Bounded server-provided timeline projection for the selected record.'}
+            {surface === 'settings'
+              ? 'Presentation preferences are stored locally in this browser and do not represent server evidence.'
+              : selectionEvidence === null
+                ? 'Select an available operational record to inspect its server-provided evidence.'
+                : 'Bounded server-provided timeline projection for the selected record.'}
           </p>
           <dl>
             <div>
