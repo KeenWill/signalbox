@@ -38,6 +38,7 @@ fn read_file_schema_carries_path_character_and_content_byte_bounds() {
         json!(MAX_WORKSPACE_READ_BYTES)
     );
     assert_eq!(schema["properties"]["max_bytes"]["minimum"], json!(1));
+    assert_eq!(schema["properties"]["offset"]["minimum"], json!(0));
 }
 
 #[test]
@@ -109,6 +110,151 @@ fn read_file_at_exact_byte_cap_reports_complete() {
     assert_eq!(result.bytes_read, CONTENT.len());
     assert_eq!(result.total_bytes, CONTENT.len() as u64);
     assert!(!result.truncated);
+    assert_eq!(result.offset, 0);
+    assert_eq!(result.next_offset, CONTENT.len() as u64);
+}
+
+#[test]
+fn read_file_offset_reaches_content_past_the_per_call_byte_cap() {
+    const FILE_PATH: &str = "large.txt";
+    const TAIL: &str = "the tail past the first page";
+
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    let head = "a".repeat(MAX_WORKSPACE_READ_BYTES);
+    let content = format!("{head}{TAIL}");
+    fs::write(workspace.path().join(FILE_PATH), &content).expect("fixture file writes");
+    let executor = fixture_executor(&workspace);
+    let operation = decode_operation(
+        ReadToolKind::ReadFile,
+        &arguments(format!(
+            r#"{{"offset":{},"path":"{FILE_PATH}"}}"#,
+            head.len()
+        )),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("read arguments are valid");
+    let ReadResult::ReadFile(result) = executor
+        .execute_operation(operation)
+        .expect("fixture read succeeds")
+    else {
+        panic!("read_file returns a read result")
+    };
+
+    assert_eq!(result.content, TAIL);
+    assert_eq!(result.offset, head.len() as u64);
+    assert_eq!(result.next_offset, content.len() as u64);
+    assert_eq!(result.total_bytes, content.len() as u64);
+    assert!(!result.truncated);
+}
+
+#[test]
+fn read_file_reports_the_cursor_that_continues_a_truncated_page() {
+    const FILE_PATH: &str = "paged.txt";
+    const CONTENT: &str = "abcdefgh";
+    const PAGE_BYTES: usize = 3;
+
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    fs::write(workspace.path().join(FILE_PATH), CONTENT).expect("fixture file writes");
+    let executor = fixture_executor(&workspace);
+    let operation = decode_operation(
+        ReadToolKind::ReadFile,
+        &arguments(format!(
+            r#"{{"max_bytes":{PAGE_BYTES},"path":"{FILE_PATH}"}}"#
+        )),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("read arguments are valid");
+    let ReadResult::ReadFile(result) = executor
+        .execute_operation(operation)
+        .expect("fixture read succeeds")
+    else {
+        panic!("read_file returns a read result")
+    };
+
+    assert_eq!(result.content, CONTENT[..PAGE_BYTES]);
+    assert_eq!(result.next_offset, PAGE_BYTES as u64);
+    assert!(result.truncated);
+
+    let continuation = decode_operation(
+        ReadToolKind::ReadFile,
+        &arguments(format!(
+            r#"{{"offset":{},"path":"{FILE_PATH}"}}"#,
+            result.next_offset
+        )),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("continuation arguments are valid");
+    let ReadResult::ReadFile(continued) = executor
+        .execute_operation(continuation)
+        .expect("continuation read succeeds")
+    else {
+        panic!("read_file returns a read result")
+    };
+
+    assert_eq!(continued.content, CONTENT[PAGE_BYTES..]);
+    assert_eq!(continued.offset, PAGE_BYTES as u64);
+    assert!(!continued.truncated);
+}
+
+#[test]
+fn read_file_offset_beyond_the_file_returns_an_empty_complete_page() {
+    const FILE_PATH: &str = "short.txt";
+    const CONTENT: &str = "abcd";
+
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    fs::write(workspace.path().join(FILE_PATH), CONTENT).expect("fixture file writes");
+    let executor = fixture_executor(&workspace);
+    let operation = decode_operation(
+        ReadToolKind::ReadFile,
+        &arguments(format!(
+            r#"{{"offset":{},"path":"{FILE_PATH}"}}"#,
+            CONTENT.len() + 1
+        )),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("read arguments are valid");
+    let ReadResult::ReadFile(result) = executor
+        .execute_operation(operation)
+        .expect("fixture read succeeds")
+    else {
+        panic!("read_file returns a read result")
+    };
+
+    assert_eq!(result.content, "");
+    assert_eq!(result.bytes_read, 0);
+    assert_eq!(result.total_bytes, CONTENT.len() as u64);
+    assert!(!result.truncated);
+}
+
+#[test]
+fn read_file_offset_inside_a_character_starts_at_the_next_boundary() {
+    const FILE_PATH: &str = "unicode.txt";
+    const CONTENT: &str = "é!";
+
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    fs::write(workspace.path().join(FILE_PATH), CONTENT).expect("fixture file writes");
+    let executor = fixture_executor(&workspace);
+    let operation = decode_operation(
+        ReadToolKind::ReadFile,
+        &arguments(format!(r#"{{"offset":1,"path":"{FILE_PATH}"}}"#)),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("read arguments are valid");
+    let ReadResult::ReadFile(result) = executor
+        .execute_operation(operation)
+        .expect("fixture read succeeds")
+    else {
+        panic!("read_file returns a read result")
+    };
+
+    assert_eq!(result.content, "!");
+    assert_eq!(result.offset, 2);
+    assert_eq!(result.next_offset, CONTENT.len() as u64);
 }
 
 #[test]
@@ -375,7 +521,9 @@ fn maximum_escaped_read_content_remains_inside_result_text_admission() {
     let result = ReadResult::ReadFile(ReadFileResult {
         path: String::from(FILE_PATH),
         content,
+        offset: 0,
         bytes_read: content_bytes,
+        next_offset: content_bytes as u64,
         total_bytes: content_bytes as u64,
         truncated: false,
     });
