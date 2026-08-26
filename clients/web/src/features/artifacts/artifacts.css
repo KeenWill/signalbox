@@ -1,9 +1,42 @@
 .artifact-panel {
   display: grid;
   min-height: 0;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: 56px auto minmax(0, 1fr);
   border-bottom: 1px solid var(--border);
   background: var(--surface-2);
+}
+
+.artifact-panel-heading {
+  min-width: 0;
+}
+
+.artifact-panel-heading label {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  color: var(--text-muted);
+  font-size: 0.62rem;
+}
+
+.artifact-panel-heading select {
+  min-width: 84px;
+  padding: 0.28rem 0.4rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--text);
+  background: var(--surface-3);
+  font: inherit;
+}
+
+.artifact-bound-summary {
+  margin: 0;
+  padding: 0.38rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--surface-1);
+  font:
+    0.59rem ui-monospace,
+    monospace;
 }
 
 .artifact-list {
@@ -13,14 +46,164 @@
 
 .artifact-row {
   display: grid;
-  min-height: 190px;
-  grid-template-columns: minmax(210px, 0.9fr) minmax(260px, 1.1fr);
+  grid-template-columns: 164px minmax(0, 1fr);
   border-bottom: 1px solid var(--border);
+}
+
+.artifact-row[data-selected] {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.artifact-heading {
+  display: flex;
+  width: 100%;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.85rem 0.7rem;
+  border: 0;
+  border-right: 1px solid var(--border);
+  color: inherit;
+  text-align: left;
+  background: var(--surface-1);
+  cursor: pointer;
+}
+
+.artifact-heading:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.artifact-heading > svg {
+  width: 15px;
+  min-width: 15px;
+  color: var(--accent);
+}
+
+.artifact-heading div {
+  display: grid;
+  min-width: 0;
+  gap: 0.18rem;
+}
+
+.artifact-heading strong {
+  overflow: hidden;
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+}
+
+.artifact-heading small {
+  color: var(--text-muted);
+  font:
+    0.57rem ui-monospace,
+    monospace;
+}
+
+.artifact-rendered {
+  min-width: 0;
+}
+
+.artifact-scroll {
+  display: block;
+  width: 100%;
+  max-height: 300px;
+  min-height: 300px;
+  overflow: auto;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0.8rem;
+  border: 0;
+  border-radius: 0;
+  color: var(--text);
+  background: var(--canvas);
+  font:
+    0.66rem / 1.55 ui-monospace,
+    monospace;
+  resize: none;
+  tab-size: 2;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.artifact-code .artifact-scroll {
+  color: var(--accent-strong);
+  white-space: pre;
+}
+
+.artifact-scroll:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.artifact-code-heading {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.32rem 0.75rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--surface-3);
+  font:
+    0.57rem ui-monospace,
+    monospace;
+}
+
+.artifact-code-heading svg {
+  width: 12px;
+}
+
+.artifact-bounded-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+  padding: 0.38rem 0.7rem;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--surface-3);
+  font-size: 0.58rem;
+}
+
+.artifact-bounded-footer button,
+.artifact-actions button,
+.artifact-actions a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  padding: 0.3rem 0.48rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  color: var(--text);
+  background: var(--surface-3);
+  font-size: 0.61rem;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.artifact-bounded-footer button:focus-visible,
+.artifact-actions button:focus-visible,
+.artifact-actions a:focus-visible,
+.artifact-panel-heading select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.artifact-bounded-footer svg,
+.artifact-actions svg {
+  width: 12px;
+  height: 12px;
+}
+
+.artifact-image-layout {
+  display: grid;
+  min-height: 190px;
+  grid-template-columns: minmax(220px, 1.2fr) minmax(230px, 0.8fr);
 }
 
 .artifact-visual {
   display: grid;
   min-height: 190px;
+  max-height: 320px;
   place-items: center;
   overflow: hidden;
   border-right: 1px solid var(--border);
@@ -33,6 +216,7 @@
   display: block;
   width: 100%;
   height: 100%;
+  max-height: 320px;
   object-fit: contain;
 }
 
@@ -42,37 +226,16 @@
   color: var(--text-muted);
 }
 
+.remote-media {
+  background:
+    repeating-linear-gradient(-45deg, transparent 0 9px, #8793a00a 9px 18px), var(--canvas);
+}
+
 .artifact-detail {
   display: grid;
   align-content: center;
   gap: 0.75rem;
-  padding: 1rem;
-}
-
-.artifact-detail header {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.55rem;
-}
-
-.artifact-detail header > svg {
-  width: 16px;
-  color: var(--accent);
-}
-
-.artifact-detail header div {
-  display: grid;
-  gap: 0.2rem;
-}
-
-.artifact-detail strong {
-  font-size: 0.76rem;
-}
-
-.artifact-detail small,
-.artifact-detail dt {
-  color: var(--text-muted);
-  font-size: 0.62rem;
+  padding: 0.9rem;
 }
 
 .artifact-detail dl {
@@ -82,17 +245,22 @@
 
 .artifact-detail dl div {
   display: grid;
-  grid-template-columns: 96px minmax(0, 1fr);
+  grid-template-columns: 88px minmax(0, 1fr);
   gap: 0.5rem;
   padding: 0.28rem 0;
   border-bottom: 1px solid var(--border);
+}
+
+.artifact-detail dt {
+  color: var(--text-muted);
+  font-size: 0.59rem;
 }
 
 .artifact-detail dd {
   overflow: hidden;
   margin: 0;
   font:
-    0.62rem ui-monospace,
+    0.6rem ui-monospace,
     monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -104,34 +272,78 @@
   gap: 0.4rem;
 }
 
-.artifact-actions button,
-.artifact-actions a {
-  display: inline-flex;
+.artifact-state {
+  display: flex;
+  min-height: 108px;
   align-items: center;
-  gap: 0.35rem;
-  padding: 0.35rem 0.55rem;
-  border: 1px solid var(--border-strong);
-  border-radius: 3px;
-  color: var(--text);
-  background: var(--surface-3);
-  font-size: 0.64rem;
-  text-decoration: none;
-  cursor: pointer;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: var(--canvas);
 }
 
-.artifact-actions svg {
-  width: 13px;
-  height: 13px;
+.artifact-state > svg {
+  width: 24px;
+  min-width: 24px;
+  color: var(--warning);
+}
+
+.artifact-state div {
+  display: grid;
+  gap: 0.25rem;
+}
+
+.artifact-state strong {
+  font-size: 0.69rem;
+}
+
+.artifact-state p {
+  max-width: 70ch;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.63rem;
+  line-height: 1.45;
+}
+
+.artifact-state.blocked {
+  box-shadow: inset 3px 0 var(--warning);
 }
 
 @media (max-width: 760px) {
+  .artifact-panel {
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .artifact-panel-heading {
+    align-items: flex-end;
+    padding-block: 0.55rem;
+  }
+
+  .artifact-panel-heading label {
+    display: grid;
+    gap: 0.22rem;
+  }
+
   .artifact-row {
     grid-template-columns: 1fr;
   }
 
-  .artifact-visual {
-    min-height: 150px;
+  .artifact-heading {
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+
+  .artifact-image-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .artifact-visual {
+    min-height: 155px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .artifact-bounded-footer {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
