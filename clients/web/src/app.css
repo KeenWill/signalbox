@@ -301,6 +301,9 @@ kbd {
   display: grid;
   gap: 0.35rem;
 }
+.surface-empty > :only-child {
+  grid-column: 1 / -1;
+}
 .surface-empty h2 {
   font-size: 0.74rem;
 }
@@ -597,11 +600,239 @@ kbd {
   right: 0.55rem;
 }
 
+.attention-live-surface {
+  display: grid;
+  align-content: start;
+  gap: 0.7rem;
+}
+.attention-monitor-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.7rem;
+}
+.attention-monitor,
+.attention-monitor-bar button,
+.attention-page-controls button {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.55rem;
+  border: 1px solid var(--border);
+  background: var(--surface-1);
+  font-size: 0.64rem;
+}
+.attention-monitor svg,
+.attention-monitor-bar button svg,
+.attention-page-controls svg {
+  width: 13px;
+}
+.attention-monitor svg {
+  color: var(--text-muted);
+}
+.attention-monitor.phase-live svg {
+  color: var(--success);
+  fill: currentcolor;
+}
+.attention-monitor.phase-resyncing svg,
+.attention-monitor.phase-connecting svg {
+  color: var(--warning);
+}
+.attention-monitor.phase-failed svg {
+  color: var(--danger);
+}
+.attention-monitor-bar button,
+.attention-page-controls button {
+  cursor: pointer;
+}
+.attention-notice {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+.attention-workbench {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(230px, 31%);
+  border-top: 1px solid var(--border);
+}
+.attention-list {
+  min-width: 0;
+  padding: 0.75rem 0.75rem 0 0;
+}
+.attention-list > header,
+.attention-inspector > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.attention-list > header > div,
+.attention-inspector > header > div {
+  display: grid;
+  gap: 0.3rem;
+}
+:where(.attention-identity, .attention-inspector) code {
+  overflow-wrap: anywhere;
+  font-size: 0.58rem;
+}
+:where(.attention-list) > header > code {
+  color: var(--text-muted);
+  font-size: 0.58rem;
+}
+.attention-list ol {
+  margin: 0.75rem 0 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  list-style: none;
+}
+:where(.attention-list) li + li {
+  border-top: 1px solid var(--border);
+}
+.attention-list li > button {
+  display: grid;
+  width: 100%;
+  min-height: var(--row-block);
+  grid-template-columns: 4px minmax(170px, 1.25fr) minmax(105px, 0.8fr) minmax(90px, 0.8fr) 108px 18px;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0;
+  border: 0;
+  background: var(--surface-1);
+  color: var(--text-muted);
+  font-size: 0.62rem;
+  text-align: left;
+  cursor: pointer;
+}
+:where(.attention-list li > button):hover,
+:where(.attention-list li > button)[aria-pressed="true"] {
+  background: var(--surface-3);
+}
+.attention-rail {
+  align-self: stretch;
+  background: var(--text-muted);
+}
+.attention-awaiting_approval .attention-rail,
+.attention-blocked .attention-rail,
+.attention-runner_lost .attention-rail {
+  background: var(--danger);
+}
+.attention-ambiguous .attention-rail,
+.attention-awaiting_reconciliation .attention-rail {
+  background: var(--warning);
+}
+.attention-active .attention-rail {
+  background: var(--success);
+}
+.attention-identity {
+  display: grid;
+  min-width: 0;
+  gap: 0.22rem;
+}
+.attention-identity strong {
+  color: var(--text);
+  font-size: 0.68rem;
+  text-transform: capitalize;
+}
+.attention-obligation {
+  color: var(--text);
+  text-transform: capitalize;
+}
+.attention-list time {
+  text-align: right;
+}
+.attention-page-controls {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding-top: 0.65rem;
+}
+.attention-inspector {
+  min-width: 0;
+  padding: 0.75rem 0 0.75rem 0.75rem;
+  border-left: 1px solid var(--border);
+}
+.attention-inspector > header button {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-3);
+  cursor: pointer;
+}
+.attention-inspector > header button svg {
+  width: 14px;
+}
+.attention-inspector dl {
+  margin: 0.85rem 0;
+}
+.attention-inspector dl div {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  gap: 0.65rem;
+  padding: 0.45rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.61rem;
+}
+.attention-inspector dd {
+  margin: 0;
+}
+.attention-goal-block,
+.attention-readonly-note {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.75rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  font-size: 0.64rem;
+}
+.attention-goal-block strong {
+  color: var(--warning);
+  text-transform: capitalize;
+}
+.attention-goal-block p,
+.attention-readonly-note {
+  color: var(--text-muted);
+  line-height: 1.45;
+}
+.attention-judge {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+}
+.attention-judge div {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.5rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.58rem;
+}
+.attention-judge span {
+  color: var(--text-muted);
+}
+.attention-judge strong {
+  font:
+    0.68rem ui-monospace,
+    monospace;
+}
+
 @media (max-width: 1259px) {
   .product-shell {
     grid-template-columns: var(--product-navigation-width, 218px) minmax(400px, 1fr);
   }
   .product-inspector {
+    display: none;
+  }
+  .attention-list li > button {
+    grid-template-columns: 4px minmax(170px, 1.3fr) minmax(100px, 0.8fr) 104px 18px;
+  }
+  .attention-list li > button > span:nth-child(4) {
     display: none;
   }
 }
@@ -639,6 +870,32 @@ kbd {
   }
   .session-columns span:nth-child(n + 3) {
     display: none;
+  }
+  .attention-monitor-bar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .attention-workbench {
+    display: block;
+  }
+  .attention-workbench.inspector-open .attention-list {
+    display: none;
+  }
+  .attention-list {
+    padding-right: 0;
+  }
+  .attention-list li > button {
+    grid-template-columns: 4px minmax(0, 1fr) auto 18px;
+    gap: 0.5rem;
+  }
+  .attention-list li > button > span:nth-child(4),
+  .attention-list time {
+    display: none;
+  }
+  .attention-inspector {
+    min-height: 100%;
+    padding-left: 0;
+    border-left: 0;
   }
   .settings-actions {
     align-items: flex-start;

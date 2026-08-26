@@ -96,11 +96,17 @@ export function OverlaySurfaces({
 }) {
   const overlay = useAppSelector((state) => state.app.overlay)
   const close = () => invokeCommand('surface.escape', context)
+  // A surface only registers the hotkey collections its own shell mounts, so both overlays list
+  // the same surface-scoped set. Keyboard help additionally names the escape binding the palette
+  // deliberately hides, because Escape is registered wherever this overlay is mounted.
+  const surfaceScoped = (command: (typeof commandRegistry)[number]) =>
+    command.available(context) &&
+    (!importsSurface || command.category === 'Surface' || command.category === 'Imports')
   const availableCommands = commandRegistry.filter(
-    (command) =>
-      command.id !== 'surface.escape' &&
-      command.available(context) &&
-      (!importsSurface || command.category === 'Surface' || command.category === 'Imports'),
+    (command) => command.id !== 'surface.escape' && surfaceScoped(command),
+  )
+  const boundCommands = commandRegistry.filter(
+    (command) => command.bindings.length > 0 && surfaceScoped(command),
   )
 
   return (
@@ -137,18 +143,16 @@ export function OverlaySurfaces({
         onClose={close}
       >
         <dl className="shortcut-list">
-          {availableCommands
-            .filter((command) => command.bindings.length > 0)
-            .map((command) => (
-              <div key={command.id}>
-                <dt>{command.title}</dt>
-                <dd>
-                  {command.bindings.map((binding) => (
-                    <kbd key={binding.label}>{binding.label}</kbd>
-                  ))}
-                </dd>
-              </div>
-            ))}
+          {boundCommands.map((command) => (
+            <div key={command.id}>
+              <dt>{command.title}</dt>
+              <dd>
+                {command.bindings.map((binding) => (
+                  <kbd key={binding.label}>{binding.label}</kbd>
+                ))}
+              </dd>
+            </div>
+          ))}
         </dl>
       </DialogFrame>
       <DialogFrame

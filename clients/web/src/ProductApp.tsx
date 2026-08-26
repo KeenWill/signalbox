@@ -23,6 +23,7 @@ import {
   useState,
 } from 'react'
 import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspector'
+import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext, CommandId } from './commands'
 import { invokeCommand } from './commands'
 import { HttpImportApi } from './imports/api'
@@ -327,22 +328,6 @@ function SurfaceUnavailable({ surface }: { surface: ProductRouteId }) {
   )
 }
 
-function AttentionSurface() {
-  return (
-    <div className="surface-body attention-surface">
-      <section className="surface-intro">
-        <span className="eyebrow">Decision queue</span>
-        <h2>Intervention before observation</h2>
-        <p>
-          Approvals, blocked goals, ambiguous outcomes, runner loss, and held repository work will
-          share one bounded priority surface when their owning read model is available.
-        </p>
-      </section>
-      <SurfaceUnavailable surface="attention" />
-    </div>
-  )
-}
-
 function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   return (
     <div className="surface-body">
@@ -513,9 +498,14 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const bootstrapStatusRef = useRef<HTMLSpanElement>(null)
   const artifactSideWasOpen = useRef(false)
   const inspectorWasInSheet = useRef(false)
+  const surfaceEscapeRef = useRef<(() => boolean) | null>(null)
+  const registerSurfaceEscape = useCallback((handler: (() => boolean) | null) => {
+    surfaceEscapeRef.current = handler
+  }, [])
   const [artifactOpen, setArtifactOpen] = useState(false)
   const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
   const narrowInspector = useNarrowInspector()
+  const [focusAfterBootstrapRecovery, setFocusAfterBootstrapRecovery] = useState(false)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
   const [selectionEvidence, setSelectionEvidence] = useState<SessionSelectionEvidence | null>(null)
@@ -570,12 +560,17 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
       configuresTranscriptDetail: surface === 'settings',
       focusTimeline: surfaceContext?.focusTimeline ?? (() => timelineRef.current?.focus()),
+      unwindSurface: () => surfaceEscapeRef.current?.() ?? false,
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
       loadTimelineWindow: (anchor) =>
         setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
       navigate: (path) => {
         // A retained exact continuation command owns the surface until it is retried or abandoned.
         if (navigationDisabled) return
+        if (path === '/scenario/streaming') {
+          void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } })
+          return
+        }
         void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() => {
           requestAnimationFrame(() => mainRef.current?.focus())
         })
@@ -662,6 +657,13 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.density, app.theme])
 
   useEffect(() => {
+    if (!focusAfterBootstrapRecovery || !bootstrap.isSuccess) return
+    setFocusAfterBootstrapRecovery(false)
+    const frame = requestAnimationFrame(() => mainRef.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [bootstrap.isSuccess, focusAfterBootstrapRecovery])
+
+  useEffect(() => {
     const returnedToSidePane = artifactOpen && inspectorWasInSheet.current && !inspectorInSheet
     if (artifactOpen && !inspectorInSheet && (!artifactSideWasOpen.current || returnedToSidePane)) {
       artifactSideWasOpen.current = true
@@ -716,8 +718,35 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [copy.title])
 
   const content =
-    surface === 'attention' ? (
-      <AttentionSurface />
+    surface === 'attention' && bootstrap.isSuccess ? (
+      <AttentionSurface registerEscapeHandler={registerSurfaceEscape} />
+    ) : surface === 'attention' ? (
+      <div className="surface-body">
+        <section className="surface-empty" role={bootstrap.isError ? 'alert' : 'status'}>
+          <div>
+            <h2>
+              {bootstrap.isError ? 'Attention contract unavailable' : 'Checking Attention contract'}
+            </h2>
+            <p>
+              {bootstrap.isError
+                ? 'Attention reads remain disabled until the generated bootstrap contract validates.'
+                : 'Attention reads will begin after the generated bootstrap contract validates.'}
+            </p>
+            {bootstrap.isError && (
+              <button
+                type="button"
+                className="bootstrap-retry"
+                onClick={() => {
+                  setFocusAfterBootstrapRecovery(true)
+                  void bootstrap.refetch()
+                }}
+              >
+                Retry contract check
+              </button>
+            )}
+          </div>
+        </section>
+      </div>
     ) : surface === 'sessions' ? (
       <SessionWorkspaceSurface
         onSelectionEvidence={updateSelectionEvidence}

@@ -594,7 +594,7 @@ SELECT count(*)
               AND stored.tag = required.tag))
 "#;
 
-async fn load_summaries(
+pub(crate) async fn load_summaries(
     transaction: &mut Transaction<'_, Postgres>,
     identities: Option<&[Uuid]>,
     query: Option<&AttentionQuery>,

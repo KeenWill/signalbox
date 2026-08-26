@@ -503,8 +503,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         "tool_call_bad_arguments" => {
             envelope(&format!(
-                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-bad","name":"{}","arguments":"not an argument object"}}]}}"#,
-                fixtures::TOOL_NAME
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-bad","name":"{}","arguments":"{}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                fixtures::MALFORMED_TOOL_ARGUMENTS
+            ));
+            completed();
+        }
+        "tool_call_non_object_arguments" => {
+            envelope(&format!(
+                r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-non-object","name":"{}","arguments":"{}"}}]}}"#,
+                fixtures::TOOL_NAME,
+                fixtures::NON_OBJECT_TOOL_ARGUMENTS
             ));
             completed();
         }

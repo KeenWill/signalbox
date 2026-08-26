@@ -4188,6 +4188,7 @@ mod tests {
                 crate::RunnerGeneration::try_from_u64(2)
                     .expect("the fixture placement revision is positive"),
                 None,
+                None,
             ),
         )
     }

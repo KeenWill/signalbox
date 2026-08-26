@@ -36,6 +36,7 @@ use signalbox_persistence::{
         RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchEventPageSize,
         RepoWatchPersistenceCorruption, RepoWatchStoreError,
     },
+    repo_watch_operations::PostgresRepoWatchOperations,
 };
 use sqlx::{PgPool, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
 use testcontainers_modules::{
@@ -84,6 +85,10 @@ const CHECK_SUITE_ID: u64 = 51;
 const CHECK_RUN_ID: u64 = 52;
 const ISSUE_COMMENT_ID: u64 = 61;
 const REVIEW_COMMENT_ID: u64 = 62;
+/// This operator read turns on the durable pull-request projection, never on
+/// how many automatic resumptions a deployment still owes, so it states the
+/// unbounded automatic-resume budget instead of a number its story never uses.
+const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -589,6 +594,82 @@ async fn cursor_round_trip_retains_check_completion_generations() -> Result<(), 
         .expect("fixture cursor is present");
 
     assert_eq!(loaded.candidate(), &fixture.second_candidate);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn cursor_payload_size_reports_the_latest_stored_document() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+
+    let absent = store.load_cursor_payload_bytes(&repository).await?;
+    store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+        )
+        .await?;
+    let reported = store.load_cursor_payload_bytes(&repository).await?;
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT pg_column_size(cursor_payload)::bigint
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(absent, None);
+    assert_eq!(reported, Some(u64::try_from(stored)?));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pull_request_pages_read_the_current_projection_without_decoding_the_cursor()
+-> Result<(), Box<dyn Error>> {
+    let fixture = committed_fixture().await?;
+    let mut connection = fixture.pool.acquire().await?;
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
+    // The payload keeps only its storage version, which no decode accepts as a
+    // cursor. Copying that version from the column rather than naming a literal
+    // keeps the row inside the table's payload/column agreement check, so the
+    // corruption stays undecodable across a storage-version bump instead of
+    // failing the write the next bump lands.
+    sqlx::query(
+        "UPDATE repo_watch_cursor
+            SET cursor_payload = jsonb_build_object('storage_version', storage_version)
+          WHERE repository = $1 AND generation = $2",
+    )
+    .bind(fixture.repository.as_str())
+    .bind(i64::try_from(fixture.second_generation.get())?)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
+    drop(connection);
+
+    let page =
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+            .pull_requests(fixture.repository.clone(), None)
+            .await?;
+
+    assert_eq!(page.pull_requests.len(), 1);
+    assert_eq!(
+        page.pull_requests[0].number,
+        fixture
+            .second_candidate
+            .observation()
+            .state()
+            .pull_requests()[0]
+            .context()
+            .number()
+    );
     Ok(())
 }
 
