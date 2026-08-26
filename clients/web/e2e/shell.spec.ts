@@ -42,6 +42,7 @@ const streamingFixture = {
   firstLoadedItemId: 'event-0',
   secondLoadedItemId: 'event-1',
   lastLoadedItemId: 'event-239',
+  timelineHeading: 'Bounded timeline',
 } as const
 
 const cachedScenarioFixture = {
@@ -488,7 +489,7 @@ test('keeps the fleet surface reachable on a short wide viewport', async ({ page
 test('Mod+K opens the registered command palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
-  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: streamingFixture.timelineHeading })).toBeVisible()
 
   await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
   const modifier = await platformModifier(page)
@@ -512,7 +513,7 @@ test('the command palette opens keyboard help with available product navigation'
 }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
-  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: streamingFixture.timelineHeading })).toBeVisible()
 
   await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
   const modifier = await platformModifier(page)
@@ -531,6 +532,18 @@ test('returns from the scenario studio through the command palette', async ({ pa
   await page.route('**/api/bootstrap', (route) =>
     route.fulfill({ json: webContractBootstrapFixture }),
   )
+  const attentionSnapshot = {
+    continuation_after_session_id: null,
+    cursor: '0',
+    summaries: [],
+  }
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: attentionSnapshot })}\n`,
+      contentType: 'application/x-ndjson',
+    }),
+  )
+  await page.route('**/api/attention', (route) => route.fulfill({ json: attentionSnapshot }))
   await page.goto('/scenario/streaming')
 
   await page.getByRole('button', { name: 'Open command palette' }).click()

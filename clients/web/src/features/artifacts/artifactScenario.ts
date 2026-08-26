@@ -1,8 +1,17 @@
 import { decodeWebBlobDescriptor, type WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { type ArtifactItem, boundArtifactText } from './artifactTypes'
+import {
+  type ArtifactItem,
+  boundArtifactText,
+  type DerivativeArtifact,
+  type DocumentArtifact,
+  type MediaPlaceholderArtifact,
+} from './artifactTypes'
 
 const sourceDigest = 'sha256:3729b2319da081a0710ba27da7af330c1236325cf8ed0a619cf132375bb0fc1e'
 const previewDigest = 'sha256:071d25f582ba9e6a8725e198dab884d70a3d7ce3ea84a74c66e65a1443c41a8e'
+const documentDigest = `sha256:${'6f'.repeat(32)}`
+const audioDigest = `sha256:${'7a'.repeat(32)}`
+const videoDigest = `sha256:${'8c'.repeat(32)}`
 const thumbnailDigest = 'sha256:e3f49e726a8b33752609b0f159cac0e185d6f02f6f72e872652e5df849ee5490'
 const jpegDigest = 'sha256:11ce39dce155c991152fad639d7ba25efab3f14e9eb921f20d1dbde5b67cb29e'
 type BlobView = WebBlobDescriptor['available_views'][number]
@@ -88,6 +97,38 @@ export const fetchVerifiedSingleFrameJpeg = async (
   return new Blob([bytes], { type: view.media_type })
 }
 
+// One derivation record has to carry both proofs at once. The generated decoder checks them
+// separately — the exact deterministic transformation for the advertised view kind against
+// `derivations[0]`, the descriptor-input-to-content-output digest correlation against *any*
+// derivation of the view — so a schema-valid descriptor can satisfy each with a different record.
+// Admitting that union would let an arbitrary transformation's output render as the view and be
+// reported as its proven provenance, so callers admit only a record proving the whole pair.
+export const provesViewDerivation = (
+  descriptor: WebBlobDescriptor,
+  view: BlobView,
+  derivation: BlobView['derivations'][number],
+): boolean => {
+  if (view.kind !== 'preview' && view.kind !== 'thumbnail') return false
+  const expected = expectedTransformation(view.kind)
+  const outputDigest = viewOutputDigest(view)
+  return (
+    BOUNDED_IMAGE_TRANSFORMATIONS.has(derivation.transformation_name) &&
+    derivation.transformation_name === expected.name &&
+    derivation.transformation_version === 1 &&
+    derivation.parameters_json === expected.parameters &&
+    derivation.producer.class === 'deterministic' &&
+    derivation.input_digests.includes(descriptor.digest) &&
+    outputDigest !== undefined &&
+    derivation.output_digests.includes(outputDigest)
+  )
+}
+
+export const selectProvenViewDerivation = (
+  descriptor: WebBlobDescriptor,
+  view: BlobView,
+): BlobView['derivations'][number] | undefined =>
+  view.derivations.find((derivation) => provesViewDerivation(descriptor, view, derivation))
+
 export const selectBoundedOriginalView = (descriptor: WebBlobDescriptor): BlobView | undefined => {
   const original = descriptor.available_views.find((view) => view.kind === 'browser_native')
   if (
@@ -98,24 +139,9 @@ export const selectBoundedOriginalView = (descriptor: WebBlobDescriptor): BlobVi
     return undefined
   }
 
-  const boundedDecodeProven = descriptor.available_views
-    .filter((view) => view.kind === 'preview' || view.kind === 'thumbnail')
-    .some((view) => {
-      const derivation = view.derivations[0]
-      const expected = expectedTransformation(view.kind as 'preview' | 'thumbnail')
-      const outputDigest = viewOutputDigest(view)
-      return (
-        derivation !== undefined &&
-        BOUNDED_IMAGE_TRANSFORMATIONS.has(derivation.transformation_name) &&
-        derivation.transformation_name === expected.name &&
-        derivation.transformation_version === 1 &&
-        derivation.parameters_json === expected.parameters &&
-        derivation.producer.class === 'deterministic' &&
-        derivation.input_digests.includes(descriptor.digest) &&
-        outputDigest !== undefined &&
-        derivation.output_digests.includes(outputDigest)
-      )
-    })
+  const boundedDecodeProven = descriptor.available_views.some(
+    (view) => selectProvenViewDerivation(descriptor, view) !== undefined,
+  )
 
   return boundedDecodeProven ? original : undefined
 }
@@ -234,6 +260,54 @@ export const jpegDescriptor = decodeWebBlobDescriptor({
   available_views: [jpegDownloadView, jpegOriginalView, jpegPreviewView],
 })
 
+const documentDescriptor = decodeWebBlobDescriptor({
+  digest: documentDigest,
+  byte_length: '1843200',
+  declared_media_type: 'application/pdf',
+  display_filename: ['architecture.pdf'],
+  available_views: [
+    {
+      kind: 'download',
+      media_type: 'application/pdf',
+      byte_length: '1843200',
+      content_url: `/api/blobs/${documentDigest}/download?media_type=application%2Fpdf&display_filename=architecture.pdf`,
+      derivations: [],
+    },
+  ],
+})
+
+const audioDescriptor = decodeWebBlobDescriptor({
+  digest: audioDigest,
+  byte_length: '4194304',
+  declared_media_type: 'audio/ogg',
+  display_filename: ['operator-note.ogg'],
+  available_views: [
+    {
+      kind: 'download',
+      media_type: 'audio/ogg',
+      byte_length: '4194304',
+      content_url: `/api/blobs/${audioDigest}/download?media_type=audio%2Fogg&display_filename=operator-note.ogg`,
+      derivations: [],
+    },
+  ],
+})
+
+const videoDescriptor = decodeWebBlobDescriptor({
+  digest: videoDigest,
+  byte_length: '73400320',
+  declared_media_type: 'video/mp4',
+  display_filename: ['runner-capture.mp4'],
+  available_views: [
+    {
+      kind: 'download',
+      media_type: 'video/mp4',
+      byte_length: '73400320',
+      content_url: `/api/blobs/${videoDigest}/download?media_type=video%2Fmp4&display_filename=runner-capture.mp4`,
+      derivations: [],
+    },
+  ],
+})
+
 const fallbackDigest = `sha256:${'3c'.repeat(32)}`
 export const fallbackDownloadView: BlobView = {
   kind: 'download',
@@ -311,6 +385,46 @@ export const artifactScenario: ReadonlyArray<ArtifactItem> = [
     attemptedKind: 'unknown binary',
     reason: 'The current capability projection does not authorize a content view.',
   },
+]
+
+export const documentAttachment: DocumentArtifact = {
+  id: 'document-attachment',
+  kind: 'document',
+  displayName: 'architecture.pdf',
+  documentKind: 'pdf',
+  source: { kind: 'signalbox_blob', descriptor: documentDescriptor },
+}
+
+export const derivativeAttachment: DerivativeArtifact = {
+  id: 'derived-attachment',
+  kind: 'derivative',
+  displayName: 'orbital-map.preview.png',
+  presentation: 'image',
+  viewKind: 'preview',
+  source: { kind: 'signalbox_blob', descriptor: imageDescriptor },
+}
+
+export const audioAttachment: MediaPlaceholderArtifact = {
+  id: 'audio-attachment',
+  kind: 'media_placeholder',
+  displayName: 'operator-note.ogg',
+  mediaKind: 'audio',
+  source: { kind: 'signalbox_blob', descriptor: audioDescriptor },
+}
+
+export const videoAttachment: MediaPlaceholderArtifact = {
+  id: 'video-attachment',
+  kind: 'media_placeholder',
+  displayName: 'runner-capture.mp4',
+  mediaKind: 'video',
+  source: { kind: 'signalbox_blob', descriptor: videoDescriptor },
+}
+
+export const attachmentScenario: ReadonlyArray<ArtifactItem> = [
+  documentAttachment,
+  derivativeAttachment,
+  audioAttachment,
+  videoAttachment,
 ]
 
 export const imageArtifact = imageDescriptor

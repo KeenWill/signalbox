@@ -9,6 +9,42 @@ export type WebApiError = {
 
 export type WebApiErrorKind = "transport" | "application";
 
+export type WebAttentionAction = "provide_goal_need" | "decide_approval" | "reconcile_turn";
+
+export type WebAttentionActivity = {
+  readonly kind: WebAttentionActivityKind;
+  readonly unix_milliseconds: string;
+};
+
+export type WebAttentionActivityKind = "session" | "turn" | "goal" | "approval_judge" | "runner";
+
+export type WebAttentionBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure";
+
+export type WebAttentionGoalBlock = {
+  readonly generation: string;
+  readonly need_summary: string;
+  readonly reason: WebAttentionBlockedReason;
+};
+
+export type WebAttentionJudgeFacts = {
+  readonly actionable: string;
+  readonly completed: string;
+  readonly escalated: string;
+  readonly failed: string;
+};
+
+export type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" | "ambiguous" | "awaiting_tool_recovery" | "awaiting_reconciliation" | "runner_lost" | "idle";
+
+export type WebAttentionSummary = {
+  readonly action?: WebAttentionAction | null;
+  readonly current_turn_id?: string | null;
+  readonly goal_block?: WebAttentionGoalBlock | null;
+  readonly judge: WebAttentionJudgeFacts;
+  readonly last_activity: WebAttentionActivity;
+  readonly session_id: string;
+  readonly state: WebAttentionState;
+};
+
 export type WebBlobAvailableView = {
   readonly byte_length: string;
   readonly content_url: string;
@@ -217,6 +253,24 @@ export type WebSessionTimelineWindow = {
   readonly session_id: WebSessionId;
 };
 
+export type WebAttentionSnapshot = {
+  readonly continuation_after_session_id?: string | null;
+  readonly cursor: string;
+  readonly summaries: ReadonlyArray<WebAttentionSummary>;
+};
+
+export type WebAttentionStreamEvent = {
+  readonly kind: "snapshot";
+  readonly snapshot: WebAttentionSnapshot;
+} | {
+  readonly cursor: string;
+  readonly kind: "update";
+  readonly summaries: ReadonlyArray<WebAttentionSummary>;
+} | {
+  readonly cursor: string;
+  readonly kind: "resync_required";
+};
+
 export type WebImportListRequest = {
   readonly after?: string | null;
   readonly format?: WebImportFormat | null;
@@ -278,6 +332,8 @@ export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
 export function decodeWebBlobDescriptor(value: unknown): WebBlobDescriptor;
 export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;
 export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;
+export function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;
+export function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;
 export function decodeWebImportListRequest(value: unknown): WebImportListRequest;
 export function decodeWebImportListPage(value: unknown): WebImportListPage;
 export function decodeWebImportDescriptor(value: unknown): WebImportDescriptor;

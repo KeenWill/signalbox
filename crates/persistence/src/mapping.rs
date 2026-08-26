@@ -821,6 +821,7 @@ pub(crate) const fn repo_watch_webhook_disposition_to_str(
 ) -> &'static str {
     match value {
         RepoWatchWebhookDisposition::Projected => "projected",
+        RepoWatchWebhookDisposition::Committed => "committed",
         RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
         RepoWatchWebhookDisposition::Superseded => "superseded",
         RepoWatchWebhookDisposition::Ignored => "ignored",
@@ -830,12 +831,12 @@ pub(crate) const fn repo_watch_webhook_disposition_to_str(
 
 /// Paired with the encoder above so a renamed or added disposition cannot
 /// update the writer while leaving a reader interpreting the old spelling.
-#[cfg(feature = "test-support")]
 pub(crate) fn repo_watch_webhook_disposition_from_str(
     value: &str,
 ) -> Option<RepoWatchWebhookDisposition> {
     match value {
         "projected" => Some(RepoWatchWebhookDisposition::Projected),
+        "committed" => Some(RepoWatchWebhookDisposition::Committed),
         "duplicate_state" => Some(RepoWatchWebhookDisposition::DuplicateState),
         "superseded" => Some(RepoWatchWebhookDisposition::Superseded),
         "ignored" => Some(RepoWatchWebhookDisposition::Ignored),
@@ -1656,6 +1657,7 @@ pub(crate) const fn repo_watch_event_target_to_str(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepoWatchEventProducerStorageKind {
     Poll,
+    Webhook,
 }
 
 pub(crate) const fn repo_watch_event_producer_to_str(
@@ -1663,6 +1665,7 @@ pub(crate) const fn repo_watch_event_producer_to_str(
 ) -> &'static str {
     match value {
         RepoWatchEventProducerStorageKind::Poll => "poll",
+        RepoWatchEventProducerStorageKind::Webhook => "webhook",
     }
 }
 
@@ -1671,6 +1674,7 @@ pub(crate) fn repo_watch_event_producer_from_str(
 ) -> Option<RepoWatchEventProducerStorageKind> {
     match value {
         "poll" => Some(RepoWatchEventProducerStorageKind::Poll),
+        "webhook" => Some(RepoWatchEventProducerStorageKind::Webhook),
         _ => None,
     }
 }

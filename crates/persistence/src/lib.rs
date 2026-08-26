@@ -11,6 +11,7 @@ mod user_content;
 
 pub mod approval_judge;
 pub mod approval_judge_eval;
+pub mod attention;
 pub mod automatic_reconciliation;
 pub mod blob;
 pub mod blob_derivation;
@@ -36,6 +37,7 @@ pub mod replace_session_defaults;
 pub mod repo_watch;
 pub mod repo_watch_dispatch;
 pub mod repo_watch_dispatch_obligation;
+pub mod repo_watch_operations;
 pub mod repo_watch_webhook;
 pub mod review_orchestration;
 pub mod review_workflow;
