@@ -880,26 +880,35 @@ Within the envelope each tool call carries its provider-supplied argument text
 inside a string: strict structured-output validation refuses any schema object
 that does not supply `additionalProperties: false` and require all its
 properties, so a free-form argument object is not expressible in the output
-schema and the live API rejects one as `invalid_json_schema`. The adapter passes
-the contained text onward byte-verbatim when it is credential-shape clean,
-including malformed or non-object text; the provider-independent typed decoder
-owns its inert `invalid_arguments` result. Caller JSON remains raw through
-serialization, preserving deep admitted values and their numeric lexemes.
-Buffered delivery retains its content without deltas; streamed delivery feeds
-raw bounded CLI reasoning and final-envelope text through the stateful redactor
-before emitting ordered deltas and the same terminal evidence. A provider
-failure message consults the same held lookbehind state before it enters
-provider-error evidence: a message that extends a held credential candidate, or
-that arrives during oversized-credential suppression, is suppressed whole rather
-than statelessly re-redacted. Usage comes only from `turn.completed`. The
-adapter maps `input_tokens`, `output_tokens`, `cache_write_input_tokens`, and
-`cached_input_tokens` exactly to Signalbox input, output, cache-creation input,
-and cache-read input axes. Each decoded field is independently optional: an
-omitted field remains unreported rather than becoming zero. A partial event
-records only its present axes, and a total-only event records none because the
-adapter never distributes a total. The pinned CLI's separate
-`reasoning_output_tokens` counter and additive `total_tokens` siblings have no
-existing Signalbox usage axis; neither is folded into output or another field.
+schema and the live API rejects one as `invalid_json_schema`. The adapter
+requires the contained text to stay within the shared JSON nesting bound, which
+the line-level and agent-message-level checks cannot see because string content
+does not nest the outer JSON, and reports over-depth text as boundary loss; it
+judges neither syntax nor shape, so malformed and non-object argument text
+passes onward byte-verbatim when it is credential-shape clean rather than
+becoming boundary loss. Preserved text is proposal material the
+provider-independent decoders classify: `decode_tool_arguments` and
+`decode_structured_json` only return their typed `JsonSyntax` and
+`SchemaMismatch` failures, never a model call or repair round, and it is the
+tool loop that projects an ordinary proposal's typed failure as its
+`invalid_arguments` result for the next model round. Caller JSON remains raw
+through serialization, preserving deep admitted values and their numeric
+lexemes. Buffered delivery retains its content without deltas; streamed delivery
+feeds raw bounded CLI reasoning and final-envelope text through the stateful
+redactor before emitting ordered deltas and the same terminal evidence. A
+provider failure message consults the same held lookbehind state before it
+enters provider-error evidence: a message that extends a held credential
+candidate, or that arrives during oversized-credential suppression, is
+suppressed whole rather than statelessly re-redacted. Usage comes only from
+`turn.completed`. The adapter maps `input_tokens`, `output_tokens`,
+`cache_write_input_tokens`, and `cached_input_tokens` exactly to Signalbox
+input, output, cache-creation input, and cache-read input axes. Each decoded
+field is independently optional: an omitted field remains unreported rather than
+becoming zero. A partial event records only its present axes, and a total-only
+event records none because the adapter never distributes a total. The pinned
+CLI's separate `reasoning_output_tokens` counter and additive `total_tokens`
+siblings have no existing Signalbox usage axis; neither is folded into output or
+another field.
 
 The pinned CLI exposes no argv, configuration, or subscription request controls
 for output-token ceiling, temperature, top-p, or stop sequences. This adapter is

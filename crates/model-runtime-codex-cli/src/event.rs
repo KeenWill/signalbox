@@ -744,10 +744,16 @@ impl<C: Clone> EventDecoder<C> {
             // The envelope carries the provider's argument text inside a
             // string because strict structured output forbids a free-form
             // object (see `wire::EnvelopeToolCall`). Preserve that text even
-            // when it is malformed: `ToolCallProposal` deliberately owns raw
-            // provider text, and typed decoding downstream turns malformed or
-            // schema-invalid arguments into an inert `invalid_arguments`
-            // result for the next model round.
+            // when it is malformed or not an object: `ToolCallProposal`
+            // deliberately owns raw provider text, and the provider-independent
+            // typed decoders report a typed decode failure the caller acts on,
+            // which the tool loop projects as its `invalid_arguments` result
+            // for the next model round. The shared nesting bound still applies
+            // to the contained text, as it does in the sibling adapters that
+            // receive string-carried arguments: string content is invisible to
+            // the line-level and agent-message-level checks, and the shared
+            // typed decoders admit only serde_json's recursion boundary.
+            validate_tool_argument_nesting(&call.arguments, &call.name)?;
             // The id consults the same held lookbehind the arguments do —
             // including the same-envelope final text — so an id extending a
             // credential marker gets a safe surrogate instead of leaking.
@@ -1044,6 +1050,27 @@ fn fold_dropped_units<'a, C: Clone>(
         [only] => sink.extend_dropped_context(only),
         _ => sink.suppress_remaining(),
     }
+}
+
+/// Requires a string-carried tool-argument payload to stay within the
+/// provider nesting bound, whatever its syntax.
+///
+/// The argument text arrives inside a JSON string, so the line-level nesting
+/// validation in `push` never saw its structure, and the shared typed decoders
+/// that consume the preserved text admit only serde_json's recursion boundary.
+/// Syntax and shape are deliberately not judged here: malformed and non-object
+/// text is authoritative proposal material the typed decoders classify. Failure
+/// detail names only the redacted tool name, never the argument text itself.
+fn validate_tool_argument_nesting(
+    arguments: &str,
+    tool_name: &str,
+) -> Result<(), ResponseEnvelopeFailure> {
+    validate_provider_json_nesting(arguments.as_bytes()).map_err(|error| {
+        ResponseEnvelopeFailure::new(
+            "tool_arguments_nesting",
+            format!("tool `{}` arguments: {error}", redact_text(tool_name)),
+        )
+    })
 }
 
 /// Allocates the next distinct redacted-call surrogate from a monotonic

@@ -489,7 +489,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-deep","name":"{}","arguments":{}}}]}}"#,
                 fixtures::TOOL_NAME,
-                fixtures::deeply_nested_tool_arguments()
+                deeply_nested_arguments()
             ));
             completed();
         }
@@ -521,7 +521,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             envelope(&format!(
                 r#"{{"outcome":"completed","text":"","tool_calls":[{{"id":"call-offline-deep","name":"{}","arguments":"{}"}}]}}"#,
                 fixtures::TOOL_NAME,
-                json_escape(&fixtures::deeply_nested_tool_arguments())
+                json_escape(&deeply_nested_arguments())
             ));
             completed();
         }
@@ -1100,6 +1100,14 @@ fn completed_without_cache() {
         fixtures::INPUT_TOKENS,
         fixtures::OUTPUT_TOKENS
     ));
+}
+
+fn deeply_nested_arguments() -> String {
+    let mut value = "{}".to_string();
+    for _ in 0..130 {
+        value = format!(r#"{{"nested":{value}}}"#);
+    }
+    value
 }
 
 fn failed(message: &str) -> ! {

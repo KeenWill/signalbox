@@ -12,15 +12,6 @@ pub const OTHER_TOOL_NAME: &str = "timezone";
 pub const TOOL_ARGUMENTS: &str = r#"{ "city" : "Oslo", "limit": 3 }"#;
 pub const MALFORMED_TOOL_ARGUMENTS: &str = "not an argument object";
 pub const NON_OBJECT_TOOL_ARGUMENTS: &str = "7";
-
-pub fn deeply_nested_tool_arguments() -> String {
-    let mut value = "{}".to_string();
-    for _ in 0..130 {
-        value = format!(r#"{{"nested":{value}}}"#);
-    }
-    value
-}
-
 pub const STRUCTURED_ACCEPTED: bool = true;
 pub const INPUT_TOKENS: u64 = 11;
 pub const CACHE_READ_INPUT_TOKENS: u64 = 2;

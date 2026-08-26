@@ -1661,8 +1661,9 @@ async fn buffered_tool_call_retains_the_same_verbatim_arguments() {
 
 /// Defect regression: the envelope carries each tool call's provider-supplied
 /// argument text inside a string because strict structured output forbids a
-/// free-form object member. Malformed text remains an authoritative proposal;
-/// typed decoding downstream owns the inert `invalid_arguments` result.
+/// free-form object member. Malformed text remains an authoritative proposal
+/// the provider-independent typed decoders classify, which the tool loop
+/// projects as its `invalid_arguments` result.
 #[tokio::test]
 async fn non_json_string_carried_tool_arguments_are_preserved() {
     let result = execute_scenario(
@@ -1697,11 +1698,13 @@ async fn non_object_string_carried_tool_arguments_are_preserved() {
     );
 }
 
-/// Deep provider argument text is likewise preserved for stack-guarded typed
-/// decoding downstream; its string content does not add nesting to the outer
-/// response envelope and cannot consume the event decoder's call stack.
+/// Preservation stops at the shared nesting bound. The bound applies to the
+/// argument text carried inside the envelope string, which the line-level and
+/// agent-message-level checks cannot see because string content does not nest
+/// the outer JSON, and which the shared typed decoders could not decode past
+/// serde_json's recursion boundary.
 #[tokio::test]
-async fn over_deep_string_carried_tool_arguments_are_preserved() {
+async fn over_deep_string_carried_tool_arguments_are_boundary_loss() {
     let result = execute_scenario(
         "tool_call_deep_arguments",
         DeliveryMode::Buffered,
@@ -1709,11 +1712,10 @@ async fn over_deep_string_carried_tool_arguments_are_preserved() {
         CancellationSignal::never(),
     )
     .await;
-    let completed = completed(&result.evidence);
 
-    assert_eq!(
-        tool_proposal(&completed.content).arguments_json,
-        fixtures::deeply_nested_tool_arguments()
+    assert!(
+        response_unintelligible(&boundary_loss(&result.evidence).cause)
+            .contains("arguments: provider JSON exceeds")
     );
 }
 
