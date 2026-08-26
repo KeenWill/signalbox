@@ -1414,7 +1414,7 @@ final class ProcessProtocolTests: XCTestCase {
 
     let frame = try SignalboxProcessServerFrame.decode(from: encoded)
 
-    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: frame.message))
+    XCTAssertNotNil(ProcessProtocolFixture.textEntryDecodingDiagnostic(in: frame.message))
   }
 
   func testContextCompactionFramesDecodeTheirCurrentShapes() throws {
@@ -3583,6 +3583,17 @@ private enum ProcessProtocolFixture {
     in message: SignalboxProcessServerMessage
   ) -> SignalboxDecodingDiagnostic? {
     guard case .unknown(_, _, let diagnostic) = message else {
+      return nil
+    }
+    return diagnostic
+  }
+
+  static func textEntryDecodingDiagnostic(
+    in message: SignalboxProcessServerMessage
+  ) -> SignalboxDecodingDiagnostic? {
+    guard case .transcriptTextEntry(let textEntry) = message,
+      case .unknown("user", _, let diagnostic) = textEntry.entry
+    else {
       return nil
     }
     return diagnostic
