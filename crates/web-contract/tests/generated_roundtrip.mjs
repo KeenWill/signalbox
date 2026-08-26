@@ -1505,9 +1505,17 @@ test("generated search decoder rejects a continuation projection mismatch", () =
   );
 });
 
-test("generated search decoder accepts an omitted optional continuation", () => {
+test("generated search decoder requires the continuation key", () => {
   const page = searchPage();
   delete page.continuation;
+
+  assert.throws(() => decodeWebSearchPage(page), /continuation must be present/);
+});
+
+test("generated search decoder accepts an explicit null continuation", () => {
+  const page = searchPage();
+  page.results = [];
+  page.continuation = null;
 
   assert.deepEqual(decodeWebSearchPage(page), page);
 });
