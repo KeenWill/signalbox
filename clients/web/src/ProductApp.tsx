@@ -22,6 +22,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { ActivitySurface } from './ActivitySurface'
 import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext, CommandId } from './commands'
@@ -781,6 +782,35 @@ export function ProductApp({
               {bootstrap.isError
                 ? 'Attention reads remain disabled until the generated bootstrap contract validates.'
                 : 'Attention reads will begin after the generated bootstrap contract validates.'}
+            </p>
+            {bootstrap.isError && (
+              <button
+                type="button"
+                className="bootstrap-retry"
+                onClick={() => {
+                  setFocusAfterBootstrapRecovery(true)
+                  void bootstrap.refetch()
+                }}
+              >
+                Retry contract check
+              </button>
+            )}
+          </div>
+        </section>
+      </div>
+    ) : surface === 'activity' && bootstrap.isSuccess ? (
+      <ActivitySurface />
+    ) : surface === 'activity' ? (
+      <div className="surface-body">
+        <section className="surface-empty" role={bootstrap.isError ? 'alert' : 'status'}>
+          <div>
+            <h2>
+              {bootstrap.isError ? 'Activity contract unavailable' : 'Checking Activity contract'}
+            </h2>
+            <p>
+              {bootstrap.isError
+                ? 'Repository activity reads remain disabled until the generated bootstrap contract validates.'
+                : 'Repository activity reads will begin after the generated bootstrap contract validates.'}
             </p>
             {bootstrap.isError && (
               <button

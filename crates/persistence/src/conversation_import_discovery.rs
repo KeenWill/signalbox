@@ -13,8 +13,8 @@ use signalbox_domain::{
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::conversation_import::{
-    DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
-    decode_format, decode_source_speaker, encode_format, positive_u64,
+    DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_UNDERIVABLE, decode_format,
+    decode_source_speaker, encode_format, positive_u64,
 };
 
 /// Exact filters and exclusive keyset position for one imports page.
@@ -782,9 +782,6 @@ fn checked_display_title(
                 .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidDisplayTitle.into())
         }
         (DISPLAY_TITLE_STATE_UNDERIVABLE, None) => Ok(None),
-        (DISPLAY_TITLE_STATE_PENDING, _) => Err(
-            ImportedConversationDiscoveryCorruption::Inconsistent("pending display title").into(),
-        ),
         _ => {
             Err(ImportedConversationDiscoveryCorruption::Inconsistent("display-title state").into())
         }
