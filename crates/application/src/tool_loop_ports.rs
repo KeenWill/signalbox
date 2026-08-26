@@ -15,7 +15,7 @@ use signalbox_domain::{
     ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolRequest, TurnAttemptId, TurnId,
 };
 
-use crate::{ClassifyOperatorFailure, CorrelatedDurableChildWait};
+use crate::{ClassifyOperatorFailure, CorrelatedDurableChildWait, ToolPreauthorization};
 
 /// Storage-resolved authority for one tool-related semantic entry.
 ///
@@ -80,6 +80,18 @@ pub enum ToolAttemptAuthorizationStatus {
     Prepared(CurrentToolAttempt),
     /// Authorization committed; this exact fence may enter the executor.
     InFlight(ToolDispatchAuthority),
+}
+
+/// Durable preauthorization and dispatch decision for one prepared attempt.
+#[derive(Debug, Eq, PartialEq)]
+pub enum ToolAttemptAuthorizationOutcome {
+    /// The exact dispatch fence was authorized.
+    Authorized(Box<ToolDispatchAuthority>),
+    /// A request-scoped durable resource budget refused dispatch authority.
+    PreauthorizationRejected {
+        /// Exact bounded, sanitized reason for refusing authorization.
+        detail: signalbox_domain::ToolExecutionErrorDetail,
+    },
 }
 
 /// Transaction consuming one user decision and advancing the exact wait.
@@ -262,7 +274,8 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> impl Future<Output = Result<ToolDispatchAuthority, Self::Error>> + Send;
+        preauthorization: ToolPreauthorization,
+    ) -> impl Future<Output = Result<ToolAttemptAuthorizationOutcome, Self::Error>> + Send;
 
     /// Rereads whether an ambiguously acknowledged authorization committed.
     fn reread_ambiguous_authorization(

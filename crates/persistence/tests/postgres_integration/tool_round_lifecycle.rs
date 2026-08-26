@@ -2,6 +2,197 @@
 
 use crate::*;
 
+/// Registers one verified replica so a fixture attachment names a catalogued blob.
+///
+/// The attachment part itself travels with the fixture's submit input rather
+/// than being inserted afterwards, because content parts are immutable outside
+/// the transaction that creates their parent.
+async fn register_fixture_blob(
+    pool: &PgPool,
+    seed: u128,
+    digest: BlobDigest,
+) -> Result<(), Box<dyn Error>> {
+    let store = BlobStoreName::try_new(format!("fixture-{seed:x}"))?;
+    let expected = ExpectedBlob::try_new(digest, 1)?;
+    let binding = BlobStoreBindingRecord::new(store.clone(), Uuid::from_u128(seed + 0x90));
+    BlobCatalogRepository::new(pool.clone())
+        .register_verified_replica(
+            expected,
+            binding,
+            BlobReplicaRecord::new(store, BlobObjectKey::for_digest(digest)),
+        )
+        .await?;
+    Ok(())
+}
+
+async fn prepare_confirmed_tool_attempt(
+    pool: &PgPool,
+    seed: u128,
+    arguments: &str,
+    attachment: Option<BlobDigest>,
+) -> Result<(RestartModelCallFixture, ToolAttemptId), Box<dyn Error>> {
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round_with_attachment(
+        pool,
+        seed,
+        "blob_read",
+        arguments,
+        attachment,
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xa0)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xa1)),
+        )
+        .await?;
+    let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0xa2));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    Ok((fixture, attempt))
+}
+
+/// One durable `blob_read_tool_charge` projection with its labels preserved.
+#[derive(Debug, sqlx::FromRow)]
+struct StoredBlobReadCharge {
+    blob_digest: Vec<u8>,
+    decoded_byte_count: Decimal,
+    admission: bool,
+}
+
+/// Whether a recorded charge granted the request its decoded bytes.
+#[derive(Debug, Eq, PartialEq)]
+enum BlobReadChargeAdmission {
+    Admitted,
+    Rejected,
+}
+
+impl StoredBlobReadCharge {
+    fn admission(&self) -> BlobReadChargeAdmission {
+        if self.admission {
+            BlobReadChargeAdmission::Admitted
+        } else {
+            BlobReadChargeAdmission::Rejected
+        }
+    }
+}
+
+/// INV-091: blob-read visibility and decoded-byte charges commit before
+/// dispatch authority.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv091_blob_read_preauthorization_is_visible_bounded_and_durable()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let visible_seed = 0xd000;
+    let visible_digest = BlobDigest::digest(b"visible");
+    let visible_decoded_bytes = 524_288_u64;
+    let visible_arguments = format!(
+        r#"{{"digest":"{visible_digest}","offset_bytes":"0","length_bytes":"{visible_decoded_bytes}"}}"#
+    );
+    register_fixture_blob(&pool, visible_seed, visible_digest).await?;
+    let (visible_fixture, visible_attempt) = prepare_confirmed_tool_attempt(
+        &pool,
+        visible_seed,
+        &visible_arguments,
+        Some(visible_digest),
+    )
+    .await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let visible = repository
+        .authorize_attempt_with_preauthorization(
+            visible_fixture.session,
+            visible_fixture.turn,
+            visible_attempt,
+            ToolPreauthorization::BlobRead {
+                digest: visible_digest,
+                decoded_bytes: NonZeroU64::new(visible_decoded_bytes)
+                    .expect("the fixture bound is positive"),
+            },
+        )
+        .await?;
+    assert!(matches!(
+        visible,
+        ToolAttemptAuthorizationOutcome::Authorized(_)
+    ));
+    let charge: StoredBlobReadCharge = sqlx::query_as(
+        "SELECT blob_digest, decoded_byte_count, admitted AS admission
+           FROM blob_read_tool_charge
+          WHERE request_id = (
+                SELECT request_id FROM tool_attempt WHERE attempt_id = $1)",
+    )
+    .bind(visible_attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(charge.blob_digest, visible_digest.as_bytes().as_slice());
+    assert_eq!(
+        charge.decoded_byte_count,
+        Decimal::from(visible_decoded_bytes)
+    );
+    assert_eq!(charge.admission(), BlobReadChargeAdmission::Admitted);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-091: an unattached blob-read digest is rejected before dispatch and
+/// leaves the durable attempt Prepared.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv091_unattached_blob_read_is_rejected_before_dispatch() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+
+    let hidden_seed = 0xd200;
+    let hidden_digest = BlobDigest::digest(b"hidden");
+    let hidden_decoded_bytes = 1_u64;
+    let hidden_arguments = format!(
+        r#"{{"digest":"{hidden_digest}","offset_bytes":"0","length_bytes":"{hidden_decoded_bytes}"}}"#
+    );
+    let (hidden_fixture, hidden_attempt) =
+        prepare_confirmed_tool_attempt(&pool, hidden_seed, &hidden_arguments, None).await?;
+    let hidden = repository
+        .authorize_attempt_with_preauthorization(
+            hidden_fixture.session,
+            hidden_fixture.turn,
+            hidden_attempt,
+            ToolPreauthorization::BlobRead {
+                digest: hidden_digest,
+                decoded_bytes: NonZeroU64::new(hidden_decoded_bytes)
+                    .expect("the fixture byte is positive"),
+            },
+        )
+        .await?;
+    assert_eq!(
+        hidden,
+        ToolAttemptAuthorizationOutcome::PreauthorizationRejected {
+            detail: ToolExecutionErrorDetail::try_new(String::from("blob_not_visible"))
+                .expect("the fixed rejection detail is valid"),
+        }
+    );
+    let hidden_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(hidden_attempt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(hidden_state, "prepared");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 async fn lock_tool_continuation_outbox_allocator(
     pool: &sqlx::PgPool,
 ) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, Box<dyn Error>> {
@@ -631,50 +822,40 @@ async fn s02_s08_inv016_inv036_steering_consumed_at_continuation_reloads_and_sca
             &mut recovery_ids,
         )
         .await?;
-    let StartupScanSessionOutcome::RecoveredModelCall(recovered) = scan else {
-        panic!("the startup scan classifies the prepared continuation call instead of aborting");
-    };
-    assert!(
-        matches!(*recovered, ModelCallTerminalOutcome::Failed(_)),
-        "the lost prepared continuation call closes as a known failure"
+    assert_eq!(
+        scan,
+        StartupScanSessionOutcome::ResumablePreparedModelCall { turn: fixture.turn },
+        "the startup scan preserves the prepared continuation for resumption"
     );
-    let recovered_shape: (String, Option<Uuid>) = sqlx::query_as(
-        "SELECT terminal_disposition_kind, terminal_model_call_id
-           FROM turn_lifecycle
-          WHERE session_id = $1
-            AND turn_id = $2",
+    let recovered_shape: (String, Option<String>, Uuid, String, Option<String>) = sqlx::query_as(
+        "SELECT lifecycle.state_kind,
+                lifecycle.terminal_disposition_kind,
+                lifecycle.current_attempt_id,
+                continuation.state_kind,
+                continuation.terminal_disposition_kind
+           FROM turn_lifecycle AS lifecycle
+           JOIN model_call AS continuation
+             ON continuation.session_id = lifecycle.session_id
+            AND continuation.turn_id = lifecycle.turn_id
+            AND continuation.model_call_id = $3
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.turn_id = $2",
     )
     .bind(fixture.session.into_uuid())
     .bind(fixture.turn.into_uuid())
+    .bind(continuation_call.into_uuid())
     .fetch_one(&pool)
     .await?;
     assert_eq!(
         recovered_shape,
-        (String::from("failed"), Some(continuation_call.into_uuid()),),
-        "restart recovery names the steering-consuming continuation call"
-    );
-
-    let post_recovery = SubmitInputRepository::new(pool.clone())
-        .handle(
-            start_input(
-                seed + 0x33,
-                seed + 1,
-                "work after recovered continuation",
-                1,
-                ModelSelectionOverride::UseSessionDefault,
-            ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x34)),
-            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x35))),
-        )
-        .await?;
-    assert!(
-        matches!(
-            post_recovery,
-            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-                SubmitInputAppliedResult::TurnOrigin(_)
-            ))
+        (
+            String::from("active"),
+            None,
+            continuation_attempt.into_uuid(),
+            String::from("prepared"),
+            None,
         ),
-        "the failed terminal continuation shape must reconstitute before the next submit"
+        "restart recovery leaves the steering-consuming continuation unchanged"
     );
 
     pool.close().await;

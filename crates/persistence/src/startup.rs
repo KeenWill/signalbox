@@ -385,6 +385,7 @@ fn startup_recovery_created_ambiguous_wait(outcome: &StartupScanSessionOutcome) 
         StartupScanSessionOutcome::Recovered(_)
         | StartupScanSessionOutcome::RecoveredContextCompaction { .. }
         | StartupScanSessionOutcome::ResumableToolBatch { .. }
+        | StartupScanSessionOutcome::ResumablePreparedModelCall { .. }
         | StartupScanSessionOutcome::AwaitingRecoveryDecision { .. }
         | StartupScanSessionOutcome::NoActiveTurn => false,
     }
@@ -679,14 +680,18 @@ where
         .await
         .map_err(map_model_call_error)?;
     if let Some(call_state) = model_execution.current_call().map(|call| call.state()) {
+        if call_state == CurrentModelCallState::Prepared {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::ResumablePreparedModelCall {
+                    turn: model_execution.turn(),
+                },
+            ));
+        }
         let mut failure_identities = FailedModelCallTurnIdentities::new(
             identities.failure_entry(),
             identities.terminal_frontier(),
         );
-        if matches!(
-            call_state,
-            CurrentModelCallState::Prepared | CurrentModelCallState::CancellationRequested
-        ) {
+        if call_state == CurrentModelCallState::CancellationRequested {
             let mut proposed_turns = BTreeSet::new();
             let mut reclassifications = Vec::new();
             for pending in model_execution.active_turn().pending_steering() {

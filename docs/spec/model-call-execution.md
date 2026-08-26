@@ -46,9 +46,11 @@ The user-vocabulary surface on this page was re-verified through PR #378
 The durable usage-provenance column and read projection are verified against PR
 `#389` (`agent/cost-accounting`).
 
-Multipart attachment rendering and verification below are the foundation
-proposal from PR #553 (`agent/blob-storage-foundation`) and become verified with
-its implementing child stack.
+Multipart attachment rendering remains part of the foundation proposal from PR
+#553 (`agent/blob-storage-foundation`). Distinct attachment sizing, streamed
+replica verification, typed pre-authorization failure, and retryable
+unavailability are verified against this implementing change
+(`agent/blob-storage-attachment-preparation`).
 
 This page describes the implemented model-call orchestration chain as verified
 against the implementing stack through PR #201 (`agent/tool-loop-proof`):
@@ -603,9 +605,11 @@ command. This proposal is accepted with the implementing stack's merge.
    nonfatal deferred execution result and is never routed to
    `FatalExecutionSupervisor`. Authoritative cancellation aborts store I/O,
    returns `NoWork`, and never substitutes an attachment failure for the
-   cancellation closure. A successful check seeds only the bounded turn-scoped
-   verification inventory owned by
-   [blob storage](blob-storage.md#wire-vocabulary).
+   cancellation closure. Reusing a successful check through the bounded
+   turn-scoped verification inventory is committed unimplemented functionality
+   until a blob-store adapter supplies the immutable-generation token required
+   by [blob storage](blob-storage.md#wire-vocabulary); current later ranges
+   therefore reverify.
 4. **Authorize-send transaction.** After acquiring the process-shared
    per-attempt dispatch gate, a distinct transaction reloads authority and
    commits `Prepared -> InFlight`. A `Prepared` owning attempt moves

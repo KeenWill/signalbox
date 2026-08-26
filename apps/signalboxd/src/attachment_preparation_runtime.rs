@@ -170,7 +170,9 @@ async fn verify_entry(
             Err(error) => match error.kind() {
                 BlobStoreFailureKind::NotFound => saw_missing = true,
                 BlobStoreFailureKind::VerificationFailed => saw_corrupt = true,
-                BlobStoreFailureKind::Unavailable => saw_unavailable = true,
+                BlobStoreFailureKind::PublicationAmbiguous | BlobStoreFailureKind::Unavailable => {
+                    saw_unavailable = true;
+                }
             },
         }
     }
