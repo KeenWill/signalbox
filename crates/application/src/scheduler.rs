@@ -9,7 +9,7 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     error::Error,
     fmt,
-    future::{Future, ready},
+    future::{Future, pending, ready},
     num::NonZeroUsize,
     pin::Pin,
     sync::{Arc, Mutex, MutexGuard},
@@ -25,6 +25,7 @@ use tokio::{
             self,
             error::{TryRecvError, TrySendError},
         },
+        watch,
     },
     task::{Id, JoinError, JoinSet},
     time::{self, Instant, Interval, MissedTickBehavior},
@@ -36,37 +37,36 @@ use crate::{
     StartEligibleTurnTransaction,
 };
 
-/// The baseline reconciliation interval selected by the scheduler slice.
-///
-/// The composition root may supply another nonzero interval after validating
-/// deployment configuration through [`ReconciliationSweepInterval::try_new`].
-// numeric-bound: tunable - controls the baseline reconciliation cadence
-const BASELINE_RECONCILIATION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
-// numeric-bound: tunable - controls baseline scheduler nudge backpressure
-const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
-// numeric-bound: ceiling - one repository-watch rule can dispatch this many actions
+// numeric-bound: guard - prevents nudge backpressure from dropping part of one rule's admitted dispatch
 const MINIMUM_DISPATCH_START_BACKLOG_CAPACITY: usize = 32;
-/// Shared product cap for concurrent authoritative scheduler passes.
-///
-/// This controls simultaneous provider, tool, and database pressure. Deployment
-/// configuration may lower or pause admission but cannot raise this cap.
-// numeric-bound: tunable - controls concurrent authoritative scheduler passes
-const SCHEDULER_PASS_ADMISSION_CAP: usize = 16;
 /// Capacity kept available for a dispatched session that has not made a model call.
 ///
-/// The reservation is inside the shared pass cap. Long-lived recovery and
-/// execution passes therefore cannot occupy every admission slot.
-// numeric-bound: tunable - preserves dispatch-start progress inside shared pressure limit
+/// The reservation is inside whatever pass cap the deployment configured. Long
+/// lived recovery and execution passes therefore cannot occupy every admission
+/// slot.
+// numeric-bound: guard - prevents long-lived passes from taking every slot and starving dispatch starts forever
 const DISPATCH_START_RESERVED_PASS_CAPACITY: usize = 1;
-/// Longest wall-clock tenure of one admitted authoritative pass.
+
+/// Returns the concurrent ordinary passes admissible under a configured cap.
+///
+/// One place inside the cap stays reserved for a repository-watch dispatch
+/// start carrying no model-call evidence, so ordinary recovery and execution
+/// passes cannot consume the start lane. The cap itself is deployment
+/// configuration rather than a compiled constant, so callers that need the
+/// derived ordinary limit pass the admission cap they were configured with.
+pub const fn scheduler_ordinary_pass_limit(max_in_flight_passes: usize) -> usize {
+    ordinary_pass_limit(max_in_flight_passes)
+}
+
+/// A configured optional bound on one authoritative pass's occupancy.
 ///
 /// This bounds *occupancy*, not turn duration, and the difference matters: one
 /// admitted pass drives a turn's entire model/tools loop, including provider
 /// retry-backoff sleeps, and returns only at a terminal or durable-park outcome.
-/// A healthy multi-round turn can therefore reach this ceiling while making
-/// continuous durable progress, so reaching it is not evidence that anything is
-/// wedged — it is only the point at which the scheduler reclaims the slot, so
-/// that one long-running session cannot hold one indefinitely.
+/// A healthy multi-round turn can therefore reach a configured bound while
+/// making continuous durable progress, so reaching it is not evidence that
+/// anything is wedged — it is only the point at which the scheduler reclaims the
+/// slot, so that one long-running session cannot hold one indefinitely.
 ///
 /// Expiry consequently hands the turn to a recovery path that decides for
 /// itself, and that path requires the turn's durable evidence to be unchanged
@@ -74,44 +74,26 @@ const DISPATCH_START_RESERVED_PASS_CAPACITY: usize = 1;
 /// unchanged-evidence requirement both liveness watchdogs impose. A pass that
 /// expired while progressing has its turn left active and eligibility nudged, so
 /// a fresh pass may be admitted for it.
-// numeric-bound: ceiling - bounds one authoritative pass's scheduler occupancy
-const SCHEDULER_PASS_OCCUPANCY_BOUND: Duration = Duration::from_secs(15 * 60);
-
-/// Returns the shared product cap for concurrent authoritative passes.
-pub const fn scheduler_pass_admission_cap() -> usize {
-    SCHEDULER_PASS_ADMISSION_CAP
-}
-
-/// Returns the concurrent ordinary passes admissible under the shared cap.
-///
-/// One place inside the cap stays reserved for a repository-watch dispatch
-/// start carrying no model-call evidence, so ordinary recovery and execution
-/// passes cannot consume the start lane.
-pub const fn scheduler_ordinary_pass_limit() -> usize {
-    ordinary_pass_limit(SCHEDULER_PASS_ADMISSION_CAP)
-}
-
-/// The hard product ceiling on one authoritative pass's occupancy.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct SchedulerPassOccupancyBound(Duration);
+pub struct SchedulerPassOccupancyBound(Option<Duration>);
 
 impl SchedulerPassOccupancyBound {
-    /// Returns the compiled fifteen-minute ceiling.
-    pub const fn hard_ceiling() -> Self {
-        Self(SCHEDULER_PASS_OCCUPANCY_BOUND)
+    /// Disables occupancy expiry.
+    pub const fn unbounded() -> Self {
+        Self(None)
     }
 
-    /// Accepts a nonzero whole-second lowering of the product ceiling.
-    pub fn try_lowered(bound: Duration) -> Result<Self, InvalidSchedulerPassOccupancyBound> {
-        if bound.is_zero() || bound > SCHEDULER_PASS_OCCUPANCY_BOUND || bound.subsec_nanos() != 0 {
+    /// Accepts a configured nonzero whole-second occupancy bound.
+    pub fn try_new(bound: Duration) -> Result<Self, InvalidSchedulerPassOccupancyBound> {
+        if bound.is_zero() || bound.subsec_nanos() != 0 {
             Err(InvalidSchedulerPassOccupancyBound)
         } else {
-            Ok(Self(bound))
+            Ok(Self(Some(bound)))
         }
     }
 
-    /// Returns the enforced duration.
-    pub const fn get(self) -> Duration {
+    /// Returns the configured duration, or `None` when expiry is disabled.
+    pub const fn get(self) -> Option<Duration> {
         self.0
     }
 }
@@ -122,9 +104,8 @@ pub struct InvalidSchedulerPassOccupancyBound;
 
 impl fmt::Display for InvalidSchedulerPassOccupancyBound {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(
-            "scheduler pass occupancy bound must be a nonzero whole-second duration at or below the compiled ceiling",
-        )
+        formatter
+            .write_str("scheduler pass occupancy bound must be a nonzero whole-second duration")
     }
 }
 
@@ -174,11 +155,6 @@ pub trait SchedulerPassExpiryHandler: fmt::Debug + Send + Sync + 'static {
 pub struct ReconciliationSweepInterval(Duration);
 
 impl ReconciliationSweepInterval {
-    /// Returns the one-second baseline selected by the scheduler slice.
-    pub const fn baseline() -> Self {
-        Self(BASELINE_RECONCILIATION_SWEEP_INTERVAL)
-    }
-
     /// Validates an operator-supplied interval.
     pub fn try_new(interval: Duration) -> Result<Self, InvalidReconciliationSweepInterval> {
         if interval.is_zero() || Instant::now().checked_add(interval).is_none() {
@@ -607,10 +583,54 @@ where
 /// Cloneable same-process post-commit nudge hook.
 #[derive(Clone, Debug)]
 pub struct InProcessEligibilityNudge {
-    sender: mpsc::Sender<SessionId>,
+    sender: EligibilityNudgeSender,
     pending: Arc<Mutex<HashMap<SessionId, PendingEligibilityHint>>>,
     dispatch_start_available: Arc<Notify>,
     dispatch_start_backlog_capacity: usize,
+}
+
+/// Either half of the configured nudge channel.
+///
+/// A deployment that configures no nudge-buffer capacity gets an unbounded
+/// channel, whose send never reports `Full`. Reusing the bounded channel's error
+/// type keeps one admission path for both shapes: the unbounded arm simply never
+/// reaches the backpressure branches.
+#[derive(Clone, Debug)]
+enum EligibilityNudgeSender {
+    Bounded(mpsc::Sender<SessionId>),
+    Unbounded(mpsc::UnboundedSender<SessionId>),
+}
+
+impl EligibilityNudgeSender {
+    fn try_send(&self, session: SessionId) -> Result<(), TrySendError<SessionId>> {
+        match self {
+            Self::Bounded(sender) => sender.try_send(session),
+            Self::Unbounded(sender) => sender
+                .send(session)
+                .map_err(|error| TrySendError::Closed(error.0)),
+        }
+    }
+}
+
+enum EligibilityNudgeReceiver {
+    Bounded(mpsc::Receiver<SessionId>),
+    Unbounded(mpsc::UnboundedReceiver<SessionId>),
+}
+
+impl EligibilityNudgeReceiver {
+    fn try_recv(&mut self) -> Result<SessionId, TryRecvError> {
+        match self {
+            Self::Bounded(receiver) => receiver.try_recv(),
+            Self::Unbounded(receiver) => receiver.try_recv(),
+        }
+    }
+
+    async fn recv(&mut self) -> Option<SessionId> {
+        match self {
+            Self::Bounded(receiver) => receiver.recv().await,
+            Self::Unbounded(receiver) => receiver.recv().await,
+        }
+    }
 }
 
 impl InProcessEligibilityNudge {
@@ -706,13 +726,13 @@ pub struct InProcessEligibilityWorkSource<Sweep>
 where
     Sweep: EligibilitySweep,
 {
-    nudges: mpsc::Receiver<SessionId>,
+    nudges: EligibilityNudgeReceiver,
     pending_nudges: Arc<Mutex<HashMap<SessionId, PendingEligibilityHint>>>,
     dispatch_start_available: Arc<Notify>,
     returned_priority: Option<(SessionId, EligibilityHintPriority)>,
     sweep: Option<Sweep>,
     sweep_in_progress: Option<InProgressEligibilitySweep<Sweep>>,
-    sweep_interval: Interval,
+    sweep_interval: Option<Interval>,
     initial_sweep_due: bool,
     pending_sweep_hints: VecDeque<SessionId>,
     pending_sweep_dispatch_starts: HashSet<SessionId>,
@@ -753,13 +773,9 @@ impl<Sweep> InProcessEligibilityWorkSource<Sweep>
 where
     Sweep: EligibilitySweep,
 {
-    /// Builds a work source with the one-second baseline sweep interval.
+    /// Builds an unbounded work source with only its initial reconciliation sweep.
     pub fn new(sweep: Sweep) -> (InProcessEligibilityNudge, Self) {
-        Self::with_options(
-            sweep,
-            ReconciliationSweepInterval::baseline(),
-            NonZeroUsize::new(BASELINE_NUDGE_BUFFER_CAPACITY).unwrap_or(NonZeroUsize::MIN),
-        )
+        Self::with_options(sweep, None, None)
     }
 
     /// Builds a work source with an explicitly validated sweep interval.
@@ -767,34 +783,53 @@ where
         sweep: Sweep,
         sweep_interval: ReconciliationSweepInterval,
     ) -> (InProcessEligibilityNudge, Self) {
-        Self::with_options(
-            sweep,
-            sweep_interval,
-            NonZeroUsize::new(BASELINE_NUDGE_BUFFER_CAPACITY).unwrap_or(NonZeroUsize::MIN),
-        )
+        Self::with_options(sweep, Some(sweep_interval), None)
     }
 
     /// Builds a work source with explicit validated timing and buffer bounds.
     pub fn with_options(
         sweep: Sweep,
-        sweep_interval: ReconciliationSweepInterval,
-        nudge_buffer_capacity: NonZeroUsize,
+        sweep_interval: Option<ReconciliationSweepInterval>,
+        nudge_buffer_capacity: Option<NonZeroUsize>,
     ) -> (InProcessEligibilityNudge, Self) {
-        let (sender, nudges) = mpsc::channel(nudge_buffer_capacity.get());
+        let (sender, nudges, dispatch_start_backlog_capacity) = match nudge_buffer_capacity {
+            Some(capacity) => {
+                let (sender, receiver) = mpsc::channel(capacity.get());
+                (
+                    EligibilityNudgeSender::Bounded(sender),
+                    EligibilityNudgeReceiver::Bounded(receiver),
+                    capacity.get().max(MINIMUM_DISPATCH_START_BACKLOG_CAPACITY),
+                )
+            }
+            None => {
+                let (sender, receiver) = mpsc::unbounded_channel();
+                // An unbounded nudge channel applies no backpressure, so its
+                // send can never report `Full` and the reserved dispatch-start
+                // backlog can never be starved by ordinary capacity. The
+                // backlog bound is correspondingly unbounded; the compiled
+                // minimum stays the floor for configured bounded buffers.
+                (
+                    EligibilityNudgeSender::Unbounded(sender),
+                    EligibilityNudgeReceiver::Unbounded(receiver),
+                    usize::MAX,
+                )
+            }
+        };
         let pending_nudges = Arc::new(Mutex::new(HashMap::new()));
         let dispatch_start_available = Arc::new(Notify::new());
         let nudge = InProcessEligibilityNudge {
             sender,
             pending: Arc::clone(&pending_nudges),
             dispatch_start_available: Arc::clone(&dispatch_start_available),
-            dispatch_start_backlog_capacity: nudge_buffer_capacity
-                .get()
-                .max(MINIMUM_DISPATCH_START_BACKLOG_CAPACITY),
+            dispatch_start_backlog_capacity,
         };
-        let now = Instant::now();
-        let first_sweep_deadline = now.checked_add(sweep_interval.get()).unwrap_or(now);
-        let mut interval = time::interval_at(first_sweep_deadline, sweep_interval.get());
-        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let interval = sweep_interval.map(|sweep_interval| {
+            let now = Instant::now();
+            let first_sweep_deadline = now.checked_add(sweep_interval.get()).unwrap_or(now);
+            let mut interval = time::interval_at(first_sweep_deadline, sweep_interval.get());
+            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            interval
+        });
         let source = Self {
             nudges,
             pending_nudges,
@@ -949,7 +984,7 @@ where
                 select! {
                     biased;
 
-                    _ = self.sweep_interval.tick() => {
+                    _ = next_sweep_tick(&mut self.sweep_interval) => {
                         self.start_sweep();
                     }
                     () = ready(()) => {
@@ -989,7 +1024,7 @@ where
                     }
                     continue 'source;
                 },
-                _ = self.sweep_interval.tick() => {
+                _ = next_sweep_tick(&mut self.sweep_interval) => {
                     self.start_sweep();
                 }
             }
@@ -1055,10 +1090,19 @@ where
                 continue;
             }
             select! {
-                _ = self.sweep_interval.tick() => self.start_sweep(),
+                _ = next_sweep_tick(&mut self.sweep_interval) => self.start_sweep(),
                 () = notified => {}
             }
         }
+    }
+}
+
+async fn next_sweep_tick(interval: &mut Option<Interval>) {
+    match interval {
+        Some(interval) => {
+            interval.tick().await;
+        }
+        None => pending().await,
     }
 }
 
@@ -1084,30 +1128,23 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         Self {
             work_source,
             pass,
-            max_in_flight_passes: SCHEDULER_PASS_ADMISSION_CAP,
-            occupancy_bound: SchedulerPassOccupancyBound::hard_ceiling(),
+            max_in_flight_passes: usize::MAX,
+            occupancy_bound: SchedulerPassOccupancyBound::unbounded(),
             occupancy_observer: None,
         }
     }
 
-    /// Composes the ports with an explicit nonzero in-flight pass bound capped
-    /// at the shared admission cap.
+    /// Composes the ports with an explicit nonzero in-flight pass bound.
     pub const fn with_max_in_flight(
         work_source: WorkSource,
         pass: Pass,
         max_in_flight_passes: NonZeroUsize,
     ) -> Self {
-        let requested = max_in_flight_passes.get();
-        let max_in_flight_passes = if requested > SCHEDULER_PASS_ADMISSION_CAP {
-            SCHEDULER_PASS_ADMISSION_CAP
-        } else {
-            requested
-        };
         Self {
             work_source,
             pass,
-            max_in_flight_passes,
-            occupancy_bound: SchedulerPassOccupancyBound::hard_ceiling(),
+            max_in_flight_passes: max_in_flight_passes.get(),
+            occupancy_bound: SchedulerPassOccupancyBound::unbounded(),
             occupancy_observer: None,
         }
     }
@@ -1118,12 +1155,12 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
             work_source,
             pass,
             max_in_flight_passes: 0,
-            occupancy_bound: SchedulerPassOccupancyBound::hard_ceiling(),
+            occupancy_bound: SchedulerPassOccupancyBound::unbounded(),
             occupancy_observer: None,
         }
     }
 
-    /// Lowers the pass-occupancy ceiling for this loop.
+    /// Applies the configured pass-occupancy policy to this loop.
     pub fn with_occupancy_bound(mut self, bound: SchedulerPassOccupancyBound) -> Self {
         self.occupancy_bound = bound;
         self
@@ -1154,8 +1191,8 @@ where
     /// Runs until shutdown, retrying source and pass failures on later hints.
     ///
     /// The loop admits no new pass once it observes shutdown. A pass already
-    /// in progress remains subject to the scheduler occupancy bound while the
-    /// composition root owns the shorter shutdown grace window.
+    /// in progress stops spending its ordinary occupancy deadline and drains
+    /// under the composition root's shutdown grace window instead.
     pub async fn run_until<Shutdown>(&mut self, shutdown: Shutdown) -> SchedulerLoopExit
     where
         Shutdown: Future<Output = ()> + Send,
@@ -1174,6 +1211,7 @@ where
         let mut pending_hints = HashMap::new();
         let mut pending_reruns = HashMap::new();
         let mut deferred_dispatch_start_retries = HashSet::new();
+        let (shutdown_drain, shutdown_drain_receiver) = watch::channel(false);
         observe_occupancy(&self.occupancy_observer, &task_sessions);
 
         'scheduler: loop {
@@ -1201,6 +1239,7 @@ where
                                 session,
                                 priority,
                                 self.occupancy_bound,
+                                shutdown_drain_receiver.clone(),
                                 &mut task_sessions,
                                 &self.occupancy_observer,
                             );
@@ -1360,6 +1399,7 @@ where
             }
         }
 
+        shutdown_drain.send_replace(true);
         while let Some(completed) = passes.join_next_with_id().await {
             observe_pass_completion::<Pass>(
                 completed,
@@ -1510,6 +1550,29 @@ enum PassTaskOutcome<PassError> {
     OccupancyExpired { bound: SchedulerPassOccupancyBound },
 }
 
+type ErasedPassExecution<PassError> =
+    Pin<Box<dyn Future<Output = Result<(), PassError>> + Send + 'static>>;
+
+fn erased_pass_execution<Pass>(
+    pass: &mut Pass,
+    session: SessionId,
+) -> ErasedPassExecution<Pass::Error>
+where
+    Pass: EligibilityPass,
+{
+    Box::pin(pass.run(session))
+}
+
+fn erased_dispatch_start_execution<Pass>(
+    pass: &mut Pass,
+    session: SessionId,
+) -> ErasedPassExecution<Pass::Error>
+where
+    Pass: EligibilityPass,
+{
+    Box::pin(pass.run_dispatch_start(session))
+}
+
 /// Scheduler-visible queues retired by one completed pass.
 struct PassCompletionState<'a> {
     task_sessions: &'a mut HashMap<Id, InFlightPass>,
@@ -1585,12 +1648,17 @@ where
     true
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one admission carries the pass, its reserved-lane priority, and every bound the scheduler enforces over it"
+)]
 fn spawn_pass<Pass>(
     passes: &mut JoinSet<PassTaskOutcome<Pass::Error>>,
     pass: &mut Pass,
     session: SessionId,
     priority: EligibilityHintPriority,
     bound: SchedulerPassOccupancyBound,
+    shutdown_drain: watch::Receiver<bool>,
     task_sessions: &mut HashMap<Id, InFlightPass>,
     observer: &Option<Arc<dyn SchedulerOccupancyObserver>>,
 ) where
@@ -1599,16 +1667,17 @@ fn spawn_pass<Pass>(
 {
     let expiry_handler = pass.occupancy_expiry_handler();
     let span = session_work_span(session);
-    let task = match priority {
-        EligibilityHintPriority::Ordinary => {
-            let execution = pass.run(session);
-            passes.spawn(bounded_pass(execution, session, bound, expiry_handler).instrument(span))
-        }
-        EligibilityHintPriority::DispatchStart => {
-            let execution = pass.run_dispatch_start(session);
-            passes.spawn(bounded_pass(execution, session, bound, expiry_handler).instrument(span))
-        }
+    // Heap-erasing the adapter future before composing the task keeps the
+    // scheduler's deeply nested concrete adapter type off Tokio's worker
+    // stack at the spawn boundary. Both admission lanes erase to the same
+    // shape, so the reserved dispatch-start lane costs no extra stack.
+    let execution = match priority {
+        EligibilityHintPriority::Ordinary => erased_pass_execution(pass, session),
+        EligibilityHintPriority::DispatchStart => erased_dispatch_start_execution(pass, session),
     };
+    let task = passes.spawn(
+        bounded_pass(execution, session, bound, shutdown_drain, expiry_handler).instrument(span),
+    );
     task_sessions.insert(
         task.id(),
         InFlightPass {
@@ -1623,24 +1692,35 @@ fn spawn_pass<Pass>(
 /// Bounds one admitted pass's occupancy, invoking the handoff once it expires.
 ///
 /// Expiry releases the admission slot after the synchronous handoff callback,
-/// which is what makes the ceiling a scheduler-occupancy bound rather than a
-/// claim about the turn itself.
-async fn bounded_pass<Execution, PassError>(
-    execution: Execution,
+/// which is what makes the bound a scheduler-occupancy bound rather than a claim
+/// about the turn itself. A deployment that configures no bound runs the pass to
+/// completion, and so does a pass that is already draining: once the loop
+/// requests drain the pass stops spending its ordinary occupancy deadline and
+/// finishes under the composition root's shutdown grace window instead.
+async fn bounded_pass<PassError>(
+    execution: ErasedPassExecution<PassError>,
     session: SessionId,
     bound: SchedulerPassOccupancyBound,
+    mut shutdown_drain: watch::Receiver<bool>,
     expiry_handler: Option<Arc<dyn SchedulerPassExpiryHandler>>,
 ) -> PassTaskOutcome<PassError>
 where
-    Execution: Future<Output = Result<(), PassError>> + Send,
-    PassError: Send,
+    PassError: Send + 'static,
 {
+    let Some(duration) = bound.get() else {
+        return PassTaskOutcome::Completed(execution.await);
+    };
     pin!(execution);
-    let deadline = time::sleep(bound.get());
+    let deadline = time::sleep(duration);
     pin!(deadline);
+    let drain_requested = async move {
+        let _ = shutdown_drain.changed().await;
+    };
+    pin!(drain_requested);
     select! {
         biased;
         result = &mut execution => PassTaskOutcome::Completed(result),
+        _ = &mut drain_requested => PassTaskOutcome::Completed(execution.as_mut().await),
         () = &mut deadline => {
             if let Some(handler) = expiry_handler {
                 handler.occupancy_expired(session);
@@ -1745,7 +1825,7 @@ where
                 cause_code = "scheduler_pass_occupancy_expired",
                 stage = "occupancy",
                 session_id = %session.as_uuid(),
-                occupancy_bound_seconds = bound.get().as_secs(),
+                occupancy_bound_seconds = bound.get().map(|duration| duration.as_secs()),
                 "authoritative eligibility pass exceeded its occupancy bound and released its slot"
             );
             return Some(CompletedPass {
@@ -1836,9 +1916,9 @@ mod tests {
         EligibilityWorkSource, GoalAwareEligibilityPass, GoalAwareEligibilityPassError,
         GoalPassDisposition, InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
         MINIMUM_DISPATCH_START_BACKLOG_CAPACITY, PendingHintQueues, ReconciliationSweepInterval,
-        SCHEDULER_PASS_ADMISSION_CAP, SchedulerLoop, SchedulerLoopExit,
-        SchedulerPassOccupancyBound, enqueue_pending_hint, ordinary_pass_limit,
-        pass_continuation_priority, take_admissible_hint,
+        SchedulerLoop, SchedulerLoopExit, SchedulerPassOccupancyBound, enqueue_pending_hint,
+        erased_pass_execution, ordinary_pass_limit, pass_continuation_priority,
+        take_admissible_hint,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -1911,6 +1991,15 @@ mod tests {
 
     fn session(value: u128) -> SessionId {
         SessionId::from_uuid(Uuid::from_u128(value))
+    }
+
+    /// The one-second reconciliation cadence these fixtures configure.
+    ///
+    /// The cadence is deployment configuration rather than a compiled constant,
+    /// so the fixtures name their own interval instead of importing one.
+    fn baseline_sweep_interval() -> ReconciliationSweepInterval {
+        ReconciliationSweepInterval::try_new(Duration::from_secs(1))
+            .expect("one second is a valid reconciliation interval")
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2050,10 +2139,12 @@ mod tests {
     async fn inv007_same_process_nudge_is_the_primary_hint() {
         let nudged = session(1);
         let swept = session(2);
-        let (nudge, mut source) = InProcessEligibilityWorkSource::new(FakeSweep::returning([
-            Ok(vec![]),
-            Ok(vec![swept]),
-        ]));
+        let interval = ReconciliationSweepInterval::try_new(Duration::from_secs(1))
+            .expect("the test sweep interval is valid");
+        let (nudge, mut source) = InProcessEligibilityWorkSource::with_interval(
+            FakeSweep::returning([Ok(vec![]), Ok(vec![swept])]),
+            interval,
+        );
 
         assert_eq!(nudge.nudge(nudged), EligibilityNudgeOutcome::Enqueued);
         assert_eq!(source.next().await, Ok(nudged));
@@ -2260,8 +2351,8 @@ mod tests {
         let second = session(34);
         let (nudge, _source) = InProcessEligibilityWorkSource::with_options(
             FakeSweep::returning([]),
-            ReconciliationSweepInterval::baseline(),
-            NonZeroUsize::new(1).expect("the test capacity is nonzero"),
+            Some(baseline_sweep_interval()),
+            Some(NonZeroUsize::new(1).expect("the test capacity is nonzero")),
         );
 
         assert_eq!(nudge.nudge(first), EligibilityNudgeOutcome::Enqueued);
@@ -2281,8 +2372,8 @@ mod tests {
         let overflow = session(200);
         let (nudge, mut source) = InProcessEligibilityWorkSource::with_options(
             FakeSweep::returning([]),
-            ReconciliationSweepInterval::baseline(),
-            NonZeroUsize::new(1).expect("the test capacity is nonzero"),
+            Some(baseline_sweep_interval()),
+            Some(NonZeroUsize::new(1).expect("the test capacity is nonzero")),
         );
 
         assert_eq!(nudge.nudge(ordinary), EligibilityNudgeOutcome::Enqueued);
@@ -2347,8 +2438,11 @@ mod tests {
         let second = session(34);
         let (nudge, _source) = InProcessEligibilityWorkSource::with_options(
             FakeSweep::returning([]),
-            ReconciliationSweepInterval::baseline(),
-            NonZeroUsize::new(1).expect("the test capacity is nonzero"),
+            Some(
+                ReconciliationSweepInterval::try_new(Duration::from_secs(2))
+                    .expect("the test interval is valid"),
+            ),
+            Some(NonZeroUsize::new(1).expect("the test capacity is nonzero")),
         );
 
         assert_eq!(nudge.nudge(first), EligibilityNudgeOutcome::Enqueued);
@@ -2455,6 +2549,15 @@ mod tests {
             }
             ready(response)
         }
+    }
+
+    #[tokio::test]
+    async fn scheduler_heap_erases_pass_execution_before_task_construction() {
+        let admitted = session(57);
+        let (shutdown, _shutdown_receiver) = oneshot::channel();
+        let mut pass = FakePass::failing_once(session(58), 1, shutdown);
+
+        assert_eq!(erased_pass_execution(&mut pass, admitted).await, Ok(()));
     }
 
     #[derive(Clone, Copy, Debug)]
@@ -2667,7 +2770,7 @@ mod tests {
         let expiration_count = Arc::new(AtomicUsize::new(0));
         let run_count = Arc::new(AtomicUsize::new(0));
         let (shutdown_sender, shutdown_receiver) = oneshot::channel();
-        let bound = SchedulerPassOccupancyBound::try_lowered(Duration::from_secs(1))
+        let bound = SchedulerPassOccupancyBound::try_new(Duration::from_secs(1))
             .expect("one second lowers the production ceiling");
         let scheduler = SchedulerLoop::new(
             FakeWorkSource {
@@ -2708,6 +2811,89 @@ mod tests {
         assert!(encoded.contains("occupancy_bound_seconds=1"));
     }
 
+    #[derive(Clone, Debug)]
+    struct ShutdownDrainPass {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+        expiration_count: Arc<AtomicUsize>,
+    }
+
+    impl super::SchedulerPassExpiryHandler for ShutdownDrainPass {
+        fn occupancy_expired(&self, _session: SessionId) {
+            self.expiration_count.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    impl EligibilityPass for ShutdownDrainPass {
+        type Error = FakeSweepError;
+
+        fn occupancy_expiry_handler(&self) -> Option<Arc<dyn super::SchedulerPassExpiryHandler>> {
+            Some(Arc::new(self.clone()))
+        }
+
+        fn run(
+            &mut self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            async move {
+                started.notify_one();
+                release.notified().await;
+                Ok(())
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_drain_suspends_the_admitted_pass_occupancy_deadline() {
+        let selected = session(52);
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let shutdown_observed = Arc::new(Notify::new());
+        let expiration_count = Arc::new(AtomicUsize::new(0));
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let bound = SchedulerPassOccupancyBound::try_new(Duration::from_secs(1))
+            .expect("one second is a valid configured bound");
+        let scheduler = SchedulerLoop::new(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(selected)]),
+            },
+            ShutdownDrainPass {
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+                expiration_count: Arc::clone(&expiration_count),
+            },
+        )
+        .with_occupancy_bound(bound);
+        let observed = Arc::clone(&shutdown_observed);
+        let runtime = tokio::spawn(async move {
+            let mut scheduler = scheduler;
+            scheduler
+                .run_until(async {
+                    shutdown_receiver.await.expect("the test requests shutdown");
+                    observed.notify_one();
+                })
+                .await
+        });
+
+        started.notified().await;
+        shutdown_sender
+            .send(())
+            .expect("the scheduler still listens for shutdown");
+        shutdown_observed.notified().await;
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(2)).await;
+
+        assert_eq!(expiration_count.load(Ordering::SeqCst), 0);
+
+        release.notify_one();
+        assert_eq!(
+            runtime.await.expect("scheduler task completes"),
+            SchedulerLoopExit::Shutdown
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn inv007_paused_scheduler_admits_no_authoritative_passes() {
         let selected = session(50);
@@ -2740,6 +2926,12 @@ mod tests {
         );
     }
 
+    /// One deployment-configured admission cap, standing in for a live bound.
+    ///
+    /// The cap is deployment configuration rather than a compiled constant, so
+    /// the admission fixtures name their own value instead of importing one.
+    const FIXTURE_PASS_ADMISSION_CAP: usize = 16;
+
     #[test]
     fn inv069_dispatch_start_admission_reserves_capacity_inside_the_shared_cap() {
         let ordinary = session(48);
@@ -2758,7 +2950,7 @@ mod tests {
             &mut dispatch_starts,
             &mut ordinary_hints,
         );
-        let filler_count = SCHEDULER_PASS_ADMISSION_CAP - 2;
+        let filler_count = FIXTURE_PASS_ADMISSION_CAP - 2;
         in_flight.extend((0..filler_count).map(|offset| session(100 + offset as u128)));
 
         assert_eq!(
@@ -2771,7 +2963,7 @@ mod tests {
                 AdmissionState {
                     total_in_flight: in_flight.len(),
                     ordinary_in_flight: in_flight.len(),
-                    max_in_flight_passes: SCHEDULER_PASS_ADMISSION_CAP,
+                    max_in_flight_passes: FIXTURE_PASS_ADMISSION_CAP,
                 },
             ),
             Some((dispatch_start, EligibilityHintPriority::DispatchStart))
@@ -2783,7 +2975,7 @@ mod tests {
     fn inv069_ordinary_admission_cannot_consume_reserved_capacity() {
         let ordinary = session(50);
         let in_flight = HashSet::from_iter(
-            (0..ordinary_pass_limit(SCHEDULER_PASS_ADMISSION_CAP))
+            (0..ordinary_pass_limit(FIXTURE_PASS_ADMISSION_CAP))
                 .map(|offset| session(200 + offset as u128)),
         );
         let mut reruns = HashMap::new();
@@ -2810,7 +3002,7 @@ mod tests {
                 AdmissionState {
                     total_in_flight: in_flight.len(),
                     ordinary_in_flight: in_flight.len(),
-                    max_in_flight_passes: SCHEDULER_PASS_ADMISSION_CAP,
+                    max_in_flight_passes: FIXTURE_PASS_ADMISSION_CAP,
                 },
             ),
             None
@@ -2822,34 +3014,31 @@ mod tests {
     }
 
     #[test]
-    fn inv007_explicit_scheduler_bound_is_capped_at_admission_cap() {
-        let requested = NonZeroUsize::new(SCHEDULER_PASS_ADMISSION_CAP + 1)
-            .expect("the fixture exceeds a positive admission cap");
+    fn inv007_explicit_scheduler_bound_is_used_exactly() {
+        let requested = NonZeroUsize::new(19).expect("the fixture bound is positive");
         let scheduler = SchedulerLoop::with_max_in_flight((), (), requested);
 
-        assert_eq!(scheduler.max_in_flight_passes, SCHEDULER_PASS_ADMISSION_CAP);
+        assert_eq!(scheduler.max_in_flight_passes, requested.get());
     }
 
     #[test]
-    fn scheduler_occupancy_bound_only_accepts_whole_second_lowerings() {
-        let lowered = SchedulerPassOccupancyBound::try_lowered(Duration::from_secs(60))
-            .expect("one minute lowers the product ceiling");
+    fn scheduler_occupancy_bound_accepts_configured_whole_seconds() {
+        let configured = SchedulerPassOccupancyBound::try_new(Duration::from_secs(60))
+            .expect("one minute is a valid configured bound");
 
-        assert_eq!(lowered.get(), Duration::from_secs(60));
+        assert_eq!(configured.get(), Some(Duration::from_secs(60)));
+        assert_eq!(SchedulerPassOccupancyBound::unbounded().get(), None);
         assert_eq!(
-            SchedulerPassOccupancyBound::hard_ceiling().get(),
-            Duration::from_secs(900)
-        );
-        assert_eq!(
-            SchedulerPassOccupancyBound::try_lowered(Duration::ZERO),
+            SchedulerPassOccupancyBound::try_new(Duration::ZERO),
             Err(super::InvalidSchedulerPassOccupancyBound)
         );
         assert_eq!(
-            SchedulerPassOccupancyBound::try_lowered(Duration::from_secs(901)),
-            Err(super::InvalidSchedulerPassOccupancyBound)
+            SchedulerPassOccupancyBound::try_new(Duration::from_secs(901))
+                .map(SchedulerPassOccupancyBound::get),
+            Ok(Some(Duration::from_secs(901)))
         );
         assert_eq!(
-            SchedulerPassOccupancyBound::try_lowered(Duration::from_millis(500)),
+            SchedulerPassOccupancyBound::try_new(Duration::from_millis(500)),
             Err(super::InvalidSchedulerPassOccupancyBound)
         );
     }
@@ -3328,8 +3517,8 @@ mod tests {
         let dispatch_start = session(54);
         let (nudge, mut source) = InProcessEligibilityWorkSource::with_options(
             FakeSweep::returning([Ok(vec![])]),
-            ReconciliationSweepInterval::baseline(),
-            NonZeroUsize::new(1).expect("the test nudge buffer is nonzero"),
+            Some(baseline_sweep_interval()),
+            Some(NonZeroUsize::new(1).expect("the test nudge buffer is nonzero")),
         );
 
         assert_eq!(nudge.nudge(ordinary), EligibilityNudgeOutcome::Enqueued);

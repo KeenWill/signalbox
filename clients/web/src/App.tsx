@@ -10,6 +10,7 @@ import {
 } from './commands'
 import { FleetTable } from './FleetTable'
 import { ArtifactWorkbench } from './features/artifacts/ArtifactRenderer'
+import { artifactOriginalIds, artifactPreviewIds } from './features/artifacts/artifactScenario'
 import type { WebSearchPage } from './generated/web-contract.mjs'
 import {
   SCENARIO_FLEET_WINDOW_ITEMS,
@@ -111,17 +112,19 @@ export function Workspace({
       dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: knownId === 'blobs' ? artifactPreviewIds : [],
+      artifactOriginalIds: knownId === 'blobs' ? artifactOriginalIds : [],
       navigate: (path) =>
         void navigate({
           to: '/$surface',
           params: { surface: path.slice(1) as ProductRouteId },
         }),
       focusTimeline: () => {
-        const active = document.activeElement
-        if (active instanceof HTMLElement) active.blur()
         const target =
-          knownId === 'blobs' ? '[data-command-focus-target]' : '[aria-label="Session timeline"]'
-        document.querySelector<HTMLElement>(target)?.focus()
+          document.querySelector<HTMLElement>('[aria-label="Session timeline"]') ??
+          document.querySelector<HTMLElement>('.artifact-heading[aria-pressed="true"]') ??
+          document.querySelector<HTMLElement>('.artifact-heading')
+        target?.focus()
       },
       searchAvailable: knownId === 'search-usage',
       focusSearch: () => document.querySelector<HTMLInputElement>('#lexical-search-input')?.focus(),
@@ -263,7 +266,7 @@ export function Workspace({
           }
         >
           {knownId === 'blobs' ? (
-            <ArtifactWorkbench />
+            <ArtifactWorkbench commandContext={commandContext} />
           ) : (
             <Transcript
               key={`timeline-${knownId}`}

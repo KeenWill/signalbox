@@ -6,6 +6,9 @@ export interface CommandContext {
   dispatch: AppDispatch
   getState: () => RootState
   timelineIds: readonly string[]
+  artifactPreviewIds: readonly string[]
+  artifactOriginalIds: readonly string[]
+  artifactSelectionTarget?: string
   paneSize?: number
   sessionId?: string
   timelineWindowAvailable?: boolean
@@ -41,15 +44,92 @@ interface CommandDefinitionShape {
   id: string
   title: string
   description: string
-  category: 'Navigate' | 'View' | 'Surface' | 'Imports'
+  category: 'Navigate' | 'View' | 'Surface' | 'Artifact' | 'Imports'
   bindings: readonly CommandBinding[]
   available: (context: CommandContext) => boolean
   run: (context: CommandContext) => void
 }
 
 const always = () => true
+const selectedArtifact = (context: CommandContext) => context.getState().app.selectedArtifact
+const hasSelectedArtifactPreview = (context: CommandContext) => {
+  const id = selectedArtifact(context)
+  return id !== null && context.artifactPreviewIds.includes(id)
+}
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
 export const commandRegistry = [
+  {
+    id: 'artifact.select',
+    title: 'Select artifact',
+    description: 'Select the artifact targeted by the invoking control.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => context.artifactSelectionTarget !== undefined,
+    run: (context) => {
+      if (context.artifactSelectionTarget !== undefined) {
+        context.dispatch(actions.artifactSelected(context.artifactSelectionTarget))
+      }
+    },
+  },
+  {
+    id: 'artifact.preview.expand',
+    title: 'Expand bounded artifact preview',
+    description: 'Show the larger bounded projection of the selected artifact.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => {
+      const id = selectedArtifact(context)
+      return (
+        id !== null &&
+        hasSelectedArtifactPreview(context) &&
+        !context.getState().app.expandedArtifacts[id]
+      )
+    },
+    run: (context) => {
+      const id = selectedArtifact(context)
+      if (id !== null) context.dispatch(actions.artifactExpansionSet({ id, expanded: true }))
+    },
+  },
+  {
+    id: 'artifact.preview.collapse',
+    title: 'Collapse artifact preview',
+    description: 'Return the selected artifact to its initial bounded projection.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => {
+      const id = selectedArtifact(context)
+      return (
+        id !== null &&
+        hasSelectedArtifactPreview(context) &&
+        Boolean(context.getState().app.expandedArtifacts[id])
+      )
+    },
+    run: (context) => {
+      const id = selectedArtifact(context)
+      if (id !== null) context.dispatch(actions.artifactExpansionSet({ id, expanded: false }))
+    },
+  },
+  {
+    id: 'artifact.original.load',
+    title: 'Load artifact original',
+    description: 'Request the admitted browser-native original for the selected artifact.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => {
+      const id = selectedArtifact(context)
+      const originalState = id === null ? undefined : context.getState().app.originalArtifacts[id]
+      return (
+        id !== null &&
+        context.artifactOriginalIds.includes(id) &&
+        originalState !== 'loading' &&
+        originalState !== 'loaded'
+      )
+    },
+    run: (context) => {
+      const id = selectedArtifact(context)
+      if (id !== null) context.dispatch(actions.artifactOriginalRequested(id))
+    },
+  },
   {
     id: 'navigate.attention',
     title: 'Go to Attention',

@@ -3,10 +3,9 @@
 use serde_json::{Value, json};
 
 use crate::code_host::{
+    CodeHostNumericBounds,
     arguments::{valid_cursor, valid_opaque_id, valid_revision},
-    result::{
-        MAX_ENCODED_RESULT_BYTES, MAX_RESULT_ITEMS, valid_path, valid_required_text, valid_text,
-    },
+    result::{MAX_ENCODED_RESULT_BYTES, valid_path, valid_required_text, valid_text},
 };
 
 const STARVATION_RESPONSE: &str = concat!(
@@ -73,12 +72,19 @@ pub struct ReviewThreadIdentity {
 
 impl ReviewThreadIdentity {
     /// Validates one bounded thread identity and its display evidence.
-    pub fn try_new(id: String, path: String, finding_title: String) -> Option<Self> {
-        (valid_opaque_id(&id) && valid_path(&path) && valid_text(&finding_title)).then_some(Self {
-            id,
-            path,
-            finding_title,
-        })
+    pub fn try_new(
+        bounds: CodeHostNumericBounds,
+        id: String,
+        path: String,
+        finding_title: String,
+    ) -> Option<Self> {
+        (valid_opaque_id(&id) && valid_path(&path) && valid_text(bounds, &finding_title)).then_some(
+            Self {
+                id,
+                path,
+                finding_title,
+            },
+        )
     }
 
     /// Borrows the opaque thread identity.
@@ -101,10 +107,17 @@ pub struct ReviewCheck {
 
 impl ReviewCheck {
     /// Validates exact code-host check evidence.
-    pub fn try_new(name: String, status: String, conclusion: Option<String>) -> Option<Self> {
-        (valid_required_text(&name)
-            && valid_required_text(&status)
-            && conclusion.as_deref().is_none_or(valid_required_text))
+    pub fn try_new(
+        bounds: CodeHostNumericBounds,
+        name: String,
+        status: String,
+        conclusion: Option<String>,
+    ) -> Option<Self> {
+        (valid_required_text(bounds, &name)
+            && valid_required_text(bounds, &status)
+            && conclusion
+                .as_deref()
+                .is_none_or(|value| valid_required_text(bounds, value)))
         .then_some(Self {
             name,
             status,
@@ -168,7 +181,7 @@ pub struct ReviewerVerdictFields {
 
 impl ReviewerVerdictEvidence {
     /// Validates one complete bounded reviewer-evidence projection.
-    pub fn try_new(fields: ReviewerVerdictFields) -> Option<Self> {
+    pub fn try_new(bounds: CodeHostNumericBounds, fields: ReviewerVerdictFields) -> Option<Self> {
         let revision_valid = fields.reviewed_revision.as_deref().is_none_or(|revision| {
             (7..=40).contains(&revision.len())
                 && revision.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -176,15 +189,15 @@ impl ReviewerVerdictEvidence {
         let timestamps_valid = fields
             .reviewed_at
             .as_deref()
-            .is_none_or(valid_required_text)
+            .is_none_or(|value| valid_required_text(bounds, value))
             && fields
                 .latest_starvation_at
                 .as_deref()
-                .is_none_or(valid_required_text)
+                .is_none_or(|value| valid_required_text(bounds, value))
             && fields
                 .latest_review_request_at
                 .as_deref()
-                .is_none_or(valid_required_text);
+                .is_none_or(|value| valid_required_text(bounds, value));
         let cursors_valid = fields
             .comments_previous_cursor
             .as_deref()
@@ -306,22 +319,22 @@ pub struct ConvergenceStateFields {
 
 impl ConvergenceStateResult {
     /// Validates bounded evidence and derives its deterministic verdict.
-    pub fn try_new(fields: ConvergenceStateFields) -> Option<Self> {
-        let lists_valid = fields.checks.len() <= MAX_RESULT_ITEMS
-            && fields.unresolved_threads.len() <= MAX_RESULT_ITEMS
-            && fields.open_escalations.len() <= MAX_RESULT_ITEMS
-            && fields.buried_escalations.len() <= MAX_RESULT_ITEMS
-            && fields.undispositioned_threads.len() <= MAX_RESULT_ITEMS;
+    pub fn try_new(bounds: CodeHostNumericBounds, fields: ConvergenceStateFields) -> Option<Self> {
+        let lists_valid = bounds.permits_result_items(fields.checks.len())
+            && bounds.permits_result_items(fields.unresolved_threads.len())
+            && bounds.permits_result_items(fields.open_escalations.len())
+            && bounds.permits_result_items(fields.buried_escalations.len())
+            && bounds.permits_result_items(fields.undispositioned_threads.len());
         let escalation_relationships_valid = fields
             .open_escalations
             .iter()
             .all(|escalation| fields.unresolved_threads.contains(escalation));
         let text_valid = valid_revision(&fields.head_revision)
-            && valid_required_text(&fields.mergeable_state)
+            && valid_required_text(bounds, &fields.mergeable_state)
             && fields
                 .ci_rollup_state
                 .as_deref()
-                .is_none_or(valid_required_text);
+                .is_none_or(|value| valid_required_text(bounds, value));
         let cursors_valid = fields
             .checks_next_cursor
             .as_deref()
@@ -489,6 +502,7 @@ pub(crate) fn authorized_association(association: &str) -> bool {
 
 /// Merges review bodies and issue comments in exact code-host timestamp order.
 pub(crate) fn reviewer_verdict_evidence(
+    bounds: CodeHostNumericBounds,
     head_revision: &str,
     mut activities: Vec<ReviewerActivity>,
     source_truncated: bool,
@@ -540,18 +554,21 @@ pub(crate) fn reviewer_verdict_evidence(
     let review_request_in_flight = latest_review_request_at
         .as_ref()
         .is_some_and(|requested| latest_response_at.is_none_or(|responded| requested >= responded));
-    ReviewerVerdictEvidence::try_new(ReviewerVerdictFields {
-        status,
-        reviewed_revision,
-        reviewed_at,
-        starvation_after_verdict,
-        latest_starvation_at,
-        latest_review_request_at,
-        review_request_in_flight,
-        source_truncated,
-        comments_previous_cursor,
-        reviews_previous_cursor,
-    })
+    ReviewerVerdictEvidence::try_new(
+        bounds,
+        ReviewerVerdictFields {
+            status,
+            reviewed_revision,
+            reviewed_at,
+            starvation_after_verdict,
+            latest_starvation_at,
+            latest_review_request_at,
+            review_request_in_flight,
+            source_truncated,
+            comments_previous_cursor,
+            reviews_previous_cursor,
+        },
+    )
 }
 
 fn reviewed_commit_from_body(body: &str) -> Option<String> {
@@ -590,6 +607,7 @@ mod tests {
 
     fn complete_fields() -> ConvergenceStateFields {
         let reviewer = reviewer_verdict_evidence(
+            crate::code_host::test_numeric_bounds(),
             HEAD_REVISION,
             vec![ReviewerActivity {
                 author: Some(String::from("chatgpt-codex-connector")),
@@ -622,6 +640,7 @@ mod tests {
 
     fn review_thread() -> ReviewThreadIdentity {
         ReviewThreadIdentity::try_new(
+            crate::code_host::test_numeric_bounds(),
             String::from("PRRT_fixture"),
             String::from("src/lib.rs"),
             String::from("Finding"),
@@ -630,8 +649,15 @@ mod tests {
     }
 
     fn evidence(activities: Vec<ReviewerActivity>) -> ReviewerVerdictEvidence {
-        reviewer_verdict_evidence(HEAD_REVISION, activities, false, None, None)
-            .expect("fixture reviewer evidence is admitted")
+        reviewer_verdict_evidence(
+            crate::code_host::test_numeric_bounds(),
+            HEAD_REVISION,
+            activities,
+            false,
+            None,
+            None,
+        )
+        .expect("fixture reviewer evidence is admitted")
     }
 
     /// Reviewer verdict extraction scans review bodies, not only issue
@@ -639,6 +665,7 @@ mod tests {
     #[test]
     fn review_body_establishes_current_head_coverage() {
         let evidence = reviewer_verdict_evidence(
+            crate::code_host::test_numeric_bounds(),
             HEAD_REVISION,
             vec![ReviewerActivity {
                 author: Some(String::from("chatgpt-codex-connector")),
@@ -662,6 +689,7 @@ mod tests {
     #[test]
     fn timestamp_order_exposes_starvation_after_actual_verdict() {
         let evidence = reviewer_verdict_evidence(
+            crate::code_host::test_numeric_bounds(),
             HEAD_REVISION,
             vec![
                 ReviewerActivity {
@@ -712,6 +740,7 @@ mod tests {
     #[test]
     fn truncated_checks_make_the_verdict_indeterminate() {
         let reviewer = reviewer_verdict_evidence(
+            crate::code_host::test_numeric_bounds(),
             HEAD_REVISION,
             vec![ReviewerActivity {
                 author: Some(String::from("chatgpt-codex-connector")),
@@ -725,21 +754,24 @@ mod tests {
             None,
         )
         .expect("fixture reviewer evidence is admitted");
-        let result = ConvergenceStateResult::try_new(ConvergenceStateFields {
-            head_revision: String::from(HEAD_REVISION),
-            mergeable_state: String::from("MERGEABLE"),
-            ci_rollup_state: Some(String::from("SUCCESS")),
-            checks: Vec::new(),
-            checks_truncated: true,
-            checks_next_cursor: Some(String::from("check-cursor")),
-            unresolved_threads: Vec::new(),
-            open_escalations: Vec::new(),
-            buried_escalations: Vec::new(),
-            undispositioned_threads: Vec::new(),
-            threads_truncated: false,
-            threads_next_cursor: None,
-            reviewer,
-        })
+        let result = ConvergenceStateResult::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ConvergenceStateFields {
+                head_revision: String::from(HEAD_REVISION),
+                mergeable_state: String::from("MERGEABLE"),
+                ci_rollup_state: Some(String::from("SUCCESS")),
+                checks: Vec::new(),
+                checks_truncated: true,
+                checks_next_cursor: Some(String::from("check-cursor")),
+                unresolved_threads: Vec::new(),
+                open_escalations: Vec::new(),
+                buried_escalations: Vec::new(),
+                undispositioned_threads: Vec::new(),
+                threads_truncated: false,
+                threads_next_cursor: None,
+                reviewer,
+            },
+        )
         .expect("fixture convergence result is admitted");
 
         assert_eq!(result.verdict(), ConvergenceVerdict::Indeterminate);
@@ -750,8 +782,9 @@ mod tests {
     fn missing_ci_rollup_prevents_convergence() {
         let mut fields = complete_fields();
         fields.ci_rollup_state = None;
-        let result = ConvergenceStateResult::try_new(fields)
-            .expect("fixture convergence result is admitted");
+        let result =
+            ConvergenceStateResult::try_new(crate::code_host::test_numeric_bounds(), fields)
+                .expect("fixture convergence result is admitted");
 
         assert_eq!(result.verdict(), ConvergenceVerdict::NotConverged);
     }
@@ -761,8 +794,9 @@ mod tests {
     fn unknown_mergeability_is_indeterminate() {
         let mut fields = complete_fields();
         fields.mergeable_state = String::from("UNKNOWN");
-        let result = ConvergenceStateResult::try_new(fields)
-            .expect("fixture convergence result is admitted");
+        let result =
+            ConvergenceStateResult::try_new(crate::code_host::test_numeric_bounds(), fields)
+                .expect("fixture convergence result is admitted");
 
         assert_eq!(result.verdict(), ConvergenceVerdict::Indeterminate);
     }
@@ -772,8 +806,9 @@ mod tests {
     fn reviewer_starvation_prevents_direct_convergence() {
         let mut fields = complete_fields();
         fields.reviewer.starvation_after_verdict = true;
-        let result = ConvergenceStateResult::try_new(fields)
-            .expect("fixture convergence result is admitted");
+        let result =
+            ConvergenceStateResult::try_new(crate::code_host::test_numeric_bounds(), fields)
+                .expect("fixture convergence result is admitted");
 
         assert_eq!(result.verdict(), ConvergenceVerdict::NotConverged);
     }
@@ -784,8 +819,9 @@ mod tests {
     fn resolved_undispositioned_thread_prevents_convergence() {
         let mut fields = complete_fields();
         fields.undispositioned_threads = vec![review_thread()];
-        let result = ConvergenceStateResult::try_new(fields)
-            .expect("fixture convergence result is admitted");
+        let result =
+            ConvergenceStateResult::try_new(crate::code_host::test_numeric_bounds(), fields)
+                .expect("fixture convergence result is admitted");
 
         assert_eq!(result.verdict(), ConvergenceVerdict::NotConverged);
     }
@@ -795,8 +831,9 @@ mod tests {
     fn unresolved_dispositioned_thread_prevents_convergence() {
         let mut fields = complete_fields();
         fields.unresolved_threads = vec![review_thread()];
-        let result = ConvergenceStateResult::try_new(fields)
-            .expect("fixture convergence result is admitted");
+        let result =
+            ConvergenceStateResult::try_new(crate::code_host::test_numeric_bounds(), fields)
+                .expect("fixture convergence result is admitted");
 
         assert_eq!(result.verdict(), ConvergenceVerdict::NotConverged);
     }
@@ -808,8 +845,9 @@ mod tests {
         let mut fields = complete_fields();
         fields.unresolved_threads = vec![review_thread()];
         fields.open_escalations = vec![review_thread()];
-        let result = ConvergenceStateResult::try_new(fields)
-            .expect("fixture convergence result is admitted");
+        let result =
+            ConvergenceStateResult::try_new(crate::code_host::test_numeric_bounds(), fields)
+                .expect("fixture convergence result is admitted");
 
         assert_eq!(
             result.verdict(),
@@ -823,7 +861,10 @@ mod tests {
         let mut fields = complete_fields();
         fields.open_escalations = vec![review_thread()];
 
-        assert!(ConvergenceStateResult::try_new(fields).is_none());
+        assert!(
+            ConvergenceStateResult::try_new(crate::code_host::test_numeric_bounds(), fields)
+                .is_none()
+        );
     }
 
     /// Independently bounded overlapping lists cannot exceed the aggregate
@@ -831,16 +872,21 @@ mod tests {
     #[test]
     fn aggregate_convergence_result_over_budget_is_rejected() {
         let thread = ReviewThreadIdentity::try_new(
+            crate::code_host::test_numeric_bounds(),
             String::from("PRRT_fixture"),
             "a".repeat(4_096),
             String::from("Finding"),
         )
         .expect("maximum-path fixture thread is admitted");
         let mut fields = complete_fields();
-        fields.unresolved_threads = vec![thread.clone(); MAX_RESULT_ITEMS];
-        fields.undispositioned_threads = vec![thread; MAX_RESULT_ITEMS];
+        let over_budget_items = MAX_ENCODED_RESULT_BYTES / 4_096 + 1;
+        fields.unresolved_threads = vec![thread.clone(); over_budget_items];
+        fields.undispositioned_threads = vec![thread; over_budget_items];
 
-        assert!(ConvergenceStateResult::try_new(fields).is_none());
+        assert!(
+            ConvergenceStateResult::try_new(crate::code_host::test_numeric_bounds(), fields)
+                .is_none()
+        );
     }
 
     /// A similarly named account cannot provide the reviewer verdict.
