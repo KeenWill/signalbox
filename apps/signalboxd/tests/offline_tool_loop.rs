@@ -20,8 +20,9 @@ use signalbox_application::{
     InProcessAttemptDispatchGate, InProcessEligibilityWorkSource, InProcessToolDispatchGate,
     ModelCallCredentialReference, OperatorFailureClass, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, SubmitInputOutcome, SubmitInputRequest,
-    SubmitInputService, ToolDefinition, ToolExecutionInvocation, ToolExecutor,
-    ToolExecutorEvidence, ToolInputSchema, UuidV7SessionIdGenerator,
+    SubmitInputService, ToolCatalog, ToolCatalogValidationFailure, ToolDefinition,
+    ToolExecutionInvocation, ToolExecutor, ToolExecutorEvidence, ToolInputSchema,
+    ToolPreauthorization, UuidV7SessionIdGenerator,
     UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, UuidV7SubmitInputIdGenerator,
     UuidV7ToolLoopIdGenerator,
 };
@@ -1096,6 +1097,54 @@ impl RecordingExecutor {
             .lock()
             .expect("fixture correlation lock is available")
             .clone()
+    }
+}
+
+/// Requests daemon shutdown whenever the tool loop resolves one exact tool
+/// name, and otherwise answers exactly as the wrapped catalog does.
+///
+/// Only the loop's own attempt preparation and its preflight resolve a single
+/// name; everything earlier reads the advertised snapshot. So the first such
+/// lookup of a batch is the one preceding that batch's attempt checkpoint, and
+/// the request lands between two committed boundaries rather than inside an
+/// issued operation — the interleaving an asynchronous `SIGTERM` produces, and
+/// the one the drive loop's shutdown checks exist to catch.
+#[derive(Clone, Debug)]
+struct ShutdownOnToolResolutionCatalog {
+    inner: CompiledToolCatalog,
+    shutdown: watch::Sender<bool>,
+}
+
+impl ShutdownOnToolResolutionCatalog {
+    const fn new(inner: CompiledToolCatalog, shutdown: watch::Sender<bool>) -> Self {
+        Self { inner, shutdown }
+    }
+}
+
+impl ToolCatalog for ShutdownOnToolResolutionCatalog {
+    fn definitions(&self) -> Box<[ToolDefinition]> {
+        self.inner.definitions()
+    }
+
+    fn definition(&self, name: &ToolName) -> Option<ToolDefinition> {
+        self.shutdown.send_replace(true);
+        self.inner.definition(name)
+    }
+
+    fn validate_arguments(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<(), ToolCatalogValidationFailure> {
+        self.inner.validate_arguments(name, arguments)
+    }
+
+    fn preauthorization(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolCatalogValidationFailure> {
+        self.inner.preauthorization(name, arguments)
     }
 }
 
@@ -2532,6 +2581,82 @@ async fn shutdown_checkpoints_after_the_issued_model_before_the_next_tool()
         tool_catalog.clone(),
         executor.clone(),
         shutdown_sender,
+    );
+
+    execution
+        .with_shutdown_checkpoint(shutdown_receiver)
+        .execute(Box::new(fixture.activated.clone()))
+        .await?;
+    let active: (String, String) = sqlx::query_as(
+        "SELECT state_kind, active_phase_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&fixture.pool)
+    .await?;
+
+    assert!(executor.events().is_empty());
+    assert_eq!(first_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        1
+    );
+    assert_eq!(active, (String::from("active"), String::from("running")));
+
+    let (resumed, second_runtime) = fixture.execution(
+        [completion_script("resumed after the shutdown checkpoint")],
+        tool_catalog,
+        executor.clone(),
+    );
+    resumed.resume_active(fixture.session).await?;
+
+    assert_eq!(executor.events(), vec![String::from("checkpointed")]);
+    assert_eq!(second_runtime.received_operations().len(), 1);
+    assert_eq!(
+        model_call_history_count(&fixture.pool, fixture.session).await?,
+        2
+    );
+    assert_eq!(
+        fixture.transcript_kinds().await?,
+        vec![
+            "origin_accepted_input",
+            "assistant_tool_use",
+            "tool_execution_result",
+            "assistant_text",
+            "turn_completed",
+        ]
+    );
+    Ok(())
+}
+
+/// A shutdown requested between two operations checkpoints at the committed
+/// attempt boundary the loop has just reached, issuing neither the tool
+/// operation that boundary prepared nor the continuation provider round beyond
+/// it, and lets a successor finish both.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn shutdown_checkpoints_at_a_committed_boundary_before_the_next_operation()
+-> Result<(), Box<dyn Error>> {
+    let fixture = ToolLoopFixture::new(DangerousToolAutoApproval::Disabled).await?;
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let tool_catalog = ShutdownOnToolResolutionCatalog::new(
+        catalog([tool(
+            "checkpointed",
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::EffectFree,
+        )]),
+        shutdown_sender,
+    );
+    let executor = RecordingExecutor::completing();
+    let (execution, first_runtime) = fixture.execution(
+        [
+            tool_use_script(&[("checkpointed", "{}")]),
+            completion_script("must remain unused before restart"),
+        ],
+        tool_catalog.clone(),
+        executor.clone(),
     );
 
     execution

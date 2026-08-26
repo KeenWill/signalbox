@@ -2809,10 +2809,17 @@ where
             );
             let mut run_tools = true;
             let mut return_if_tools_absent = false;
-            let mut checkpoint_safe = true;
 
+            // Every stage this loop completes ends at a committed durable
+            // boundary a successor pass resumes from: a checkpointed attempt or
+            // prepared call waits for another pass by construction, a preflight
+            // closure and a crash classification are committed evidence, and an
+            // observation is the operation's own authoritative result. So a
+            // shutdown observed here is always observed between operations, and
+            // returning issues neither another tool operation nor another paid
+            // provider round.
             loop {
-                if checkpoint_safe && shutdown_checkpoint_requested(&shutdown_checkpoint) {
+                if shutdown_checkpoint_requested(&shutdown_checkpoint) {
                     return Ok(());
                 }
                 if run_tools {
@@ -2835,26 +2842,19 @@ where
                         ToolExecutionServiceOutcome::AttemptCheckpointed(_)
                         | ToolExecutionServiceOutcome::ChildWaitResumed(_)
                         | ToolExecutionServiceOutcome::PreflightFailed(_)
-                        | ToolExecutionServiceOutcome::CrashClassified(_) => {
-                            checkpoint_safe = false;
-                            return_if_tools_absent = true;
-                            continue;
-                        }
-                        ToolExecutionServiceOutcome::ObservationCommitted(_)
+                        | ToolExecutionServiceOutcome::CrashClassified(_)
+                        | ToolExecutionServiceOutcome::ObservationCommitted(_)
                         | ToolExecutionServiceOutcome::ObservationAlreadyCommitted(_) => {
-                            checkpoint_safe = true;
                             return_if_tools_absent = true;
                             continue;
                         }
                         ToolExecutionServiceOutcome::ContinuationCheckpointed(_) => {
-                            checkpoint_safe = false;
                             run_tools = false;
                         }
                         ToolExecutionServiceOutcome::NoWork => {
                             if return_if_tools_absent {
                                 return Ok(());
                             }
-                            checkpoint_safe = true;
                             run_tools = false;
                         }
                         ToolExecutionServiceOutcome::AwaitingApproval(_) => {
@@ -2877,10 +2877,7 @@ where
                             .await
                             .map_err(PostgresProviderToolLoopExecutionError::ApprovalJudge)?
                             {
-                                ApprovalJudgeLoopOutcome::Continue => {
-                                    checkpoint_safe = true;
-                                    continue;
-                                }
+                                ApprovalJudgeLoopOutcome::Continue => continue,
                                 ApprovalJudgeLoopOutcome::Parked => return Ok(()),
                             }
                         }
@@ -2894,7 +2891,7 @@ where
                     }
                 }
 
-                if checkpoint_safe && shutdown_checkpoint_requested(&shutdown_checkpoint) {
+                if shutdown_checkpoint_requested(&shutdown_checkpoint) {
                     return Ok(());
                 }
                 let model_outcome = match model.execute(session).await {
@@ -2921,10 +2918,8 @@ where
                     ModelCallExecutionOutcome::Checkpointed(_) if return_on_model_checkpoint => {
                         return Ok(());
                     }
-                    ModelCallExecutionOutcome::Checkpointed(_) => checkpoint_safe = false,
-                    ModelCallExecutionOutcome::AvailabilitySuccessor(_) => {
-                        checkpoint_safe = true;
-                    }
+                    ModelCallExecutionOutcome::Checkpointed(_)
+                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => {}
                     ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
@@ -2937,7 +2932,6 @@ where
                     | ModelCallExecutionOutcome::AttachmentUnavailable => return Ok(()),
                     ModelCallExecutionOutcome::ObservationCommitted(_)
                     | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => {
-                        checkpoint_safe = true;
                         run_tools = true;
                         return_if_tools_absent = true;
                     }
