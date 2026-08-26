@@ -25,7 +25,11 @@ use futures_util::{StreamExt, TryStreamExt};
 use http_body::{Body, Frame, SizeHint};
 use instant_xml::FromXml;
 use jiff::Timestamp;
-use reqwest::{Client, Response, StatusCode, redirect::Policy};
+use reqwest::{
+    Client, Response, StatusCode,
+    header::{HeaderMap, HeaderValue},
+    redirect::Policy,
+};
 use rustix::fs::{Mode, OFlags, openat};
 use rusty_s3::{Bucket, Credentials, Method, S3Action, UrlStyle, signing::sign};
 use serde::Deserialize;
@@ -584,6 +588,35 @@ impl S3BlobStore {
         require_success(response, "get S3 object").await
     }
 
+    /// Re-reads one object generation under a proved conditional match.
+    ///
+    /// The signed request carries no `If-Match`, so the header is unsigned and
+    /// the generation claim rests on the store honoring the precondition. A
+    /// refused precondition proves only that the verified generation is gone,
+    /// never that the recorded blob is corrupt, so it stays unavailability.
+    async fn open_pinned_response(
+        &self,
+        credentials: &Credentials,
+        key: &BlobObjectKey,
+        generation: &HeaderValue,
+    ) -> Result<Response, BlobStoreError> {
+        let action = self.bucket.get_object(Some(credentials), key.as_str());
+        let response = self
+            .client
+            .get(action.sign(SIGNED_URL_LIFETIME))
+            .header(reqwest::header::IF_MATCH, generation.clone())
+            .send()
+            .await
+            .map_err(|_| BlobStoreError::io("get pinned S3 object", SanitizedS3Failure))?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Err(classify_absence(response, "get pinned S3 object").await);
+        }
+        if response.status() == StatusCode::PRECONDITION_FAILED {
+            return Err(BlobStoreError::unavailable("pin verified S3 generation"));
+        }
+        require_success(response, "get pinned S3 object").await
+    }
+
     async fn verify_object(
         &self,
         credentials: &Credentials,
@@ -591,35 +624,7 @@ impl S3BlobStore {
         expected: ExpectedBlob,
     ) -> Result<(), BlobStoreError> {
         let response = self.open_response(credentials, key).await?;
-        let mut reader = response_reader(response);
-        let mut hasher = Sha256::new();
-        let mut observed_length = 0_u64;
-        let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
-        loop {
-            let count = reader
-                .read(&mut buffer)
-                .await
-                .map_err(|_| BlobStoreError::io("read S3 object", SanitizedS3Failure))?;
-            if count == 0 {
-                break;
-            }
-            observed_length = observed_length.saturating_add(count as u64);
-            if observed_length > expected.byte_length() {
-                return Err(BlobStoreError::verification(
-                    "verify S3 object",
-                    BlobVerificationFailure::new(expected, None, observed_length),
-                ));
-            }
-            hasher.update(&buffer[..count]);
-        }
-        let observed_digest = BlobDigest::from_bytes(hasher.finalize().into());
-        if observed_length != expected.byte_length() || observed_digest != expected.digest() {
-            return Err(BlobStoreError::verification(
-                "verify S3 object",
-                BlobVerificationFailure::new(expected, Some(observed_digest), observed_length),
-            ));
-        }
-        Ok(())
+        verify_stream(response_reader(response), expected, "verify S3 object").await
     }
 
     async fn open_inner(&self, key: &BlobObjectKey) -> Result<OpenedBlob, BlobStoreError> {
@@ -630,6 +635,40 @@ impl S3BlobStore {
             .content_length()
             .ok_or_else(|| BlobStoreError::unavailable("read S3 object length"))?;
         Ok(OpenedBlob::new(length, Box::new(response_reader(response))))
+    }
+
+    /// Verifies one complete object generation, then re-opens that same one.
+    ///
+    /// A remote object cannot be rewound the way a local file handle can, and
+    /// the delivered stream may exceed every adapter memory and range bound,
+    /// so the verified bytes are not spooled. The generation is pinned by the
+    /// entity tag observed on the verifying response instead: the delivering
+    /// request repeats that tag as `If-Match`, so the store either serves the
+    /// generation this call hashed or refuses to serve anything.
+    async fn open_verified_inner(
+        &self,
+        expected: ExpectedBlob,
+        key: &BlobObjectKey,
+    ) -> Result<OpenedBlob, BlobStoreError> {
+        let credentials = self.credentials().await?;
+        self.ensure_namespace_ready(&credentials).await?;
+        let response = self.open_response(&credentials, key).await?;
+        let generation = object_generation(response.headers())
+            .ok_or_else(|| BlobStoreError::unavailable("name S3 object generation"))?;
+        verify_stream(
+            response_reader(response),
+            expected,
+            "verify opened S3 object",
+        )
+        .await?;
+        let pinned = self
+            .open_pinned_response(&credentials, key, &generation)
+            .await?;
+        let length = pinned
+            .content_length()
+            .filter(|length| *length == expected.byte_length())
+            .ok_or_else(|| BlobStoreError::unavailable("read pinned S3 object length"))?;
+        Ok(OpenedBlob::new(length, Box::new(response_reader(pinned))))
     }
 
     async fn open_range_inner(
@@ -794,6 +833,18 @@ impl BlobStore for S3BlobStore {
         })
     }
 
+    fn open_verified<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        Box::pin(async move {
+            tokio::time::timeout(OPERATION_DEADLINE, self.open_verified_inner(expected, key))
+                .await
+                .map_err(|_| BlobStoreError::unavailable("bound S3 verified open deadline"))?
+        })
+    }
+
     fn open_range<'a>(
         &'a self,
         expected: ExpectedBlob,
@@ -818,6 +869,57 @@ fn response_reader(response: Response) -> impl tokio::io::AsyncRead + Send + Unp
             .bytes_stream()
             .map_err(|_| io::Error::other("S3 response stream failed")),
     )
+}
+
+/// Hashes one complete stream against its expected immutable identity.
+///
+/// A stream that runs past the expected length fails as soon as the overrun is
+/// observed, because no suffix can restore the declared identity and the
+/// remainder is unbounded. Every other outcome is decided on the full stream.
+async fn verify_stream(
+    mut reader: impl tokio::io::AsyncRead + Send + Unpin,
+    expected: ExpectedBlob,
+    operation: &'static str,
+) -> Result<(), BlobStoreError> {
+    let mut hasher = Sha256::new();
+    let mut observed_length = 0_u64;
+    let mut buffer = vec![0_u8; STREAM_CHUNK_BYTES];
+    loop {
+        let count = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|_| BlobStoreError::io("read S3 object", SanitizedS3Failure))?;
+        if count == 0 {
+            break;
+        }
+        observed_length = observed_length.saturating_add(count as u64);
+        if observed_length > expected.byte_length() {
+            return Err(BlobStoreError::verification(
+                operation,
+                BlobVerificationFailure::new(expected, None, observed_length),
+            ));
+        }
+        hasher.update(&buffer[..count]);
+    }
+    let observed_digest = BlobDigest::from_bytes(hasher.finalize().into());
+    if observed_length != expected.byte_length() || observed_digest != expected.digest() {
+        return Err(BlobStoreError::verification(
+            operation,
+            BlobVerificationFailure::new(expected, Some(observed_digest), observed_length),
+        ));
+    }
+    Ok(())
+}
+
+/// Names the exact object generation a response was served from.
+///
+/// An absent, empty, or oversized entity tag leaves the generation unnamed, so
+/// no later request can prove it read the same bytes this call verified.
+fn object_generation(headers: &HeaderMap) -> Option<HeaderValue> {
+    headers
+        .get(reqwest::header::ETAG)
+        .filter(|generation| !generation.is_empty() && generation.len() <= MAX_ETAG_BYTES)
+        .cloned()
 }
 
 async fn require_success(
@@ -1418,17 +1520,40 @@ mod tests {
     use tempfile::TempDir;
     use url::Url;
 
+    use signalbox_blob_store::{BlobStoreFailureKind, ExpectedBlob};
+    use signalbox_domain::BlobDigest;
+
     use super::{
-        CompletionFailure, CredentialFileError, LifecycleConfiguration, LifecycleRule,
-        MAX_MULTIPART_PARTS, MAX_S3_OBJECT_BYTES, MIN_MULTIPART_PART_BYTES, NamespaceProbe,
-        NamespaceVerification, S3BlobStore, StatusCode, completion_status_failure,
-        multipart_part_bytes, names_absent_object, read_credentials, validate_completion_response,
+        CompletionFailure, CredentialFileError, HeaderMap, HeaderValue, LifecycleConfiguration,
+        LifecycleRule, MAX_ETAG_BYTES, MAX_MULTIPART_PARTS, MAX_S3_OBJECT_BYTES,
+        MIN_MULTIPART_PART_BYTES, NamespaceProbe, NamespaceVerification, S3BlobStore, StatusCode,
+        completion_status_failure, multipart_part_bytes, names_absent_object, object_generation,
+        read_credentials, validate_completion_response, verify_stream,
     };
 
     const ACCESS_KEY: &str = "fixture-access-key";
     const SECRET_KEY: &str = "fixture-secret-key";
     const ENDPOINT: &str = "https://objects.example.test";
     const BUCKET: &str = "fixture-bucket";
+    const VERIFIED_CONTENT: &[u8] = b"S3 verified-open conformance fixture";
+    const SAME_LENGTH_CONTENT: &[u8] = b"S3 verified-open conformance fixturf";
+
+    fn verified_expectation() -> ExpectedBlob {
+        ExpectedBlob::try_new(
+            BlobDigest::digest(VERIFIED_CONTENT),
+            VERIFIED_CONTENT.len() as u64,
+        )
+        .expect("the verified-open fixture is nonempty")
+    }
+
+    fn generation_headers(generation: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            reqwest::header::ETAG,
+            HeaderValue::from_str(generation).expect("the fixture entity tag is a header value"),
+        );
+        headers
+    }
 
     fn credential_body() -> String {
         format!(
@@ -1669,6 +1794,111 @@ mod tests {
         );
         assert!(multipart_part_bytes(MAX_S3_OBJECT_BYTES).is_some());
         assert_eq!(multipart_part_bytes(MAX_S3_OBJECT_BYTES + 1), None);
+    }
+
+    #[tokio::test]
+    async fn a_verified_stream_admits_the_exact_expected_bytes() {
+        let expected = verified_expectation();
+
+        verify_stream(
+            std::io::Cursor::new(VERIFIED_CONTENT.to_vec()),
+            expected,
+            "verify opened S3 object",
+        )
+        .await
+        .expect("the exact recorded bytes verify");
+    }
+
+    #[tokio::test]
+    async fn a_verified_stream_fails_as_soon_as_it_runs_long() {
+        let expected = verified_expectation();
+        let mut overrun = VERIFIED_CONTENT.to_vec();
+        overrun.extend_from_slice(b" and one trailing overrun");
+
+        let error = verify_stream(
+            std::io::Cursor::new(overrun),
+            expected,
+            "verify opened S3 object",
+        )
+        .await
+        .expect_err("a stream longer than the declared length must fail verification");
+
+        assert_eq!(error.kind(), BlobStoreFailureKind::VerificationFailed);
+        let failure = error
+            .verification_failure()
+            .expect("an overrun retains its observed facts");
+        assert_eq!(failure.observed_digest(), None);
+        assert!(failure.observed_length() > expected.byte_length());
+    }
+
+    #[tokio::test]
+    async fn a_verified_stream_rejects_a_same_length_digest_mismatch() {
+        let expected = verified_expectation();
+        assert_eq!(SAME_LENGTH_CONTENT.len(), VERIFIED_CONTENT.len());
+
+        let error = verify_stream(
+            std::io::Cursor::new(SAME_LENGTH_CONTENT.to_vec()),
+            expected,
+            "verify opened S3 object",
+        )
+        .await
+        .expect_err("bytes that do not hash to the recorded digest must fail verification");
+
+        assert_eq!(error.kind(), BlobStoreFailureKind::VerificationFailed);
+        let failure = error
+            .verification_failure()
+            .expect("a completed mismatch retains its observed facts");
+        assert_eq!(
+            failure.observed_digest(),
+            Some(BlobDigest::digest(SAME_LENGTH_CONTENT))
+        );
+        assert_eq!(failure.observed_length(), expected.byte_length());
+    }
+
+    #[tokio::test]
+    async fn a_verified_stream_rejects_a_truncated_generation() {
+        let expected = verified_expectation();
+        let truncated = VERIFIED_CONTENT[..VERIFIED_CONTENT.len() - 1].to_vec();
+
+        let error = verify_stream(
+            std::io::Cursor::new(truncated.clone()),
+            expected,
+            "verify opened S3 object",
+        )
+        .await
+        .expect_err("a stream shorter than the declared length must fail verification");
+
+        assert_eq!(error.kind(), BlobStoreFailureKind::VerificationFailed);
+        let failure = error
+            .verification_failure()
+            .expect("a completed shortfall retains its observed facts");
+        assert_eq!(
+            failure.observed_digest(),
+            Some(BlobDigest::digest(&truncated))
+        );
+        assert_eq!(failure.observed_length(), expected.byte_length() - 1);
+    }
+
+    #[test]
+    fn an_entity_tag_names_the_generation_a_pinned_read_replays() {
+        let generation = object_generation(&generation_headers("\"fixture-generation\""))
+            .expect("a served entity tag names the generation");
+
+        assert_eq!(generation.as_bytes(), b"\"fixture-generation\"");
+    }
+
+    #[test]
+    fn a_response_without_an_entity_tag_leaves_the_generation_unnamed() {
+        assert_eq!(object_generation(&HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn an_empty_or_oversized_entity_tag_leaves_the_generation_unnamed() {
+        assert_eq!(object_generation(&generation_headers("")), None);
+        assert_eq!(
+            object_generation(&generation_headers(&"e".repeat(MAX_ETAG_BYTES + 1))),
+            None
+        );
     }
 
     #[test]
