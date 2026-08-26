@@ -41,6 +41,7 @@ const HEADLINE_END: &str = "\u{e001}";
 /// the cap, so grouping and sorting it cannot scale with the corpus. At or
 /// above the cap every term is common enough that the newest-first keyset
 /// traversal reaches a full page without visiting a corpus-sized prefix.
+// numeric-bound: guard - prevents a seeded candidate set from growing with the corpus
 const RARE_TERM_CANDIDATE_CAP: i64 = 1_000;
 
 /// Index-driven per-term existence and boundedness probe.
