@@ -913,13 +913,40 @@ async fn verify_stream(
 
 /// Names the exact object generation a response was served from.
 ///
-/// An absent, empty, or oversized entity tag leaves the generation unnamed, so
-/// no later request can prove it read the same bytes this call verified.
+/// An absent, oversized, or non-singleton entity tag leaves the generation
+/// unnamed, so no later request can prove it read the same bytes this call
+/// verified.
 fn object_generation(headers: &HeaderMap) -> Option<HeaderValue> {
     headers
         .get(reqwest::header::ETAG)
-        .filter(|generation| !generation.is_empty() && generation.len() <= MAX_ETAG_BYTES)
+        .filter(|generation| {
+            generation.len() <= MAX_ETAG_BYTES && names_one_strong_generation(generation)
+        })
         .cloned()
+}
+
+/// Reports whether a served entity tag names exactly one strong generation.
+///
+/// The delivering request replays this value as `If-Match`, where `*` matches
+/// whatever representation is current and a comma-separated list matches any
+/// member, so either spelling would let the store serve a generation this call
+/// never hashed. `If-Match` also compares strongly, so a weak `W/` tag can
+/// never match and is not a usable generation token either. Only one
+/// double-quoted tag of at least one entity-tag character — no embedded quote,
+/// no comma, no space — names the exact generation the verifying response was
+/// served from.
+fn names_one_strong_generation(generation: &HeaderValue) -> bool {
+    let Some(interior) = generation
+        .as_bytes()
+        .strip_prefix(b"\"")
+        .and_then(|rest| rest.strip_suffix(b"\""))
+    else {
+        return false;
+    };
+    !interior.is_empty()
+        && interior
+            .iter()
+            .all(|byte| matches!(byte, 0x21 | 0x23..=0x7e | 0x80..=0xff))
 }
 
 async fn require_success(
@@ -1920,10 +1947,42 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_or_oversized_entity_tag_leaves_the_generation_unnamed() {
+    fn an_empty_entity_tag_leaves_the_generation_unnamed() {
         assert_eq!(object_generation(&generation_headers("")), None);
+    }
+
+    #[test]
+    fn an_oversized_entity_tag_leaves_the_generation_unnamed() {
+        let oversized = format!("\"{}\"", "e".repeat(MAX_ETAG_BYTES));
+
+        assert_eq!(object_generation(&generation_headers(&oversized)), None);
+    }
+
+    #[test]
+    fn a_wildcard_entity_tag_leaves_the_generation_unnamed() {
+        assert_eq!(object_generation(&generation_headers("*")), None);
+    }
+
+    #[test]
+    fn an_entity_tag_list_leaves_the_generation_unnamed() {
         assert_eq!(
-            object_generation(&generation_headers(&"e".repeat(MAX_ETAG_BYTES + 1))),
+            object_generation(&generation_headers("\"first\", \"second\"")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_weak_entity_tag_leaves_the_generation_unnamed() {
+        assert_eq!(
+            object_generation(&generation_headers("W/\"fixture-generation\"")),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unquoted_entity_tag_leaves_the_generation_unnamed() {
+        assert_eq!(
+            object_generation(&generation_headers("fixture-generation")),
             None
         );
     }
