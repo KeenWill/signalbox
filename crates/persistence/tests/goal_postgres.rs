@@ -44,10 +44,11 @@ use signalbox_persistence::{
         PrepareContextCompactionRequest,
     },
     create_session::CreateSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels,
     goal::{
-        GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError, GoalTransitionOutcome,
+        GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRepository,
+        GoalRepositoryError, GoalTransitionOutcome,
     },
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
     local_test_connection_options, migrate,
@@ -62,7 +63,7 @@ use signalbox_persistence::{
         ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRepository,
     },
     scheduler::PostgresEligibilitySweep,
-    start_eligible_turn::StartEligibleTurnRepository,
+    start_eligible_turn::{CommitCompactionFailurePreviewOutcome, StartEligibleTurnRepository},
     startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository,
 };
@@ -91,7 +92,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -348,6 +349,68 @@ async fn terminalize_goal_turn_as_failed(pool: &PgPool, value: u128) -> Result<(
     let StartupScanSessionOutcome::Recovered(_) = outcome else {
         panic!("prepared active goal turn must recover as failed");
     };
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn call_free_failure_recovery_cause_round_trips_as_a_closed_type()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let attached_turn = turn_candidates(0xb5f);
+    GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(ATTACH_COMMAND),
+                session(SESSION),
+                GoalUserAction::Attach(statement("finish the commissioned task")),
+            ),
+            Some(attached_turn),
+            |_| None,
+        )
+        .await?;
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    let preview = activation
+        .preview(session(SESSION), activation_identities(0xd5f))
+        .await?
+        .expect("the queued goal turn has an activation preview");
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(0xa01)),
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(0xa02))),
+    )])
+    .expect("one fixture target forms a catalog");
+    let model_calls = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("compaction-failure-test-provider"),
+    );
+    let expected = GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit;
+    let closure = activation
+        .commit_compaction_failure_preview(
+            preview,
+            &model_calls,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xe5f)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xe60)),
+            ),
+            Some(expected),
+        )
+        .await?;
+    assert_eq!(
+        closure,
+        CommitCompactionFailurePreviewOutcome::Failed(attached_turn.turn())
+    );
+
+    let actual = GoalRepository::new(pool.clone())
+        .execution_failure_recovery_cause(session(SESSION), attached_turn.turn())
+        .await?;
+
+    assert_eq!(actual, Some(expected));
+    pool.close().await;
+    drop(container);
     Ok(())
 }
 
@@ -899,16 +962,26 @@ async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<()
         attached_turn.turn()
     );
     terminalize_goal_turn_as_failed(&pool, 0xe70).await?;
+    let scheduled_need = GoalNeed::try_new(String::from(
+        "automatic resumption is scheduled; repair execution",
+    ))
+    .expect("fixture need is admitted");
     let blocked = repository
         .block_execution_failure(
             session(SESSION),
-            GoalNeed::try_new(String::from("repair execution")).expect("fixture need is admitted"),
+            scheduled_need.clone(),
             GoalSchedulerProvenance::new(attached_turn.turn()),
         )
         .await?;
     let GoalTransitionOutcome::Applied(blocked) = blocked else {
         panic!("fixture execution-failure block must apply");
     };
+    let pending = repository
+        .pending_execution_failures_with_need(&scheduled_need)
+        .await?;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].session(), session(SESSION));
+    assert_eq!(pending[0].blocked(), blocked.ordinal());
 
     // The attach event is no longer the lineage head, so a command expecting it
     // answers a state that has moved on.
@@ -945,6 +1018,12 @@ async fn s_goal_inv048_expected_resume_binds_to_one_blocked_event() -> Result<()
         )
         .await?;
     assert_applied_command(resumed);
+    assert!(
+        repository
+            .pending_execution_failures_with_need(&scheduled_need)
+            .await?
+            .is_empty()
+    );
     let spent: i64 =
         sqlx::query_scalar("SELECT count(*) FROM durable_command WHERE command_id = $1")
             .bind(Uuid::from_u128(RESUME_COMMAND))
@@ -4332,6 +4411,7 @@ async fn s18_inv015_inv032_logically_terminal_child_admits_compaction() -> Resul
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 Uuid::from_u128(0xfa41),
             )),
+            input_includes_cache_tokens: false,
             credential_reference: String::from("cascade-compaction-test-provider"),
             call: ModelCallId::from_uuid(Uuid::from_u128(0xfa42)),
             compaction: ContextCompactionId::from_uuid(Uuid::from_u128(0xfa43)),

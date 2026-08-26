@@ -10,7 +10,7 @@ publish.workspace = true
 [dependencies]
 jiff = { version = "0.2.34", default-features = false, features = [
     "std",
-    "tzdb-zoneinfo",
+    "tzdb-bundle-always",
 ] }
 schemars = "1.0.4"
 serde = { version = "1.0.219", features = ["derive"] }

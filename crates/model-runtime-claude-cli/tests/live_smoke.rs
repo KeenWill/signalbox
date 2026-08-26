@@ -128,8 +128,10 @@ async fn the_pinned_claude_cli_completes_one_exchange() {
         mcp_bridge_executable(),
         working_directory.path(),
         credential_reference.clone(),
+        None,
+        None,
     );
-    config.exchange_timeout = Duration::from_secs(4 * 60);
+    config.exchange_timeout = Some(Duration::from_secs(4 * 60));
     let runtime = ClaudeCliRuntime::new_with_file_delivery(
         config,
         credentials,
@@ -1615,6 +1617,8 @@ async fn preparation_projection_returns_a_prepared_capability() {
         working_directory.path().join("bridge-fixture"),
         working_directory.path(),
         credential_reference.clone(),
+        None,
+        None,
     );
     let runtime = ClaudeCliRuntime::new(config).expect("smoke runtime configuration is valid");
     let operation = ModelOperation::new(

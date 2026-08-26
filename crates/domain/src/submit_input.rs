@@ -1586,6 +1586,19 @@ pub struct SubmitInputInterruptedModelCallReconciliationConstructionInput {
     pub interrupt: crate::AppliedInterruptProof,
 }
 
+/// Named facts for an automatically reconciled ambiguous-operation source.
+#[derive(Clone, Debug)]
+pub struct SubmitInputAutomaticReconciliationConstructionInput {
+    /// The canonical origin facts owned by the terminal source turn.
+    pub origin: SubmitInputTurnOriginReconstitutionInput,
+    /// The terminal source turn identity.
+    pub turn: TurnId,
+    /// The unresolved physical operation requiring reconciliation.
+    pub ambiguous_operation: crate::IssuedOperationRef,
+    /// The one-based durable automatic recovery attempt.
+    pub attempt: std::num::NonZeroU32,
+}
+
 /// Named facts for an interrupted ambiguous tool-attempt reconciliation source.
 #[derive(Clone, Debug)]
 pub struct SubmitInputInterruptedToolReconciliationConstructionInput {
@@ -1636,6 +1649,31 @@ impl SubmitInputTerminalSourceReconstitutionInput {
                 marker: crate::ReconciliationMarker::from_interrupt_ambiguity(
                     ambiguous_operations,
                     interrupt,
+                ),
+            },
+        })
+    }
+
+    /// Supplies a terminal source whose exact ambiguous operation remained
+    /// unresolved after one daemon-owned durable recovery attempt.
+    pub fn automatic_reconciliation(
+        input: SubmitInputAutomaticReconciliationConstructionInput,
+    ) -> Self {
+        let SubmitInputAutomaticReconciliationConstructionInput {
+            origin,
+            turn,
+            ambiguous_operation,
+            attempt,
+        } = input;
+        let ambiguous_operations =
+            crate::NonEmptyIssuedOperationRefs::singleton(ambiguous_operation);
+        Self::new(SubmitInputTerminalSourceConstructionInput {
+            origin,
+            turn,
+            disposition: TurnDisposition::ReconciliationRequired {
+                marker: crate::ReconciliationMarker::from_automatic_recovery(
+                    ambiguous_operations,
+                    attempt,
                 ),
             },
         })
@@ -3636,7 +3674,7 @@ fn terminal_disposition_command(disposition: &TurnDisposition) -> Option<Durable
                     AppliedInterruptState::Applied { proof } => Some(proof.command()),
                 }
             }
-            ReconciliationReason::AutomaticModelCallRecovery { .. } => None,
+            ReconciliationReason::AutomaticRecovery { .. } => None,
         },
     }
 }
@@ -3656,7 +3694,7 @@ fn terminal_disposition_matches_turn(disposition: &TurnDisposition, turn: TurnId
                     AppliedInterruptState::Applied { proof } => proof.predecessor() == turn,
                 }
             }
-            ReconciliationReason::AutomaticModelCallRecovery { .. } => true,
+            ReconciliationReason::AutomaticRecovery { .. } => true,
         },
     }
 }

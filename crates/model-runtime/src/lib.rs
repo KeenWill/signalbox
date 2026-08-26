@@ -75,8 +75,8 @@ pub use cli_process::{
     CliSession, CliTerminalTextCapture, execute_cli_process,
 };
 pub use cli_redaction::{
-    DiscardedField, REDACTED, RedactingSink, TerminalTextCapture, redact_json, redact_text,
-    trailing_credential_context,
+    DiscardedField, REDACTED, RedactingSink, TerminalTextCapture, ToolArgumentRedaction,
+    redact_json, redact_text, trailing_credential_context,
 };
 pub use credential::{
     CredentialAccess, CredentialAccessError, CredentialAccessFailure, CredentialReference,
