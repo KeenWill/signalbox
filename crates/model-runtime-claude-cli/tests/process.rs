@@ -428,6 +428,22 @@ async fn named_tool_choice_rejects_an_extra_declared_proposal() {
     assert_eq!(result.spawns, 1);
 }
 
+/// The credential boundary withholds a proposal's arguments, never its tool
+/// identity, so a suppressed foreign proposal still violates a named choice.
+#[tokio::test]
+async fn named_tool_choice_rejects_a_suppressed_extra_declared_proposal() {
+    let result = execute_scenario(
+        "named_choice_suppressed_extra_tool",
+        OperationShape::NamedTool,
+    )
+    .await;
+    let loss = boundary_loss(&result.evidence);
+
+    assert!(response_unintelligible(&loss.cause).contains(fixtures::TOOL_NAME));
+    assert_eq!(loss.finish_reported, Some(FinishReason::ToolUse));
+    assert_eq!(result.spawns, 1);
+}
+
 #[tokio::test]
 async fn refusal_requires_the_typed_refusal_stop_reason() {
     let result = execute_scenario("refusal", OperationShape::Text).await;
