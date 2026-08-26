@@ -246,15 +246,13 @@ fn open_blob_root(
     OpenedFilesystemBlobRoot::open(root)
 }
 
+/// Reports whether any semantic write route currently selects this store.
+///
+/// The parsed route map is the authority, so a store named only by a storage
+/// class added later still authenticates its namespace and proves its
+/// lifecycle at startup.
 fn is_routed(configuration: &BlobStorageConfiguration, name: &BlobStoreName) -> bool {
-    [
-        BlobStorageClass::UserAttachment,
-        BlobStorageClass::ToolArtifact,
-        BlobStorageClass::ImportedSource,
-        BlobStorageClass::GeneratedArtifact,
-    ]
-    .into_iter()
-    .any(|class| configuration.route(class).0 == name)
+    configuration.routed_stores().any(|routed| routed == name)
 }
 
 fn validate_s3_locators(

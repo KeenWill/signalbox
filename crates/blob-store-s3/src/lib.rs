@@ -12,7 +12,10 @@ use std::{
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -64,7 +67,7 @@ const MAX_LIFECYCLE_RESPONSE_BYTES: usize = 65_536;
 const MAX_ERROR_RESPONSE_BYTES: usize = 65_536;
 const S3_XML_NAMESPACE: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
 const BLOB_KEY_PREFIX: &str = "sha256/";
-const BUCKET_ABSENCE_CODE: &str = "NoSuchBucket";
+const OBJECT_ABSENCE_CODE: &str = "NoSuchKey";
 
 /// One path-style S3-compatible immutable-object store.
 pub struct S3BlobStore {
@@ -187,7 +190,7 @@ impl S3BlobStore {
         let mut store = Self::try_new(endpoint, region, bucket, credentials_file)?;
         store.namespace_marker = Some(NamespaceMarker {
             body: Arc::from(marker_body),
-            verified: tokio::sync::OnceCell::new(),
+            verification: NamespaceVerification::default(),
         });
         Ok(store)
     }
@@ -205,7 +208,7 @@ impl S3BlobStore {
             S3NamespaceBindingState::Recorded => self.verify_namespace_marker(marker).await,
         };
         if result.is_ok() {
-            let _ = marker.verified.set(());
+            marker.verification.record(true);
         }
         result
     }
@@ -252,11 +255,21 @@ impl S3BlobStore {
         let Some(marker) = &self.namespace_marker else {
             return Ok(());
         };
-        marker
-            .verified
-            .get_or_try_init(|| self.verify_namespace_marker_with(credentials, marker))
-            .await?;
-        Ok(())
+        if marker.verification.proved.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let arrived_at = marker.verification.arrive();
+        let _gate = marker.verification.gate.lock().await;
+        match marker.verification.probe(arrived_at) {
+            NamespaceProbe::Proved => return Ok(()),
+            NamespaceProbe::Adopt => {
+                return Err(BlobStoreError::unavailable("verify S3 namespace marker"));
+            }
+            NamespaceProbe::Run => {}
+        }
+        let result = self.verify_namespace_marker_with(credentials, marker).await;
+        marker.verification.record(result.is_ok());
+        result
     }
 
     async fn create_namespace_marker(
@@ -849,29 +862,30 @@ fn completion_status_failure(status: StatusCode) -> CompletionFailure {
     }
 }
 
-/// Separates a missing object from a backend that no longer serves the bucket.
+/// Separates a proved missing object from a backend that did not answer.
 ///
-/// Only a proved object-level absence may report `NotFound`; a named bucket
-/// absence is ordinary unavailability because it does not prove the blob is
-/// unusable.
+/// Reporting absence is a durable claim about the blob, so only a parsed
+/// object-level absence earns `NotFound`. A bucket-level code, an oversized,
+/// truncated, malformed, or non-UTF-8 body, and any unrecognized code all
+/// leave absence unproved and stay ordinary unavailability.
 async fn classify_absence(response: Response, operation: &'static str) -> BlobStoreError {
     let Ok(body) = bounded_response(response, MAX_ERROR_RESPONSE_BYTES, operation).await else {
-        return BlobStoreError::not_found(operation);
+        return BlobStoreError::unavailable(operation);
     };
     let Ok(body) = std::str::from_utf8(&body) else {
-        return BlobStoreError::not_found(operation);
+        return BlobStoreError::unavailable(operation);
     };
-    if names_absent_bucket(body) {
-        BlobStoreError::unavailable(operation)
-    } else {
+    if names_absent_object(body) {
         BlobStoreError::not_found(operation)
+    } else {
+        BlobStoreError::unavailable(operation)
     }
 }
 
-/// Reports whether a bounded S3 error document names an absent bucket.
-fn names_absent_bucket(body: &str) -> bool {
+/// Reports whether a bounded S3 error document proves object-level absence.
+fn names_absent_object(body: &str) -> bool {
     instant_xml::from_str::<S3ErrorDocument>(body)
-        .is_ok_and(|document| document.code.as_deref() == Some(BUCKET_ABSENCE_CODE))
+        .is_ok_and(|document| document.code.as_deref() == Some(OBJECT_ABSENCE_CODE))
 }
 
 fn validate_completion_response(body: &[u8]) -> Result<(), ()> {
@@ -982,9 +996,57 @@ struct UploadStreamState {
 
 struct NamespaceMarker {
     body: Arc<str>,
-    /// Only proved verification is cached: a transient failure stays retryable
-    /// so a rotated credential can bind the namespace without a restart.
-    verified: tokio::sync::OnceCell<()>,
+    verification: NamespaceVerification,
+}
+
+/// Lazy namespace-marker verification shared across concurrent callers.
+///
+/// Only proved verification is final, so a rotated credential can bind the
+/// namespace without a restart. Callers already waiting while one probe runs
+/// adopt its outcome instead of each running another, which keeps an outage
+/// from serializing one 60-second probe per concurrent traversal.
+#[derive(Default)]
+struct NamespaceVerification {
+    proved: AtomicBool,
+    completed_attempts: AtomicU64,
+    gate: AsyncMutex<()>,
+}
+
+/// What one caller holding the gate must do about verification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NamespaceProbe {
+    /// Verification already succeeded and no probe is needed.
+    Proved,
+    /// An attempt completed while this caller waited; adopt its failure.
+    Adopt,
+    /// No attempt has completed since this caller arrived; probe now.
+    Run,
+}
+
+impl NamespaceVerification {
+    /// Records this caller's arrival against the completed-attempt counter.
+    fn arrive(&self) -> u64 {
+        self.completed_attempts.load(Ordering::Acquire)
+    }
+
+    /// Decides one gate holder's action given the count it arrived with.
+    fn probe(&self, arrived_at: u64) -> NamespaceProbe {
+        if self.proved.load(Ordering::Acquire) {
+            NamespaceProbe::Proved
+        } else if self.completed_attempts.load(Ordering::Acquire) == arrived_at {
+            NamespaceProbe::Run
+        } else {
+            NamespaceProbe::Adopt
+        }
+    }
+
+    /// Records one completed attempt and whether it proved the namespace.
+    fn record(&self, proved: bool) {
+        if proved {
+            self.proved.store(true, Ordering::Release);
+        }
+        self.completed_attempts.fetch_add(1, Ordering::Release);
+    }
 }
 
 #[derive(Debug, FromXml)]
@@ -1358,9 +1420,9 @@ mod tests {
 
     use super::{
         CompletionFailure, CredentialFileError, LifecycleConfiguration, LifecycleRule,
-        MAX_MULTIPART_PARTS, MAX_S3_OBJECT_BYTES, MIN_MULTIPART_PART_BYTES, S3BlobStore,
-        StatusCode, completion_status_failure, multipart_part_bytes, names_absent_bucket,
-        read_credentials, validate_completion_response,
+        MAX_MULTIPART_PARTS, MAX_S3_OBJECT_BYTES, MIN_MULTIPART_PART_BYTES, NamespaceProbe,
+        NamespaceVerification, S3BlobStore, StatusCode, completion_status_failure,
+        multipart_part_bytes, names_absent_object, read_credentials, validate_completion_response,
     };
 
     const ACCESS_KEY: &str = "fixture-access-key";
@@ -1404,22 +1466,20 @@ mod tests {
     }
 
     #[test]
-    fn credential_file_rejects_unknown_members_and_broad_permissions() -> Result<(), Box<dyn Error>>
-    {
-        let unknown_body = format!("{}unknown = true\n", credential_body());
-        let (_unknown_directory, unknown_path) = credential_fixture(&unknown_body)?;
-        let mode_body = credential_body();
-        let (_mode_directory, mode_path) = credential_fixture(&mode_body)?;
-        fs::set_permissions(&mode_path, fs::Permissions::from_mode(0o640))?;
+    fn credential_file_rejects_an_unknown_member() -> Result<(), Box<dyn Error>> {
+        let body = format!("{}unknown = true\n", credential_body());
+        let (_directory, path) = credential_fixture(&body)?;
 
-        assert!(matches!(
-            read_credentials(&unknown_path),
-            Err(CredentialFileError)
-        ));
-        assert!(matches!(
-            read_credentials(&mode_path),
-            Err(CredentialFileError)
-        ));
+        assert!(matches!(read_credentials(&path), Err(CredentialFileError)));
+        Ok(())
+    }
+
+    #[test]
+    fn credential_file_rejects_group_readable_permissions() -> Result<(), Box<dyn Error>> {
+        let (_directory, path) = credential_fixture(&credential_body())?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640))?;
+
+        assert!(matches!(read_credentials(&path), Err(CredentialFileError)));
         Ok(())
     }
 
@@ -1516,22 +1576,64 @@ mod tests {
     }
 
     #[test]
-    fn absent_bucket_error_document_is_not_an_absent_object() {
-        let bucket = r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message><BucketName>fixture-bucket</BucketName><RequestId>fixture</RequestId></Error>"#;
-
-        assert!(names_absent_bucket(bucket));
-    }
-
-    #[test]
-    fn absent_object_error_document_stays_an_absent_object() {
+    fn an_absent_object_code_proves_absence() {
         let key = r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchKey</Code><Message>The specified key does not exist</Message><RequestId>fixture</RequestId></Error>"#;
 
-        assert!(!names_absent_bucket(key));
+        assert!(names_absent_object(key));
     }
 
     #[test]
-    fn an_unparsable_absence_body_stays_an_absent_object() {
-        assert!(!names_absent_bucket(""));
+    fn an_absent_bucket_code_does_not_prove_object_absence() {
+        let bucket = r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message><BucketName>fixture-bucket</BucketName><RequestId>fixture</RequestId></Error>"#;
+
+        assert!(!names_absent_object(bucket));
+    }
+
+    #[test]
+    fn an_unrecognized_code_does_not_prove_object_absence() {
+        let denied = r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>"#;
+
+        assert!(!names_absent_object(denied));
+    }
+
+    #[test]
+    fn an_unparsable_body_does_not_prove_object_absence() {
+        assert!(!names_absent_object(""));
+    }
+
+    #[test]
+    fn a_first_caller_runs_its_own_namespace_probe() {
+        let verification = NamespaceVerification::default();
+        let arrived_at = verification.arrive();
+
+        assert_eq!(verification.probe(arrived_at), NamespaceProbe::Run);
+    }
+
+    #[test]
+    fn a_caller_waiting_through_a_failed_probe_adopts_it() {
+        let verification = NamespaceVerification::default();
+        let arrived_at = verification.arrive();
+        verification.record(false);
+
+        assert_eq!(verification.probe(arrived_at), NamespaceProbe::Adopt);
+    }
+
+    #[test]
+    fn a_caller_arriving_after_a_failed_probe_retries() {
+        let verification = NamespaceVerification::default();
+        verification.record(false);
+        let arrived_at = verification.arrive();
+
+        assert_eq!(verification.probe(arrived_at), NamespaceProbe::Run);
+    }
+
+    #[test]
+    fn a_proved_namespace_needs_no_further_probe() {
+        let verification = NamespaceVerification::default();
+        let arrived_at = verification.arrive();
+        verification.record(true);
+
+        assert_eq!(verification.probe(arrived_at), NamespaceProbe::Proved);
     }
 
     #[test]
