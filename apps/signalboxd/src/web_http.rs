@@ -408,8 +408,12 @@ fn production_router_with_budget(
         blobs,
         blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
     };
+    let automatic_resume_attempt_budget =
+        configured_automatic_resume_attempt_budget(model_configuration.as_ref());
     let state = WebApiState {
-        attention: pool.clone().map(AttentionRepository::new),
+        attention: pool
+            .clone()
+            .map(|pool| AttentionRepository::new(pool, automatic_resume_attempt_budget)),
         timeline: pool.clone().map(SessionTimelineRepository::new),
         snapshot_reader_budget,
         shutdown,
@@ -467,6 +471,26 @@ fn production_router_with_budget(
     };
     let api = api.fallback(api_not_found);
     same_origin_router(asset_root, api)
+}
+
+/// Reads the deployment's automatic-resume attempt budget for the attention
+/// projection.
+///
+/// The projection reports a blocked goal as still owed automatic resumption
+/// until this budget is spent, so it must read the same configured number the
+/// daemon's resume planner reads (`goal_mode::GoalModeNumericBounds`). An
+/// absent or unbounded setting leaves the budget unbounded there as well.
+fn configured_automatic_resume_attempt_budget(
+    model_configuration: Option<&HubModelConfiguration>,
+) -> Option<u32> {
+    model_configuration
+        .and_then(|configuration| {
+            configuration
+                .numeric_bounds()
+                .integer("automatic_resume_attempt_budget")
+                .flatten()
+        })
+        .and_then(|budget| u32::try_from(budget).ok())
 }
 
 fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
@@ -2982,11 +3006,37 @@ mod tests {
             .expect("the follower wait task completes cleanly");
     }
 
+    /// The projection reports a blocked goal as still owed automatic
+    /// resumption until the deployment's attempt budget is spent, so it must
+    /// read the budget the daemon's resume planner spends
+    /// (`goal_mode::GoalModeNumericBounds`) rather than a compiled-in number.
     #[test]
-    fn attention_summary_bound_is_enforced_and_maximum_snapshot_fits_one_ndjson_item() {
-        let session = SessionId::from_uuid(Uuid::from_u128(u128::MAX));
-        let summary = AttentionSummary {
-            session,
+    fn the_attention_projection_reads_the_configured_automatic_resume_budget() {
+        let configuration = crate::configuration::checked_in_example_configuration()
+            .expect("checked-in example parses");
+        let configured = configuration
+            .numeric_bounds()
+            .integer("automatic_resume_attempt_budget")
+            .flatten()
+            .and_then(|budget| u32::try_from(budget).ok())
+            .expect("the example configures an automatic-resume attempt budget");
+
+        assert_eq!(
+            super::configured_automatic_resume_attempt_budget(Some(&configuration)),
+            Some(configured)
+        );
+        assert_eq!(
+            super::configured_automatic_resume_attempt_budget(None),
+            None
+        );
+    }
+
+    /// The largest summary the projection can carry: every scalar at its
+    /// maximum, a blocked goal whose need summary sits exactly on the
+    /// character ceiling, and activity at a representative far-future instant.
+    fn maximum_attention_summary() -> AttentionSummary {
+        AttentionSummary {
+            session: SessionId::from_uuid(Uuid::from_u128(u128::MAX)),
             current_turn: Some(TurnId::from_uuid(Uuid::from_u128(u128::MAX))),
             state: AttentionState::Blocked,
             action: Some(AttentionAction::ProvideGoalNeed),
@@ -3007,62 +3057,51 @@ mod tests {
                     + Duration::from_millis(LARGE_REPRESENTATIVE_UNIX_MILLISECONDS),
                 kind: AttentionActivityKind::ApprovalJudge,
             },
-        };
-        let mut oversized_summary = summary.clone();
+        }
+    }
+
+    #[test]
+    fn a_goal_summary_one_character_past_the_ceiling_is_rejected() {
+        let mut oversized_summary = maximum_attention_summary();
         oversized_summary
             .goal_block
             .as_mut()
             .expect("the maximum summary carries a goal block")
             .need_summary
             .push('x');
+
+        assert!(super::attention_summary_dto(maximum_attention_summary()).is_ok());
+        assert!(super::attention_summary_dto(oversized_summary).is_err());
+    }
+
+    #[test]
+    fn maximum_attention_snapshot_fits_one_ndjson_item() {
+        let summary = maximum_attention_summary();
         let snapshot = attention_snapshot_dto(AttentionSnapshot {
             cursor: AttentionCursor::new(u64::MAX),
+            continuation_after: Some(summary.session),
             summaries: vec![summary; usize::from(max_attention_snapshot_items())],
-            continuation_after: Some(session),
         })
         .expect("the maximum snapshot timestamp is representable");
         let mut writer = super::NdjsonItemWriter::new();
+
         serde_json::to_writer(&mut writer, &WebAttentionStreamEvent::Snapshot { snapshot })
             .expect("the maximum snapshot serializes within one item");
         writer
             .write_all(b"\n")
             .expect("the NDJSON terminator fits the item");
 
-        assert!(super::attention_summary_dto(oversized_summary).is_err());
         assert!(writer.encoded.len() <= MAX_NDJSON_ITEM_BYTES);
     }
 
     #[test]
     fn maximum_attention_update_fits_one_ndjson_item() {
-        let session = SessionId::from_uuid(Uuid::from_u128(u128::MAX));
-        let summary = AttentionSummary {
-            session,
-            current_turn: Some(TurnId::from_uuid(Uuid::from_u128(u128::MAX))),
-            state: AttentionState::Blocked,
-            action: Some(AttentionAction::ProvideGoalNeed),
-            goal_block: Some(AttentionGoalBlock {
-                generation: u64::MAX,
-                reason: AttentionBlockedReason::ExternalChangeRequired,
-                need_summary: String::from('\u{1}')
-                    .repeat(usize::from(max_attention_goal_summary_characters())),
-            }),
-            judge: AttentionJudgeFacts {
-                actionable: u64::MAX,
-                completed: u64::MAX,
-                escalated: u64::MAX,
-                failed: u64::MAX,
-            },
-            last_activity: AttentionActivity {
-                recorded_at: UNIX_EPOCH
-                    + Duration::from_millis(LARGE_REPRESENTATIVE_UNIX_MILLISECONDS),
-                kind: AttentionActivityKind::ApprovalJudge,
-            },
-        };
-        let summaries = vec![summary; usize::from(max_attention_change_items())]
-            .into_iter()
-            .map(super::attention_summary_dto)
-            .collect::<Result<Vec<_>, _>>()
-            .expect("maximum summaries are representable");
+        let summaries =
+            vec![maximum_attention_summary(); usize::from(max_attention_change_items())]
+                .into_iter()
+                .map(super::attention_summary_dto)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("maximum summaries are representable");
         let event = WebAttentionStreamEvent::Update {
             cursor: u64::MAX.to_string(),
             summaries,
