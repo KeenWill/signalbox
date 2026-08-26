@@ -770,7 +770,7 @@ const request = async (input: RequestInfo | URL, init: RequestInit): Promise<Res
   }
 }
 
-const canonicalUuid = (value: string): string | undefined => {
+const canonicalizedSearchUuid = (value: string): string | undefined => {
   const compact = value
     .toLowerCase()
     .replace(/^urn:uuid:/, '')
@@ -811,17 +811,19 @@ const validateSearchPageBounds = (
     throw new TypeError('search page exceeds item limit')
   const encoder = new TextEncoder()
   const requestedSession =
-    searchRequest.sessionId === undefined ? undefined : canonicalUuid(searchRequest.sessionId)
+    searchRequest.sessionId === undefined
+      ? undefined
+      : canonicalizedSearchUuid(searchRequest.sessionId)
   let previousAddress =
     searchRequest.after === undefined ? undefined : BigInt(searchRequest.after.address)
   let previousProjectionId =
     searchRequest.after === undefined ? undefined : BigInt(searchRequest.after.projectionId)
   let firstResult = true
   for (const result of page.results) {
-    const resultSession = canonicalUuid(result.session_id)
+    const resultSession = canonicalizedSearchUuid(result.session_id)
     if (
       resultSession === undefined ||
-      sourceUuids(result.source).some((identity) => canonicalUuid(identity) === undefined)
+      sourceUuids(result.source).some((identity) => canonicalizedSearchUuid(identity) === undefined)
     ) {
       throw new TypeError('search result carries an invalid UUID identity')
     }
@@ -833,7 +835,7 @@ const validateSearchPageBounds = (
     }
     if (
       result.source.kind === 'session' &&
-      canonicalUuid(result.source.session_id) !== resultSession
+      canonicalizedSearchUuid(result.source.session_id) !== resultSession
     ) {
       throw new TypeError('search result source contradicts its session')
     }

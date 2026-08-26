@@ -456,9 +456,7 @@ test('reports an unreachable search transport separately from contract decoding'
   await page.goto('/search?q=release')
 
   await expect(page.getByRole('alert')).toContainText('Search could not be read')
-  await expect(page.getByRole('alert')).toContainText(
-    'The Signalbox daemon could not be reached.',
-  )
+  await expect(page.getByRole('alert')).toContainText('The Signalbox daemon could not be reached.')
   expect(problems.pageErrors).toEqual([])
 })
 
