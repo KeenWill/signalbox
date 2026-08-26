@@ -25,6 +25,8 @@ import {
 import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspector'
 import type { CommandContext, CommandId } from './commands'
 import { invokeCommand } from './commands'
+import { HttpImportApi } from './imports/api'
+import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
   ProductContractError,
   type ProductRouteId,
@@ -519,6 +521,12 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     anchor: 'first' | 'latest'
     attempt: number
   } | null>(null)
+  const [importsCommandContext, setImportsCommandContext] = useState<CommandContext | null>(null)
+  const [navigationDisabled, setNavigationDisabled] = useState(false)
+  const updateImportsCommandContext = useCallback(
+    (next: CommandContext | null) => setImportsCommandContext(next),
+    [],
+  )
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
   const updateSelectionEvidence = useCallback(
     (evidence: SessionSelectionEvidence | null) => setSelectionEvidence(evidence),
@@ -539,19 +547,31 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         : 'Bootstrap unavailable'
     : null
   const inspectorInSheet = app.layout === 'focus' || narrowInspector
-  const context = useMemo<ProductCommandContext>(
-    () => ({
+  // Imports reads and continuation mutations are admitted by the same bootstrap the shell validated.
+  const productImportApi = useMemo(
+    () =>
+      bootstrap.data === undefined ? null : HttpImportApi.withAdmittedBootstrap(bootstrap.data),
+    [bootstrap.data],
+  )
+  const context = useMemo<ProductCommandContext>(() => {
+    // `productCommandRegistry` already carries the `imports.*` family behind `available()` gates;
+    // publishing the mounted surface's context is what makes those commands live.
+    const surfaceContext = surface === 'imports' ? importsCommandContext : null
+    return {
+      ...surfaceContext,
       dispatch,
       getState: store.getState,
-      timelineIds,
+      timelineIds: surfaceContext === null ? timelineIds : surfaceContext.timelineIds,
       artifactPreviewIds: [],
       artifactOriginalIds: [],
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
-      focusTimeline: () => timelineRef.current?.focus(),
+      focusTimeline: surfaceContext?.focusTimeline ?? (() => timelineRef.current?.focus()),
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
       loadTimelineWindow: (anchor) =>
         setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
       navigate: (path) => {
+        // A retained exact continuation command owns the surface until it is retried or abandoned.
+        if (navigationDisabled) return
         void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() => {
           requestAnimationFrame(() => mainRef.current?.focus())
         })
@@ -567,9 +587,17 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         navigationOpenerRef.current = opener?.isConnected ? opener : null
         dispatch(actions.overlaySet('navigation'))
       },
-    }),
-    [artifactAvailable, dispatch, navigate, surface, timelineIds, timelineWindowAvailable],
-  )
+    }
+  }, [
+    artifactAvailable,
+    dispatch,
+    importsCommandContext,
+    navigate,
+    navigationDisabled,
+    surface,
+    timelineIds,
+    timelineWindowAvailable,
+  ])
   const artifactSheetOwnsFocus = artifactOpen && inspectorInSheet
   useHotkeys(
     productHotkeyBindings.map((binding) => ({
@@ -698,6 +726,30 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       />
     ) : surface === 'settings' ? (
       <SettingsSurface />
+    ) : surface === 'imports' && bootstrap.isSuccess && productImportApi !== null ? (
+      <ImportsWorkspace
+        api={productImportApi}
+        scenario={false}
+        presentation="product"
+        onCommandContext={updateImportsCommandContext}
+        onNavigationDisabledChange={setNavigationDisabled}
+      />
+    ) : surface === 'imports' ? (
+      <div className="surface-body">
+        <section className="surface-empty" aria-labelledby="imports-unavailable-heading">
+          <AlertTriangle aria-hidden="true" />
+          <div>
+            <span className="availability-tag">Contract required</span>
+            <h2 id="imports-unavailable-heading">
+              Imports are unavailable until bootstrap admission succeeds
+            </h2>
+            <p>
+              Signalbox will not issue import reads or enable continuation mutations without an
+              admitted daemon contract.
+            </p>
+          </div>
+        </section>
+      </div>
     ) : (
       <DeferredSurface surface={surface} />
     )
@@ -710,9 +762,9 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   return (
     <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} context={context} />
+        <ProductNavigation active={surface} context={context} disabled={navigationDisabled} />
       </aside>
-      <main className="product-main" ref={mainRef} tabIndex={-1}>
+      <main className={`product-main product-main-${surface}`} ref={mainRef} tabIndex={-1}>
         <header className="product-header">
           <div>
             <span className="eyebrow">{copy.eyebrow}</span>
@@ -821,6 +873,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <ProductNavigation
               active={surface}
               context={context}
+              disabled={navigationDisabled}
               onActivate={() => dispatch(actions.overlaySet(null))}
             />
           </Dialog.Content>
