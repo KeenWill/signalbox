@@ -4178,7 +4178,8 @@ fn merge_targeted_refresh_into_webhook_shadow(
 }
 
 /// Joins two advances from the same durable frontier without moving a stream
-/// backwards. Ownership can be learned by either branch but cannot conflict.
+/// backwards. A pull-request subject can be learned by either branch but
+/// cannot conflict.
 fn merge_event_identity_frontiers(
     shadow: RepoWatchEventIdentityFrontierV1,
     candidate: &RepoWatchEventIdentityFrontierV1,
@@ -4193,18 +4194,18 @@ fn merge_event_identity_frontiers(
             entries.insert(identity, candidate_entry);
             continue;
         };
-        if let (Some(shadow_owner), Some(candidate_owner)) = (
+        if let (Some(shadow_subject), Some(candidate_subject)) = (
             shadow_entry.pull_request_number(),
             candidate_entry.pull_request_number(),
-        ) && shadow_owner != candidate_owner
+        ) && shadow_subject != candidate_subject
         {
             return Err(RepositoryWatchAttemptError::Normalization);
         }
         let sequence = shadow_entry.sequence().max(candidate_entry.sequence());
-        let owner = shadow_entry
+        let subject = shadow_entry
             .pull_request_number()
             .or(candidate_entry.pull_request_number());
-        *shadow_entry = match owner {
+        *shadow_entry = match subject {
             Some(number) => {
                 RepoWatchEventIdentityFrontierEntryV1::for_pull_request(identity, sequence, number)
             }

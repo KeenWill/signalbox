@@ -3700,7 +3700,7 @@ mod tests {
             context: PullRequestEventContext::new(PullRequestEventContextInput {
                 number,
                 head_sha: baseline.head_sha().clone(),
-                head_repository: RepositorySlug::try_new(String::from("owner/repository"))?,
+                head_repository: RepositorySlug::try_new(String::from("example/repository"))?,
                 base_branch: BranchName::try_new(String::from("main"))?,
                 head_branch: BranchName::try_new(String::from("merged"))?,
                 title: PullRequestTitle::try_new(String::from("merged pull request"))?,
