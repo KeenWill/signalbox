@@ -1,5 +1,6 @@
 import { configureStore, createSlice, type Middleware } from '@reduxjs/toolkit'
 import { useDispatch, useSelector } from 'react-redux'
+import type { AttentionSyncPhase } from './attention'
 import {
   type BrowserPreferences,
   createDefaultBrowserPreferences,
@@ -28,6 +29,7 @@ interface AppState extends BrowserPreferences {
   detail: DetailMode
   theme: ThemeMode
   overlay: Overlay
+  attentionSync: AttentionSyncPhase
   selectedTimeline: string | null
   selectedArtifact: string | null
   expandedArtifacts: Record<string, boolean>
@@ -40,6 +42,7 @@ interface AppState extends BrowserPreferences {
 const initialState: AppState = {
   ...loadBrowserPreferences(),
   overlay: null,
+  attentionSync: 'idle',
   selectedTimeline: null,
   selectedArtifact: null,
   expandedArtifacts: {},
@@ -106,6 +109,11 @@ const appSlice = createSlice({
     },
     overlaySet(state, action: { payload: Overlay }) {
       state.overlay = action.payload
+      state.activitySequence += 1
+    },
+    attentionSyncSet(state, action: { payload: AttentionSyncPhase }) {
+      if (state.attentionSync === action.payload) return
+      state.attentionSync = action.payload
       state.activitySequence += 1
     },
     timelineSelected(state, action: { payload: string | null }) {

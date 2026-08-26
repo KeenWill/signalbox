@@ -835,6 +835,13 @@ impl PostgresRepoWatchStore {
         .bind(Json(payload))
         .execute(&mut *transaction)
         .await?;
+        replace_current_pull_requests(
+            &mut transaction,
+            repository,
+            generation,
+            request.candidate().observation().state().pull_requests(),
+        )
+        .await?;
         let already_durable =
             durable_occurrences(&mut transaction, repository, request.events(), None).await?;
         let fresh = request
@@ -1574,7 +1581,7 @@ fn stale_review_dismissal_message(candidate: &RepoWatchStaleReviewClearanceCandi
     )
 }
 
-async fn load_cursor_in_transaction(
+pub(crate) async fn load_cursor_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
 ) -> Result<Option<RepoWatchCursor>, RepoWatchStoreError> {
@@ -2229,6 +2236,82 @@ fn pull_request_state_record(state: &RepoWatchPullRequestState) -> PullRequestSt
             })
             .collect(),
     }
+}
+
+pub(crate) fn encode_current_pull_request(
+    state: &RepoWatchPullRequestState,
+) -> Result<Value, RepoWatchStoreError> {
+    serde_json::to_value(pull_request_state_record(state))
+        .map_err(RepoWatchStoreError::CursorEncoding)
+}
+
+pub(crate) fn decode_current_pull_request(
+    value: Value,
+) -> Result<RepoWatchPullRequestState, RepoWatchStoreError> {
+    let record = serde_json::from_value(value).map_err(|_| {
+        RepoWatchStoreError::Corruption(RepoWatchPersistenceCorruption::MalformedCursorDocument)
+    })?;
+    decode_pull_request_state(record)
+}
+
+async fn replace_current_pull_requests(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    generation: RepoWatchCursorGeneration,
+    pull_requests: &[RepoWatchPullRequestState],
+) -> Result<(), RepoWatchStoreError> {
+    sqlx::query("DELETE FROM repo_watch_current_pull_request WHERE repository = $1")
+        .bind(repository.as_str())
+        .execute(&mut **transaction)
+        .await?;
+
+    let mut pull_request_numbers = Vec::with_capacity(pull_requests.len());
+    let mut cursor_generations = Vec::with_capacity(pull_requests.len());
+    let mut lifecycles = Vec::with_capacity(pull_requests.len());
+    let mut head_repositories = Vec::with_capacity(pull_requests.len());
+    let mut base_branches = Vec::with_capacity(pull_requests.len());
+    let mut head_branches = Vec::with_capacity(pull_requests.len());
+    let mut state_payloads = Vec::with_capacity(pull_requests.len());
+    for pull_request in pull_requests {
+        let context = pull_request.context();
+        pull_request_numbers.push(Decimal::from(context.number().get()));
+        cursor_generations.push(generation_to_i64(generation));
+        lifecycles
+            .push(repo_watch_pull_request_lifecycle_to_str(pull_request.lifecycle()).to_owned());
+        head_repositories.push(context.head_repository().as_str().to_owned());
+        base_branches.push(context.base_branch().as_str().to_owned());
+        head_branches.push(context.head_branch().as_str().to_owned());
+        state_payloads.push(Json(encode_current_pull_request(pull_request)?));
+    }
+
+    sqlx::query(
+        "INSERT INTO repo_watch_current_pull_request (
+            repository, pull_request_number, cursor_generation, lifecycle,
+            head_repository, base_branch, head_branch, state_payload
+         )
+         SELECT $1, supplied.pull_request_number, supplied.cursor_generation,
+                supplied.lifecycle, supplied.head_repository, supplied.base_branch,
+                supplied.head_branch, supplied.state_payload
+           FROM UNNEST(
+                $2::numeric[], $3::bigint[], $4::text[], $5::text[],
+                $6::text[], $7::text[], $8::jsonb[]
+           ) AS supplied(
+                pull_request_number, cursor_generation, lifecycle, head_repository,
+                base_branch, head_branch, state_payload
+           )",
+    )
+    .bind(repository.as_str())
+    .bind(pull_request_numbers)
+    .bind(cursor_generations)
+    .bind(lifecycles)
+    .bind(head_repositories)
+    .bind(base_branches)
+    .bind(head_branches)
+    .bind(state_payloads)
+    .execute(&mut **transaction)
+    .await?;
+
+    Ok(())
 }
 
 fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, RepoWatchStoreError> {

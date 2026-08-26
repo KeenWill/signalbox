@@ -13,7 +13,8 @@ use std::{
 use rust_decimal::Decimal;
 use signalbox_application::RepoWatchEventContentIdentityV1;
 use signalbox_application::{
-    RepoWatchObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
+    RepoWatchObservation, RepoWatchPagePosition, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, max_repo_watch_activity_page_items,
 };
 use signalbox_domain::{CommitSha, PullRequestNumber, RepoWatchEventKindNameV1, RepositorySlug};
 use signalbox_persistence::{
@@ -23,6 +24,7 @@ use signalbox_persistence::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
         RepoWatchCursorCandidate, RepoWatchCursorGeneration,
     },
+    repo_watch_operations::PostgresRepoWatchOperations,
     repo_watch_webhook::{
         MAX_PENDING_PAGE_BYTES, PostgresRepoWatchWebhookStore, RepoWatchWebhookAdmission,
         RepoWatchWebhookAdmissionOutcome, RepoWatchWebhookDeliveryKey, RepoWatchWebhookDisposition,
@@ -65,6 +67,13 @@ const HISTORICAL_IDENTITY: [u8; 32] = [0x35; 32];
 const SHADOW_POLL_IDENTITY: [u8; 32] = [0x36; 32];
 const PROMOTION_IDENTITY: [u8; 32] = [0x37; 32];
 const BACKSTOP_POLL_IDENTITY: [u8; 32] = [0x38; 32];
+const OPERATIONS_BURST_BASE: u128 = 0xa00;
+const OPERATIONS_BURST_COUNT: usize = 101;
+/// These operator reads turn on webhook intake and repository health, never on
+/// how many automatic resumptions a deployment still owes, so they state the
+/// unbounded automatic-resume budget instead of a number their story never
+/// uses.
+const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -198,6 +207,22 @@ async fn admit_fixture(
             BODY,
         )?)
         .await?)
+}
+
+async fn seed_operations_webhook_burst(
+    store: &PostgresRepoWatchWebhookStore,
+) -> Result<(), Box<dyn Error>> {
+    for offset in 0..OPERATIONS_BURST_COUNT {
+        let key = delivery_key(OPERATIONS_BURST_BASE + offset as u128);
+        admit_fixture(store, key).await?;
+        store
+            .record_terminal(
+                key,
+                &projected_request(vec![event_projection(MATCHED_IDENTITY)?])?,
+            )
+            .await?;
+    }
+    Ok(())
 }
 
 fn admitted_receipt(
@@ -895,6 +920,120 @@ async fn terminal_disposition_drains_pending_delivery() -> Result<(), Box<dyn Er
             .await?;
     assert_eq!(projection_count, 1);
     assert_eq!(disposition_count, 1);
+    Ok(())
+}
+
+async fn operations_webhook_fixture() -> Result<
+    (
+        ContainerAsync<Postgres>,
+        RepositorySlug,
+        PostgresRepoWatchOperations,
+    ),
+    Box<dyn Error>,
+> {
+    let (container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let event_store = PostgresRepoWatchStore::new(pool.clone());
+    event_store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(
+                None,
+                RepoWatchCursorCandidate::new(RepoWatchObservation::new(
+                    Vec::new(),
+                    RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())?,
+                )),
+                Vec::new(),
+            ),
+        )
+        .await?;
+    let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    seed_operations_webhook_burst(&webhook_store).await?;
+    let reader = PostgresRepoWatchOperations::new(pool, UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+    Ok((container, repository, reader))
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operations_webhook_window_counts_recent_projected_deliveries() -> Result<(), Box<dyn Error>>
+{
+    let (_container, _repository, reader) = operations_webhook_fixture().await?;
+    let statuses = reader.repository_statuses(None).await?;
+
+    assert_eq!(statuses.repositories.len(), 1);
+    assert_eq!(
+        statuses.repositories[0].previous_five_minutes.received,
+        u64::try_from(OPERATIONS_BURST_COUNT)?
+    );
+    assert_eq!(
+        statuses.repositories[0].previous_five_minutes.projected,
+        u64::try_from(OPERATIONS_BURST_COUNT)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn repository_health_includes_webhook_intake_before_the_first_cursor()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let webhook = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(OPERATIONS_BURST_BASE);
+    admit_fixture(&webhook, key).await?;
+
+    let statuses = PostgresRepoWatchOperations::new(pool, UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+        .repository_statuses(None)
+        .await?;
+
+    assert_eq!(statuses.repositories.len(), 1);
+    assert_eq!(statuses.repositories[0].repository, repository()?);
+    assert_eq!(statuses.repositories[0].cursor_generation, None);
+    assert_eq!(statuses.repositories[0].observed_at, None);
+    assert_eq!(
+        statuses.repositories[0]
+            .latest_webhook
+            .as_ref()
+            .map(|webhook| webhook.receipt_sequence),
+        Some(1)
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn operations_webhook_activity_is_bounded_and_keyset_paged() -> Result<(), Box<dyn Error>> {
+    let (_container, repository, reader) = operations_webhook_fixture().await?;
+    let first = reader
+        .activity(
+            repository.clone(),
+            RepoWatchPagePosition::Start,
+            RepoWatchPagePosition::Start,
+        )
+        .await?;
+    let second = reader
+        .activity(
+            repository,
+            RepoWatchPagePosition::Exhausted,
+            first.webhook_continuation_before,
+        )
+        .await?;
+
+    assert_eq!(
+        first.webhooks.len(),
+        usize::from(max_repo_watch_activity_page_items())
+    );
+    assert_eq!(
+        second.webhooks.len(),
+        OPERATIONS_BURST_COUNT - usize::from(max_repo_watch_activity_page_items())
+    );
+    assert_eq!(
+        first.webhooks[0].receipt_sequence,
+        u64::try_from(OPERATIONS_BURST_COUNT)?
+    );
+    assert_eq!(
+        second.webhooks[0].receipt_sequence,
+        first.webhooks[first.webhooks.len() - 1].receipt_sequence - 1
+    );
     Ok(())
 }
 

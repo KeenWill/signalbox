@@ -29,6 +29,7 @@ export interface CommandContext {
   openArtifactInspector?: () => void
   openSession?: (sessionId: string) => void
   toggleTimelineExpansion?: () => void
+  unwindSurface?: () => boolean
 }
 
 export interface CommandBinding {
@@ -212,6 +213,15 @@ export const commandRegistry = [
     run: (context) => context.navigate?.('/settings'),
   },
   {
+    id: 'navigate.scenario',
+    title: 'Go to Scenario Studio',
+    description: 'Open the streaming interaction scenario.',
+    category: 'Navigate',
+    bindings: [],
+    available: productNavigation,
+    run: (context) => context.navigate?.('/scenario/streaming'),
+  },
+  {
     id: 'artifact.open',
     title: 'Open artifact inspector',
     description: 'Resolve and inspect an immutable blob by its server-provided identity.',
@@ -256,6 +266,7 @@ export const commandRegistry = [
     available: always,
     run: (context) => {
       if (context.getState().app.overlay !== null) context.dispatch(actions.overlaySet(null))
+      else if (context.unwindSurface?.()) return
       else context.focusTimeline()
     },
   },
@@ -472,7 +483,7 @@ export const commandRegistry = [
     available: always,
     run: (context) => {
       const current = context.getState().app.layout
-      if (current === 'workbench') context.focusTimeline()
+      if (current !== 'focus') context.focusTimeline()
       context.dispatch(actions.layoutSet(current === 'focus' ? 'workbench' : 'focus'))
     },
   },
