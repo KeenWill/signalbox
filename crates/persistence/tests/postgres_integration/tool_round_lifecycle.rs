@@ -845,6 +845,7 @@ async fn inv014_tool_continuation_headroom_counts_delegation_results() -> Result
     let targets =
         ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
             .expect("one continuation target forms a catalog");
+    let result_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xe6));
     let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0xe8));
     let model_repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference())
@@ -865,7 +866,7 @@ async fn inv014_tool_continuation_headroom_counts_delegation_results() -> Result
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xe4)),
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xe5)),
                 ],
-                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xe6)),
+                result_frontier,
                 continuation_call,
                 FailedModelCallTurnIdentities::new(
                     SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xe9)),
@@ -896,6 +897,15 @@ async fn inv014_tool_continuation_headroom_counts_delegation_results() -> Result
     .fetch_one(&pool)
     .await?;
     assert_eq!(stored_bytes, Decimal::from(36 + 44_u64));
+    let reported = model_repository
+        .latest_reported_usage(fixture.session, target, result_frontier)
+        .await?
+        .expect("the producing call reported input usage");
+    assert_eq!(
+        reported.projected_unreported_content_bytes(),
+        36 + 44,
+        "a proved delegation result present in the successor projection is counted once"
+    );
 
     pool.close().await;
     drop(container);

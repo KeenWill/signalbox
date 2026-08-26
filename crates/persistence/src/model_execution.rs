@@ -833,13 +833,27 @@ impl PostgresModelCallRepository {
                     + (
                         SELECT COALESCE(SUM(
                             CASE
+                                -- The durable proof already measured every
+                                -- result the producing call's round projected,
+                                -- including a returning foreground delegation's
+                                -- child result. Each correlates to that call
+                                -- through the request that produced it.
                                 WHEN latest_call.proven_unreported_content_bytes IS NOT NULL
-                                     AND entry.payload_kind IN (
-                                         'tool_execution_result',
-                                         'tool_denied'
+                                     AND (
+                                         (
+                                             entry.payload_kind IN (
+                                                 'tool_execution_result',
+                                                 'tool_denied'
+                                             )
+                                             AND result_request.producing_model_call_id =
+                                                 latest_call.model_call_id
+                                         )
+                                         OR (
+                                             entry.payload_kind = 'delegation_result'
+                                             AND awaiting_request.producing_model_call_id =
+                                                 latest_call.model_call_id
+                                         )
                                      )
-                                     AND result_request.producing_model_call_id =
-                                         latest_call.model_call_id
                                 THEN 0
                                 ELSE CASE entry.payload_kind
                                     WHEN 'imported_entry' THEN
@@ -911,6 +925,10 @@ impl PostgresModelCallRepository {
                                    entry.tool_result_request_id
                                )
                            AND result_request.session_id = entry.source_session_id
+                          LEFT JOIN tool_request AS awaiting_request
+                            ON awaiting_request.request_id =
+                               entry.delegation_result_awaiting_tool_request_id
+                           AND awaiting_request.session_id = entry.source_session_id
                           LEFT JOIN tool_approval_decision AS decision
                             ON decision.request_id = entry.tool_result_request_id
                           LEFT JOIN session_delegation_initial_task AS task
