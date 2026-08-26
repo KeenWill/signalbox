@@ -58,6 +58,7 @@ pub mod submit_input;
 pub mod test_support;
 pub mod tool_loop;
 pub mod turn_liveness;
+pub mod usage;
 pub mod workspace_instructions;
 
 pub use session_credentials::{

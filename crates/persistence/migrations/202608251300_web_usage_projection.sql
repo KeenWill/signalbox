@@ -1,0 +1,591 @@
+-- Dedicated terminal model-call usage projection for bounded browser reads.
+-- Token evidence is copied exactly once when its canonical ordinary,
+-- approval-judge, or context-compaction call becomes terminal. Dollar cost
+-- remains a read-time derivation from versioned deployment rates and is
+-- deliberately not stored.
+
+-- Tighten canonical compaction evidence before projection backfill. This is a
+-- forward correction because recorded migrations are immutable. The replaced
+-- constraint was defined by 202607290401_context_compaction.sql.
+--
+-- The projected `usage_input_includes_cache_tokens` column, its `false`
+-- default for newly prepared calls, and its update-immutability trigger are
+-- owned by 202608210611_context_compaction_input_semantics.sql; this migration
+-- only reads that column.
+ALTER TABLE context_compaction_model_call
+    DROP CONSTRAINT context_compaction_model_call_usage_nonnegative;
+ALTER TABLE context_compaction_model_call
+    ADD CONSTRAINT context_compaction_model_call_usage_u64
+        CHECK (
+            (
+                input_tokens IS NULL
+                OR (
+                    input_tokens = trunc(input_tokens)
+                    AND input_tokens BETWEEN 0 AND 18446744073709551615
+                )
+            )
+            AND (
+                output_tokens IS NULL
+                OR (
+                    output_tokens = trunc(output_tokens)
+                    AND output_tokens BETWEEN 0 AND 18446744073709551615
+                )
+            )
+            AND (
+                cache_read_input_tokens IS NULL
+                OR (
+                    cache_read_input_tokens = trunc(cache_read_input_tokens)
+                    AND cache_read_input_tokens
+                        BETWEEN 0 AND 18446744073709551615
+                )
+            )
+            AND (
+                cache_creation_input_tokens IS NULL
+                OR (
+                    cache_creation_input_tokens
+                        = trunc(cache_creation_input_tokens)
+                    AND cache_creation_input_tokens
+                        BETWEEN 0 AND 18446744073709551615
+                )
+            )
+        );
+
+CREATE TABLE web_usage_oversized_profile_identity (
+    profile_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    reference_digest text NOT NULL,
+    exact_reference text NOT NULL,
+    CONSTRAINT web_usage_oversized_profile_reference
+        CHECK (octet_length(exact_reference) > 250),
+    CONSTRAINT web_usage_oversized_profile_digest_shape
+        CHECK (reference_digest ~ '^[0-9a-f]{32}$')
+);
+CREATE INDEX web_usage_oversized_profile_by_digest
+    ON web_usage_oversized_profile_identity (reference_digest);
+
+CREATE FUNCTION enforce_web_usage_oversized_profile_identity()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    expected_digest text;
+BEGIN
+    expected_digest := md5(NEW.exact_reference);
+    IF NEW.reference_digest <> expected_digest THEN
+        RAISE EXCEPTION 'oversized usage profile digest must match its exact reference'
+            USING ERRCODE = '23514';
+    END IF;
+
+    -- Serialize the bounded digest bucket so exact-reference uniqueness does
+    -- not require an index over the unbounded canonical reference.
+    PERFORM pg_advisory_xact_lock(hashtextextended(expected_digest, 0));
+    IF EXISTS (
+        SELECT 1
+          FROM web_usage_oversized_profile_identity
+         WHERE reference_digest = expected_digest
+           AND exact_reference = NEW.exact_reference
+    ) THEN
+        RAISE EXCEPTION 'oversized usage profile reference already has an identity'
+            USING ERRCODE = '23505';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER web_usage_oversized_profile_identity_is_consistent
+BEFORE INSERT ON web_usage_oversized_profile_identity
+FOR EACH ROW
+EXECUTE FUNCTION enforce_web_usage_oversized_profile_identity();
+
+CREATE FUNCTION bounded_web_usage_profile(value text)
+RETURNS text
+LANGUAGE plpgsql
+STRICT
+AS $$
+DECLARE
+    lookup_digest text;
+    mapped_id bigint;
+BEGIN
+    IF octet_length(value) <= 250 THEN
+        RETURN 'exact:' || value;
+    END IF;
+
+    lookup_digest := md5(value);
+    -- Serialize one bounded digest bucket while retaining exact collision
+    -- resolution without indexing the unbounded canonical reference.
+    PERFORM pg_advisory_xact_lock(hashtextextended(lookup_digest, 0));
+    SELECT profile_id
+      INTO mapped_id
+      FROM web_usage_oversized_profile_identity
+     WHERE reference_digest = lookup_digest
+       AND exact_reference = value;
+    IF mapped_id IS NULL THEN
+        INSERT INTO web_usage_oversized_profile_identity (
+            reference_digest, exact_reference
+        ) VALUES (lookup_digest, value)
+        RETURNING profile_id INTO mapped_id;
+    END IF;
+    RETURN 'mapped:' || mapped_id::text;
+END;
+$$;
+
+CREATE TABLE web_usage_call_projection (
+    model_call_id uuid PRIMARY KEY,
+    call_kind text NOT NULL,
+    session_id uuid NOT NULL,
+    turn_id uuid,
+    resolved_provider_model_identity_id uuid NOT NULL,
+    credential_profile_label text NOT NULL,
+    usage_provenance_kind text NOT NULL,
+    usage_input_includes_cache_tokens boolean,
+    input_tokens numeric,
+    output_tokens numeric,
+    cache_creation_input_tokens numeric,
+    cache_read_input_tokens numeric,
+    recorded_at timestamptz NOT NULL DEFAULT statement_timestamp(),
+
+    CONSTRAINT web_usage_call_kind_closed
+        CHECK (call_kind IN ('model_call', 'approval_judge', 'context_compaction')),
+    CONSTRAINT web_usage_provenance_closed
+        CHECK (usage_provenance_kind IN ('reported', 'estimated')),
+    CONSTRAINT web_usage_credential_profile_label_bounded
+        CHECK (
+            char_length(credential_profile_label) > 0
+            AND octet_length(credential_profile_label) <= 256
+            AND (
+                (
+                    left(credential_profile_label, 6) = 'exact:'
+                    AND octet_length(credential_profile_label) > 6
+                )
+                OR (
+                    left(credential_profile_label, 7) = 'mapped:'
+                    AND octet_length(credential_profile_label) > 7
+                )
+            )
+        ),
+    CONSTRAINT web_usage_turn_shape
+        CHECK ((call_kind = 'context_compaction') = (turn_id IS NULL)),
+    -- The shared PostgreSQL/time representable range the read adapter
+    -- decodes; an out-of-range or infinite stored time would make every
+    -- matching read fail closed on an immutable append-only row.
+    CONSTRAINT web_usage_recorded_at_representable
+        CHECK (
+            recorded_at >= '1970-01-01T00:00:00Z'::timestamptz
+            AND recorded_at <= '9999-12-31T23:59:59.999999Z'::timestamptz
+        ),
+    CONSTRAINT web_usage_token_axes_u64
+        CHECK (
+            (
+                input_tokens IS NULL
+                OR (
+                    input_tokens = trunc(input_tokens)
+                    AND input_tokens BETWEEN 0 AND 18446744073709551615
+                )
+            )
+            AND (
+                output_tokens IS NULL
+                OR (
+                    output_tokens = trunc(output_tokens)
+                    AND output_tokens BETWEEN 0 AND 18446744073709551615
+                )
+            )
+            AND (
+                cache_creation_input_tokens IS NULL
+                OR (
+                    cache_creation_input_tokens = trunc(cache_creation_input_tokens)
+                    AND cache_creation_input_tokens
+                        BETWEEN 0 AND 18446744073709551615
+                )
+            )
+            AND (
+                cache_read_input_tokens IS NULL
+                OR (
+                    cache_read_input_tokens = trunc(cache_read_input_tokens)
+                    AND cache_read_input_tokens
+                        BETWEEN 0 AND 18446744073709551615
+                )
+            )
+        ),
+    CONSTRAINT web_usage_call_identity_fk
+        FOREIGN KEY (model_call_id)
+        REFERENCES model_call_identity (model_call_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CONSTRAINT web_usage_turn_fk
+        FOREIGN KEY (turn_id, session_id)
+        REFERENCES turn_lifecycle (turn_id, session_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT
+        DEFERRABLE INITIALLY DEFERRED
+);
+
+-- Every projected column must correlate with the canonical terminal call
+-- record: the identity foreign key alone accepts any existing model_call_id
+-- regardless of its kind, its owning session, its state, or its recorded
+-- evidence, and the projection is append-only, so a direct insert could
+-- otherwise misclassify, misattribute, or fabricate canonical evidence
+-- permanently -- or occupy the primary key a later terminalization needs.
+-- The identity vocabulary spells the ordinary kind 'ordinary' where the
+-- projection spells it 'model_call'.
+CREATE FUNCTION require_web_usage_source_correlation()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    identity_kind text;
+    projected_identity_kind text;
+    source record;
+BEGIN
+    SELECT call_kind INTO identity_kind
+      FROM model_call_identity
+     WHERE model_call_id = NEW.model_call_id;
+    projected_identity_kind := identity_kind;
+    IF projected_identity_kind = 'ordinary' THEN
+        projected_identity_kind := 'model_call';
+    END IF;
+    IF NEW.call_kind IS DISTINCT FROM projected_identity_kind THEN
+        RAISE EXCEPTION
+            'usage projection call kind % contradicts identity kind %',
+            NEW.call_kind, identity_kind
+            USING ERRCODE = '23514';
+    END IF;
+    IF identity_kind = 'ordinary' THEN
+        SELECT session_id, turn_id, resolved_provider_model_identity_id,
+               bounded_web_usage_profile(credential_reference)
+                   AS credential_profile_label,
+               usage_provenance_kind, usage_input_includes_cache_tokens,
+               usage_input_tokens AS input_tokens,
+               usage_output_tokens AS output_tokens,
+               usage_cache_creation_input_tokens
+                   AS cache_creation_input_tokens,
+               usage_cache_read_input_tokens AS cache_read_input_tokens
+          INTO source
+          FROM model_call
+         WHERE model_call_id = NEW.model_call_id
+           AND state_kind = 'terminal';
+    ELSIF identity_kind = 'approval_judge' THEN
+        SELECT session_id, turn_id, resolved_provider_model_identity_id,
+               bounded_web_usage_profile(credential_reference)
+                   AS credential_profile_label,
+               usage_provenance_kind, usage_input_includes_cache_tokens,
+               input_tokens, output_tokens,
+               cache_creation_input_tokens, cache_read_input_tokens
+          INTO source
+          FROM tool_approval_judge_model_call
+         WHERE model_call_id = NEW.model_call_id
+           AND state_kind = 'terminal';
+    ELSE
+        SELECT session_id, NULL::uuid AS turn_id,
+               resolved_provider_model_identity_id,
+               bounded_web_usage_profile(credential_reference)
+                   AS credential_profile_label,
+               'reported' AS usage_provenance_kind,
+               usage_input_includes_cache_tokens,
+               input_tokens, output_tokens,
+               cache_creation_input_tokens, cache_read_input_tokens
+          INTO source
+          FROM context_compaction_model_call
+         WHERE model_call_id = NEW.model_call_id
+           AND state_kind = 'terminal';
+    END IF;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION
+            'usage projection call % has no terminal source record',
+            NEW.model_call_id
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.session_id IS DISTINCT FROM source.session_id THEN
+        RAISE EXCEPTION
+            'usage projection session % contradicts source session %',
+            NEW.session_id, source.session_id
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.turn_id IS DISTINCT FROM source.turn_id THEN
+        RAISE EXCEPTION
+            'usage projection turn % contradicts source turn %',
+            NEW.turn_id, source.turn_id
+            USING ERRCODE = '23514';
+    END IF;
+    IF NEW.resolved_provider_model_identity_id
+           IS DISTINCT FROM source.resolved_provider_model_identity_id
+       OR NEW.credential_profile_label
+           IS DISTINCT FROM source.credential_profile_label
+       OR NEW.usage_provenance_kind
+           IS DISTINCT FROM source.usage_provenance_kind
+       OR NEW.usage_input_includes_cache_tokens
+           IS DISTINCT FROM source.usage_input_includes_cache_tokens
+       OR NEW.input_tokens IS DISTINCT FROM source.input_tokens
+       OR NEW.output_tokens IS DISTINCT FROM source.output_tokens
+       OR NEW.cache_creation_input_tokens
+           IS DISTINCT FROM source.cache_creation_input_tokens
+       OR NEW.cache_read_input_tokens
+           IS DISTINCT FROM source.cache_read_input_tokens
+    THEN
+        RAISE EXCEPTION
+            'usage projection evidence for call % contradicts its terminal source record',
+            NEW.model_call_id
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+CREATE TRIGGER web_usage_projection_matches_its_source
+BEFORE INSERT ON web_usage_call_projection
+FOR EACH ROW
+EXECUTE FUNCTION require_web_usage_source_correlation();
+
+CREATE INDEX web_usage_by_recorded_call
+    ON web_usage_call_projection (recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_recorded_call
+    ON web_usage_call_projection
+       (session_id, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_kind_recorded_call
+    ON web_usage_call_projection
+       (session_id, call_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_provenance_recorded_call
+    ON web_usage_call_projection
+       (session_id, usage_provenance_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_model_recorded_call
+    ON web_usage_call_projection
+       (session_id, resolved_provider_model_identity_id,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_recorded_call
+    ON web_usage_call_projection
+       (turn_id, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_kind_recorded_call
+    ON web_usage_call_projection
+       (turn_id, call_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_model_recorded_call
+    ON web_usage_call_projection
+       (resolved_provider_model_identity_id, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_model_provenance_recorded_call
+    ON web_usage_call_projection
+       (resolved_provider_model_identity_id, usage_provenance_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_model_kind_recorded_call
+    ON web_usage_call_projection
+       (resolved_provider_model_identity_id, call_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_provenance_recorded_call
+    ON web_usage_call_projection
+       (usage_provenance_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_kind_recorded_call
+    ON web_usage_call_projection
+       (call_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_provenance_kind_recorded_call
+    ON web_usage_call_projection
+       (usage_provenance_kind, call_kind, recorded_at DESC, model_call_id DESC);
+-- Every allowed exact-selection conjunction gets an ordered path whose leading
+-- columns are exactly the selected dimensions. Pairwise prefixes are not
+-- enough: each pair can be common while a three- or four-way intersection is
+-- rare or empty, which would force a large pairwise range to be scanned and
+-- filtered before the bounded detail or aggregate limit applies.
+CREATE INDEX web_usage_by_session_model_provenance_recorded_call
+    ON web_usage_call_projection
+       (session_id, resolved_provider_model_identity_id, usage_provenance_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_model_kind_recorded_call
+    ON web_usage_call_projection
+       (session_id, resolved_provider_model_identity_id, call_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_provenance_kind_recorded_call
+    ON web_usage_call_projection
+       (session_id, usage_provenance_kind, call_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_session_model_provenance_kind_recorded_call
+    ON web_usage_call_projection
+       (session_id, resolved_provider_model_identity_id, usage_provenance_kind,
+        call_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_model_recorded_call
+    ON web_usage_call_projection
+       (turn_id, resolved_provider_model_identity_id,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_provenance_recorded_call
+    ON web_usage_call_projection
+       (turn_id, usage_provenance_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_model_provenance_recorded_call
+    ON web_usage_call_projection
+       (turn_id, resolved_provider_model_identity_id, usage_provenance_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_model_kind_recorded_call
+    ON web_usage_call_projection
+       (turn_id, resolved_provider_model_identity_id, call_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_provenance_kind_recorded_call
+    ON web_usage_call_projection
+       (turn_id, usage_provenance_kind, call_kind,
+        recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_turn_model_provenance_kind_recorded_call
+    ON web_usage_call_projection
+       (turn_id, resolved_provider_model_identity_id, usage_provenance_kind,
+        call_kind, recorded_at DESC, model_call_id DESC);
+CREATE INDEX web_usage_by_model_provenance_kind_recorded_call
+    ON web_usage_call_projection
+       (resolved_provider_model_identity_id, usage_provenance_kind, call_kind,
+        recorded_at DESC, model_call_id DESC);
+
+CREATE FUNCTION project_terminal_model_call_usage()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO web_usage_call_projection (
+        model_call_id, call_kind, session_id, turn_id,
+        resolved_provider_model_identity_id, credential_profile_label,
+        usage_provenance_kind, usage_input_includes_cache_tokens,
+        input_tokens, output_tokens,
+        cache_creation_input_tokens, cache_read_input_tokens
+    ) VALUES (
+        NEW.model_call_id, 'model_call', NEW.session_id, NEW.turn_id,
+        NEW.resolved_provider_model_identity_id,
+        bounded_web_usage_profile(NEW.credential_reference),
+        NEW.usage_provenance_kind, NEW.usage_input_includes_cache_tokens,
+        NEW.usage_input_tokens, NEW.usage_output_tokens,
+        NEW.usage_cache_creation_input_tokens,
+        NEW.usage_cache_read_input_tokens
+    );
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION project_terminal_approval_judge_usage()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO web_usage_call_projection (
+        model_call_id, call_kind, session_id, turn_id,
+        resolved_provider_model_identity_id, credential_profile_label,
+        usage_provenance_kind, usage_input_includes_cache_tokens,
+        input_tokens, output_tokens,
+        cache_creation_input_tokens, cache_read_input_tokens
+    ) VALUES (
+        NEW.model_call_id, 'approval_judge', NEW.session_id, NEW.turn_id,
+        NEW.resolved_provider_model_identity_id,
+        bounded_web_usage_profile(NEW.credential_reference),
+        NEW.usage_provenance_kind, NEW.usage_input_includes_cache_tokens,
+        NEW.input_tokens, NEW.output_tokens,
+        NEW.cache_creation_input_tokens, NEW.cache_read_input_tokens
+    );
+    RETURN NEW;
+END;
+$$;
+
+CREATE FUNCTION project_terminal_context_compaction_usage()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    INSERT INTO web_usage_call_projection (
+        model_call_id, call_kind, session_id, turn_id,
+        resolved_provider_model_identity_id, credential_profile_label,
+        usage_provenance_kind, usage_input_includes_cache_tokens,
+        input_tokens, output_tokens,
+        cache_creation_input_tokens, cache_read_input_tokens
+    ) VALUES (
+        NEW.model_call_id, 'context_compaction', NEW.session_id, NULL,
+        NEW.resolved_provider_model_identity_id,
+        bounded_web_usage_profile(NEW.credential_reference),
+        'reported', NEW.usage_input_includes_cache_tokens,
+        NEW.input_tokens, NEW.output_tokens,
+        NEW.cache_creation_input_tokens, NEW.cache_read_input_tokens
+    );
+    RETURN NEW;
+END;
+$$;
+
+-- Existing terminal rows are projected at each backfill statement's exact
+-- timestamp. Signalbox is pre-alpha, so no deployed historical time is
+-- fabricated; all subsequent rows record their terminal statement time.
+INSERT INTO web_usage_call_projection (
+    model_call_id, call_kind, session_id, turn_id,
+    resolved_provider_model_identity_id, credential_profile_label,
+    usage_provenance_kind, usage_input_includes_cache_tokens,
+    input_tokens, output_tokens,
+    cache_creation_input_tokens, cache_read_input_tokens
+)
+SELECT model_call_id, 'model_call', session_id, turn_id,
+       resolved_provider_model_identity_id,
+       bounded_web_usage_profile(credential_reference),
+       usage_provenance_kind, usage_input_includes_cache_tokens,
+       usage_input_tokens, usage_output_tokens,
+       usage_cache_creation_input_tokens, usage_cache_read_input_tokens
+  FROM model_call
+ WHERE state_kind = 'terminal';
+
+INSERT INTO web_usage_call_projection (
+    model_call_id, call_kind, session_id, turn_id,
+    resolved_provider_model_identity_id, credential_profile_label,
+    usage_provenance_kind, usage_input_includes_cache_tokens,
+    input_tokens, output_tokens,
+    cache_creation_input_tokens, cache_read_input_tokens
+)
+SELECT model_call_id, 'approval_judge', session_id, turn_id,
+       resolved_provider_model_identity_id,
+       bounded_web_usage_profile(credential_reference),
+       usage_provenance_kind, usage_input_includes_cache_tokens,
+       input_tokens, output_tokens,
+       cache_creation_input_tokens, cache_read_input_tokens
+  FROM tool_approval_judge_model_call
+ WHERE state_kind = 'terminal';
+
+INSERT INTO web_usage_call_projection (
+    model_call_id, call_kind, session_id, turn_id,
+    resolved_provider_model_identity_id, credential_profile_label,
+    usage_provenance_kind, usage_input_includes_cache_tokens,
+    input_tokens, output_tokens,
+    cache_creation_input_tokens, cache_read_input_tokens
+)
+SELECT model_call_id, 'context_compaction', session_id, NULL,
+       resolved_provider_model_identity_id,
+       bounded_web_usage_profile(credential_reference),
+       'reported', usage_input_includes_cache_tokens, input_tokens, output_tokens,
+       cache_creation_input_tokens, cache_read_input_tokens
+  FROM context_compaction_model_call
+ WHERE state_kind = 'terminal';
+
+CREATE TRIGGER model_call_projects_terminal_usage
+AFTER INSERT OR UPDATE ON model_call
+FOR EACH ROW
+WHEN (NEW.state_kind = 'terminal')
+EXECUTE FUNCTION project_terminal_model_call_usage();
+
+CREATE TRIGGER approval_judge_projects_terminal_usage
+AFTER INSERT OR UPDATE ON tool_approval_judge_model_call
+FOR EACH ROW
+WHEN (NEW.state_kind = 'terminal')
+EXECUTE FUNCTION project_terminal_approval_judge_usage();
+
+CREATE TRIGGER context_compaction_projects_terminal_usage
+AFTER INSERT OR UPDATE ON context_compaction_model_call
+FOR EACH ROW
+WHEN (NEW.state_kind = 'terminal')
+EXECUTE FUNCTION project_terminal_context_compaction_usage();
+
+CREATE TRIGGER web_usage_call_projection_is_append_only
+BEFORE UPDATE OR DELETE ON web_usage_call_projection
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE TRIGGER web_usage_oversized_profile_identity_is_append_only
+BEFORE UPDATE OR DELETE ON web_usage_oversized_profile_identity
+FOR EACH ROW
+EXECUTE FUNCTION reject_immutable_record_change();
+
+CREATE FUNCTION reject_web_usage_projection_truncate()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    RAISE EXCEPTION 'web usage projection cannot be truncated'
+        USING ERRCODE = '23514';
+END;
+$$;
+
+CREATE TRIGGER web_usage_call_projection_cannot_be_truncated
+BEFORE TRUNCATE ON web_usage_call_projection
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_web_usage_projection_truncate();
+
+CREATE TRIGGER web_usage_oversized_profile_identity_cannot_be_truncated
+BEFORE TRUNCATE ON web_usage_oversized_profile_identity
+FOR EACH STATEMENT
+EXECUTE FUNCTION reject_web_usage_projection_truncate();

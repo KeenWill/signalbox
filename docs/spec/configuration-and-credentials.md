@@ -12,7 +12,9 @@ capabilities and production adapter are verified against this PR
 verified against this PR (`agent/web-blob-delivery`). The fleet-attention
 snapshot and monitor stream are verified against this PR
 (`agent/web-attention-projections`). The bounded lexical-search route and
-generated DTOs are verified against this PR (`agent/web-search-usage`).
+generated DTOs are verified against this PR (`agent/web-search-usage`). The
+dedicated browser usage/cost routes and generated DTOs are verified against this
+PR (`agent/web-usage-http`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -211,23 +213,26 @@ bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
 listener therefore rejects non-loopback binds; any future remote deployment
 requires an explicit authentication and transport-security design first.
 Unauthenticated session reads — the session descriptor, the session timeline,
-the bounded lexical search, the operator attention snapshot and its follow
-stream, and the blob descriptor and content routes — additionally require a
-loopback `Host` authority: `localhost` or an IPv4 or IPv6 loopback address, with
-an optional port. Another authority receives a structured `403 Forbidden`
-transport error with code `non_loopback_host_rejected` before session data,
-search results, blob metadata, or blob bytes are read, and before a descriptor
-read may start image derivation work.
+the bounded lexical search, the bounded usage summary and usage-call detail, the
+operator attention snapshot and its follow stream, and the blob descriptor and
+content routes — additionally require a loopback `Host` authority: `localhost`
+or an IPv4 or IPv6 loopback address, with an optional port. Another authority
+receives a structured `403 Forbidden` transport error with code
+`non_loopback_host_rejected` before session data, search results, usage and cost
+results, blob metadata, or blob bytes are read, and before a descriptor read may
+start image derivation work.
 
 `GET /api/bootstrap` describes the production browser contract. It returns the
 exact contract family `signalbox.web-http`, version `2`, the `bounded_json`,
 `same_origin_json_mutations`, `ndjson_streaming`, `import_discovery`,
 `imported_continuations`, and `bounded_session_timeline` capabilities, the
 `immutable_blob_content`, `blob_derivations`, and `image_derivatives`
-capabilities, the `bounded_lexical_search` capability, the effective 65,536-byte
-JSON-body and NDJSON-item hard ceilings, the 256-item and 65,536-projected-byte
-timeline ceilings, and the 512-byte query, 100-item page, and 512-byte snippet
-search ceilings. Version two adds the bounded import DTOs and routes owned by
+capabilities, the `bounded_lexical_search` and `bounded_usage_cost`
+capabilities, the effective 65,536-byte JSON-body and NDJSON-item hard ceilings,
+the 256-item and 65,536-projected-byte timeline ceilings, and the 512-byte
+query, 100-item page, and 512-byte snippet search ceilings. It also advertises
+the 256-group usage summary and 100-call usage-detail ceilings. Version two adds
+the bounded import DTOs and routes owned by
 [conversation import](conversation-import.md#bounded-browser-discovery-and-continuation).
 The generated browser decoder rejects an unknown field, wrong shape, different
 family, or different version rather than interpreting it as the local process
@@ -293,6 +298,12 @@ when the response body polls it, carries one trailing newline, and is at most
 own bounded channel supplies backpressure; dropping the browser response drops
 that stream and closes its receiver, cancelling a blocked producer. Static files
 use ordinary HTTP bodies rather than JSON wrapping.
+
+### Bounded browser usage and cost reads
+
+The bounded `/api/usage/summary` and newest-first `/api/usage/calls` routes,
+their filters, pagination, compatibility grouping, and read-time configured-cost
+semantics are owned by [Usage evidence](usage-evidence.md).
 
 `deterministic_test_router` supplies a database-free page plus bounded read,
 mutation, and two-item stream routes. It composes the same bootstrap, mutation
