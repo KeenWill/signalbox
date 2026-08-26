@@ -1,25 +1,7 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    bounded_lexical_search: true,
-    bounded_session_timeline: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: {
-    max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 262_144,
-    max_search_query_bytes: 512,
-    max_search_page_items: 100,
-    max_search_snippet_bytes: 512,
-    max_timeline_window_bytes: 524_288,
-    max_timeline_window_items: 256,
-  },
-} as const
 const firstPage = {
   results: [
     {
@@ -380,13 +362,16 @@ test('restores focus to validation when history restores repeated session parame
   await expect(page.getByRole('alert')).toBeFocused()
 })
 
-test('does not search without the bounded JSON capability', async ({ page }) => {
+// The generated bootstrap decoder requires `bounded_json === true`, so a contract that withholds
+// it is rejected before any surface reads it. The optional bounded-lexical-search capability is
+// the admitted contract that actually defers Search.
+test('does not search without the bounded lexical search capability', async ({ page }) => {
   let searchRequests = 0
   await page.route('**/api/bootstrap', (route) =>
     route.fulfill({
       json: {
         ...bootstrapFixture,
-        capabilities: { ...bootstrapFixture.capabilities, bounded_json: false },
+        capabilities: { ...bootstrapFixture.capabilities, bounded_lexical_search: false },
       },
     }),
   )
@@ -470,8 +455,9 @@ test('reports an unreachable search transport separately from contract decoding'
   await page.route('**/api/search?**', (route) => route.abort('connectionrefused'))
   await page.goto('/search?q=release')
 
+  await expect(page.getByRole('alert')).toContainText('Search could not be read')
   await expect(page.getByRole('alert')).toContainText(
-    'The search request could not reach Signalbox.',
+    'The Signalbox daemon could not be reached.',
   )
   expect(problems.pageErrors).toEqual([])
 })
