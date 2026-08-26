@@ -2831,7 +2831,7 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
     sqlx::query(
         "INSERT INTO durable_command
             (command_id, command_kind, storage_version, claimed_at)
-         VALUES ($1, 'submit_input', 4, transaction_timestamp())",
+         VALUES ($1, 'submit_input', 3, transaction_timestamp())",
     )
     .bind(Uuid::from_u128(0x466))
     .execute(&mut *cross_wired)
@@ -2851,7 +2851,7 @@ async fn occupied_slot_schema_constraints_and_checked_decode_fail_closed()
              result_unknown_alias_id, result_selected_defaults_version,
              result_last_position)
          VALUES
-            ($1, 'submit_input', 4, $2,
+            ($1, 'submit_input', 3, $2,
              'user', NULL, NULL,
              'next_safe_point', $3, NULL, NULL, NULL, NULL, NULL,
              'applied', NULL, $2, $4, NULL, $3,

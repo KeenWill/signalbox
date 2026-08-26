@@ -387,7 +387,12 @@ impl ToolLoopFixture {
     ) -> (
         FixtureExecution<Catalog, Executor>,
         Arc<ScriptedModel<ModelCallId>>,
-    ) {
+    )
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
         let runtime = Arc::new(ScriptedModel::<ModelCallId>::following(scripts));
         let provider = RuntimeModelCallProvider::new(
             RecordingScriptedModel {
@@ -405,7 +410,12 @@ impl ToolLoopFixture {
                 InProcessAttemptDispatchGate::default(),
                 provider,
             )
-            .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor),
+            .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor)
+            .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+                self.pool.clone(),
+                None,
+                Vec::new(),
+            )),
             runtime,
         )
     }
@@ -448,6 +458,11 @@ impl ToolLoopFixture {
                 provider,
             )
             .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor)
+            .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+                self.pool.clone(),
+                None,
+                Vec::new(),
+            ))
             .with_approval_judge(judge, None, configuration),
             runtime,
             judge_runtime,
@@ -2830,10 +2845,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
         "max_bytes": 131072
     })
     .to_string();
-    let expected_user_content = format!(
-        r#"[{{"type":"text","text":{}}}]"#,
-        serde_json::to_string(FIXTURE_USER_CONTENT)?
-    );
+    let expected_user_content = r#"[{"type":"text","text":"offline tool-loop request"}]"#;
     let expected_tool_use_content = format!(
         "{}\n{arguments}",
         signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME

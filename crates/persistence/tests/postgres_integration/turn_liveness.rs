@@ -184,11 +184,11 @@ async fn a_quiescent_active_turn_terminalizes_as_failed() -> Result<(), Box<dyn 
     Ok(())
 }
 
-/// A checkpointed provider call is work in flight, so its turn never reaches
-/// the inventory however long it stays outstanding.
+/// A checkpointed provider call is excluded from the quiescent inventory but
+/// included in the outer slot-held inventory under the same progress evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn an_outstanding_provider_call_keeps_its_turn_out_of_the_inventory()
+async fn an_outstanding_provider_call_moves_from_quiescent_to_slot_held_inventory()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x12_000).await?;
@@ -208,6 +208,10 @@ async fn an_outstanding_provider_call_keeps_its_turn_out_of_the_inventory()
         repository.quiescent_active_turns(None).await?.candidates(),
         []
     );
+    let slot_held = repository.slot_held_active_turns(None).await?;
+    assert_eq!(slot_held.candidates().len(), 1);
+    assert_eq!(slot_held.candidates()[0].session(), fixture.session);
+    assert_eq!(slot_held.candidates()[0].turn(), fixture.turn);
 
     pool.close().await;
     drop(container);

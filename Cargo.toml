@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["crates/file-media-linux-sandbox"]
 members = [
     "apps/client",
     "apps/signalbox-runner",
@@ -14,12 +15,19 @@ members = [
     "crates/conversation-import-json",
     "crates/domain",
     "crates/expect-table",
+    "crates/file-media-adapters-text",
+    "crates/file-media-runtime",
+    "crates/file-media-adapter-office",
+    "crates/file-media-adapter-pdf",
+    "crates/file-media-provider-runtime",
+    "crates/file-media-processor-runtime",
     "crates/model-runtime",
     "crates/model-runtime-anthropic",
     "crates/model-runtime-claude-cli",
     "crates/model-runtime-codex-cli",
     "crates/model-runtime-openai",
     "crates/model-provider-runtime",
+    "crates/model-reference-catalog",
     "crates/persistence",
     "crates/process-protocol",
     "crates/program-runtime",
@@ -30,6 +38,7 @@ members = [
     "crates/tools-basic",
     "crates/tools-code-host",
     "crates/tools-exec",
+    "crates/tools-file-media",
     "crates/tools-conversations",
     "crates/tools-github",
     "crates/tools-git",

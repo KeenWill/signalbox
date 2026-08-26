@@ -307,6 +307,11 @@ impl Error for ClientError {
 const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
     match cause {
         FailedModelCallCause::CredentialRejected => "the provider rejected the credential",
+        FailedModelCallCause::AttachmentTooLarge => {
+            "the attachment verification budget was exceeded"
+        }
+        FailedModelCallCause::AttachmentMissing => "a required attachment is missing",
+        FailedModelCallCause::AttachmentCorrupt => "a required attachment is corrupt",
         FailedModelCallCause::PermissionDenied => "the credential lacks permission",
         FailedModelCallCause::InvalidRequest => "the provider rejected the request as invalid",
         FailedModelCallCause::TargetNotFound => "the requested model or resource was not found",
@@ -393,6 +398,9 @@ impl fmt::Display for RejectionDisplay {
                 "unsupported_service_tier selection={selection_id} service_tier={}",
                 service_tier_name(requested)
             ),
+            RejectionDetail::SessionNotFound { session_id } => {
+                write!(formatter, "session_not_found session={session_id}")
+            }
             RejectionDetail::AttachmentBlobNotFound { digest } => {
                 write!(formatter, "attachment_blob_not_found digest={digest}")
             }
@@ -401,9 +409,6 @@ impl fmt::Display for RejectionDisplay {
                 "attachment_byte_budget_exceeded maximum_bytes={}",
                 maximum_bytes.value()
             ),
-            RejectionDetail::SessionNotFound { session_id } => {
-                write!(formatter, "session_not_found session={session_id}")
-            }
             RejectionDetail::SessionPlacementCurrentVersionMismatch {
                 session_id,
                 expected_placement_version,
@@ -435,6 +440,10 @@ impl fmt::Display for RejectionDisplay {
             } => write!(
                 formatter,
                 "active_turn_present session={session_id} active_turn={active_turn_id}"
+            ),
+            RejectionDetail::CommissionTargetBusy { session_id } => write!(
+                formatter,
+                "commission_target_busy live_session={session_id}"
             ),
             RejectionDetail::ActiveTurnMismatch {
                 session_id,
@@ -510,6 +519,18 @@ impl fmt::Display for RejectionDisplay {
             } => write!(
                 formatter,
                 "tool_request_not_in_session session={session_id} request={tool_request_id}"
+            ),
+            RejectionDetail::ToolRequestNotDelegateDenied { tool_request_id } => write!(
+                formatter,
+                "tool_request_not_delegate_denied request={tool_request_id}"
+            ),
+            RejectionDetail::ToolRequestNotTerminallyDenied { tool_request_id } => write!(
+                formatter,
+                "tool_request_not_terminally_denied request={tool_request_id}"
+            ),
+            RejectionDetail::ToolDenialAlreadyOverridden { tool_request_id } => write!(
+                formatter,
+                "tool_denial_already_overridden request={tool_request_id}"
             ),
             RejectionDetail::DelegationRequestNotInTurn {
                 session_id,
@@ -806,8 +827,8 @@ const fn conversation_import_rejection_class_name(
 mod tests {
     use expect_test::expect;
     use signalbox_process_protocol::{
-        CanonicalBlobDigest, CanonicalU64, CanonicalUuid, ConversationImportRejectionClass,
-        ErrorCode, ErrorDetail, FailedModelCallCause, RejectionDetail,
+        CanonicalU64, CanonicalUuid, ConversationImportRejectionClass, ErrorCode, ErrorDetail,
+        FailedModelCallCause, RejectionDetail,
     };
     use uuid::Uuid;
 
@@ -852,33 +873,6 @@ mod tests {
         expect![[r#"
             invalid_request: conversation import was rejected (conversation_import_source_too_large limit_bytes=8 declared_size_bytes=7 actual_size_bytes=9)"#]]
         .assert_eq(&error.to_string());
-    }
-
-    #[test]
-    fn attachment_admission_evidence_names_only_digest_or_bound() {
-        let digest = CanonicalBlobDigest::from_bytes([0xab; 32]);
-        let missing = ClientError::remote(
-            ErrorCode::Rejected,
-            "attachment blob was not found".to_owned(),
-            ErrorDetail::rejected(RejectionDetail::AttachmentBlobNotFound { digest }),
-        );
-        assert_eq!(
-            missing.to_string(),
-            format!(
-                "rejected: attachment blob was not found \
-                 (attachment_blob_not_found digest={digest})"
-            )
-        );
-        let over_limit = ClientError::remote(
-            ErrorCode::Rejected,
-            "attachment byte budget was exceeded".to_owned(),
-            ErrorDetail::rejected(RejectionDetail::AttachmentByteBudgetExceeded {
-                maximum_bytes: CanonicalU64::new(1024),
-            }),
-        );
-        expect![[r#"
-            rejected: attachment byte budget was exceeded (attachment_byte_budget_exceeded maximum_bytes=1024)"#]]
-        .assert_eq(&over_limit.to_string());
     }
 
     #[test]

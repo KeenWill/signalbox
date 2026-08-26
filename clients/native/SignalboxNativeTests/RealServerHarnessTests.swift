@@ -300,7 +300,8 @@ private func requireImportedConversationID(
     .importedConversationEnd, .modelAliasesStart, .modelAliasSummary,
     .modelAliasesEnd, .transcriptSnapshotStart, .transcriptTurn,
     .transcriptModelCallUsage, .transcriptModelCallsEnd, .transcriptEntry,
-    .transcriptTextEntry, .transcriptContent, .transcriptSnapshotEnd,
+    .transcriptUserEntry, .transcriptTextEntry, .transcriptContent,
+    .transcriptSnapshotEnd,
     .sessionEvent, .providerTextDelta, .protocolError, .unknown:
     throw RealServerFixtureError.unexpectedMessage
   }
