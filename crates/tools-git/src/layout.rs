@@ -221,93 +221,134 @@ fn reject_administrative_symlinks_for_format(
     git_directory: &fs::File,
     object_format: ObjectFormat,
 ) -> Result<(), LocalGitToolsConstructionError> {
+    reject_administrative_symlinks_for_format_with_observer(git_directory, object_format, |_| {})
+}
+
+#[cfg(test)]
+pub(super) fn reject_administrative_symlinks_with_test_observer<Observer>(
+    git_directory: &OwnedFd,
+    object_format: ObjectFormat,
+    observer: Observer,
+) -> Result<(), LocalGitToolsConstructionError>
+where
+    Observer: FnMut(usize),
+{
+    let git_directory =
+        fs::File::from(dup(git_directory).map_err(|_| LocalGitToolsConstructionError::Repository)?);
+    reject_administrative_symlinks_for_format_with_observer(&git_directory, object_format, observer)
+}
+
+fn reject_administrative_symlinks_for_format_with_observer<Observer>(
+    git_directory: &fs::File,
+    object_format: ObjectFormat,
+    mut observer: Observer,
+) -> Result<(), LocalGitToolsConstructionError>
+where
+    Observer: FnMut(usize),
+{
     let root = dup(git_directory).map_err(|_| LocalGitToolsConstructionError::Repository)?;
-    let mut pending = vec![(root, AdministrativeDirectoryKind::Root)];
+    let root_entries =
+        Dir::read_from(&root).map_err(|_| LocalGitToolsConstructionError::Repository)?;
+    let mut pending = vec![(root, root_entries, AdministrativeDirectoryKind::Root)];
     let mut inspected = 0_usize;
-    while let Some((current, directory_kind)) = pending.pop() {
-        let mut entries =
-            Dir::read_from(&current).map_err(|_| LocalGitToolsConstructionError::Repository)?;
-        while let Some(entry) = entries.read() {
-            let entry = entry.map_err(|_| LocalGitToolsConstructionError::Repository)?;
-            let name = OsStr::from_bytes(entry.file_name().to_bytes());
-            if name == OsStr::new(".") || name == OsStr::new("..") {
-                continue;
-            }
-            inspected = inspected.saturating_add(1);
-            if inspected > MAX_REPOSITORY_INSPECTIONS {
-                return Err(LocalGitToolsConstructionError::Repository);
-            }
-            if directory_kind == AdministrativeDirectoryKind::References && name.to_str().is_none()
-            {
-                return Err(LocalGitToolsConstructionError::Repository);
-            }
-            match openat(
-                &current,
-                name,
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            ) {
-                Ok(directory) => {
-                    let child_kind = match (directory_kind, name) {
-                        (AdministrativeDirectoryKind::Root, name) if name == OsStr::new("refs") => {
-                            AdministrativeDirectoryKind::References
-                        }
-                        (AdministrativeDirectoryKind::References, _) => {
-                            AdministrativeDirectoryKind::References
-                        }
-                        _ => AdministrativeDirectoryKind::Other,
-                    };
-                    pending.push((directory, child_kind));
+    observer(pending.len());
+    while let Some((current, entries, directory_kind)) = pending.last_mut() {
+        let directory_kind = *directory_kind;
+        match entries.read() {
+            Some(entry) => {
+                let entry = entry.map_err(|_| LocalGitToolsConstructionError::Repository)?;
+                let name = OsStr::from_bytes(entry.file_name().to_bytes());
+                if name == OsStr::new(".") || name == OsStr::new("..") {
                     continue;
                 }
-                Err(error)
-                    if error == rustix::io::Errno::NOTDIR
-                        && directory_kind == AdministrativeDirectoryKind::Root
-                        && name == OsStr::new("refs") =>
+                inspected = inspected.saturating_add(1);
+                if inspected > MAX_REPOSITORY_INSPECTIONS {
+                    return Err(LocalGitToolsConstructionError::Repository);
+                }
+                if directory_kind == AdministrativeDirectoryKind::References
+                    && name.to_str().is_none()
                 {
                     return Err(LocalGitToolsConstructionError::Repository);
                 }
-                Err(error) if error == rustix::io::Errno::NOTDIR => {}
-                Err(_) => return Err(LocalGitToolsConstructionError::Repository),
-            }
-            let descriptor = openat(
-                &current,
-                name,
-                OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )
-            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-            let mut file = fs::File::from(descriptor);
-            let metadata = file
-                .metadata()
+                match openat(
+                    &current,
+                    name,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                ) {
+                    Ok(directory) => {
+                        let child_kind = match (directory_kind, name) {
+                            (AdministrativeDirectoryKind::Root, name)
+                                if name == OsStr::new("refs") =>
+                            {
+                                AdministrativeDirectoryKind::References
+                            }
+                            (AdministrativeDirectoryKind::References, _) => {
+                                AdministrativeDirectoryKind::References
+                            }
+                            _ => AdministrativeDirectoryKind::Other,
+                        };
+                        let entries = Dir::read_from(&directory)
+                            .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+                        pending.push((directory, entries, child_kind));
+                        observer(pending.len());
+                        continue;
+                    }
+                    Err(error)
+                        if error == rustix::io::Errno::NOTDIR
+                            && directory_kind == AdministrativeDirectoryKind::Root
+                            && name == OsStr::new("refs") =>
+                    {
+                        return Err(LocalGitToolsConstructionError::Repository);
+                    }
+                    Err(error) if error == rustix::io::Errno::NOTDIR => {}
+                    Err(_) => return Err(LocalGitToolsConstructionError::Repository),
+                }
+                let descriptor = openat(
+                    &current,
+                    name,
+                    OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )
                 .map_err(|_| LocalGitToolsConstructionError::Repository)?;
-            if !metadata.is_file() {
-                return Err(LocalGitToolsConstructionError::Repository);
-            }
-            let limit = match (directory_kind, name) {
-                (AdministrativeDirectoryKind::Root, name) if name == OsStr::new("HEAD") => {
-                    Some(MAX_REVISION_BYTES)
+                let mut file = fs::File::from(descriptor);
+                let metadata = file
+                    .metadata()
+                    .map_err(|_| LocalGitToolsConstructionError::Repository)?;
+                if !metadata.is_file() {
+                    return Err(LocalGitToolsConstructionError::Repository);
                 }
-                (AdministrativeDirectoryKind::References, _) => Some(MAX_REVISION_BYTES),
-                (AdministrativeDirectoryKind::Root, name) if name == OsStr::new("packed-refs") => {
-                    Some(MAX_PACKED_REFS_BYTES)
+                let limit = match (directory_kind, name) {
+                    (AdministrativeDirectoryKind::Root, name) if name == OsStr::new("HEAD") => {
+                        Some(MAX_REVISION_BYTES)
+                    }
+                    (AdministrativeDirectoryKind::References, _) => Some(MAX_REVISION_BYTES),
+                    (AdministrativeDirectoryKind::Root, name)
+                        if name == OsStr::new("packed-refs") =>
+                    {
+                        Some(MAX_PACKED_REFS_BYTES)
+                    }
+                    (AdministrativeDirectoryKind::Root, name) if name == OsStr::new("shallow") => {
+                        Some(MAX_SHALLOW_BYTES)
+                    }
+                    _ => None,
+                };
+                if limit.is_some_and(|limit| metadata.len() > limit as u64) {
+                    return Err(LocalGitToolsConstructionError::Repository);
                 }
-                (AdministrativeDirectoryKind::Root, name) if name == OsStr::new("shallow") => {
-                    Some(MAX_SHALLOW_BYTES)
+                if directory_kind == AdministrativeDirectoryKind::Root
+                    && name == OsStr::new("shallow")
+                {
+                    validate_shallow_file_at(current, name, &mut file, object_format)?;
                 }
-                _ => None,
-            };
-            if limit.is_some_and(|limit| metadata.len() > limit as u64) {
-                return Err(LocalGitToolsConstructionError::Repository);
+                if directory_kind == AdministrativeDirectoryKind::Root
+                    && name == OsStr::new("packed-refs")
+                {
+                    validate_packed_reference_name_encoding(&mut file)?;
+                }
             }
-            if directory_kind == AdministrativeDirectoryKind::Root && name == OsStr::new("shallow")
-            {
-                validate_shallow_file_at(&current, name, &mut file, object_format)?;
-            }
-            if directory_kind == AdministrativeDirectoryKind::Root
-                && name == OsStr::new("packed-refs")
-            {
-                validate_packed_reference_name_encoding(&mut file)?;
+            None => {
+                pending.pop();
             }
         }
     }

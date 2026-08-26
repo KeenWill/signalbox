@@ -24,8 +24,8 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    MAX_INPUT_CONTENT_BYTES, ObservedSessionDefaults, SubmitInputReceipt,
-    child_lifecycle_terminalization, command_identity,
+    ClientDeploymentLimits, MAX_INPUT_CONTENT_FRAME_BYTES, ObservedSessionDefaults,
+    SubmitInputReceipt, child_lifecycle_terminalization, command_identity,
     connection::ProcessClient,
     error::ClientError,
     presentation::{ChatTurnStatus, Output},
@@ -34,22 +34,75 @@ use crate::{
     transcript::SnapshotIdentitySet,
 };
 
-// numeric-bound: ceiling - protects terminal input buffering from oversized commands
-const MAX_CHAT_LINE_BYTES: usize = MAX_INPUT_CONTENT_BYTES + ":steer ".len();
-// numeric-bound: tunable - controls terminal stdin backpressure
-const TERMINAL_INPUT_CHANNEL_CAPACITY: usize = 1;
+// numeric-bound: guard - one unterminated terminal line exhausting input memory
+const MAX_CHAT_LINE_BYTES: usize = MAX_INPUT_CONTENT_FRAME_BYTES + ":steer ".len();
 
 const COMMANDS: &str = ":stop TEXT | :steer TEXT | :approve ID | :deny ID REASON | \
     :transcript | :model ALIAS-UUID | :quit";
 
 pub(crate) struct TerminalInput {
-    receiver: mpsc::Receiver<io::Result<Vec<u8>>>,
+    receiver: TerminalInputReceiver,
     chunk: Vec<u8>,
     consumed: usize,
 }
 
-pub(crate) fn terminal_input() -> io::Result<TerminalInput> {
-    let (sender, receiver) = mpsc::channel(TERMINAL_INPUT_CHANNEL_CAPACITY);
+enum TerminalInputSender {
+    Bounded(mpsc::Sender<io::Result<Vec<u8>>>),
+    Unbounded(mpsc::UnboundedSender<io::Result<Vec<u8>>>),
+}
+
+impl TerminalInputSender {
+    fn send(&self, value: io::Result<Vec<u8>>) -> Result<(), ()> {
+        match self {
+            Self::Bounded(sender) => sender.blocking_send(value).map_err(|_| ()),
+            Self::Unbounded(sender) => sender.send(value).map_err(|_| ()),
+        }
+    }
+}
+
+enum TerminalInputReceiver {
+    Bounded(mpsc::Receiver<io::Result<Vec<u8>>>),
+    Unbounded(mpsc::UnboundedReceiver<io::Result<Vec<u8>>>),
+}
+
+impl TerminalInputReceiver {
+    fn poll_recv(&mut self, context: &mut Context<'_>) -> Poll<Option<io::Result<Vec<u8>>>> {
+        match self {
+            Self::Bounded(receiver) => receiver.poll_recv(context),
+            Self::Unbounded(receiver) => receiver.poll_recv(context),
+        }
+    }
+}
+
+pub(crate) fn terminal_input(channel_capacity: Option<usize>) -> io::Result<TerminalInput> {
+    let (sender, receiver) = match channel_capacity {
+        Some(0) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "terminal input channel capacity must be positive or unbounded",
+            ));
+        }
+        Some(capacity) => {
+            if capacity > tokio::sync::Semaphore::MAX_PERMITS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "terminal input channel capacity is not representable",
+                ));
+            }
+            let (sender, receiver) = mpsc::channel(capacity);
+            (
+                TerminalInputSender::Bounded(sender),
+                TerminalInputReceiver::Bounded(receiver),
+            )
+        }
+        None => {
+            let (sender, receiver) = mpsc::unbounded_channel();
+            (
+                TerminalInputSender::Unbounded(sender),
+                TerminalInputReceiver::Unbounded(receiver),
+            )
+        }
+    };
     std::thread::Builder::new()
         .name(String::from("signalbox-chat-stdin"))
         .spawn(move || read_terminal_input(sender))?;
@@ -61,7 +114,7 @@ pub(crate) fn terminal_input() -> io::Result<TerminalInput> {
     })
 }
 
-fn read_terminal_input(sender: mpsc::Sender<io::Result<Vec<u8>>>) {
+fn read_terminal_input(sender: TerminalInputSender) {
     let stdin = io::stdin();
     let mut input = stdin.lock();
     loop {
@@ -69,7 +122,7 @@ fn read_terminal_input(sender: mpsc::Sender<io::Result<Vec<u8>>>) {
             Ok(available) => available,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => {
-                let _ = sender.blocking_send(Err(error));
+                let _ = sender.send(Err(error));
                 return;
             }
         };
@@ -79,7 +132,7 @@ fn read_terminal_input(sender: mpsc::Sender<io::Result<Vec<u8>>>) {
         let consumed = available.len();
         let chunk = available.to_vec();
         input.consume(consumed);
-        if sender.blocking_send(Ok(chunk)).is_err() {
+        if sender.send(Ok(chunk)).is_err() {
             return;
         }
     }
@@ -160,7 +213,7 @@ where
                     self.discarding = false;
                     self.buffer.clear();
                     return Ok(LineRead::Rejected(
-                        "interactive line exceeds the 1 MiB content bound",
+                        "interactive line exceeds the wire-frame content guard",
                     ));
                 }
                 if self.buffer.is_empty() {
@@ -185,7 +238,7 @@ where
                     self.discarding = false;
                     self.buffer.clear();
                     return Ok(LineRead::Rejected(
-                        "interactive line exceeds the 1 MiB content bound",
+                        "interactive line exceeds the wire-frame content guard",
                     ));
                 }
                 return Ok(self.take_line(true));
@@ -479,6 +532,7 @@ pub(crate) async fn run<R>(
     output: &mut Output<'_>,
     session_id: CanonicalUuid,
     input: R,
+    deployment_limits: ClientDeploymentLimits,
 ) -> Result<(), ClientError>
 where
     R: AsyncBufRead + Unpin,
@@ -621,7 +675,10 @@ where
                             return Ok(());
                         }
                     };
-                    let action = match parse_line(line) {
+                    let action = match parse_line_with_limit(
+                        line,
+                        deployment_limits.max_message_utf8_bytes,
+                    ) {
                         Ok(action) => action,
                         Err(error) => {
                             output.chat_usage(&error.to_string(), COMMANDS)?;
@@ -1284,9 +1341,17 @@ async fn refresh_approval_after_decision(
     Ok(true)
 }
 
+#[cfg(test)]
 fn parse_line(line: String) -> Result<ChatInput, ChatSyntaxError> {
+    parse_line_with_limit(line, None)
+}
+
+fn parse_line_with_limit(
+    line: String,
+    max_message_utf8_bytes: Option<usize>,
+) -> Result<ChatInput, ChatSyntaxError> {
     if !line.starts_with(':') {
-        validate_content(&line, "input must not be empty")?;
+        validate_content(&line, "input must not be empty", max_message_utf8_bytes)?;
         return Ok(ChatInput::Submit(line));
     }
     if line == ":transcript" {
@@ -1296,11 +1361,15 @@ fn parse_line(line: String) -> Result<ChatInput, ChatSyntaxError> {
         return Ok(ChatInput::Quit);
     }
     if let Some(content) = line.strip_prefix(":stop ") {
-        validate_content(content, ":stop requires successor text")?;
+        validate_content(
+            content,
+            ":stop requires successor text",
+            max_message_utf8_bytes,
+        )?;
         return Ok(ChatInput::Stop(content.to_owned()));
     }
     if let Some(content) = line.strip_prefix(":steer ") {
-        validate_content(content, ":steer requires text")?;
+        validate_content(content, ":steer requires text", max_message_utf8_bytes)?;
         return Ok(ChatInput::Steer(content.to_owned()));
     }
     if let Some(value) = line.strip_prefix(":approve ") {
@@ -1339,12 +1408,21 @@ fn has_surrounding_posix_whitespace(value: &str) -> bool {
             .is_some_and(|byte| is_posix_whitespace(*byte))
 }
 
-fn validate_content(content: &str, empty_message: &'static str) -> Result<(), ChatSyntaxError> {
+fn validate_content(
+    content: &str,
+    empty_message: &'static str,
+    max_message_utf8_bytes: Option<usize>,
+) -> Result<(), ChatSyntaxError> {
     if content.is_empty() {
         return Err(ChatSyntaxError(empty_message));
     }
-    if content.len() > MAX_INPUT_CONTENT_BYTES {
-        return Err(ChatSyntaxError("input exceeds the 1 MiB UTF-8 bound"));
+    if content.len() > MAX_INPUT_CONTENT_FRAME_BYTES {
+        return Err(ChatSyntaxError("input exceeds the wire-frame UTF-8 guard"));
+    }
+    if max_message_utf8_bytes.is_some_and(|maximum| content.len() > maximum) {
+        return Err(ChatSyntaxError(
+            "input exceeds the deployment UTF-8 byte limit",
+        ));
     }
     if content.contains('\0') {
         return Err(ChatSyntaxError("input must not contain U+0000"));
@@ -1422,14 +1500,14 @@ mod tests {
         const INPUT: &str = "first line\nsecond line\n";
         const FIRST_LINE: &str = "first line";
         const SECOND_LINE: &str = "second line";
-        let (sender, receiver) = mpsc::channel(TERMINAL_INPUT_CHANNEL_CAPACITY);
+        let (sender, receiver) = mpsc::channel(1);
         sender
             .send(Ok(Vec::from(INPUT.as_bytes())))
             .await
             .expect("fixture receiver remains open");
         drop(sender);
         let input = TerminalInput {
-            receiver,
+            receiver: TerminalInputReceiver::Bounded(receiver),
             chunk: Vec::new(),
             consumed: 0,
         };
@@ -1487,7 +1565,7 @@ mod tests {
 
         assert_eq!(
             lines.next_line().await.expect("fixture line read"),
-            LineRead::Rejected("interactive line exceeds the 1 MiB content bound")
+            LineRead::Rejected("interactive line exceeds the wire-frame content guard")
         );
         assert_eq!(
             lines.next_line().await.expect("fixture line read"),
@@ -1515,6 +1593,20 @@ mod tests {
         assert_eq!(
             parse_line(String::from("  exact user text  ")),
             Ok(ChatInput::Submit(String::from("  exact user text  ")))
+        );
+    }
+
+    #[test]
+    fn chat_parser_uses_the_learned_message_limit() {
+        assert_eq!(
+            parse_line_with_limit(String::from("four"), Some(3)),
+            Err(ChatSyntaxError(
+                "input exceeds the deployment UTF-8 byte limit"
+            ))
+        );
+        assert_eq!(
+            parse_line_with_limit(String::from("four"), None),
+            Ok(ChatInput::Submit(String::from("four")))
         );
     }
 

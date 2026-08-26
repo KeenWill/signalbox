@@ -17,6 +17,18 @@ generated DTOs are verified against this PR (`agent/web-search-usage`).
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
 
+The usable context-ceiling definition and Codex CLI catalog values are
+re-verified against this PR (`agent/daemon-live-codex-effective-window`). The
+bounded Codex CLI startup pin probe is verified against this PR
+(`agent/daemon-live-codex-pin-preflight`).
+
+The required numeric-bound configuration grammar and scheduler admission policy
+are verified against this PR (`agent/bounds-required-config-protocol`). The
+fenced pool floor reconciliation policy is verified against this PR
+(`agent/daemon-live-nondisruptive-pool-reconcile`). The fenced PostgreSQL
+prewarm policy is verified against this PR
+(`agent/daemon-live-configured-pool-prewarm`).
+
 The delegated tool-approval posture, judge selection, and daemon composition are
 verified against the implementing stack through this PR
 (`agent/approval-judge-daemon`). The posture values `unsandboxed_exec` accepts,
@@ -25,9 +37,6 @@ and which of them changes its resolved approval, are re-verified against this PR
 
 The daemon-local Git and execution-tool dependencies are verified against this
 stack through this PR (`agent/daemon-exec-tools`).
-
-The scheduler pass-admission override is verified against this PR
-(`agent/scheduler-pass-pause`).
 
 The derivation of each session's workspace root from the configured root is
 verified against this PR (`agent/per-session-workspaces`).
@@ -38,7 +47,12 @@ profile does and does not provide are verified against this PR
 variant is verified against this PR (`agent/kubernetes-bwrap-proc`).
 
 Direct unsandboxed Git execution from sandbox-created linked worktrees is
-verified against this PR (`agent/unsandboxed-worktree-gitdir`).
+verified against this PR (`agent/unsandboxed-worktree-gitdir`). Sandboxed Git
+execution from host-created linked worktrees is verified against this PR
+(`agent/daemon-live-sandbox-linked-worktree-git`).
+
+The explicit read-only Cargo registry cache is verified against this PR
+(`agent/daemon-live-sandbox-provisioning`).
 
 The daemon web-tool composition, Brave credential channel, and shipped human
 postures are verified against PR #433 (`agent/web-search-wiring`).
@@ -450,23 +464,24 @@ The registry contains exactly six metric names:
   values are `completed`, `known_failed`, `refused`, `cancelled`, and
   `ambiguous`, counts durable terminal model calls. It separates provider-call
   health and refusal from ambiguity that requires recovery handling.
-- `signalbox_scheduler_passes_in_flight`, with no labels, reports current
-  authoritative scheduler-pass occupancy.
-- `signalbox_scheduler_oldest_in_flight_pass_age_seconds`, with no labels,
-  reports the oldest admitted pass's age at scrape time.
-- `signalbox_scheduler_oldest_in_flight_pass_info{session_id}` reports the
-  daemon-minted session UUID of that oldest pass. It has zero or one series and
-  removes the former label value when the oldest pass changes.
+- `signalbox_scheduler_passes_in_flight`, with no labels, is the current count
+  of authoritative scheduler passes holding admission slots.
+- `signalbox_scheduler_oldest_in_flight_pass_age_seconds`, with no labels, is
+  the scrape-time age of the oldest admitted pass, or zero while idle.
+- `signalbox_scheduler_oldest_in_flight_pass_info{session_id}` identifies that
+  oldest pass by its daemon-minted session UUID. It has zero or one series and
+  removes the prior series whenever the oldest pass changes or the loop becomes
+  idle.
 
-All closed-enum label children are allocated at registry construction. The only
-identity label is the scheduler oldest-pass `session_id`; the metric API accepts
-no turn id, model-call id, prompt, completion, or tool value. The terminal
-metric source is the already-committed typed outbox transition, and
-content-bearing input events are ignored. The dispatcher retains only the last
-observed durable sequence, so a retry of that sequence is not counted twice and
-deduplication has constant memory. Metric help and type lines are fixed strings;
-sample values are counters or gauges. There are no tool, queue-depth, or
-database-duration metrics in this surface.
+Counter label children are allocated from closed enums at registry construction.
+The only free-form metric label is the scheduler information gauge's
+daemon-minted `session_id`; no turn id, model-call id, prompt, completion, or
+tool value is accepted. The durable counters use already-committed typed outbox
+transitions, and content-bearing input events are ignored. The dispatcher
+retains only the last observed durable sequence, so a retry of that sequence is
+not counted twice and deduplication has constant memory. Metric help and type
+lines are fixed strings. There are no tool, queue-depth, or database-duration
+metrics in this surface.
 
 The complete OTLP record inventory is:
 
@@ -637,6 +652,14 @@ fail-closed:
   this branch installs the grammar in the parser and updates that file in the
   same change, so it declares `adapter` and `delivery` on every profile and maps
   each family through a `[[credential_pools]]` entry.
+- The `[numeric_bounds]` table is required and contains every deployment-owned
+  numeric policy listed in `config/signalboxd.example.toml`. Integer policies
+  use nonnegative TOML integers and duration policies use an unsigned integer
+  followed by `ms` or `s`. Every field also accepts the single exact string
+  `"none"` for an unbounded deployment policy. Missing fields are one typed
+  startup failure whose sanitized message lists every absent field in schema
+  order; mistyped values, alternate spellings of `"none"`, and unknown fields
+  fail startup. The loader supplies no default for any member of this table.
 - At least one `[[models]]` entry is required: an absent, mistyped, or empty
   models array is rejected (`MissingModels`), so a document containing only
   `version = 1` fails startup.
@@ -684,15 +707,33 @@ fail-closed:
 - Parse errors are typed, sanitized values; no file content appears in error
   text. (signalboxd erases the type before logging, as described above.)
 
-The optional `[scheduler]` table has exactly one `max_in_flight_passes` integer
-from 0 through 16. It replaces the scheduler's fixed 16-pass baseline for this
-daemon process. Omission keeps that baseline. A positive limit bounds concurrent
-authoritative per-session passes, not the durable queue: excess eligible
-sessions remain recorded and are admitted as passes finish. Zero pauses
+The required `numeric_bounds.scheduler_pass_admission_cap` policy bounds
+concurrent authoritative per-session passes, not the durable queue: excess
+eligible sessions remain recorded and are admitted as passes finish. Zero pauses
 authoritative session execution while the scheduler task and the daemon's
-ingestion and process services remain live; durable queued work is unchanged. A
-value above 16, a mistyped value, or an unknown field fails startup as invalid
-scheduler settings.
+ingestion and process services remain live; `"none"` admits every currently
+eligible session. The retired optional `[scheduler]` table is an unknown root
+field.
+
+The required finite, positive `numeric_bounds.codex_cli_version_probe_bound`
+policy bounds the credential-free startup probe that asks a configured Codex CLI
+executable for its version. A missing, malformed, unbounded, zero, unsuccessful,
+or mismatched probe fails configuration before the socket opens; the executable
+must report the exact version compiled into the adapter from the installation
+manifest.
+
+The required `numeric_bounds.fenced_pool_min_connections` policy controls how
+many fenced PostgreSQL sessions are established before daemon work begins;
+`"none"` preserves SQLx's zero-session floor. A finite value above the daemon's
+compiled pool ceiling is rejected during configuration rather than silently
+clamped. A positive floor also requires finite, positive
+`fenced_pool_floor_reconciliation_interval` and
+`fenced_pool_floor_reconciliation_attempt_bound` policies. The runtime
+periodically observes sessions retired after startup without consuming any idle
+service capacity. Once ordinary demand has consumed the idle inventory, one
+bounded attempt adds one missing physical session and returns it; failed,
+timed-out, or concurrently invalidated attempts retry after the configured
+interval. A zero or `"none"` floor disables that reconciliation.
 
 The optional `[model_settings]` table supplies the deployment-global settings
 overlay. Each `[[model_settings_profiles]]` entry gives an exact unique `name`
@@ -926,13 +967,14 @@ value. A missing table, unknown field, invalid value, or identity construction
 failure is a sanitized configuration failure.
 
 The complete mapped composition also requires one `[daemon_tools]` table with
-exactly `exec_supervisor_executable`. The value is an absolute path to an
-existing file naming the separately packaged `signalbox-exec-supervisor`
-program. A missing table, unknown field, relative path, or path that is not a
-file is a sanitized configuration failure. Production resolves an admitted
-symlink to its canonical regular-file path and passes that canonical path to the
-execution suite, which pins the program during construction; the daemon never
-derives it from its own executable path.
+`exec_supervisor_executable` and admits the optional `cargo_registry_cache`. The
+executable value is an absolute path to an existing file naming the separately
+packaged `signalbox-exec-supervisor` program. The cache value, when present, is
+an absolute path to an existing directory. A missing table, unknown field,
+relative path, or wrong path kind is a sanitized configuration failure.
+Production resolves admitted paths to their canonical targets; the execution
+suite pins both the program and optional cache during construction. The daemon
+never derives either from its own executable path or home directory.
 
 The configured root is opened once during tool construction and its pinned
 authority is cloned into both workspace suites. The local Git suite
@@ -1227,23 +1269,36 @@ resolved posture; family composition itself does not.
 
 On Linux, `unsandboxed_exec` pins the requested host working directory before
 launch. When the direct program is Git and that directory is a linked worktree
-whose `.git` marker names an administration directory below the sandbox-only
-`/workspace` path, execution pins the corresponding directory below the injected
-workspace root and supplies the pinned administration and worktree paths through
-Git's environment. Discovery stops at the first `.git` entry, so a nested clone
-or submodule never inherits an outer worktree's environment, and explicit Git
-repository selectors (`-C`, `--git-dir`, or `--work-tree`) suppress injection.
-The repository-creating commands `init` and `clone` also suppress injection,
-because each establishes a new repository rather than operating on the current
-one, and an inherited `GIT_WORK_TREE` makes `clone` refuse its destination.
-Before injection, execution atomically rewrites the linked-worktree
-administration directory's sandbox-only `gitdir` backlink to the corresponding
-host marker path so host-side worktree maintenance does not prune the live
-worktree. That durable metadata write exposes the host workspace path to the
-sandbox-side view and can make sandbox-side worktree maintenance unable to
-resolve the backlink; callers needing that view must recreate the linked
-worktree there. Other programs and other `.git` marker shapes receive no
-Git-specific environment or metadata mutation.
+whose `.git` marker names an administration directory below either the
+sandbox-only `/workspace` path or the injected host workspace root, execution
+pins the corresponding directory below that root and supplies the pinned
+administration and worktree paths through Git's environment. Discovery stops at
+the first `.git` entry, so a nested clone or submodule never inherits an outer
+worktree's environment, and explicit Git repository selectors (`-C`,
+`--git-dir`, or `--work-tree`) suppress injection. The repository-creating
+commands `init` and `clone` also suppress injection, because each establishes a
+new repository rather than operating on the current one, and an inherited
+`GIT_WORK_TREE` makes `clone` refuse its destination. Before injection,
+execution atomically rewrites the linked-worktree administration directory's
+sandbox-only `gitdir` backlink to the corresponding host marker path so
+host-side worktree maintenance does not prune the live worktree. That durable
+metadata write exposes the host workspace path to the sandbox-side view and can
+make sandbox-side worktree maintenance unable to resolve the backlink; callers
+needing that view must recreate the linked worktree there. Other programs and
+other `.git` marker shapes receive no Git-specific environment or metadata
+mutation.
+
+On Linux, direct Git through `sandboxed_exec` recognizes the same host- and
+sandbox-rooted linked-worktree markers, under the same selector, nested-marker,
+and ownership guards. It pins the administration directory, binds it over its
+corresponding path below `/workspace`, and supplies that path and the requested
+`/workspace` worktree through Git's environment. A marker already written in
+host form — the ordinary case for a worktree created on the host — is verified
+and left alone, so it stays valid without granting another host path or
+rewriting repository state. A marker still in sandbox-only form is rewritten to
+the host form exactly as the unsandboxed path does, with the same trade-off
+recorded above. Other sandboxed programs and marker shapes receive no
+Git-specific mount, environment, or metadata mutation.
 
 `sandboxed_exec` and `cargo_diagnostics` share one daemon-local bubblewrap
 profile. Its name claims more than it delivers, so this page recites the launch
@@ -1265,8 +1320,11 @@ session's bound workspace root read-write at `/workspace`, read-only binds the
 pinned execution supervisor — a host path that need not lie under that root — at
 `/signalbox-exec-dispatch`, and changes directory to `/workspace` or to the
 requested directory beneath it. The child environment is cleared and then set to
-`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. Every command is dispatched
-through the supervisor.
+`LANG`, `LC_ALL`, `PATH`, and `HOME=/workspace`. When `cargo_registry_cache` is
+configured, the profile additionally creates a private writable tmpfs at
+`/cargo-home`, read-only binds the pinned cache at `/cargo-home/registry`, and
+sets `CARGO_HOME=/cargo-home`; replacement or removal of the configured cache
+fails sandbox setup closed. Every command is dispatched through the supervisor.
 
 The profile does not provide the following, and no other daemon-local control
 supplies them:
@@ -1287,8 +1345,11 @@ supplies them:
   identifier among it — that no workspace bind governs, so the readable surface
   is wider than the bound paths alone.
 - `HOME` is the workspace root, so home-relative configuration discovery —
-  `~/.cargo`, `~/.config`, and anything else a program resolves that way — lands
-  inside the writable workspace rather than at a host location.
+  `~/.config` and anything else a program resolves that way — lands inside the
+  writable workspace rather than at a host location. Cargo alone uses the
+  private `/cargo-home` when an explicit registry cache is configured; its
+  registry is read-only while its lock and other transient state remain private
+  to the process.
 - Everything under the workspace root is writable, including the repository's
   `.git`.
 - `cargo_diagnostics` compiles and runs the workspace's own build scripts,
@@ -1332,8 +1393,9 @@ Each `[[models]]` entry defines one direct selection:
   typed startup failure, so a deployment serving one provider through two
   surfaces gives each surface its own spelling.
 - `max_output_tokens` — required positive `u32` output-token ceiling.
-- `context_window_tokens` — required positive `u32` context ceiling, not smaller
-  than `max_output_tokens`.
+- `context_window_tokens` — required positive `u32` usable context ceiling after
+  any provider or adapter reservation, not the provider's larger raw advertised
+  window, and not smaller than `max_output_tokens`.
 - the optional all-or-none rate set — `rate_version`,
   `input_usd_per_million_tokens`, `output_usd_per_million_tokens`,
   `cache_creation_input_usd_per_million_tokens`, and

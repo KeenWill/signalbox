@@ -12,8 +12,6 @@ use crate::{
     TerminalEvidence, ToolCallId, ToolCallProposal, ToolName, TransportFacts, UnsentCause,
 };
 
-// numeric-bound: tunable - controls retained provider diagnostic detail
-const MAX_NATIVE_MESSAGE_BYTES: usize = 2_048;
 const NATIVE_MESSAGE_TRUNCATION_SUFFIX: &str = " … [truncated]";
 
 /// An observation sink that sanitizes provider-controlled text with the exact
@@ -427,7 +425,11 @@ fn redact_observation_fact(fact: ObservationFact, credential: &CredentialValue) 
 /// before the evidence leaves the adapter boundary. Non-text typed facts are
 /// untouched; text-bearing typed fields (reported model, message id,
 /// unrecognized tokens, content) are sanitized when they carry the key.
-pub fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) -> TerminalEvidence {
+pub fn redact_evidence(
+    evidence: TerminalEvidence,
+    api_key: &CredentialValue,
+    native_message_limit: Option<usize>,
+) -> TerminalEvidence {
     let key_text = std::str::from_utf8(api_key.expose_bytes()).unwrap_or_default();
     let redact = move |text: String| -> String {
         if key_text.is_empty() {
@@ -441,7 +443,7 @@ pub fn redact_evidence(evidence: TerminalEvidence, api_key: &CredentialValue) ->
         native.error_code = native.error_code.map(redact);
         native.message = native
             .message
-            .map(|message| redact_native_message(message, api_key));
+            .map(|message| redact_native_message(message, api_key, native_message_limit));
         native
     };
     let redact_transport =
@@ -573,7 +575,11 @@ fn redact_bounded_text(text: String, credential: &CredentialValue) -> String {
     redacted
 }
 
-fn redact_native_message(text: String, credential: &CredentialValue) -> String {
+fn redact_native_message(
+    text: String,
+    credential: &CredentialValue,
+    limit: Option<usize>,
+) -> String {
     let redacted = if let Some(body) = text.strip_suffix(NATIVE_MESSAGE_TRUNCATION_SUFFIX) {
         let mut redacted = redact_native_body(body.to_string(), credential);
         redacted.push_str(NATIVE_MESSAGE_TRUNCATION_SUFFIX);
@@ -581,7 +587,7 @@ fn redact_native_message(text: String, credential: &CredentialValue) -> String {
     } else {
         redact_native_body(text, credential)
     };
-    lossy_truncated(redacted.as_bytes())
+    lossy_truncated(redacted.as_bytes(), limit)
 }
 
 fn redact_native_body(text: String, credential: &CredentialValue) -> String {
@@ -795,15 +801,21 @@ fn redact_assistant_part(part: AssistantPart, credential: &CredentialValue) -> A
         AssistantPart::ToolCall(proposal) => {
             AssistantPart::ToolCall(redact_tool_proposal(proposal, credential))
         }
+        AssistantPart::SuppressedToolCall(name) => AssistantPart::SuppressedToolCall(
+            ToolName::new(redact_text(name.as_str().to_string(), credential)),
+        ),
     }
 }
 
-fn lossy_truncated(body: &[u8]) -> String {
+fn lossy_truncated(body: &[u8], limit: Option<usize>) -> String {
     let text = String::from_utf8_lossy(body);
-    if text.len() <= MAX_NATIVE_MESSAGE_BYTES {
+    let Some(limit) = limit else {
+        return text.into_owned();
+    };
+    if text.len() <= limit {
         return text.into_owned();
     }
-    let mut end = MAX_NATIVE_MESSAGE_BYTES;
+    let mut end = limit;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
@@ -824,9 +836,18 @@ mod tests {
     };
 
     use super::{
-        CredentialRedactingSink, MAX_NATIVE_MESSAGE_BYTES, NATIVE_MESSAGE_TRUNCATION_SUFFIX,
-        redact_evidence, redact_json, redact_json_stream_fragment, redact_native_message,
+        CredentialRedactingSink, NATIVE_MESSAGE_TRUNCATION_SUFFIX,
+        redact_evidence as redact_evidence_with_limit, redact_json, redact_json_stream_fragment,
+        redact_native_message as redact_native_message_with_limit,
     };
+
+    fn redact_evidence(evidence: TerminalEvidence, key: &CredentialValue) -> TerminalEvidence {
+        redact_evidence_with_limit(evidence, key, None)
+    }
+
+    fn redact_native_message(text: String, key: &CredentialValue) -> String {
+        redact_native_message_with_limit(text, key, None)
+    }
 
     fn credential(value: &str) -> CredentialValue {
         CredentialValue::new(value.as_bytes().to_vec())
@@ -1344,9 +1365,10 @@ mod tests {
             "x".repeat(PADDING_BEFORE_ESCAPED_CREDENTIAL_BYTES),
             "y".repeat(TRAILING_BODY_BYTES)
         );
-        assert!(body.as_bytes()[..MAX_NATIVE_MESSAGE_BYTES].ends_with(br"\u"));
+        let configured_limit = body.find(r"\u").expect("fixture carries one JSON escape") + 2;
+        assert!(body.as_bytes()[..configured_limit].ends_with(br"\u"));
 
-        let message = redact_native_message(body, &key);
+        let message = redact_native_message_with_limit(body, &key, Some(configured_limit));
 
         assert!(message.contains("[redacted]"));
         assert!(message.ends_with(NATIVE_MESSAGE_TRUNCATION_SUFFIX));
@@ -1358,10 +1380,11 @@ mod tests {
     fn provider_controlled_truncation_suffix_cannot_bypass_native_message_bound() {
         const RETAINED_BYTES_AFTER_CREDENTIAL: usize = 32;
         const PROVIDER_OVERFLOW_BYTES: usize = 200;
+        const CONFIGURED_LIMIT: usize = 257;
         let credential_text = "fixture_provider_key";
         let key = credential(credential_text);
         let prefix_bytes =
-            MAX_NATIVE_MESSAGE_BYTES - credential_text.len() - RETAINED_BYTES_AFTER_CREDENTIAL;
+            CONFIGURED_LIMIT - credential_text.len() - RETAINED_BYTES_AFTER_CREDENTIAL;
         let tail_bytes = RETAINED_BYTES_AFTER_CREDENTIAL + PROVIDER_OVERFLOW_BYTES;
         let body = format!(
             "{}{credential_text}{}{}",
@@ -1370,11 +1393,21 @@ mod tests {
             NATIVE_MESSAGE_TRUNCATION_SUFFIX
         );
 
-        let message = redact_native_message(body, &key);
+        let message = redact_native_message_with_limit(body, &key, Some(CONFIGURED_LIMIT));
 
-        assert!(message.len() <= MAX_NATIVE_MESSAGE_BYTES + NATIVE_MESSAGE_TRUNCATION_SUFFIX.len());
+        assert!(message.len() <= CONFIGURED_LIMIT + NATIVE_MESSAGE_TRUNCATION_SUFFIX.len());
         assert!(message.ends_with(NATIVE_MESSAGE_TRUNCATION_SUFFIX));
         assert!(!message.contains(credential_text));
+    }
+
+    #[test]
+    fn unbounded_native_message_policy_preserves_detail() {
+        let key = credential("fixture_secret");
+        let body = "x".repeat(4_096);
+
+        let message = redact_native_message_with_limit(body.clone(), &key, None);
+
+        assert_eq!(message, body);
     }
 
     #[test]

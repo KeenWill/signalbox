@@ -97,11 +97,31 @@ FOR EACH ROW EXECUTE FUNCTION record_operator_attention_goal_change();
 -- Rejected goal commands append no goal event, but a rejected automatic
 -- resumption transfers the blocked goal back to operator ownership. Publish
 -- that durable outcome so existing followers refresh the affected summary.
+--
+-- `goal_command` deliberately carries no session reference: a command naming a
+-- session that does not exist still records its `session_not_found` rejection
+-- receipt. This journal's session reference is immediate, so publishing
+-- attention for that unknown session would fail the receipt write and turn a
+-- recorded rejection into a repository error. Skip publication instead: an
+-- unknown session appears in no summary, so no follower is watching one.
+CREATE FUNCTION record_operator_attention_rejected_goal_command_change()
+RETURNS trigger
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM session WHERE session_id = NEW.session_id) THEN
+        INSERT INTO operator_attention_change (session_id, fact_kind)
+        VALUES (NEW.session_id, 'goal');
+    END IF;
+    RETURN NULL;
+END;
+$$;
+
 CREATE TRIGGER rejected_goal_command_records_operator_attention_change
 AFTER INSERT ON goal_command
 FOR EACH ROW
 WHEN (NEW.result_kind = 'rejected')
-EXECUTE FUNCTION record_operator_attention_goal_change();
+EXECUTE FUNCTION record_operator_attention_rejected_goal_command_change();
 
 CREATE FUNCTION record_operator_attention_judge_change()
 RETURNS trigger
