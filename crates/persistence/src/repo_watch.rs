@@ -56,8 +56,8 @@ use crate::{
     },
 };
 
-const CURSOR_STORAGE_VERSION: u64 = 2;
-const CURSOR_STORAGE_VERSION_DB: i16 = 2;
+const CURSOR_STORAGE_VERSION: u64 = 3;
+const CURSOR_STORAGE_VERSION_DB: i16 = 3;
 const EVENT_CONTENT_IDENTITY_VERSION_V1: i16 = 1;
 const EVENT_VERSION_V1: i16 = 1;
 const MAX_EVENT_PAGE_SIZE: u16 = 100;
@@ -147,12 +147,24 @@ impl RepoWatchCursor {
     }
 }
 
+/// Auditable transport that produced one repository-watch event batch.
+///
+/// Recorded on every event row so a reader can tell which intake observed a
+/// fact. Polling remains the complete reconciliation sweep; `Webhook` marks the
+/// rows an authenticated delivery produced under primary mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchEventProducer {
+    Poll,
+    Webhook,
+}
+
 /// One optimistic atomic cursor-and-event commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchCommitRequest {
     expected_generation: Option<RepoWatchCursorGeneration>,
     candidate: RepoWatchCursorCandidate,
     events: Box<[RepoWatchEventOccurrenceV1]>,
+    producer: RepoWatchEventProducer,
 }
 
 impl RepoWatchCommitRequest {
@@ -165,6 +177,25 @@ impl RepoWatchCommitRequest {
             expected_generation,
             candidate,
             events: events.into_boxed_slice(),
+            producer: RepoWatchEventProducer::Poll,
+        }
+    }
+
+    /// The same commit, attributed to an authenticated webhook delivery.
+    ///
+    /// A primary-mode delivery writes ordinary event rows, so the producer they
+    /// record has to be the transport that actually observed them rather than
+    /// the poll the rows would otherwise claim.
+    pub fn from_webhook(
+        expected_generation: Option<RepoWatchCursorGeneration>,
+        candidate: RepoWatchCursorCandidate,
+        events: Vec<RepoWatchEventOccurrenceV1>,
+    ) -> Self {
+        Self {
+            expected_generation,
+            candidate,
+            events: events.into_boxed_slice(),
+            producer: RepoWatchEventProducer::Webhook,
         }
     }
 
@@ -178,6 +209,10 @@ impl RepoWatchCommitRequest {
 
     pub fn events(&self) -> &[RepoWatchEventOccurrenceV1] {
         &self.events
+    }
+
+    pub const fn producer(&self) -> RepoWatchEventProducer {
+        self.producer
     }
 }
 
@@ -251,6 +286,7 @@ impl Error for RepoWatchPageSizeError {}
 pub struct PositionedRepoWatchEvent {
     position: RepoWatchEventPosition,
     event: RepoWatchEvent,
+    producer: RepoWatchEventProducer,
 }
 
 impl PositionedRepoWatchEvent {
@@ -260,6 +296,14 @@ impl PositionedRepoWatchEvent {
 
     pub const fn event(&self) -> &RepoWatchEvent {
         &self.event
+    }
+
+    /// The intake whose commit wrote this row.
+    ///
+    /// Returned rather than validated and discarded, so a reader auditing which
+    /// intake produced a fact does not have to reach past this repository.
+    pub const fn producer(&self) -> RepoWatchEventProducer {
+        self.producer
     }
 }
 
@@ -774,7 +818,14 @@ impl PostgresRepoWatchStore {
             .iter()
             .filter(|occurrence| is_new_occurrence(&already_durable, occurrence))
             .collect::<Vec<_>>();
-        insert_events(&mut transaction, repository, generation, &fresh).await?;
+        insert_events(
+            &mut transaction,
+            repository,
+            generation,
+            &fresh,
+            request.producer(),
+        )
+        .await?;
         let cursor = RepoWatchCursor {
             repository: repository.clone(),
             generation,
@@ -1794,11 +1845,21 @@ struct CursorRecord {
     state: RepositoryStateRecord,
 }
 
+/// One stored frontier entry.
+///
+/// `pull_request_number` is required rather than defaulted: a storage-version
+/// three payload always writes the member, null for a repository-global stream
+/// and the owning number otherwise. Defaulting it would decode a version-two
+/// entry as unowned while leaving the version unchanged, which is the
+/// version-tolerant decoding `AGENTS.md` forbids; the version bump and the
+/// deliberate frontier reset in
+/// `202608250501_repo_watch_cursor_frontier_ownership.sql` replace it.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EventIdentityFrontierRecord {
     stream_identity: [u8; 32],
     sequence: u64,
+    pull_request_number: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1945,6 +2006,7 @@ fn cursor_record(candidate: &RepoWatchCursorCandidate) -> CursorRecord {
             .map(|entry| EventIdentityFrontierRecord {
                 stream_identity: *entry.stream_identity(),
                 sequence: entry.sequence().get(),
+                pull_request_number: entry.pull_request_number().map(PullRequestNumber::get),
             })
             .collect(),
         state: repository_state_record(candidate.observation().state()),
@@ -2091,13 +2153,29 @@ fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, Rep
             .event_identity_frontier
             .into_iter()
             .map(|entry| {
-                NonZeroU64::new(entry.sequence)
-                    .map(|sequence| {
-                        RepoWatchEventIdentityFrontierEntryV1::new(entry.stream_identity, sequence)
-                    })
-                    .ok_or(RepoWatchPersistenceCorruption::InvalidCursorField(
+                let sequence = NonZeroU64::new(entry.sequence).ok_or(
+                    RepoWatchPersistenceCorruption::InvalidCursorField(
                         "event_identity_frontier.sequence",
-                    ))
+                    ),
+                )?;
+                match entry.pull_request_number {
+                    None => Ok(RepoWatchEventIdentityFrontierEntryV1::new(
+                        entry.stream_identity,
+                        sequence,
+                    )),
+                    Some(number) => NonZeroU64::new(number)
+                        .map(PullRequestNumber::new)
+                        .map(|number| {
+                            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                                entry.stream_identity,
+                                sequence,
+                                number,
+                            )
+                        })
+                        .ok_or(RepoWatchPersistenceCorruption::InvalidCursorField(
+                            "event_identity_frontier.pull_request_number",
+                        )),
+                }
             })
             .collect::<Result<Vec<_>, _>>()?,
     )
@@ -2527,7 +2605,12 @@ async fn insert_events(
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
     events: &[&RepoWatchEventOccurrenceV1],
+    producer: RepoWatchEventProducer,
 ) -> Result<(), RepoWatchStoreError> {
+    let producer = match producer {
+        RepoWatchEventProducer::Poll => RepoWatchEventProducerStorageKind::Poll,
+        RepoWatchEventProducer::Webhook => RepoWatchEventProducerStorageKind::Webhook,
+    };
     for (index, occurrence) in events.iter().enumerate() {
         let ordinal =
             i32::try_from(index + 1).map_err(|_| RepoWatchStoreError::EventBatchTooLarge)?;
@@ -2561,9 +2644,7 @@ async fn insert_events(
         .bind(encoded.event_version)
         .bind(EVENT_CONTENT_IDENTITY_VERSION_V1)
         .bind(occurrence.content_identity().as_bytes().as_slice())
-        .bind(repo_watch_event_producer_to_str(
-            RepoWatchEventProducerStorageKind::Poll,
-        ))
+        .bind(repo_watch_event_producer_to_str(producer))
         .bind(encoded.target_kind)
         .bind(encoded.event_kind)
         .bind(encoded.pull_request_number)
@@ -2785,10 +2866,11 @@ fn decode_positioned_event(
     if row.content_identity.len() != 32 {
         return Err(RepoWatchPersistenceCorruption::InvalidEventContentIdentity.into());
     }
-    match repo_watch_event_producer_from_str(&row.producer) {
-        Some(RepoWatchEventProducerStorageKind::Poll) => {}
+    let producer = match repo_watch_event_producer_from_str(&row.producer) {
+        Some(RepoWatchEventProducerStorageKind::Poll) => RepoWatchEventProducer::Poll,
+        Some(RepoWatchEventProducerStorageKind::Webhook) => RepoWatchEventProducer::Webhook,
         None => return Err(RepoWatchPersistenceCorruption::UnknownEventProducer.into()),
-    }
+    };
     let target = repo_watch_event_target_from_str(&row.target_kind).ok_or(
         RepoWatchPersistenceCorruption::UnknownEventDiscriminator("target_kind"),
     )?;
@@ -2833,6 +2915,7 @@ fn decode_positioned_event(
     Ok(PositionedRepoWatchEvent {
         position: RepoWatchEventPosition::new(generation, ordinal),
         event,
+        producer,
     })
 }
 

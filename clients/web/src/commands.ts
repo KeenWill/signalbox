@@ -26,6 +26,7 @@ export interface CommandContext {
   abandonImport?: () => void
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
   navigate?: (path: string) => void
+  openArtifactInspector?: () => void
   openSession?: (sessionId: string) => void
   toggleTimelineExpansion?: () => void
 }
@@ -55,6 +56,7 @@ const hasSelectedArtifactPreview = (context: CommandContext) => {
   return id !== null && context.artifactPreviewIds.includes(id)
 }
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
+const artifactInspector = (context: CommandContext) => context.openArtifactInspector !== undefined
 export const commandRegistry = [
   {
     id: 'artifact.select',
@@ -208,6 +210,15 @@ export const commandRegistry = [
     bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
     available: productNavigation,
     run: (context) => context.navigate?.('/settings'),
+  },
+  {
+    id: 'artifact.open',
+    title: 'Open artifact inspector',
+    description: 'Resolve and inspect an immutable blob by its server-provided identity.',
+    category: 'Surface',
+    bindings: [],
+    available: artifactInspector,
+    run: (context) => context.openArtifactInspector?.(),
   },
   {
     id: 'palette.open',

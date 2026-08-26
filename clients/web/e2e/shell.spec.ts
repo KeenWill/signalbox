@@ -42,6 +42,7 @@ const streamingFixture = {
   firstLoadedItemId: 'event-0',
   secondLoadedItemId: 'event-1',
   lastLoadedItemId: 'event-239',
+  timelineHeading: 'Bounded timeline',
 } as const
 
 const cachedScenarioFixture = {
@@ -488,7 +489,7 @@ test('keeps the fleet surface reachable on a short wide viewport', async ({ page
 test('Mod+K opens the registered command palette', async ({ page }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
-  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: streamingFixture.timelineHeading })).toBeVisible()
 
   await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
   const modifier = await platformModifier(page)
@@ -512,7 +513,7 @@ test('the command palette opens keyboard help with available product navigation'
 }) => {
   const problems = watchBrowser(page)
   await page.goto('/scenario/streaming')
-  await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: streamingFixture.timelineHeading })).toBeVisible()
 
   await expect(page.getByRole('button', { name: 'Open command palette' })).toBeVisible()
   const modifier = await platformModifier(page)

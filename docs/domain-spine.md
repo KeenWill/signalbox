@@ -6115,6 +6115,107 @@ impl WorkspaceRecord {
 }
 ```
 
+## application: attention
+
+```rust
+pub const fn max_attention_snapshot_items() -> u16;
+pub const fn max_attention_goal_summary_characters() -> u16;
+pub const fn max_attention_change_items() -> u16;
+
+pub struct AttentionCursor(/* private */);
+impl AttentionCursor {
+    pub const fn new(value: u64) -> Self;
+    pub const fn value(self) -> u64;
+}
+
+pub enum AttentionState {
+    Active,
+    Queued,
+    Blocked,
+    AwaitingApproval,
+    Ambiguous,
+    AwaitingToolRecovery,
+    AwaitingReconciliation,
+    RunnerLost,
+    Idle,
+}
+
+pub enum AttentionAction {
+    ProvideGoalNeed,
+    DecideApproval,
+    ReconcileTurn,
+}
+
+pub enum AttentionBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+
+pub struct AttentionGoalBlock {
+    pub generation: u64,
+    pub reason: AttentionBlockedReason,
+    pub need_summary: String,
+}
+
+pub struct AttentionJudgeFacts {
+    pub actionable: u64,
+    pub completed: u64,
+    pub escalated: u64,
+    pub failed: u64,
+}
+
+pub struct AttentionActivity {
+    pub recorded_at: SystemTime,
+    pub kind: AttentionActivityKind,
+}
+
+pub enum AttentionActivityKind {
+    Session,
+    Turn,
+    Goal,
+    ApprovalJudge,
+    Runner,
+}
+
+pub struct AttentionSummary {
+    pub session: SessionId,
+    pub current_turn: Option<TurnId>,
+    pub state: AttentionState,
+    pub action: Option<AttentionAction>,
+    pub goal_block: Option<AttentionGoalBlock>,
+    pub judge: AttentionJudgeFacts,
+    pub last_activity: AttentionActivity,
+}
+
+pub struct AttentionSnapshot {
+    pub cursor: AttentionCursor,
+    pub summaries: Vec<AttentionSummary>,
+    pub continuation_after: Option<SessionId>,
+}
+
+pub enum AttentionChanges {
+    Updated {
+        cursor: AttentionCursor,
+        summaries: Vec<AttentionSummary>,
+    },
+    ResyncRequired { cursor: AttentionCursor },
+}
+
+pub trait AttentionReader {
+    type Error;
+    fn snapshot(
+        &self,
+        after: Option<SessionId>,
+    ) -> impl Future<Output = Result<AttentionSnapshot, Self::Error>> + Send;
+    fn changes_after(
+        &self,
+        cursor: AttentionCursor,
+    ) -> impl Future<Output = Result<AttentionChanges, Self::Error>> + Send;
+}
+```
+
 ## domain: workspace_instruction
 
 ```rust
@@ -7962,7 +8063,12 @@ impl RepoWatchEventContentIdentityV1 {
 pub struct RepoWatchEventIdentityFrontierEntryV1 { /* private */ }
 impl RepoWatchEventIdentityFrontierEntryV1 {
     pub const fn new(stream_identity: [u8; 32], sequence: NonZeroU64) -> Self;
-    // accessors: stream_identity(), sequence()
+    pub const fn for_pull_request(
+        stream_identity: [u8; 32],
+        sequence: NonZeroU64,
+        pull_request_number: PullRequestNumber,
+    ) -> Self;
+    // accessors: stream_identity(), sequence(), pull_request_number()
 }
 
 pub struct RepoWatchEventIdentityFrontierV1 { /* private */ }
@@ -12094,6 +12200,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: workspace_instruction                      | 18                               |
 | **signalbox-domain total**                         | **857 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
+| application: attention                             | 12 (+3 free fn) (incl. 1 trait)  |
 | application: blob_derivation                       | 9 (incl. 3 traits)               |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
@@ -12123,4 +12230,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **356 (+11 free fn)**            |
+| **signalbox-application total**                    | **368 (+14 free fn)**            |

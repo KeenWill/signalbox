@@ -1,9 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { imageViewLabel, registeredArtifactKinds, selectImageView } from './ArtifactRenderer'
+import { boundAttachments } from './ArtifactAttachments'
+import {
+  imageViewLabel,
+  registeredArtifactKinds,
+  selectBlobView,
+  selectImageView,
+} from './ArtifactRenderer'
 import {
   artifactOriginalIds,
   artifactPreviewIds,
+  documentAttachment,
   fetchVerifiedSingleFrameJpeg,
   INLINE_ORIGINAL_MAX_BYTES,
   imageArtifact,
@@ -14,6 +21,7 @@ import {
   jpegDescriptor,
   jpegOriginalView,
   selectBoundedOriginalView,
+  selectProvenViewDerivation,
 } from './artifactScenario'
 import {
   ARTIFACT_EXPANDED_CHARACTERS,
@@ -131,8 +139,16 @@ describe('artifact renderer compatibility', () => {
     expectAnimationCapableOriginalStaysDownloadOnly('image/webp')
   })
 
-  it('registers the closed text, code, and image renderer set', () => {
-    expect(registeredArtifactKinds).toEqual(['blob', 'code', 'image', 'text'])
+  it('registers the closed artifact renderer set', () => {
+    expect(registeredArtifactKinds).toEqual([
+      'blob',
+      'code',
+      'derivative',
+      'document',
+      'image',
+      'media_placeholder',
+      'text',
+    ])
   })
 
   it('selects the admitted view kind without interpreting its MIME string', () => {
@@ -147,6 +163,42 @@ describe('artifact renderer compatibility', () => {
     }
 
     expect(selectImageView(descriptor)?.kind).toBe('preview')
+  })
+
+  it('selects the derivation that binds the descriptor input to the rendered output', () => {
+    const unrelated = {
+      ...previewDerivation,
+      derivation_id: '0198f321-2300-7000-8000-000000000002',
+      input_digests: [`sha256:${'9a'.repeat(32)}`],
+      output_digests: [`sha256:${'9b'.repeat(32)}`],
+    }
+    const view = {
+      ...imagePreviewView,
+      derivations: [unrelated, previewDerivation],
+    }
+
+    expect(selectProvenViewDerivation(imageArtifact, view)?.derivation_id).toBe(
+      previewDerivation.derivation_id,
+    )
+  })
+
+  it('rejects a view whose kind contract and digest binding sit on different derivations', () => {
+    const misboundPreview = {
+      ...previewDerivation,
+      derivation_id: '0198f321-2300-7000-8000-000000000003',
+      input_digests: [`sha256:${'9a'.repeat(32)}`],
+    }
+    const arbitraryBinding = {
+      ...previewDerivation,
+      derivation_id: '0198f321-2300-7000-8000-000000000004',
+      transformation_name: 'image.arbitrary',
+    }
+    const view = {
+      ...imagePreviewView,
+      derivations: [misboundPreview, arbitraryBinding],
+    }
+
+    expect(selectProvenViewDerivation(imageArtifact, view)).toBeUndefined()
   })
 
   it('names a thumbnail fallback as a thumbnail', () => {
@@ -186,6 +238,23 @@ describe('artifact renderer compatibility', () => {
     }
 
     expect(selectImageView(descriptor)).toBeUndefined()
+  })
+
+  it('selects document affordances only by their admitted capability', () => {
+    expect(selectBlobView(documentAttachment.source.descriptor, 'browser_native')).toBeUndefined()
+    expect(selectBlobView(documentAttachment.source.descriptor, 'download')?.kind).toBe('download')
+  })
+
+  it('keeps attachment projection within its hard item ceiling', () => {
+    const source = Array.from({ length: 16 }, (_, index) => ({
+      ...documentAttachment,
+      id: `attachment-${index}`,
+    }))
+
+    const bounded = boundAttachments(source)
+
+    expect(bounded.visible).toHaveLength(12)
+    expect(bounded.omitted).toBe(4)
   })
 
   it('bounds the initial text projection by characters', () => {

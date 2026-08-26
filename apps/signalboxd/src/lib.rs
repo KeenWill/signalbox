@@ -120,7 +120,10 @@ pub use goal_mode::{
     GoalModeNumericBounds, PostgresGoalPassDisposition, PostgresGoalPassDispositionError,
 };
 pub use local_socket::{LocalProcessListener, LocalSocketError};
-pub use process_runtime::{ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError};
+pub use process_runtime::{
+    ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError,
+    shared_snapshot_reader_budget,
+};
 pub use repo_watch_runtime::{
     RepositoryWatchNumericBounds, RepositoryWatchRuntime, RepositoryWatchRuntimeConstructionError,
     RepositoryWatchRuntimeError,
