@@ -17,13 +17,31 @@
 -- the very gate the experiment reports, so the poll side is bounded above by
 -- the repository's own promotion.
 --
--- The boundary is the repository's first webhook-produced event. That row is
--- the durable evidence that this repository committed a delivery, it cannot
--- exist before promotion because the constraint above admitted only 'poll', and
--- it needs no separate mode record that a reverted configuration could leave
--- stranded. Rows the shadow interval already produced keep their classification
--- and their causes, so the measurement that authorized promotion stays readable
--- afterwards.
+-- The boundary is the repository's first committed delivery, not its first
+-- webhook-produced event. Those are not the same moment: an applied delivery is
+-- a cursor advance, and a cursor advance derives no event whenever the observed
+-- change falls outside the event families. A primary `pull_request: edited`
+-- carrying only a new title or body is exactly that — it commits the context
+-- and advances the cursor while `derive_pull_request_events` emits nothing. A
+-- boundary read from event rows is therefore inert for as long as a repository
+-- happens to commit only such deliveries, and every backstop row the sweep
+-- produces meanwhile lands as the permanent uncaused poll_only divergence this
+-- bound exists to prevent. It does not heal when a later delivery finally does
+-- emit an event, because the bound admits rows recorded before it.
+--
+-- The durable evidence is the terminal disposition the delivery already writes.
+-- 202608170005_repo_watch_webhook_shadow_only_disposition.sql withdrew the
+-- 'committed' spelling because the write mode had not been decided and
+-- reserving it would pre-commit a shape that decision had to be free to choose.
+-- This migration is that decision, so the spelling is restored. It records what
+-- a delivery did rather than what mode was configured, so a reverted
+-- configuration strands nothing, and it exists for every primary commit
+-- including the ones that derive no event. It names no resulting cursor
+-- generation: 202608170005 already dropped that column, and the two-step
+-- handoff records the disposition before the write whose generation it would
+-- have to name. Rows the shadow interval already produced keep their
+-- classification and their causes, so the measurement that authorized promotion
+-- stays readable afterwards.
 
 ALTER TABLE repo_watch_event
     DROP CONSTRAINT repo_watch_event_producer_check;
@@ -31,6 +49,13 @@ ALTER TABLE repo_watch_event
 ALTER TABLE repo_watch_event
     ADD CONSTRAINT repo_watch_event_producer_check
         CHECK (producer IN ('poll', 'webhook'));
+
+-- Restores the sixth disposition 202608170005 withdrew. The unnamed CHECK in
+-- 202608150002_repo_watch_webhook_intake.sql still admits it, so dropping the
+-- narrowing constraint is the whole change; the resulting_cursor_generation
+-- column and its pairing CHECK stay dropped.
+ALTER TABLE repo_watch_webhook_disposition
+    DROP CONSTRAINT repo_watch_webhook_disposition_shadow_only_check;
 
 -- Supersedes the repo_watch_webhook_parity definition in
 -- 202608170005_repo_watch_webhook_shadow_only_disposition.sql, which bounded
@@ -69,10 +94,13 @@ shadow_start AS (
      GROUP BY repository
 ),
 primary_start AS (
-    SELECT repository, min(recorded_at) AS promoted_at
-      FROM repo_watch_event
-     WHERE producer = 'webhook'
-     GROUP BY repository
+    SELECT delivery.repository, min(disposition.recorded_at) AS promoted_at
+      FROM repo_watch_webhook_disposition AS disposition
+      JOIN repo_watch_webhook_delivery AS delivery
+        ON delivery.hook_id = disposition.hook_id
+       AND delivery.delivery_id = disposition.delivery_id
+     WHERE disposition.disposition = 'committed'
+     GROUP BY delivery.repository
 ),
 poll_event AS (
     SELECT event.repository,

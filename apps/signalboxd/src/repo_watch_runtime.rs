@@ -3035,9 +3035,17 @@ impl RepositoryWatchTask {
         let webhook_store = self.webhook_store.clone();
         let poller = Arc::clone(&self.poller);
         let repository = self.repository.clone();
+        // A committed disposition, not a projected one: this delivery owns a
+        // cursor advance rather than a shadow projection, and it is the only
+        // durable evidence of that ownership when the applied observation
+        // derived no event. Recording it here — before the cursor write, where
+        // the two-step handoff already records the terminal row — is what lets
+        // the parity view end its measurement at the repository's first primary
+        // commit instead of at the first webhook-produced event, which a
+        // context-only delivery never writes.
         let terminal = RepoWatchWebhookTerminalRequest::try_new(
             projections,
-            RepoWatchWebhookDisposition::Projected,
+            RepoWatchWebhookDisposition::Committed,
             None,
         )
         .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
@@ -10516,7 +10524,7 @@ mod tests {
             .expect("a primary delivery reaches a terminal disposition");
         assert_eq!(
             disposition.disposition(),
-            RepoWatchWebhookDisposition::Projected
+            RepoWatchWebhookDisposition::Committed
         );
         let after = fixture
             .task

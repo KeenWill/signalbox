@@ -402,6 +402,15 @@ impl RepoWatchWebhookProjection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchWebhookDisposition {
     Projected,
+    /// This delivery took ownership of a primary-mode cursor commit.
+    ///
+    /// Recorded before the cursor write the two-step handoff performs, so it
+    /// names no resulting generation — the generation a delivery reached is
+    /// carried by `repo_watch_event.cursor_generation` on the rows it wrote.
+    /// It is the repository's durable evidence of primary intake even when the
+    /// applied observation derived no event at all, which is why the parity
+    /// view reads it rather than the first webhook-produced row.
+    Committed,
     DuplicateState,
     Superseded,
     Ignored,

@@ -164,6 +164,17 @@ fn projected_request(
     )?)
 }
 
+/// The terminal request a primary delivery records in place of a projected one.
+fn committed_request(
+    projections: Vec<RepoWatchWebhookProjection>,
+) -> Result<RepoWatchWebhookTerminalRequest, Box<dyn Error>> {
+    Ok(RepoWatchWebhookTerminalRequest::try_new(
+        projections,
+        RepoWatchWebhookDisposition::Committed,
+        None,
+    )?)
+}
+
 fn event_projection(identity: [u8; 32]) -> Result<RepoWatchWebhookProjection, Box<dyn Error>> {
     Ok(RepoWatchWebhookProjection::event(
         RepoWatchEventContentIdentityV1::from_bytes(identity),
@@ -246,15 +257,31 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Whether the promoting delivery's applied observation derived an event row.
+///
+/// A primary delivery whose observed change falls outside the event families —
+/// a `pull_request: edited` carrying only a new title — commits the cursor and
+/// derives nothing, so the promoted repository writes no webhook-produced row.
+/// The boundary has to hold in both cases, which is why it reads the committed
+/// disposition rather than that row.
+#[derive(Clone, Copy)]
+enum PromotionEvent {
+    Derived,
+    None,
+}
+
 /// Seeds the shadow interval and the promotion that ends it.
 ///
 /// One poll event lands while the repository is still measuring parity, the
-/// webhook-produced event that follows is the durable evidence that this
+/// committed disposition that follows is the durable evidence that this
 /// repository began committing deliveries, and the last poll event is what the
 /// backstop sweep produces afterwards. Each is placed relative to the fixture
 /// delivery's own receipt, so every one of them falls inside the shadow window
 /// the view opens at that receipt.
-async fn seed_promotion_boundary_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+async fn seed_promotion_boundary_events(
+    pool: &PgPool,
+    promotion_event: PromotionEvent,
+) -> Result<(), Box<dyn Error>> {
     let mut transaction = pool.begin().await?;
     sqlx::query(
         "INSERT INTO repo_watch_cursor (
@@ -283,15 +310,18 @@ async fn seed_promotion_boundary_events(pool: &PgPool) -> Result<(), Box<dyn Err
         1,
     )
     .await?;
-    insert_produced_event(
-        &mut transaction,
-        Uuid::from_u128(0xA02),
-        2,
-        PROMOTION_IDENTITY,
-        "webhook",
-        2,
-    )
-    .await?;
+    insert_committed_disposition(&mut transaction, 2).await?;
+    if matches!(promotion_event, PromotionEvent::Derived) {
+        insert_produced_event(
+            &mut transaction,
+            Uuid::from_u128(0xA02),
+            2,
+            PROMOTION_IDENTITY,
+            "webhook",
+            2,
+        )
+        .await?;
+    }
     insert_produced_event(
         &mut transaction,
         Uuid::from_u128(0xA03),
@@ -302,6 +332,38 @@ async fn seed_promotion_boundary_events(pool: &PgPool) -> Result<(), Box<dyn Err
     )
     .await?;
     transaction.commit().await?;
+    Ok(())
+}
+
+/// Promotes the fixture repository, the given number of seconds after its first
+/// webhook receipt.
+///
+/// The committed disposition is what a primary delivery records in place of a
+/// projected one, and it is the repository's promotion. It is written directly
+/// rather than through the store so its `recorded_at` sits on the same seeded
+/// timeline as the surrounding event rows; the fixture admits one delivery per
+/// repository, and its pending row is what the retiring trigger requires.
+async fn insert_committed_disposition(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    seconds_after_receipt: i32,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "INSERT INTO repo_watch_webhook_disposition (
+            hook_id, delivery_id, disposition, recorded_at
+         )
+         SELECT delivery.hook_id, delivery.delivery_id, 'committed',
+                (
+                    SELECT min(received_at)
+                      FROM repo_watch_webhook_delivery
+                     WHERE repository = $1
+                ) + make_interval(secs => $2)
+           FROM repo_watch_webhook_delivery AS delivery
+          WHERE delivery.repository = $1",
+    )
+    .bind(REPOSITORY)
+    .bind(f64::from(seconds_after_receipt))
+    .execute(&mut **transaction)
+    .await?;
     Ok(())
 }
 
@@ -868,27 +930,34 @@ async fn one_body_above_the_page_ceiling_still_drains() -> Result<(), Box<dyn Er
     Ok(())
 }
 
+/// Primary mode restores the spelling the shadow-only ruling withdrew.
+///
+/// 202608170005 narrowed the disposition CHECK to refuse `committed` because the
+/// write mode had not been decided; 202608250500 is that decision and drops the
+/// narrowing. The spelling is what a delivery owning a cursor advance records,
+/// and the parity view's promotion bound reads it, so both the schema and the
+/// encoder-decoder pairing have to admit it.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn committed_disposition_is_refused_by_the_schema() -> Result<(), Box<dyn Error>> {
+async fn a_committed_disposition_is_admitted_and_reads_back() -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
     let store = PostgresRepoWatchWebhookStore::new(pool.clone());
     let key = delivery_key(0x501);
     admit_fixture(&store, key).await?;
 
-    let rejected = sqlx::query(
-        "INSERT INTO repo_watch_webhook_disposition (hook_id, delivery_id, disposition)
-         VALUES ($1, $2, 'committed')",
-    )
-    .bind(Decimal::from(key.hook_id().get()))
-    .bind(key.delivery_id())
-    .execute(&pool)
-    .await;
+    store
+        .record_terminal(key, &committed_request(Vec::new())?)
+        .await?;
 
-    assert!(
-        rejected.is_err(),
-        "shadow mode reserves no committed disposition"
+    let recorded = store
+        .load_disposition(key)
+        .await?
+        .expect("a committed delivery reaches a terminal disposition");
+    assert_eq!(
+        recorded.disposition(),
+        RepoWatchWebhookDisposition::Committed
     );
+    assert_eq!(recorded.outcome_code(), None);
     Ok(())
 }
 
@@ -1106,10 +1175,45 @@ async fn promotion_bounds_the_poll_side_of_parity() -> Result<(), Box<dyn Error>
     let store = PostgresRepoWatchWebhookStore::new(pool.clone());
     let key = delivery_key(0x604);
     admit_fixture(&store, key).await?;
-    store
-        .record_terminal(key, &projected_request(Vec::new())?)
-        .await?;
-    seed_promotion_boundary_events(&pool).await?;
+    seed_promotion_boundary_events(&pool, PromotionEvent::Derived).await?;
+
+    let measured = sqlx::query_as::<_, (String, Option<String>, Option<Vec<u8>>)>(
+        "SELECT status, cause, content_identity FROM repo_watch_webhook_parity",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(
+        measured,
+        vec![(
+            "poll_only".to_owned(),
+            None,
+            Some(SHADOW_POLL_IDENTITY.to_vec())
+        )]
+    );
+    Ok(())
+}
+
+/// The bound is the first committed delivery, not the first webhook-produced
+/// row.
+///
+/// An applied primary delivery is a cursor advance, and one whose observed
+/// change falls outside the event families derives no event at all — a
+/// `pull_request: edited` carrying only a new title commits the context and
+/// emits nothing. A bound read from event rows would stay inert for as long as
+/// a repository commits only such deliveries, and every backstop row the sweep
+/// produced meanwhile would stand as a permanent uncaused `poll_only`
+/// divergence, which is the exact corruption the bound exists to prevent. It
+/// would not heal later either: the bound admits rows recorded before it, so a
+/// delivery that finally does derive an event leaves those rows measured.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_promotion_that_derived_no_event_still_bounds_parity() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x605);
+    admit_fixture(&store, key).await?;
+    seed_promotion_boundary_events(&pool, PromotionEvent::None).await?;
 
     let measured = sqlx::query_as::<_, (String, Option<String>, Option<Vec<u8>>)>(
         "SELECT status, cause, content_identity FROM repo_watch_webhook_parity",

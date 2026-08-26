@@ -751,6 +751,7 @@ pub(crate) const fn repo_watch_webhook_disposition_to_str(
 ) -> &'static str {
     match value {
         RepoWatchWebhookDisposition::Projected => "projected",
+        RepoWatchWebhookDisposition::Committed => "committed",
         RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
         RepoWatchWebhookDisposition::Superseded => "superseded",
         RepoWatchWebhookDisposition::Ignored => "ignored",
@@ -766,6 +767,7 @@ pub(crate) fn repo_watch_webhook_disposition_from_str(
 ) -> Option<RepoWatchWebhookDisposition> {
     match value {
         "projected" => Some(RepoWatchWebhookDisposition::Projected),
+        "committed" => Some(RepoWatchWebhookDisposition::Committed),
         "duplicate_state" => Some(RepoWatchWebhookDisposition::DuplicateState),
         "superseded" => Some(RepoWatchWebhookDisposition::Superseded),
         "ignored" => Some(RepoWatchWebhookDisposition::Ignored),

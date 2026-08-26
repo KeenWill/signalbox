@@ -1529,29 +1529,31 @@ is explained in the parity view instead of being carried by a durable shadow
 cursor. `repo_watch_webhook_projection` records each resulting version-one
 content identity and event kind, and the cause of any divergence the producing
 delivery already knows, while `repo_watch_webhook_disposition` atomically
-records projected, duplicate-state, superseded, ignored, or quarantined terminal
-disposition. That vocabulary is unchanged by primary mode, and no committed
-disposition or resulting cursor generation is added. The ruling that authorized
-write mode chose the two-step durable handoff below, which records the terminal
-disposition *before* the cursor write, so no disposition row can name the
-generation its own write produces; the generation a delivery reached is carried
-by `repo_watch_event.cursor_generation` on the rows it wrote, which is where a
-reader already looks for it. The `repo_watch_webhook_parity` view joins those
-identities to the version-one poll-produced `repo_watch_event` rows that
-repository recorded between its first shadow receipt and its own promotion — its
-first webhook-produced row — and reports `matched`, `webhook_only`,
-`poll_only`, or `not_directly_mapped`, each divergent row alongside a `cause`
-drawn from one closed vocabulary: `compressed_transition`, `context_drift`,
-`poll_only_family`, and `cross_drain_shadow_gap`. A delivery records the cause
-it knows beside its own projection; `poll_only_family` is derived instead,
-because the event families polling produces and webhooks are not designed to
-reproduce — mergeability changes, aggregate check rollups, and reaction changes
-— have no delivery to carry it. Event projections intentionally carry no
-uniqueness constraint because separate deliveries may represent one content
-occurrence. Terminal exact payload bytes remain for seven days; after each
-successful full poll, at most once per day and starting with the first poll
-after boot, the daemon deletes only the expired payload bytes. Delivery
-tombstones, digests, projections, and dispositions remain append-only.
+records projected, committed, duplicate-state, superseded, ignored, or
+quarantined terminal disposition. Primary mode restores the committed spelling
+the shadow-only ruling had withdrawn, and a delivery that owns a cursor advance
+records it in place of projected; no resulting cursor generation is added. The
+ruling that authorized write mode chose the two-step durable handoff below,
+which records the terminal disposition *before* the cursor write, so no
+disposition row can name the generation its own write produces; the generation a
+delivery reached is carried by `repo_watch_event.cursor_generation` on the rows
+it wrote, which is where a reader already looks for it. The
+`repo_watch_webhook_parity` view joins those identities to the version-one
+poll-produced `repo_watch_event` rows that repository recorded between its first
+shadow receipt and its own promotion — its first committed disposition — and
+reports `matched`, `webhook_only`, `poll_only`, or `not_directly_mapped`, each
+divergent row alongside a `cause` drawn from one closed vocabulary:
+`compressed_transition`, `context_drift`, `poll_only_family`, and
+`cross_drain_shadow_gap`. A delivery records the cause it knows beside its own
+projection; `poll_only_family` is derived instead, because the event families
+polling produces and webhooks are not designed to reproduce — mergeability
+changes, aggregate check rollups, and reaction changes — have no delivery to
+carry it. Event projections intentionally carry no uniqueness constraint because
+separate deliveries may represent one content occurrence. Terminal exact payload
+bytes remain for seven days; after each successful full poll, at most once per
+day and starting with the first poll after boot, the daemon deletes only the
+expired payload bytes. Delivery tombstones, digests, projections, and
+dispositions remain append-only.
 
 **Implemented behavior.** Projection coverage is closed by delivery family and
 action:
@@ -1677,13 +1679,19 @@ measures, and withholding the projection alone does not end the measurement: the
 complete sweep keeps running as the backstop, so a fact whose delivery was
 missed or unmapped still lands as a poll-produced row with no projection to
 match it. The view's poll side is therefore bounded above by the repository's
-own promotion, which is its first webhook-produced row — the durable evidence
-that it began committing deliveries, unforgeable before promotion because the
-producer constraint admitted `poll` alone, and needing no separate mode record
-that a reverted configuration could leave stranded. A repository contributes no
-divergence row recorded at or after its promotion, and the rows its shadow
-interval produced keep their classification and their causes, so the measurement
-that authorized the promotion stays readable afterwards.
+own promotion, which is its first committed disposition — the durable evidence
+that it began committing deliveries. That bound is not the first
+webhook-produced row: an applied delivery is a cursor advance, and one whose
+observed change falls outside the event families derives no event at all, so a
+repository committing only such deliveries would leave an event-derived bound
+inert and every backstop row meanwhile a permanent uncaused `poll_only`
+divergence. A disposition records what a delivery did rather than what mode was
+configured, so it needs no separate mode record that a reverted configuration
+could leave stranded, and it exists for every primary commit including the ones
+that derive nothing. A repository contributes no divergence row recorded at or
+after its promotion, and the rows its shadow interval produced keep their
+classification and their causes, so the measurement that authorized the
+promotion stays readable afterwards.
 
 The commit reuses the two-step durable handoff a shadow-mode targeted refresh
 already uses: the terminal disposition and exact projections are recorded first,
