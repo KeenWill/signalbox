@@ -1,5 +1,6 @@
 import type { HotkeySequence, RegisterableHotkey } from '@tanstack/react-hotkeys'
-import type { AppDispatch, RootState } from './state'
+import type { BrowserPreferences } from './preferences'
+import type { AppDispatch, DensityMode, LayoutMode, RootState, ThemeMode } from './state'
 import { actions } from './state'
 
 export interface CommandContext {
@@ -28,6 +29,8 @@ export interface CommandContext {
   abandonImport?: () => void
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
   navigate?: (path: string) => void
+  configuresTranscriptDetail?: boolean
+  openArtifactInspector?: () => void
   openSession?: (sessionId: string) => void
   toggleTimelineExpansion?: () => void
 }
@@ -44,7 +47,7 @@ interface CommandDefinitionShape {
   id: string
   title: string
   description: string
-  category: 'Navigate' | 'View' | 'Surface' | 'Artifact' | 'Imports'
+  category: 'Navigate' | 'View' | 'Surface' | 'Artifact' | 'Settings' | 'Imports'
   bindings: readonly CommandBinding[]
   available: (context: CommandContext) => boolean
   run: (context: CommandContext) => void
@@ -57,6 +60,16 @@ const hasSelectedArtifactPreview = (context: CommandContext) => {
   return id !== null && context.artifactPreviewIds.includes(id)
 }
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
+const transcriptDetail = (context: CommandContext) =>
+  context.timelineIds.length > 0 || context.configuresTranscriptDetail === true
+const paneSizeProvided = (context: CommandContext) => context.paneSize !== undefined
+const setLayout = (layout: LayoutMode) => (context: CommandContext) =>
+  context.dispatch(actions.layoutSet(layout))
+const setDensity = (density: DensityMode) => (context: CommandContext) =>
+  context.dispatch(actions.densitySet(density))
+const setTheme = (theme: ThemeMode) => (context: CommandContext) =>
+  context.dispatch(actions.themeSet(theme))
+const artifactInspector = (context: CommandContext) => context.openArtifactInspector !== undefined
 export const commandRegistry = [
   {
     id: 'artifact.select',
@@ -210,6 +223,15 @@ export const commandRegistry = [
     bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
     available: productNavigation,
     run: (context) => context.navigate?.('/settings'),
+  },
+  {
+    id: 'artifact.open',
+    title: 'Open artifact inspector',
+    description: 'Resolve and inspect an immutable blob by its server-provided identity.',
+    category: 'Surface',
+    bindings: [],
+    available: artifactInspector,
+    run: (context) => context.openArtifactInspector?.(),
   },
   {
     id: 'palette.open',
@@ -477,6 +499,24 @@ export const commandRegistry = [
     },
   },
   {
+    id: 'layout.workbench',
+    title: 'Use workbench layout',
+    description: 'Show navigation, the primary surface, and the contextual inspector.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: setLayout('workbench'),
+  },
+  {
+    id: 'layout.focus',
+    title: 'Use focus layout',
+    description: 'Show the primary surface without secondary panes.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: setLayout('focus'),
+  },
+  {
     id: 'density.toggle',
     title: 'Toggle visual density',
     description: 'Switch compact and comfortable spacing independently of detail.',
@@ -487,6 +527,24 @@ export const commandRegistry = [
       const current = context.getState().app.density
       context.dispatch(actions.densitySet(current === 'compact' ? 'comfortable' : 'compact'))
     },
+  },
+  {
+    id: 'density.compact',
+    title: 'Use compact density',
+    description: 'Use dense rows for high-volume operator work.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: setDensity('compact'),
+  },
+  {
+    id: 'density.comfortable',
+    title: 'Use comfortable density',
+    description: 'Add separation without changing information detail.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: setDensity('comfortable'),
   },
   {
     id: 'theme.toggle',
@@ -501,12 +559,30 @@ export const commandRegistry = [
     },
   },
   {
+    id: 'theme.dark',
+    title: 'Use dark theme',
+    description: 'Use the dark workstation color theme.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: setTheme('dark'),
+  },
+  {
+    id: 'theme.light',
+    title: 'Use light theme',
+    description: 'Use the light workstation color theme.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: setTheme('light'),
+  },
+  {
     id: 'detail.full',
     title: 'Show full transcript detail',
     description: 'Show every supported timeline record.',
     category: 'View',
     bindings: [],
-    available: always,
+    available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('full')),
   },
   {
@@ -515,7 +591,7 @@ export const commandRegistry = [
     description: 'Keep origins, tools, progress, warnings, and results compact.',
     category: 'View',
     bindings: [],
-    available: always,
+    available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('condensed')),
   },
   {
@@ -524,17 +600,8 @@ export const commandRegistry = [
     description: 'Emphasize origins and durable results.',
     category: 'View',
     bindings: [],
-    available: always,
+    available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('results')),
-  },
-  {
-    id: 'preferences.reset',
-    title: 'Restore preference defaults',
-    description: 'Restore browser-local workstation preferences to their defaults.',
-    category: 'View',
-    bindings: [],
-    available: always,
-    run: (context) => context.dispatch(actions.preferencesReset()),
   },
   {
     id: 'session.open',
@@ -549,38 +616,77 @@ export const commandRegistry = [
     },
   },
   {
-    id: 'pane.navigation.resize',
-    title: 'Resize navigation pane',
-    description: 'Set the browser-local Workbench navigation pane width.',
-    category: 'View',
+    id: 'pane.navigation.preview',
+    title: 'Preview navigation pane size',
+    description: 'Preview the browser-local navigation pane width without persisting it.',
+    category: 'Settings',
     bindings: [],
-    available: (context) => context.paneSize !== undefined,
+    available: paneSizeProvided,
     run: (context) => {
       if (context.paneSize === undefined) return
-      context.dispatch(
-        actions.paneSizesSet({
-          ...context.getState().app.paneSizes,
-          navigation: context.paneSize,
-        }),
-      )
+      const paneSizes: BrowserPreferences['paneSizes'] = {
+        ...context.getState().app.paneSizes,
+        navigation: context.paneSize,
+      }
+      context.dispatch(actions.paneSizesPreviewed(paneSizes))
+    },
+  },
+  {
+    id: 'pane.navigation.resize',
+    title: 'Resize navigation pane',
+    description: 'Set the browser-local navigation pane width.',
+    category: 'Settings',
+    bindings: [],
+    available: paneSizeProvided,
+    run: (context) => {
+      if (context.paneSize === undefined) return
+      const paneSizes: BrowserPreferences['paneSizes'] = {
+        ...context.getState().app.paneSizes,
+        navigation: context.paneSize,
+      }
+      context.dispatch(actions.paneSizesSet(paneSizes))
+    },
+  },
+  {
+    id: 'pane.inspector.preview',
+    title: 'Preview inspector pane size',
+    description: 'Preview the browser-local inspector pane width without persisting it.',
+    category: 'Settings',
+    bindings: [],
+    available: paneSizeProvided,
+    run: (context) => {
+      if (context.paneSize === undefined) return
+      const paneSizes: BrowserPreferences['paneSizes'] = {
+        ...context.getState().app.paneSizes,
+        inspector: context.paneSize,
+      }
+      context.dispatch(actions.paneSizesPreviewed(paneSizes))
     },
   },
   {
     id: 'pane.inspector.resize',
     title: 'Resize inspector pane',
-    description: 'Set the browser-local Workbench inspector pane width.',
-    category: 'View',
+    description: 'Set the browser-local inspector pane width.',
+    category: 'Settings',
     bindings: [],
-    available: (context) => context.paneSize !== undefined,
+    available: paneSizeProvided,
     run: (context) => {
       if (context.paneSize === undefined) return
-      context.dispatch(
-        actions.paneSizesSet({
-          ...context.getState().app.paneSizes,
-          inspector: context.paneSize,
-        }),
-      )
+      const paneSizes: BrowserPreferences['paneSizes'] = {
+        ...context.getState().app.paneSizes,
+        inspector: context.paneSize,
+      }
+      context.dispatch(actions.paneSizesSet(paneSizes))
     },
+  },
+  {
+    id: 'preferences.reset',
+    title: 'Restore preference defaults',
+    description: 'Restore every browser-local workstation preference to its default.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.preferencesReset()),
   },
 ] as const satisfies readonly CommandDefinitionShape[]
 

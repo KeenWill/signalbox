@@ -1,7 +1,7 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from '@tanstack/react-router'
-import { useEffect, useMemo, useState, useSyncExternalStore } from 'react'
+import { type CSSProperties, useEffect, useMemo, useState, useSyncExternalStore } from 'react'
 import {
   type CommandContext,
   globalHotkeyBindings,
@@ -9,6 +9,7 @@ import {
   invokeCommand,
 } from './commands'
 import { FleetTable } from './FleetTable'
+import { AttachmentWorkbench } from './features/artifacts/ArtifactAttachments'
 import { ArtifactWorkbench } from './features/artifacts/ArtifactRenderer'
 import { artifactOriginalIds, artifactPreviewIds } from './features/artifacts/artifactScenario'
 import type { WebSearchPage } from './generated/web-contract.mjs'
@@ -242,8 +243,13 @@ export function Workspace({
     )
   }
 
+  const shellStyle = {
+    '--workspace-navigation-width': `${app.paneSizes.navigation}px`,
+    '--workspace-inspector-width': `${app.paneSizes.inspector}px`,
+  } as CSSProperties
+
   return (
-    <div className={`app-shell layout-${app.layout}`}>
+    <div className={`app-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="navigation-pane">
         <ScenarioNavigation activeId={knownId} />
       </aside>
@@ -267,6 +273,8 @@ export function Workspace({
         >
           {knownId === 'blobs' ? (
             <ArtifactWorkbench commandContext={commandContext} />
+          ) : knownId === 'attachments' ? (
+            <AttachmentWorkbench commandContext={commandContext} />
           ) : (
             <Transcript
               key={`timeline-${knownId}`}

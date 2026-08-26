@@ -1,5 +1,8 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
-import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
+// The shared fixture is the single copy kept aligned with WebContractBootstrap::current();
+// readBootstrap now rejects any bootstrap whose limits contradict it.
+import { webContractBootstrapFixture } from '../src/product.fixture'
+import { useDeterministicImportApi } from './import-api-fixture'
 
 interface RouteEvidence {
   path: string
@@ -30,7 +33,7 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
 }
 
 const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  page.route('**/api/bootstrap', (route) => route.fulfill({ json: webContractBootstrapFixture }))
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -47,6 +50,8 @@ const useDeterministicSession = (page: Page) =>
       return route.fulfill({
         json: {
           session_id: sessionEvidenceFixture.id,
+          // Item charges follow the wire contract: a 64-byte envelope plus the UTF-8
+          // event-kind spelling (21 bytes for tool_batch_transition, 14 for the others).
           items: [
             {
               address: { event_sequence: '999998' },
@@ -91,6 +96,8 @@ const useDeterministicSession = (page: Page) =>
 const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
+  // Only the Imports route reads this adapter; every other route ignores it.
+  await useDeterministicImportApi(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(evidence.path)
   await expect(page.getByRole('heading', { name: evidence.title, level: 1 })).toBeVisible()
