@@ -23,8 +23,26 @@ const settingsPreferenceFixture = {
   restoreAction: 'Restore defaults',
 } as const
 
-const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+const emptyAttentionFixture = {
+  continuation_after_session_id: null,
+  cursor: '0',
+  summaries: [],
+} as const
+
+const useDeterministicAttention = async (page: Page) => {
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: emptyAttentionFixture })}\n`,
+      contentType: 'application/x-ndjson',
+    }),
+  )
+  await page.route('**/api/attention', (route) => route.fulfill({ json: emptyAttentionFixture }))
+}
+
+const useDeterministicBootstrap = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await useDeterministicAttention(page)
+}
 
 const useRecoveringBootstrap = async (page: Page) => {
   const state = { unavailable: true, attempts: 0 }
@@ -649,6 +667,81 @@ test('closes phone navigation after selecting a route', async ({ page }) => {
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
 
+test('offers Scenario Studio through the product command palette', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  const modifier = await platformModifier(page)
+  await page.keyboard.press(`${modifier}+K`)
+  await page.getByRole('button', { name: /Go to Scenario Studio/ }).click()
+
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('does not start Attention reads when bootstrap validation fails', async ({ page }) => {
+  let attentionRequests = 0
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.route('**/api/attention**', (route) => {
+    attentionRequests += 1
+    return route.abort()
+  })
+
+  await page.goto('/attention')
+
+  await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+  expect(attentionRequests).toBe(0)
+})
+
+test('does not start Attention reads for incompatible bootstrap values', async ({ page }) => {
+  let attentionRequests = 0
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({
+      json: {
+        ...bootstrapFixture,
+        limits: { ...bootstrapFixture.limits, max_ndjson_item_bytes: 32_768 },
+      },
+    }),
+  )
+  await page.route('**/api/attention**', (route) => {
+    attentionRequests += 1
+    return route.abort()
+  })
+
+  await page.goto('/attention')
+
+  await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+  expect(attentionRequests).toBe(0)
+})
+
+test('retries a transient Attention bootstrap failure in place', async ({ page }) => {
+  const admission = await useBootstrapRecoveringAfterOneOutage(page)
+  await useDeterministicAttention(page)
+  await page.goto('/attention')
+
+  await expect(page.getByRole('heading', { name: 'Attention contract unavailable' })).toBeVisible()
+  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  await page.getByRole('button', { name: 'Retry contract check' }).click()
+
+  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
+  await expect(page.getByRole('heading', { name: '0 sessions' })).toBeVisible()
+  expect(admission.attempts).toBe(2)
+})
+
+test('gives iconless Attention contract errors the full empty-state width', async ({ page }) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.goto('/attention')
+
+  const message = page
+    .getByRole('heading', { name: 'Attention contract unavailable' })
+    .locator('..')
+  await expect(message).toHaveCSS('grid-column-start', '1')
+  await expect(message).toHaveCSS('grid-column-end', '-1')
+})
+
 test('mounts Imports inside the product shell without a second navigation or header', async ({
   page,
 }) => {
@@ -1047,6 +1140,9 @@ test('closes the phone navigation sheet before entering Scenario studio', async 
 test('retries a transient bootstrap failure without reloading', async ({ page }) => {
   const problems = watchBrowser(page)
   const scenario = await useRecoveringBootstrap(page)
+  // Attention reads start as soon as the retried bootstrap is admitted; serving them
+  // deterministically keeps the staged bootstrap outage the only console error this scenario sees.
+  await useDeterministicAttention(page)
   await page.goto('/attention')
 
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
