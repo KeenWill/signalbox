@@ -292,7 +292,7 @@ async fn delegated_session_backfill_uses_creation_placement_time() -> Result<(),
     setup.commit().await?;
     let migration = MIGRATOR
         .iter()
-        .find(|migration| migration.version == 202608250800)
+        .find(|migration| migration.version == OPERATOR_ATTENTION_CHANGE_MIGRATION_VERSION)
         .expect("the attention migration is registered");
     let mut connection = pool.acquire().await?;
     connection.apply("_sqlx_migrations", migration).await?;
