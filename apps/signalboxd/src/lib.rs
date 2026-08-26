@@ -1225,13 +1225,18 @@ impl SchedulerPassOccupancyRecovery {
         }
     }
 
-    /// Names the durable work an expiring pass owns, in the order the two
-    /// windows can hold it: an admitted turn first, then the compaction window
-    /// that runs before any turn is activated.
+    /// Names the durable work an expiring pass owns.
+    ///
+    /// An open compaction window wins over a reported turn, because the two
+    /// marks have different lifetimes: the window stands only while that
+    /// compaction is actually in flight, whereas a turn the pass reported stays
+    /// named for the rest of the pass even once it has ended. A pass that
+    /// resumed a turn, finished it, and then expired inside its compaction
+    /// would otherwise hand the finished turn to recovery — which finds it
+    /// superseded — and leave the compaction stranded. Nothing is lost by the
+    /// precedence: the window closes before activation, so no turn work is ever
+    /// in flight while it stands.
     fn expired_pass_subject(&self, session: SessionId) -> ExpiredPassSubject {
-        if let Some(turn) = self.active_turn(session) {
-            return ExpiredPassSubject::ActiveTurn(turn);
-        }
         if self
             .compacting_sessions
             .lock()
@@ -1239,6 +1244,9 @@ impl SchedulerPassOccupancyRecovery {
             .contains(&session)
         {
             return ExpiredPassSubject::PreActivationCompaction;
+        }
+        if let Some(turn) = self.active_turn(session) {
+            return ExpiredPassSubject::ActiveTurn(turn);
         }
         ExpiredPassSubject::Uncorrelated
     }
@@ -1893,7 +1901,7 @@ async fn recover_expired_pre_activation_compaction(
                     session_id = %session.as_uuid(),
                     attempt,
                     recovery_outcome = ?outcome,
-                    "scheduler pass expired inside its pre-activation compaction and was reconciled durably"
+                    "scheduler pass expired inside its pre-activation compaction; its session was reconciled under the scheduler lock"
                 );
                 return;
             }
@@ -4218,17 +4226,24 @@ mod tests {
         );
     }
 
-    /// An admitted turn still takes precedence: the compaction window closes
-    /// before activation, so the two never name the same pass at once.
+    /// A pass that resumed a turn, finished it, and then expired inside its
+    /// compaction names the compaction: the turn mark outlives the turn, and
+    /// handing that finished turn to recovery would strand the compaction.
     #[tokio::test]
-    async fn an_admitted_turn_outranks_the_compaction_window() {
+    async fn an_open_compaction_window_outranks_a_turn_the_pass_already_reported() {
         let session = SessionId::from_uuid(Uuid::from_u128(0x67_00));
         let turn = TurnId::from_uuid(Uuid::from_u128(0x67_01));
         let (recovery, _work_source) = expiry_recovery_fixture();
-        let (_guard, observe) = recovery.resume_turn_observer(session);
-
+        let (_turn_guard, observe) = recovery.resume_turn_observer(session);
         observe(turn);
 
+        let window = recovery.compaction_window(session);
+
+        assert_eq!(
+            recovery.expired_pass_subject(session),
+            ExpiredPassSubject::PreActivationCompaction
+        );
+        drop(window);
         assert_eq!(
             recovery.expired_pass_subject(session),
             ExpiredPassSubject::ActiveTurn(turn)
