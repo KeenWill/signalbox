@@ -25,8 +25,12 @@ use signalbox_persistence::{
 use crate::{
     ActivatedTurnExecution, HubModelConfiguration, TurnPassExecutionStage,
     WorkspaceInstructionRuntime, WorkspaceInstructionRuntimeError,
-    process_runtime::compact_automatically, report_ambiguous_commit,
-    usage_limits::reported_usage_requires_compaction,
+    process_runtime::compact_automatically,
+    report_ambiguous_commit,
+    usage_limits::{
+        ReportedInputCacheAxes, ReportedInputRetention, ReportedOutputRetention,
+        reported_usage_requires_compaction,
+    },
 };
 use tracing::Instrument;
 
@@ -336,9 +340,11 @@ impl ReportedUsageCompaction {
         let reported_requires_compaction = reported.is_some_and(|reported| {
             reported_usage_requires_compaction(
                 reported.usage(),
-                reported.input_includes_cache_tokens(),
-                reported.input_is_retained(),
-                reported.output_is_retained(),
+                ReportedInputCacheAxes::from_includes_cache_tokens(
+                    reported.input_includes_cache_tokens(),
+                ),
+                ReportedInputRetention::from_retained(reported.input_is_retained()),
+                ReportedOutputRetention::from_retained(reported.output_is_retained()),
                 reported.projected_unreported_content_bytes(),
                 u64::from(definition.max_output_tokens()),
                 u64::from(definition.context_window_tokens()),
