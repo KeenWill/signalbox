@@ -278,9 +278,16 @@ async fn s10_slot_held_recovery_declines_changed_progress_evidence() -> Result<(
 
 /// S10: a lock refusal raised by the shared startup transition remains the
 /// typed contention outcome that the detached scheduler recovery can retry.
+///
+/// This repository classifies no lock site of its own on this path — it sets
+/// one acquisition bound and hands the observation straight to the shared
+/// transition — so every refusal here reaches the caller through the
+/// `StartupScanRepositoryError` conversion, and the contended row is the
+/// session scheduler row that transition takes under that bound.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s10_slot_held_recovery_preserves_later_lock_refusal() -> Result<(), Box<dyn Error>> {
+async fn s10_slot_held_recovery_preserves_shared_transition_lock_refusal()
+-> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let fixture = activated_watchdog_session(&pool, 0x12_700).await?;
     checkpoint_model_call(&pool, &fixture, 0x12_700).await?;
@@ -290,7 +297,7 @@ async fn s10_slot_held_recovery_preserves_later_lock_refusal() -> Result<(), Box
         .await?
         .expect("the checkpointed provider call holds the session slot");
     let mut blocker = pool.begin().await?;
-    sqlx::query("SELECT session_id FROM session WHERE session_id = $1 FOR UPDATE")
+    sqlx::query("SELECT session_id FROM session_scheduler WHERE session_id = $1 FOR UPDATE")
         .bind(fixture.session.into_uuid())
         .execute(&mut *blocker)
         .await?;
@@ -306,14 +313,31 @@ async fn s10_slot_held_recovery_preserves_later_lock_refusal() -> Result<(), Box
             &mut ids,
         )
         .await
-        .expect_err("the session row remains locked past the recovery budget");
+        .expect_err("the scheduler row remains locked past the recovery budget");
 
     assert_eq!(
         error.operator_failure_cause_code(),
         "turn_liveness_terminalization_lock_unavailable"
     );
 
+    // The refusal decided nothing, so the same observation is still the one to
+    // retry: releasing the holder lets the identical call through to the shared
+    // transition's own classification of this durable shape.
     blocker.rollback().await?;
+    assert_eq!(
+        repository
+            .recover_observed_slot_held_turn(
+                observed,
+                AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x12_802)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(0x12_803)),
+                ),
+                &mut ids,
+            )
+            .await?,
+        Some(StartupScanSessionOutcome::ResumablePreparedModelCall { turn: fixture.turn })
+    );
+
     pool.close().await;
     drop(container);
     Ok(())

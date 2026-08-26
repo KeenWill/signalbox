@@ -201,7 +201,22 @@ impl FileMediaRegistry {
                     .await?;
                 match sanitize_probe(reader, raw)? {
                     SanitizedProbe::NoMatch => {}
-                    SanitizedProbe::Candidate(candidate) => candidates.push(candidate),
+                    SanitizedProbe::Candidate(candidate) => {
+                        // A retained candidate must be re-examinable inside the
+                        // envelope `validate_candidate` will grant, and that envelope
+                        // is the clamped pair rather than the deployment ceiling
+                        // alone. For a reader whose declared validation envelope is
+                        // the smaller of the two, the ceiling by itself would keep
+                        // evidence validation can never cover.
+                        if candidate.evidence_bytes
+                            <= self
+                                .ceilings
+                                .validation_source_bytes
+                                .min(reader.validation().source_bytes())
+                        {
+                            candidates.push(candidate);
+                        }
+                    }
                     SanitizedProbe::Malformed {
                         media_type,
                         reason_code,
@@ -308,6 +323,7 @@ impl FileMediaRegistry {
                         reader: reader.clone(),
                         media_type: declared,
                         strength: ProbeStrength::DeclaredCandidate,
+                        evidence_bytes: 0,
                     },
                     ValidationEvidence::DeclaredCandidateStructurallyValidated,
                 )
@@ -339,6 +355,7 @@ impl FileMediaRegistry {
                         reader: declaration.identity().clone(),
                         media_type: text_plain,
                         strength: ProbeStrength::DeclaredCandidate,
+                        evidence_bytes: 0,
                     },
                     ValidationEvidence::StreamingTextValidation,
                 )
@@ -614,6 +631,15 @@ impl FileMediaRegistry {
                     detected_media_type: validated.detected_media_type().clone(),
                     validation: validated.validation(),
                     metadata: validated.metadata().clone(),
+                    // The field names the prefix validation actually covered, so it
+                    // carries the same clamp `validate_candidate` applied. The
+                    // deployment ceiling alone would overstate that prefix for a
+                    // reader whose declared validation envelope is smaller, and an
+                    // adapter honoring it could interpret bytes validation never saw.
+                    maximum_source_bytes: self
+                        .ceilings
+                        .validation_source_bytes
+                        .min(reader.validation().source_bytes()),
                     view: request.view,
                     input: request.input,
                     maximum_image_axis: self.ceilings.image_axis,
@@ -726,6 +752,7 @@ struct Candidate {
     reader: ReaderIdentity,
     media_type: CanonicalMediaType,
     strength: ProbeStrength,
+    evidence_bytes: u64,
 }
 
 fn recognized_probe_strength(strength: ProbeStrength) -> bool {
@@ -764,11 +791,14 @@ fn sanitize_probe(
         ProcessorProbeOutput::Candidate {
             media_type,
             strength,
+            evidence_bytes,
         } => {
             let media_type = CanonicalMediaType::from_str(&media_type)
                 .map_err(|_| FileMediaFailure::ProcessorFailed)?;
             if !reader.media_types().contains(&media_type)
                 || strength == ProbeStrength::DeclaredCandidate
+                || evidence_bytes == 0
+                || evidence_bytes > reader.probe().cumulative_bytes()
             {
                 return Err(FileMediaFailure::ProcessorFailed);
             }
@@ -776,6 +806,7 @@ fn sanitize_probe(
                 reader: reader.identity().clone(),
                 media_type,
                 strength,
+                evidence_bytes,
             }))
         }
         ProcessorProbeOutput::RecognizedMalformed {

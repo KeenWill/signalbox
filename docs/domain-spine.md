@@ -4239,6 +4239,7 @@ pub enum ModelCallExecutionReconstitutionFailure {
     DuplicateOriginContent,
     MissingOriginContent,
     UnreferencedOriginContent,
+    AttachmentBlobFactMismatch,
     ConsumedSteeringMismatch,
     CallOwnershipMismatch,
     CallSelectionMismatch,
@@ -5323,6 +5324,7 @@ pub struct ApprovedToolRequestError { /* private */ }
 pub enum ToolExecutionErrorKind {
     UnknownTool,
     InvalidArguments,
+    PreauthorizationRejected,
     ExecutionFailed,
     ResultTooLarge,
     CrashLost,
@@ -7597,7 +7599,7 @@ pub enum ModelConversationMessage {
     User {
         source: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
-        content: UserContent,
+        content: ModelUserContent,
     },
     DelegatedTask {
         source: SemanticTranscriptEntryRef,
@@ -7681,6 +7683,9 @@ pub enum ModelFrontierRenderingError {
         entry: SemanticTranscriptEntryRef,
         accepted_input: AcceptedInputId,
     },
+    MissingAttachmentBlobFact { digest: BlobDigest },
+    AttachmentStubSerialization,
+    AttachmentStubBoundExceeded,
     DuplicateToolEvidence { entry: SemanticTranscriptEntryRef },
     MissingOrMismatchedToolEvidence { entry: SemanticTranscriptEntryRef },
     UnrenderableToolResult { entry: SemanticTranscriptEntryRef },
@@ -8089,8 +8094,21 @@ pub trait ToolArgumentValidator: Send + Sync {
         &self,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolExecutionErrorDetail>;
+    fn preauthorization(
+        &self,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolExecutionErrorDetail>;
 }
 // implemented for matching Fn(&NormalizedToolArguments) -> Result<(), ToolExecutionErrorDetail>
+
+pub enum ToolPreauthorization {
+    Unmetered,
+    BlobMetadata { digest: BlobDigest },
+    BlobRead {
+        digest: BlobDigest,
+        decoded_bytes: NonZeroU64,
+    },
+}
 
 pub struct CompiledTool { /* private */ }
 impl CompiledTool {
@@ -10016,6 +10034,7 @@ pub enum StartupScanSessionOutcome {
     },
     RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
     ResumableToolBatch { turn: TurnId },
+    ResumablePreparedModelCall { turn: TurnId },
     AwaitingRecoveryDecision { turn: TurnId },
 }
 
@@ -10313,6 +10332,13 @@ pub enum ToolAttemptAuthorizationStatus {
     InFlight(ToolDispatchAuthority),
 }
 
+pub enum ToolAttemptAuthorizationOutcome {
+    Authorized(Box<ToolDispatchAuthority>),
+    PreauthorizationRejected {
+        detail: ToolExecutionErrorDetail,
+    },
+}
+
 pub trait ToolExecutionTransaction {
     type Error: ClassifyOperatorFailure;
     fn load_active_batch(
@@ -10338,7 +10364,8 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> impl Future<Output = Result<ToolDispatchAuthority, Self::Error>> + Send;
+        preauthorization: ToolPreauthorization,
+    ) -> impl Future<Output = Result<ToolAttemptAuthorizationOutcome, Self::Error>> + Send;
     fn reread_ambiguous_authorization(
         &mut self,
         session: SessionId,
@@ -12630,7 +12657,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: search                                | 21 (+4 free fn) (incl. 2 traits) |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 41 (incl. 8 traits)              |
-| application: tool_loop                             | 27 (incl. 5 traits)              |
+| application: tool_loop                             | 28 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
@@ -12646,7 +12673,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: submit_input                          | 7 (incl. 2 traits)               |
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
-| application: tool_loop_ports                       | 9 (incl. 3 traits)               |
+| application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
 | **signalbox-application total**                    | **422 (+20 free fn)**            |
