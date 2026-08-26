@@ -131,6 +131,18 @@ impl AttentionQuery {
         }
     }
 
+    /// Constructs one unfiltered identity-ordered attention page.
+    #[must_use]
+    pub fn identity_page(after: Option<SessionId>) -> Self {
+        Self {
+            search: None,
+            required_tags: BTreeSet::new(),
+            include_archived: false,
+            sort: AttentionSort::SessionIdentityAscending,
+            continuation: after.map(AttentionContinuation::SessionIdentity),
+        }
+    }
+
     /// Validates bounded search, exact tags, ordering, and keyset shape.
     pub fn try_new(
         search: Option<String>,

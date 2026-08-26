@@ -6164,6 +6164,7 @@ pub enum AttentionContinuation {
 pub struct AttentionQuery { /* private */ }
 impl AttentionQuery {
     pub fn hot_page() -> Self;
+    pub fn identity_page(after: Option<SessionId>) -> Self;
     pub fn try_new(
         search: Option<String>,
         required_tags: Vec<String>,

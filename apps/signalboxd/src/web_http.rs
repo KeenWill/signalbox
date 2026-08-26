@@ -597,7 +597,7 @@ async fn attention_snapshot(
     };
     let continuation = match query.after_session_id {
         Some(value) => match parse_canonical_session_id(&value) {
-            Ok(session) => Some(AttentionContinuation::SessionIdentity(session)),
+            Ok(session) => Some(session),
             Err(()) => {
                 return application_error(
                     StatusCode::BAD_REQUEST,
@@ -726,15 +726,8 @@ fn parse_canonical_session_id(value: &str) -> Result<SessionId, ()> {
     Ok(SessionId::from_uuid(parsed))
 }
 
-fn attention_page_query(continuation: Option<AttentionContinuation>) -> AttentionQuery {
-    AttentionQuery::try_new(
-        None,
-        Vec::new(),
-        false,
-        AttentionSort::SessionIdentityAscending,
-        continuation,
-    )
-    .expect("the fixed attention page query is bounded")
+fn attention_page_query(after: Option<SessionId>) -> AttentionQuery {
+    AttentionQuery::identity_page(after)
 }
 
 fn parse_attention_query(query: SessionCatalogQuery) -> Result<AttentionQuery, ()> {

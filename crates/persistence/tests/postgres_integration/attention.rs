@@ -173,8 +173,7 @@ async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
         usize::from(max_attention_snapshot_items())
     );
     assert!(
-        activity_first.summaries.last().unwrap().session
-            < activity_second.summaries[0].session
+        activity_first.summaries.last().unwrap().session < activity_second.summaries[0].session
     );
     assert_eq!(
         first.summaries.len()
@@ -296,10 +295,9 @@ async fn missing_activity_fact_fails_the_default_catalog_page_closed() -> Result
         .await
         .expect_err("a session missing its activity fact is projection corruption, not absence");
 
-    assert!(matches!(
-        error,
-        AttentionRepositoryError::Corruption(AttentionCorruption::Missing(_))
-    ));
+    let AttentionRepositoryError::Corruption(AttentionCorruption::Missing(_)) = error else {
+        panic!("missing activity facts must report projection corruption");
+    };
 
     pool.close().await;
     drop(container);
@@ -360,7 +358,9 @@ async fn metadata_activity_drives_hot_sort_filters_counts_and_resync() -> Result
     assert!(visible.summaries[0].last_activity.recorded_at > prior_activity);
     assert_eq!(filtered.total, 1);
     assert_eq!(filtered.summaries[0].session, target);
-    assert!(matches!(follow, AttentionChanges::ResyncRequired { .. }));
+    let AttentionChanges::ResyncRequired { .. } = follow else {
+        panic!("metadata changes must require a filtered catalog resync");
+    };
 
     let archived_metadata = SessionMetadataContent::try_new(
         Some("needle catalog title".to_owned()),
@@ -488,12 +488,12 @@ async fn unknown_session_goal_rejection_is_recorded_and_publishes_no_attention()
     .fetch_one(&pool)
     .await?;
 
-    assert!(matches!(
-        outcome,
-        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(
-            GoalCommandRejection::SessionNotFound
-        ))
-    ));
+    let GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(
+        GoalCommandRejection::SessionNotFound,
+    )) = outcome
+    else {
+        panic!("an unknown session must retain its typed goal rejection");
+    };
     assert_eq!(recorded, 1);
     assert_eq!(published, 0);
 
