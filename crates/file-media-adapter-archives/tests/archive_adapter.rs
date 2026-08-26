@@ -628,6 +628,25 @@ async fn excessive_zip_entry_count_is_a_typed_bounded_failure() -> Result<(), Bo
 }
 
 #[tokio::test]
+async fn duplicate_zip_central_directory_names_are_a_typed_malformed_inspection()
+-> Result<(), Box<dyn Error>> {
+    assert_malformed(
+        malformed_inspection(ArchiveFixture::zip_with_duplicate_central_directory_names()?).await?,
+        "malformed_archive",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn zip_inside_zstd_skippable_frame_is_ambiguous() -> Result<(), Box<dyn Error>> {
+    let source = MemorySource::unknown(fixtures::zip_inside_zstd_skippable_frame()?)?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+
+    assert_eq!(inspection.status(), FileInspectionStatus::Ambiguous);
+    Ok(())
+}
+
+#[tokio::test]
 async fn unknown_bytes_remain_a_typed_unknown_inspection() -> Result<(), Box<dyn Error>> {
     let source = MemorySource::unknown(b"not an archive".to_vec())?;
     let inspection = inspect(&DirectProcessor::new(), &source).await?;

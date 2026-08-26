@@ -61,6 +61,8 @@ const OUTPUT_DEPTH: u32 = 5;
 const OUTPUT_NODES: u64 = 5_000;
 // numeric-bound: hard safety ceiling - bounds aggregate structured string memory
 const OUTPUT_STRING_BYTES: usize = 480_000;
+// numeric-bound: not-a-bound - fixed ZIP central-directory record header size
+const ZIP_CENTRAL_HEADER_BYTES: usize = 46;
 
 /// ZIP, TAR, GZIP, and Zstandard provider for the isolated worker.
 #[derive(Clone, Copy, Debug, Default)]
@@ -349,7 +351,14 @@ impl ArchiveKind {
         match self {
             Self::Zip if structurally_valid_zip => Some(ProbeStrength::Strong),
             Self::Zip if !zip_signature_at_start(source.probe_prefix()) => None,
-            Self::Gzip | Self::Zstd if structurally_valid_zip => {
+            // A ZIP-shaped source demotes a competing claim only once that claim's own
+            // format is shown not to be structurally valid. A source that is genuinely
+            // both formats keeps both strong claims, so inspection returns the ambiguity
+            // the contract requires instead of silently selecting ZIP.
+            Self::Gzip if structurally_valid_zip && !structurally_valid_gzip(source.as_bytes()) => {
+                Some(ProbeStrength::StructuralCandidate)
+            }
+            Self::Zstd if structurally_valid_zip && !structurally_valid_zstd(source.as_bytes()) => {
                 Some(ProbeStrength::StructuralCandidate)
             }
             Self::Zip | Self::Gzip | Self::Zstd | Self::Tar => {
@@ -422,6 +431,9 @@ fn enumerate(kind: ArchiveKind, bytes: &[u8]) -> Result<ArchiveSummary, ArchiveI
 
 fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
     let mut archive = ZipArchive::new(Cursor::new(bytes)).map_err(|_| ArchiveIssue::Malformed)?;
+    if zip_central_directory_records(bytes, archive.central_directory_start())? != archive.len() {
+        return Err(ArchiveIssue::Malformed);
+    }
     if archive.len() > MAX_ENTRIES {
         return Err(ArchiveIssue::EntryCount);
     }
@@ -484,6 +496,44 @@ fn enumerate_zip(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
         entries,
         expanded_bytes: total,
     })
+}
+
+/// Counts the central-directory records the source actually carries, walking from the
+/// directory start the archive itself resolved.
+///
+/// `ZipArchive` keys its inventory by entry name, so a central directory that repeats a
+/// name keeps only the last record and drops the earlier one before enumeration begins.
+/// A record hidden that way is never checked for encryption, links, unsupported
+/// compression, recursion, or expansion, and never appears in the reported inventory.
+/// A record trailing the archive's own declared count hides identically. Requiring the
+/// present record count to equal the enumerated count rejects both.
+fn zip_central_directory_records(bytes: &[u8], start: u64) -> Result<usize, ArchiveIssue> {
+    let mut offset = usize::try_from(start).map_err(|_| ArchiveIssue::Malformed)?;
+    let mut records = 0_usize;
+    loop {
+        let Some(header) = bytes
+            .get(offset..)
+            .and_then(|rest| rest.get(..ZIP_CENTRAL_HEADER_BYTES))
+        else {
+            return Ok(records);
+        };
+        if !header.starts_with(b"PK\x01\x02") {
+            return Ok(records);
+        }
+        let name = usize::from(u16::from_le_bytes([header[28], header[29]]));
+        let extra = usize::from(u16::from_le_bytes([header[30], header[31]]));
+        let comment = usize::from(u16::from_le_bytes([header[32], header[33]]));
+        offset = offset
+            .checked_add(ZIP_CENTRAL_HEADER_BYTES)
+            .and_then(|next| next.checked_add(name))
+            .and_then(|next| next.checked_add(extra))
+            .and_then(|next| next.checked_add(comment))
+            .ok_or(ArchiveIssue::Malformed)?;
+        records = records.checked_add(1).ok_or(ArchiveIssue::EntryCount)?;
+        if records > MAX_ENTRIES {
+            return Err(ArchiveIssue::EntryCount);
+        }
+    }
 }
 
 fn enumerate_tar(bytes: &[u8]) -> Result<ArchiveSummary, ArchiveIssue> {
