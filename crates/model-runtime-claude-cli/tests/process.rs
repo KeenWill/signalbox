@@ -289,8 +289,10 @@ async fn file_delivery_resolves_a_historical_operation_pin_from_the_complete_cat
         bridge_cli(),
         temporary.path(),
         CredentialReference::new(CURRENT_CREDENTIAL_REFERENCE),
+        None,
+        None,
     );
-    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.exchange_timeout = Some(OFFLINE_TIMEOUT);
     config.interrupt_grace = Duration::from_millis(100);
     let runtime = ClaudeCliRuntime::new_with_credential_catalog(
         config,
@@ -392,6 +394,27 @@ async fn tool_arguments_preserve_the_provider_json_lexeme() {
         proposal.arguments_json,
         fixtures::NONCANONICAL_TOOL_ARGUMENTS
     );
+    assert_eq!(result.spawns, 1);
+}
+
+/// A whole-object credential suppression remains typed and never emits an
+/// executable tool proposal or argument delta.
+#[tokio::test]
+async fn fully_suppressed_tool_arguments_are_non_executable() {
+    let result = execute_scenario("suppressed_tool_arguments", OperationShape::Tool).await;
+    let completion = completed(&result.evidence);
+
+    assert_eq!(
+        completion.content,
+        vec![AssistantPart::SuppressedToolCall(
+            signalbox_model_runtime::ToolName::new(fixtures::TOOL_NAME),
+        )]
+    );
+    assert!(!result.observations.iter().any(|observation| matches!(
+        observation.fact,
+        signalbox_model_runtime::ObservationFact::ToolCallProposed(_)
+            | signalbox_model_runtime::ObservationFact::ToolArgumentsDelta { .. }
+    )));
     assert_eq!(result.spawns, 1);
 }
 
@@ -922,6 +945,8 @@ async fn non_utf8_bridge_path_is_a_preparation_defect_before_spawn() {
         bridge,
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
+        None,
     );
     let runtime = ClaudeCliRuntime::new(config).expect("runtime accepts an absolute bridge path");
     let outcome = runtime
@@ -949,8 +974,10 @@ async fn a_line_rejected_by_the_event_bound_withholds_the_tool_fact() {
         bridge_cli(),
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
+        None,
     );
-    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.exchange_timeout = Some(OFFLINE_TIMEOUT);
     config.interrupt_grace = Duration::from_millis(100);
     config.event_limit = 16;
     let runtime = ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid");
@@ -1043,11 +1070,13 @@ async fn execute_hanging_scenario(scenario: &str) -> TerminalEvidence {
         bridge_cli(),
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
+        None,
     );
     // The deadline starts before environment setup and spawn, so it has to
     // cover both and still fire well inside the scenario's own 60s hang. A
     // tighter bound races process startup under load.
-    config.exchange_timeout = Duration::from_secs(3);
+    config.exchange_timeout = Some(Duration::from_secs(3));
     config.interrupt_grace = Duration::from_millis(100);
     let runtime = ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid");
     let prepared = prepare(&runtime, operation(scenario, OperationShape::Text)).await;
@@ -1080,8 +1109,10 @@ fn runtime(working_directory: &Path, executable: &Path) -> ClaudeCliRuntime {
         bridge_cli(),
         working_directory,
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
+        None,
     );
-    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.exchange_timeout = Some(OFFLINE_TIMEOUT);
     config.interrupt_grace = Duration::from_millis(100);
     ClaudeCliRuntime::new(config).expect("offline runtime configuration is valid")
 }
@@ -1110,8 +1141,10 @@ fn file_delivery_runtime_bytes_result(
         bridge_cli(),
         working_directory,
         reference.clone(),
+        None,
+        None,
     );
-    config.exchange_timeout = OFFLINE_TIMEOUT;
+    config.exchange_timeout = Some(OFFLINE_TIMEOUT);
     config.interrupt_grace = Duration::from_millis(100);
     ClaudeCliRuntime::new_with_file_delivery(
         config,

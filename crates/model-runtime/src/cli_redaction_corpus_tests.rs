@@ -12,7 +12,7 @@ use std::collections::BTreeSet;
 
 use crate::{Observation, ObservationFact, ObservationSink, TokenUsage};
 
-use super::{RedactingSink, redact_json, redact_text};
+use super::{REDACTED_JSON_OBJECT, RedactingSink, ToolArgumentRedaction, redact_json, redact_text};
 
 const CORPUS: &str = include_str!("testdata/redaction-corpus.txt");
 const CLASSIFICATIONS: &str = include_str!("testdata/redaction-corpus.classifications");
@@ -438,6 +438,10 @@ fn corpus_expectations() -> Vec<CorpusExpectation> {
 fn stateless_outputs(input: &str) -> Vec<ObservedOutput> {
     let mut observed = Vec::<Observation<u8>>::new();
     let sink = RedactingSink::new(&mut observed);
+    let tool_arguments = match sink.redact_tool_arguments("", input) {
+        ToolArgumentRedaction::Admitted(text) => text,
+        ToolArgumentRedaction::Suppressed => REDACTED_JSON_OBJECT.to_string(),
+    };
     vec![
         ObservedOutput {
             channel: "text",
@@ -453,7 +457,7 @@ fn stateless_outputs(input: &str) -> Vec<ObservedOutput> {
         },
         ObservedOutput {
             channel: "tool arguments",
-            text: sink.redact_tool_arguments("", input),
+            text: tool_arguments,
         },
         ObservedOutput {
             channel: "provider id",

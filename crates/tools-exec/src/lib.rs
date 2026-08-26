@@ -28,10 +28,11 @@
 //! network fence narrows that gap rather than closing it. Exactly what the
 //! profile does and does not confine is owned by
 //! `docs/spec/configuration-and-credentials.md` and is not restated here.
-//! Because the sandbox binds no host Cargo home, a Cargo pass through
-//! [`CargoDiagnosticsTool`] now resolves only against an already-populated
-//! workspace-local registry cache. Shell sessions and PTYs are likewise outside
-//! this crate's contract.
+//! When configured, the sandbox binds one pinned host Cargo registry read-only
+//! below a private writable Cargo home. Without that explicit cache, a Cargo
+//! pass through [`CargoDiagnosticsTool`] resolves only against an
+//! already-populated workspace-local registry. Shell sessions and PTYs are
+//! likewise outside this crate's contract.
 //!
 //! The real-bubblewrap containment check is mandatory in CI. Unsupported local
 //! hosts skip it unless `SIGNALBOX_RUN_BWRAP_INTEGRATION=1` requests the same

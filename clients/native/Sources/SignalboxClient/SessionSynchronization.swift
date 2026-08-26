@@ -136,6 +136,7 @@ public struct SignalboxSynchronizationSnapshot: Equatable, Sendable {
     case turn(SignalboxTranscriptTurn)
     case modelCallUsage(SignalboxTranscriptModelCallUsage)
     case entry(SignalboxTranscriptEntryMessage)
+    case userEntry(SignalboxTranscriptUserEntryMessage)
     case textEntry(SignalboxTranscriptTextEntryMessage)
     case content(SignalboxTranscriptContent)
   }
@@ -1565,6 +1566,27 @@ private struct SignalboxSnapshotAccumulator: Sendable {
         return .invalid("Snapshot exceeded the configured native-client capacity.")
       }
       return .accepted
+    case .transcriptUserEntry(let entry):
+      entriesStarted = true
+      guard
+        modelCallsEnded,
+        pendingModelIdentityTurnID == nil || entry.sourceSessionID == boundary.sessionID,
+        consumesModelIdentityTurnOrigin(turnID: entry.turnID),
+        entry.entryIndex.rawValue == entryCount,
+        entryIDs.insert(
+          SignalboxSnapshotEntryIdentity(
+            sourceSessionID: entry.sourceSessionID,
+            entryID: entry.entryID
+          )
+        ).inserted
+      else {
+        return .invalid("Snapshot entry indices or source-qualified identities were invalid.")
+      }
+      entryCount = entryCount.addingReportingOverflow(1).partialValue
+      guard append(.userEntry(entry)) else {
+        return .invalid("Snapshot exceeded the configured native-client capacity.")
+      }
+      return .accepted
     case .transcriptTextEntry(let entry):
       entriesStarted = true
       if let malformed = entry.entry.malformedStoredProjection {
@@ -1573,7 +1595,7 @@ private struct SignalboxSnapshotAccumulator: Sendable {
       guard
         modelCallsEnded,
         pendingModelIdentityTurnID == nil || entry.sourceSessionID == boundary.sessionID,
-        !entry.entry.hasMalformedStoredProjection && consumesModelIdentityTurnOrigin(entry.entry),
+        !entry.entry.hasMalformedStoredProjection && pendingModelIdentityTurnID == nil,
         entry.entryIndex.rawValue == entryCount,
         entryIDs.insert(
           SignalboxSnapshotEntryIdentity(
@@ -1697,6 +1719,8 @@ extension SignalboxSynchronizationSnapshot.Record {
         .saturatedAdding(UInt(usage.cost?.rateVersion.rawValue.utf8.count ?? 0))
     case .entry(let message):
       return message.entry.retainedUTF8Bytes
+    case .userEntry(let message):
+      return message.content.retainedUTF8Bytes
     case .textEntry(let message):
       return message.entry.retainedUTF8Bytes
     case .content(let content):
@@ -1810,13 +1834,19 @@ private struct SignalboxSnapshotModelIdentityTurns {
 
 extension SignalboxSnapshotAccumulator {
   fileprivate mutating func consumesModelIdentityTurnOrigin(
-    _ entry: SignalboxTranscriptTextEntry
+    turnID: SignalboxCanonicalUUID
   ) -> Bool {
-    entry.consumesTurnOrigin(
-      &pendingModelIdentityTurnID,
-      seenTurnIDs: &modelIdentityTurns.origins
-    )
+    guard let expectedTurnID = pendingModelIdentityTurnID else {
+      modelIdentityTurns.origins.insert(turnID)
+      return true
+    }
+    guard turnID == expectedTurnID, modelIdentityTurns.origins.insert(turnID).inserted else {
+      return false
+    }
+    pendingModelIdentityTurnID = nil
+    return true
   }
+
 }
 
 extension SignalboxCurrentModelCallState {
@@ -1928,24 +1958,6 @@ extension SignalboxTranscriptTextEntry {
     return (kind, decodingDiagnostic)
   }
 
-  fileprivate func consumesTurnOrigin(
-    _ pendingTurnID: inout SignalboxCanonicalUUID?,
-    seenTurnIDs: inout Set<SignalboxCanonicalUUID>
-  ) -> Bool {
-    guard case .user(_, let turnID) = self else {
-      return pendingTurnID == nil
-    }
-    guard let expectedTurnID = pendingTurnID else {
-      seenTurnIDs.insert(turnID)
-      return true
-    }
-    guard turnID == expectedTurnID, seenTurnIDs.insert(turnID).inserted else {
-      return false
-    }
-    pendingTurnID = nil
-    return true
-  }
-
   fileprivate var hasMalformedStoredProjection: Bool {
     if case .unknown(_, _, let decodingDiagnostic) = self {
       return decodingDiagnostic != nil
@@ -1961,7 +1973,7 @@ extension SignalboxTranscriptTextEntry {
       return UInt(kind.utf8.count)
         .saturatedAdding(payload.encodedUTF8Bytes)
         .saturatedAdding(UInt(diagnostic?.message.utf8.count ?? 0))
-    case .user, .assistant, .contextSummary:
+    case .assistant, .contextSummary:
       return 0
     }
   }

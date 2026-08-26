@@ -268,6 +268,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             tool_result(fixtures::TOOL_ID)?;
             success("tool_use", Some(fixtures::NONCANONICAL_TOOL_ARGUMENTS))?;
         }
+        "suppressed_tool_arguments" => {
+            assistant_tool_with_raw_arguments(
+                fixtures::TOOL_ID,
+                fixtures::TOOL_NAME,
+                fixtures::SUPPRESSED_TOOL_ARGUMENTS,
+            )?;
+            tool_result(fixtures::TOOL_ID)?;
+            success("tool_use", Some(fixtures::SUPPRESSED_TOOL_ARGUMENTS))?;
+        }
         "refusal" => {
             assistant_text(fixtures::REFUSAL)?;
             success("refusal", Some(fixtures::REFUSAL))?;
