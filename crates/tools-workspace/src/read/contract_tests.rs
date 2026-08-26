@@ -231,7 +231,7 @@ fn read_file_offset_beyond_the_file_returns_an_empty_complete_page() {
 }
 
 #[test]
-fn read_file_offset_inside_a_character_starts_at_the_next_boundary() {
+fn read_file_offset_inside_a_character_is_rejected_as_a_nonboundary_offset() {
     const FILE_PATH: &str = "unicode.txt";
     const CONTENT: &str = "é!";
 
@@ -245,6 +245,58 @@ fn read_file_offset_inside_a_character_starts_at_the_next_boundary() {
         &executor.root,
     )
     .expect("read arguments are valid");
+
+    let failure = executor
+        .execute_operation(operation)
+        .expect_err("an offset inside a character cannot begin an exact window");
+
+    assert_eq!(failure, ReadFailure::OffsetNotOnBoundary);
+}
+
+/// A window that begins at byte zero always begins on a character boundary,
+/// so a leading continuation byte there proves the file is not UTF-8 and can
+/// never be skipped as the tail of some earlier character.
+#[test]
+fn read_file_reports_a_leading_continuation_byte_as_non_utf8() {
+    const FILE_PATH: &str = "malformed.txt";
+
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    fs::write(workspace.path().join(FILE_PATH), [0x80, b'a', b'b'])
+        .expect("malformed fixture writes");
+    let executor = fixture_executor(&workspace);
+    let operation = decode_operation(
+        ReadToolKind::ReadFile,
+        &arguments(format!(r#"{{"path":"{FILE_PATH}"}}"#)),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("read arguments are valid");
+
+    let failure = executor
+        .execute_operation(operation)
+        .expect_err("a leading continuation byte is not UTF-8");
+
+    assert_eq!(failure, ReadFailure::NotUtf8);
+}
+
+/// The cursor must advance on every admitted input, so a window narrower than
+/// the character it begins at retains that one character rather than an empty
+/// page whose `next_offset` repeats the request.
+#[test]
+fn read_file_window_narrower_than_its_first_character_still_advances() {
+    const FILE_PATH: &str = "unicode.txt";
+    const CONTENT: &str = "é!";
+
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    fs::write(workspace.path().join(FILE_PATH), CONTENT).expect("fixture file writes");
+    let executor = fixture_executor(&workspace);
+    let operation = decode_operation(
+        ReadToolKind::ReadFile,
+        &arguments(format!(r#"{{"max_bytes":1,"path":"{FILE_PATH}"}}"#)),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("read arguments are valid");
     let ReadResult::ReadFile(result) = executor
         .execute_operation(operation)
         .expect("fixture read succeeds")
@@ -252,9 +304,41 @@ fn read_file_offset_inside_a_character_starts_at_the_next_boundary() {
         panic!("read_file returns a read result")
     };
 
-    assert_eq!(result.content, "!");
-    assert_eq!(result.offset, 2);
-    assert_eq!(result.next_offset, CONTENT.len() as u64);
+    assert_eq!(result.content, "é");
+    assert_eq!(result.next_offset, "é".len() as u64);
+    assert!(result.truncated);
+}
+
+/// Every `u64` offset the schema admits answers with the empty completed page
+/// the contract promises, including one past the signed range a seek carries.
+#[test]
+fn read_file_offset_past_the_seek_range_reports_an_empty_page() {
+    const FILE_PATH: &str = "short.txt";
+    const CONTENT: &str = "abcd";
+
+    let workspace = tempfile::tempdir().expect("workspace fixture constructs");
+    fs::write(workspace.path().join(FILE_PATH), CONTENT).expect("fixture file writes");
+    let executor = fixture_executor(&workspace);
+    let operation = decode_operation(
+        ReadToolKind::ReadFile,
+        &arguments(format!(
+            r#"{{"offset":{},"path":"{FILE_PATH}"}}"#,
+            u64::from(u32::MAX) * u64::from(u32::MAX)
+        )),
+        &executor.filesystem,
+        &executor.root,
+    )
+    .expect("read arguments are valid");
+    let ReadResult::ReadFile(result) = executor
+        .execute_operation(operation)
+        .expect("an offset past the seek range is an exhausted cursor, not a failure")
+    else {
+        panic!("read_file returns a read result")
+    };
+
+    assert_eq!(result.content, "");
+    assert_eq!(result.total_bytes, CONTENT.len() as u64);
+    assert!(!result.truncated);
 }
 
 #[test]

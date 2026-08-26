@@ -478,12 +478,21 @@ impl WorkspaceFileSystem for LocalWorkspaceFileSystem {
             ));
         }
         let initial_total_bytes = status.st_size.max(0) as u64;
+        // An exhausted cursor is answered before the seek rather than through
+        // it: `lseek` carries a signed offset, so a `u64` past that range
+        // fails the read outright instead of returning the empty page this
+        // contract promises for every offset at or past the end.
+        if offset >= initial_total_bytes {
+            return Ok(WorkspaceFileBytes {
+                bytes: Vec::new(),
+                total_bytes: initial_total_bytes,
+                truncated: false,
+                mode: status.st_mode as _,
+            });
+        }
         let lookahead = max_bytes.saturating_add(4);
         let mut bytes = Vec::with_capacity(lookahead);
         let mut file = File::from(descriptor);
-        // Seeking past the end is not an error on a regular file: the read
-        // that follows returns nothing, which is the exhausted-cursor answer
-        // rather than a failure.
         file.seek(SeekFrom::Start(offset))
             .map_err(|source| resolve_std_io(path, source))?;
         (&mut file)

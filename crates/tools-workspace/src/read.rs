@@ -63,6 +63,7 @@ const INVALID_ARGUMENTS_DETAIL: &str = "invalid bounded workspace-tool arguments
 const PATH_REJECTED_DETAIL: &str = "workspace path rejected";
 const FILESYSTEM_FAILED_DETAIL: &str = "workspace filesystem operation failed";
 const NOT_UTF8_DETAIL: &str = "workspace file is not UTF-8";
+const OFFSET_NOT_BOUNDARY_DETAIL: &str = "workspace read offset is not a character boundary";
 
 fn default_read_max_bytes() -> usize {
     DEFAULT_READ_MAX_BYTES
@@ -87,8 +88,9 @@ pub struct ReadFileArguments {
     #[serde(default = "default_read_max_bytes")]
     #[schemars(range(min = 1, max = MAX_WORKSPACE_READ_BYTES))]
     pub max_bytes: usize,
-    /// Byte offset the returned content starts at, from 0. Continue a
-    /// truncated read by passing the previous result's `next_offset`.
+    /// Byte offset the returned content starts at, from 0. It must fall on a
+    /// character boundary; continue a truncated read by passing the previous
+    /// result's `next_offset`.
     #[serde(default)]
     #[schemars(range(min = 0))]
     pub offset: u64,
@@ -276,6 +278,7 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadTools<FileSystem> {
         let path_rejected_detail = detail(PATH_REJECTED_DETAIL)?;
         let filesystem_failed_detail = detail(FILESYSTEM_FAILED_DETAIL)?;
         let not_utf8_detail = detail(NOT_UTF8_DETAIL)?;
+        let offset_not_boundary_detail = detail(OFFSET_NOT_BOUNDARY_DETAIL)?;
         let compiled = ReadToolKind::ALL
             .into_iter()
             .map(|kind| {
@@ -302,6 +305,7 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadTools<FileSystem> {
                 path_rejected_detail,
                 filesystem_failed_detail,
                 not_utf8_detail,
+                offset_not_boundary_detail,
             },
         })
     }
@@ -472,6 +476,7 @@ pub struct WorkspaceReadExecutor<FileSystem> {
     path_rejected_detail: ToolExecutionErrorDetail,
     filesystem_failed_detail: ToolExecutionErrorDetail,
     not_utf8_detail: ToolExecutionErrorDetail,
+    offset_not_boundary_detail: ToolExecutionErrorDetail,
 }
 
 /// A checked catalog/executor assumption failed inside the read family.
@@ -535,6 +540,9 @@ impl<FileSystem: WorkspaceFileSystem> ToolExecutor for WorkspaceReadExecutor<Fil
             },
             Err(ReadFailure::NotUtf8) => ToolExecutorEvidence::KnownFailed {
                 detail: Some(self.not_utf8_detail.clone()),
+            },
+            Err(ReadFailure::OffsetNotOnBoundary) => ToolExecutorEvidence::KnownFailed {
+                detail: Some(self.offset_not_boundary_detail.clone()),
             },
         };
         Ok(invocation.bind(evidence))
@@ -649,6 +657,7 @@ enum ReadFailure {
     PathRejected,
     Filesystem,
     NotUtf8,
+    OffsetNotOnBoundary,
 }
 
 impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
@@ -694,19 +703,43 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
             .filesystem
             .read_file_range(&self.root, path, offset, max_bytes)
             .map_err(map_resolve_failure)?;
-        // A caller-chosen offset can land inside a character. The window then
-        // starts at the next boundary and reports where it actually began,
-        // rather than reporting the whole file as non-UTF-8.
-        let skipped = leading_continuation_bytes(&read.bytes);
-        let start = offset.saturating_add(skipped as u64);
-        let retained =
-            utf8_prefix(&read.bytes[skipped..], max_bytes).ok_or(ReadFailure::NotUtf8)?;
+        // The window must begin on a character boundary. Byte zero always is
+        // one, so a continuation byte there is malformed file content and
+        // nothing else. Past zero the two readings — a mid-character offset
+        // and a malformed file — are indistinguishable without decoding from
+        // the file's start, so the offset is refused on its own terms rather
+        // than skipped: skipping would return content while silently hiding
+        // whichever bytes the caller landed on.
+        if read
+            .bytes
+            .first()
+            .is_some_and(|byte| is_continuation_byte(*byte))
+        {
+            return Err(if offset == 0 {
+                ReadFailure::NotUtf8
+            } else {
+                ReadFailure::OffsetNotOnBoundary
+            });
+        }
+        let retained = utf8_prefix(&read.bytes, max_bytes).ok_or(ReadFailure::NotUtf8)?;
+        // A window narrower than the character it begins at would retain
+        // nothing and leave the cursor where it was, so following the
+        // contract's own `next_offset` would repeat that page forever. The
+        // page admits that one character instead, overshooting the byte bound
+        // by at most three bytes, because advancing is the stronger promise.
+        let retained = match retained.is_empty() && !read.bytes.is_empty() {
+            true => {
+                let width = character_width(read.bytes[0]).ok_or(ReadFailure::NotUtf8)?;
+                utf8_prefix(&read.bytes, width).ok_or(ReadFailure::NotUtf8)?
+            }
+            false => retained,
+        };
         let bytes_read = retained.len();
-        let next_offset = start.saturating_add(bytes_read as u64);
+        let next_offset = offset.saturating_add(bytes_read as u64);
         Ok(ReadFileResult {
             path: display_path,
             content: retained.to_owned(),
-            offset: start,
+            offset,
             bytes_read,
             next_offset,
             total_bytes: read.total_bytes,
@@ -964,14 +997,22 @@ impl<FileSystem: WorkspaceFileSystem> WorkspaceReadExecutor<FileSystem> {
     }
 }
 
-/// Counts the leading UTF-8 continuation bytes a mid-character start leaves,
-/// which is at most the three that can trail one four-byte character.
-fn leading_continuation_bytes(bytes: &[u8]) -> usize {
-    bytes
-        .iter()
-        .take(3)
-        .take_while(|byte| **byte & 0b1100_0000 == 0b1000_0000)
-        .count()
+/// Reports whether a byte continues a UTF-8 character rather than beginning
+/// one, which is what a window opening mid-character starts with.
+fn is_continuation_byte(byte: u8) -> bool {
+    byte & 0b1100_0000 == 0b1000_0000
+}
+
+/// Returns how many bytes the character beginning with this lead byte spans,
+/// or `None` when the byte begins no character at all.
+fn character_width(lead: u8) -> Option<usize> {
+    match lead {
+        0x00..=0x7f => Some(1),
+        0xc2..=0xdf => Some(2),
+        0xe0..=0xef => Some(3),
+        0xf0..=0xf4 => Some(4),
+        _ => None,
+    }
 }
 
 fn utf8_prefix(bytes: &[u8], max_bytes: usize) -> Option<&str> {
@@ -1036,7 +1077,7 @@ pub struct ReadFileResult {
     pub path: String,
     /// Retained UTF-8 window.
     pub content: String,
-    /// Byte offset `content` begins at, at or after the requested offset.
+    /// Byte offset `content` begins at.
     pub offset: u64,
     /// UTF-8 bytes retained in `content`.
     pub bytes_read: usize,
