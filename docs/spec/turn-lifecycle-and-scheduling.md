@@ -18,8 +18,10 @@ and model-exchange-derived shutdown drain are verified against this PR
 is verified against this PR (`agent/daemon-live-shutdown-checkpoint`) and
 re-verified, for every committed stage boundary the tool loop reaches, against
 this PR (`agent/fix-liveness-shutdown-recovery`). Shutdown preemption of the
-ambiguous-operation batch and the separated slot-held and reconciliation attempt
-ceilings are verified against the same PR.
+ambiguous-operation batch, the separated slot-held and reconciliation attempt
+ceilings, the recovery transaction's write-lock budget, and the handoff's
+bounded attempts across correlating and recovering are verified against the same
+PR.
 
 The expired-pass recovery lock classification and retry budgets were re-verified
 against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
@@ -804,7 +806,10 @@ traffic, and refusing on it would make the pass fail whenever the daemon was
 busy. What that second buys is that one indefinite holder of that row cannot
 stall the phase, which an unbounded wait would allow — the same stall the first
 budget exists to prevent, one statement later. A wait refused after the row is
-held is an ordinary failed attempt, never contention on this session.
+held is an ordinary failed attempt, never contention on this session. The
+recovery transaction the slot-held watchdog and the expiry handoff share
+installs the same pair, in the same order and for the same reasons, because it
+reaches the same outbox row.
 
 Neither budget can leave a commit's outcome unknown, which is what rules out
 bounding the attempt by a statement timeout or by cancelling its future instead.

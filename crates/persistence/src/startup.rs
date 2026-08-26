@@ -1,6 +1,6 @@
 //! Atomic PostgreSQL recovery of prior-process active attempts.
 
-use std::{collections::BTreeSet, error::Error, fmt};
+use std::{collections::BTreeSet, error::Error, fmt, time::Duration};
 
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StartupScanIdGenerator,
@@ -395,6 +395,7 @@ pub(crate) async fn recover_observed_slot_held_in_transaction<Generator>(
     connection: &mut PgConnection,
     candidate: StaleTurnCandidate,
     identities: AcceptedInputTurnFailureIdentities,
+    write_lock_wait: Option<Duration>,
     ids: &mut Generator,
 ) -> Result<Option<TransactionDecision>, StartupScanRepositoryError>
 where
@@ -424,6 +425,16 @@ where
         )
         .bind(session_uuid)
         .fetch_one(&mut *connection)
+        .await?;
+    // The acquisition budget has done its work: the scheduler row is held. The
+    // write phase takes over with a budget of its own, exactly as the sibling
+    // terminalization does — wide enough that the outbox's shared sequence row,
+    // which every writer holds until it commits, is not mistaken for a stall.
+    // Recovery reaches that same row, so without this switch its post-lock
+    // statements are refused on ordinary busy-daemon traffic.
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(crate::turn_liveness::postgres_lock_timeout(write_lock_wait))
+        .execute(&mut *connection)
         .await?;
     if active_turn != Some(turn_id_to_uuid(candidate.turn())) {
         return Ok(None);

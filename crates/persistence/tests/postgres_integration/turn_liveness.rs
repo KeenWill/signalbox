@@ -520,3 +520,72 @@ async fn pending_steering_leaves_a_wedged_turn_visible_and_unreachable()
     drop(container);
     Ok(())
 }
+
+/// The narrower bound this recovery installs before the session locks, in the
+/// shape the acquisition budget takes.
+const RECOVERY_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The wider bound the write phase is owed once the scheduler row is held.
+const RECOVERY_WRITE_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(1_500);
+
+/// S10: slot-held recovery switches to its write budget once the scheduler row
+/// is held, so the outbox sequence row every writer holds until it commits is
+/// ordinary contention rather than a stall refused at the acquisition budget.
+///
+/// Without the switch every statement after the scheduler row runs at the
+/// narrower acquisition bound, and a busy daemon's ordinary outbox traffic
+/// refuses all four detached attempts — leaving the session occupied until the
+/// thirty-minute watchdog.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s10_slot_held_recovery_spends_its_write_budget_on_the_outbox_row()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let issued = checkpoint_restart_model_call(&pool, 0x15_900, true).await?;
+    let repository = PostgresTurnLivenessRepository::new(
+        pool.clone(),
+        TurnLivenessPersistenceBounds::new(
+            Some(RECOVERY_LOCK_WAIT),
+            Some(std::time::Duration::from_millis(250)),
+            Some(RECOVERY_WRITE_LOCK_WAIT),
+        ),
+    );
+    let observed = repository
+        .observed_slot_held_turn(issued.session)
+        .await?
+        .expect("the issued provider call holds the session slot");
+    let mut allocator_holder = pool.begin().await?;
+    sqlx::query("SELECT singleton FROM outbox_sequence_state WHERE singleton FOR UPDATE")
+        .execute(&mut *allocator_holder)
+        .await?;
+    let mut ids = UuidV7StartupScanIdGenerator;
+
+    let started = std::time::Instant::now();
+    let error = repository
+        .recover_observed_slot_held_turn(
+            observed,
+            AcceptedInputTurnFailureIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0x15_910)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0x15_911)),
+            ),
+            &mut ids,
+        )
+        .await
+        .expect_err("the held outbox sequence row outlasts even the write budget");
+    let waited = started.elapsed();
+    allocator_holder.rollback().await?;
+
+    assert_eq!(observed.turn(), issued.turn);
+    assert_eq!(
+        error.operator_failure_cause_code(),
+        "turn_liveness_terminalization_lock_unavailable"
+    );
+    assert!(
+        waited >= RECOVERY_WRITE_LOCK_WAIT,
+        "the write budget is what expired, so {waited:?} spans it"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}

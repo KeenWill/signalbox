@@ -275,10 +275,15 @@ impl PostgresTurnLivenessRepository {
             .execute(&mut *transaction)
             .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
-        let decision =
-            recover_observed_slot_held_in_transaction(&mut transaction, candidate, identities, ids)
-                .await
-                .map_err(TurnLivenessRepositoryError::from)?;
+        let decision = recover_observed_slot_held_in_transaction(
+            &mut transaction,
+            candidate,
+            identities,
+            self.bounds.write_lock_wait,
+            ids,
+        )
+        .await
+        .map_err(TurnLivenessRepositoryError::from)?;
         match decision {
             None => {
                 transaction
@@ -866,7 +871,7 @@ where
     }
 }
 
-fn postgres_lock_timeout(bound: Option<Duration>) -> String {
+pub(crate) fn postgres_lock_timeout(bound: Option<Duration>) -> String {
     match bound {
         Some(bound) => format!("{}us", bound.as_micros().max(1)),
         None => String::from("0"),
