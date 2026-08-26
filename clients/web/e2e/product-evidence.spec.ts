@@ -1,4 +1,6 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+// The shared fixture is the single copy kept aligned with WebContractBootstrap::current();
+// readBootstrap now rejects any bootstrap whose limits contradict it.
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { useDeterministicImportApi } from './import-api-fixture'
 
@@ -30,8 +32,22 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
   )
 }
 
-const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+const emptyAttentionFixture = {
+  continuation_after_session_id: null,
+  cursor: '0',
+  summaries: [],
+} as const
+
+const useDeterministicBootstrap = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: emptyAttentionFixture })}\n`,
+      contentType: 'application/x-ndjson',
+    }),
+  )
+  await page.route('**/api/attention', (route) => route.fulfill({ json: emptyAttentionFixture }))
+}
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }

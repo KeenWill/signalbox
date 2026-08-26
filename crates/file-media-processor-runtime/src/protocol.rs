@@ -1,3 +1,6 @@
+//! Wire framing and declaration fingerprints for the isolated processor protocol governed by
+//! `docs/spec/file-and-media.md`.
+
 use std::{borrow::Borrow, num::NonZeroU64, str::FromStr};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -33,6 +36,13 @@ where
     for declaration in declarations {
         let declaration = declaration.borrow();
         fingerprint_field(&mut fingerprint, declaration.provider().as_str().as_bytes());
+        match declaration.observed_container_entries() {
+            None => fingerprint_field(&mut fingerprint, b"no_container_entries"),
+            Some(entries) => {
+                fingerprint_field(&mut fingerprint, b"container_entries");
+                fingerprint_u64(&mut fingerprint, entries);
+            }
+        }
         let mut readers = declaration.readers().iter().collect::<Vec<_>>();
         readers.sort_by(|left, right| left.identity().cmp(right.identity()));
         fingerprint_len(&mut fingerprint, readers.len());

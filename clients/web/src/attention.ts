@@ -7,54 +7,35 @@ export type AttentionReduction =
   | { kind: 'projection'; snapshot: WebAttentionSnapshot }
   | { kind: 'resync' }
 
-const MAX_CURSOR = 18_446_744_073_709_551_615n
-
-const cursorValue = (cursor: string): bigint | null => {
-  if (!/^(0|[1-9][0-9]*)$/.test(cursor)) return null
-  const value = BigInt(cursor)
-  return value <= MAX_CURSOR ? value : null
-}
-
-const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-
-const hasValidPageBoundary = (snapshot: WebAttentionSnapshot) => {
-  const identities = snapshot.summaries.map((summary) => summary.session_id)
-  if (new Set(identities).size !== identities.length) return false
-  let previous: string | null = null
-  for (const identity of identities) {
-    if (!CANONICAL_UUID.test(identity) || (previous !== null && identity <= previous)) return false
-    previous = identity
-  }
-  const continuation = snapshot.continuation_after_session_id
-  if (continuation == null) return true
-  return CANONICAL_UUID.test(continuation) && previous !== null && continuation === previous
+export type AttentionProjectionAcceptance = {
+  snapshot: WebAttentionSnapshot
+  accepted: boolean
 }
 
 export const reduceAttentionEvent = (
   current: WebAttentionSnapshot | undefined,
   event: WebAttentionStreamEvent,
 ): AttentionReduction => {
-  if (event.kind === 'snapshot') {
-    const snapshotCursor = cursorValue(event.snapshot.cursor)
-    if (snapshotCursor === null || !hasValidPageBoundary(event.snapshot)) return { kind: 'resync' }
-    if (current) {
-      const currentCursor = cursorValue(current.cursor)
-      if (currentCursor === null || snapshotCursor < currentCursor) return { kind: 'resync' }
-    }
-    return { kind: 'projection', snapshot: event.snapshot }
-  }
+  if (event.kind === 'snapshot') return { kind: 'projection', snapshot: event.snapshot }
   if (event.kind === 'resync_required' || !current) return { kind: 'resync' }
-  const currentCursor = cursorValue(current.cursor)
-  const eventCursor = cursorValue(event.cursor)
-  if (currentCursor === null || eventCursor === null || eventCursor <= currentCursor) {
-    return { kind: 'resync' }
+  if (event.cursor === current.cursor && event.summaries.length === 0) {
+    return { kind: 'projection', snapshot: current }
   }
+  if (BigInt(event.cursor) <= BigInt(current.cursor)) return { kind: 'resync' }
+  if (event.summaries.length === 0) return { kind: 'resync' }
 
-  const replacementIds = new Set(event.summaries.map((summary) => summary.session_id))
-  if (replacementIds.size !== event.summaries.length) return { kind: 'resync' }
+  const updateSessionIds = new Set(event.summaries.map((summary) => summary.session_id))
+  if (updateSessionIds.size !== event.summaries.length) return { kind: 'resync' }
   const replacements = new Map(event.summaries.map((summary) => [summary.session_id, summary]))
   const knownSessionIds = new Set(current.summaries.map((summary) => summary.session_id))
-  if (event.summaries.some((summary) => !knownSessionIds.has(summary.session_id))) {
+  const continuation = current.continuation_after_session_id ?? null
+  if (
+    event.summaries.some(
+      (summary) =>
+        !knownSessionIds.has(summary.session_id) &&
+        (continuation === null || summary.session_id <= continuation),
+    )
+  ) {
     return { kind: 'resync' }
   }
   return {
@@ -82,9 +63,10 @@ export const synchronizeAttention = async ({
   transport: ProductTransport
   signal: AbortSignal
   onPhase: (phase: AttentionSyncPhase) => void
-  onProjection: (snapshot: WebAttentionSnapshot) => void
+  onProjection: (snapshot: WebAttentionSnapshot) => AttentionProjectionAcceptance
 }): Promise<void> => {
   let resyncs = 0
+  let resyncCursorFloor: bigint | undefined
   let projection: WebAttentionSnapshot | undefined
   let phase: AttentionSyncPhase = 'idle'
   const transition = (next: AttentionSyncPhase) => {
@@ -97,10 +79,31 @@ export const synchronizeAttention = async ({
   try {
     while (!signal.aborted) {
       let restart = false
+      let firstEvent = true
       for await (const event of transport.followAttention(signal)) {
-        const previousProjection = projection
+        if (
+          (firstEvent && event.kind !== 'snapshot') ||
+          (!firstEvent && event.kind === 'snapshot')
+        ) {
+          transition('failed')
+          return
+        }
+        firstEvent = false
+        const cursorBeforeReduction = projection?.cursor
         const reduction = reduceAttentionEvent(projection, event)
-        if (reduction.kind === 'resync') {
+        // A projection below the last advertised resync cursor omits a known journal
+        // interval, so it is never installed as authority.
+        const belowResyncCursorFloor =
+          reduction.kind === 'projection' &&
+          resyncCursorFloor !== undefined &&
+          BigInt(reduction.snapshot.cursor) < resyncCursorFloor
+        if (reduction.kind === 'resync' || belowResyncCursorFloor) {
+          if (event.kind !== 'snapshot') {
+            const advertised = BigInt(event.cursor)
+            if (resyncCursorFloor === undefined || advertised > resyncCursorFloor) {
+              resyncCursorFloor = advertised
+            }
+          }
           resyncs += 1
           if (resyncs > MAX_IMMEDIATE_RESYNCS) {
             transition('failed')
@@ -110,19 +113,15 @@ export const synchronizeAttention = async ({
           restart = true
           break
         }
-        projection = reduction.snapshot
-        const previousCursor = previousProjection ? cursorValue(previousProjection.cursor) : null
-        const projectionCursor = cursorValue(projection.cursor)
+        const acceptance = onProjection(reduction.snapshot)
+        projection = acceptance.snapshot
         if (
-          event.kind === 'update' ||
-          (event.kind === 'snapshot' &&
-            previousCursor !== null &&
-            projectionCursor !== null &&
-            projectionCursor > previousCursor)
+          acceptance.accepted &&
+          (cursorBeforeReduction === undefined ||
+            BigInt(acceptance.snapshot.cursor) > BigInt(cursorBeforeReduction))
         ) {
           resyncs = 0
         }
-        onProjection(projection)
         transition('live')
       }
       if (!restart) {

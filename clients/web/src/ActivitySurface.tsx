@@ -160,7 +160,7 @@ export const sessionPurposeLabel = (purpose: SessionPurpose) => {
 
 const errorMessage = (error: unknown) =>
   error instanceof ProductRequestError
-    ? `${error.code}: ${error.message}`
+    ? `${error.response.error.code}: ${error.message}`
     : 'The daemon response did not match the generated browser contract.'
 
 function HistoryTable({ rows }: { rows: ActivityRow[] }) {

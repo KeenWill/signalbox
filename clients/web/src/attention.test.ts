@@ -1,13 +1,16 @@
 import { describe, expect, it } from 'vitest'
+import { activityTime } from './AttentionSurface'
 import { reduceAttentionEvent, synchronizeAttention } from './attention'
 import type { WebAttentionSnapshot, WebAttentionStreamEvent } from './generated/web-contract.mjs'
 import type { ProductTransport } from './product'
 
 const sessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6d'
+const earlierSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6c'
 const anotherSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c6e'
+const turnId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c70'
 const summary = {
   action: 'decide_approval',
-  current_turn_id: '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c70',
+  current_turn_id: turnId,
   goal_block: null,
   judge: { actionable: '2', completed: '7', escalated: '1', failed: '0' },
   last_activity: { kind: 'approval_judge', unix_milliseconds: '1724200000000' },
@@ -33,6 +36,9 @@ const streamTransport = (
     readBootstrap: async () => {
       throw new Error('unused bootstrap read')
     },
+    readBlobDescriptor: async () => {
+      throw new Error('unused blob descriptor read')
+    },
     readAttention: async () => {
       throw new Error('unused attention read')
     },
@@ -45,6 +51,10 @@ const streamTransport = (
 }
 
 describe('attention projection recovery', () => {
+  it('preserves timestamps outside the JavaScript date range', () => {
+    expect(activityTime('9000000000000000')).toBe('9000000000000000')
+  })
+
   it('replaces only summaries already present in the bounded page', () => {
     const reduction = reduceAttentionEvent(snapshot, {
       kind: 'update',
@@ -62,54 +72,26 @@ describe('attention projection recovery', () => {
     const reduction = reduceAttentionEvent(snapshot, {
       kind: 'update',
       cursor: '18',
-      summaries: [{ ...replacement, session_id: anotherSessionId }],
+      summaries: [{ ...replacement, session_id: earlierSessionId }],
     })
 
     expect(reduction).toEqual({ kind: 'resync' })
   })
 
-  it('requests resynchronization when an update repeats a session identity', () => {
+  it('ignores updates beyond the bounded page while advancing the cursor', () => {
     const reduction = reduceAttentionEvent(snapshot, {
       kind: 'update',
       cursor: '18',
-      summaries: [replacement, { ...replacement, state: 'idle' }],
+      summaries: [{ ...replacement, session_id: anotherSessionId }],
     })
 
-    expect(reduction).toEqual({ kind: 'resync' })
-  })
-
-  it('requests resynchronization when a snapshot repeats a session identity', () => {
-    const reduction = reduceAttentionEvent(undefined, {
-      kind: 'snapshot',
-      snapshot: { ...snapshot, summaries: [summary, { ...summary, state: 'idle' }] },
+    expect(reduction).toEqual({
+      kind: 'projection',
+      snapshot: { ...snapshot, cursor: '18' },
     })
-
-    expect(reduction).toEqual({ kind: 'resync' })
   })
 
-  it('requests resynchronization when a snapshot continuation skips beyond its page', () => {
-    const reduction = reduceAttentionEvent(undefined, {
-      kind: 'snapshot',
-      snapshot: { ...snapshot, continuation_after_session_id: anotherSessionId },
-    })
-
-    expect(reduction).toEqual({ kind: 'resync' })
-  })
-
-  it('requests resynchronization when snapshot sessions are not strictly ordered', () => {
-    const reduction = reduceAttentionEvent(undefined, {
-      kind: 'snapshot',
-      snapshot: {
-        ...snapshot,
-        continuation_after_session_id: sessionId,
-        summaries: [{ ...summary, session_id: anotherSessionId }, summary],
-      },
-    })
-
-    expect(reduction).toEqual({ kind: 'resync' })
-  })
-
-  it('requests resynchronization when an update moves the cursor backward', () => {
+  it('requests resynchronization instead of installing a regressing cursor', () => {
     const reduction = reduceAttentionEvent(snapshot, {
       kind: 'update',
       cursor: '16',
@@ -119,10 +101,31 @@ describe('attention projection recovery', () => {
     expect(reduction).toEqual({ kind: 'resync' })
   })
 
-  it('rejects a replacement snapshot that moves the durable cursor backward', () => {
+  it('ignores an empty update at the current cursor', () => {
     const reduction = reduceAttentionEvent(snapshot, {
-      kind: 'snapshot',
-      snapshot: { ...snapshot, cursor: '16' },
+      kind: 'update',
+      cursor: snapshot.cursor,
+      summaries: [],
+    })
+
+    expect(reduction).toEqual({ kind: 'projection', snapshot })
+  })
+
+  it('requests resynchronization for replacements at the current cursor', () => {
+    const reduction = reduceAttentionEvent(snapshot, {
+      kind: 'update',
+      cursor: snapshot.cursor,
+      summaries: [replacement],
+    })
+
+    expect(reduction).toEqual({ kind: 'resync' })
+  })
+
+  it('requests resynchronization for duplicate identities in an update', () => {
+    const reduction = reduceAttentionEvent(snapshot, {
+      kind: 'update',
+      cursor: '18',
+      summaries: [replacement, { ...replacement, state: 'blocked' }],
     })
 
     expect(reduction).toEqual({ kind: 'resync' })
@@ -144,7 +147,10 @@ describe('attention projection recovery', () => {
       transport,
       signal: controller.signal,
       onPhase: (phase) => phases.push(phase),
-      onProjection: (projection) => projections.push(projection),
+      onProjection: (projection) => {
+        projections.push(projection)
+        return { snapshot: projection, accepted: true }
+      },
     })
 
     expect(phases).toEqual(['connecting', 'live', 'resyncing', 'live', 'stale'])
@@ -155,80 +161,212 @@ describe('attention projection recovery', () => {
     const phases: string[] = []
     const controller = new AbortController()
     const resync = { kind: 'resync_required', cursor: '18' } as const
-
-    await synchronizeAttention({
-      transport: streamTransport([[resync], [resync], [resync], [resync]]),
-      signal: controller.signal,
-      onPhase: (phase) => phases.push(phase),
-      onProjection: () => undefined,
-    })
-
-    expect(phases).toEqual(['connecting', 'resyncing', 'failed'])
-  })
-
-  it('preserves the immediate resync budget across replacement snapshots', async () => {
-    const phases: string[] = []
-    const resync = { kind: 'resync_required', cursor: '18' } as const
-    const recovered = { kind: 'snapshot', snapshot: { ...snapshot, cursor: '19' } } as const
+    const recovered = { kind: 'snapshot', snapshot } as const
 
     await synchronizeAttention({
       transport: streamTransport([
-        [resync],
         [recovered, resync],
         [recovered, resync],
         [recovered, resync],
-        [recovered],
+        [recovered, resync],
       ]),
-      signal: new AbortController().signal,
+      signal: controller.signal,
       onPhase: (phase) => phases.push(phase),
-      onProjection: () => undefined,
+      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
     })
 
     expect(phases.at(-1)).toBe('failed')
   })
 
-  it('resets the immediate resync budget after a forward update', async () => {
+  it('fails closed when a follow response does not begin with a snapshot', async () => {
     const phases: string[] = []
-    const resync = { kind: 'resync_required', cursor: '18' } as const
-    const recovered = { kind: 'snapshot', snapshot: { ...snapshot, cursor: '19' } } as const
-    const recoveredAfterUpdate = {
-      kind: 'snapshot',
-      snapshot: { ...snapshot, cursor: '20' },
-    } as const
-    const update = { kind: 'update', cursor: '20', summaries: [replacement] } as const
+
+    await synchronizeAttention({
+      transport: streamTransport([[{ kind: 'update', cursor: '18', summaries: [replacement] }]]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
+    })
+
+    expect(phases).toEqual(['connecting', 'failed'])
+  })
+
+  it('fails closed when a follow response emits a later snapshot', async () => {
+    const phases: string[] = []
 
     await synchronizeAttention({
       transport: streamTransport([
-        [resync],
-        [recovered, update, resync],
-        [recoveredAfterUpdate, resync],
-        [recoveredAfterUpdate, resync],
-        [recoveredAfterUpdate],
+        [
+          { kind: 'snapshot', snapshot },
+          { kind: 'snapshot', snapshot: { ...snapshot, cursor: '18' } },
+        ],
       ]),
       signal: new AbortController().signal,
       onPhase: (phase) => phases.push(phase),
-      onProjection: () => undefined,
+      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
+    })
+
+    expect(phases).toEqual(['connecting', 'live', 'failed'])
+  })
+
+  it('resets the immediate resync budget after accepted incremental progress', async () => {
+    const phases: string[] = []
+    const resync = { kind: 'resync_required', cursor: '18' } as const
+    const recovered = { kind: 'snapshot', snapshot } as const
+    const progressed = { kind: 'update', cursor: '18', summaries: [replacement] } as const
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [recovered, resync],
+        [recovered, progressed, resync],
+        [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '19' } }],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
     })
 
     expect(phases.at(-1)).toBe('stale')
   })
 
-  it('resets the immediate resync budget after each valid forward snapshot', async () => {
+  it('resets the resync budget when a reconnect snapshot advances the cursor', async () => {
     const phases: string[] = []
-    const resync = { kind: 'resync_required', cursor: '18' } as const
+    const advancingRecovery = (cursor: string) =>
+      [
+        { kind: 'snapshot', snapshot: { ...snapshot, cursor } },
+        { kind: 'resync_required', cursor },
+      ] as const
 
     await synchronizeAttention({
       transport: streamTransport([
-        [{ kind: 'snapshot', snapshot }, resync],
-        [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '19' } }, resync],
-        [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '20' } }, resync],
+        advancingRecovery('17'),
+        advancingRecovery('18'),
+        advancingRecovery('19'),
+        advancingRecovery('20'),
         [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '21' } }],
       ]),
       signal: new AbortController().signal,
       onPhase: (phase) => phases.push(phase),
-      onProjection: () => undefined,
+      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
     })
 
     expect(phases.at(-1)).toBe('stale')
+  })
+
+  it('rejects reconnect snapshots below the advertised resync cursor', async () => {
+    const phases: string[] = []
+    const projections: WebAttentionSnapshot[] = []
+    const partialRecovery = [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '20' } }] as const
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [
+          { kind: 'snapshot', snapshot },
+          { kind: 'resync_required', cursor: '50' },
+        ],
+        partialRecovery,
+        partialRecovery,
+        partialRecovery,
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: (projection) => {
+        projections.push(projection)
+        return { snapshot: projection, accepted: true }
+      },
+    })
+
+    expect(phases.at(-1)).toBe('failed')
+    expect(projections).toEqual([snapshot])
+  })
+
+  it('accepts a reconnect snapshot at the advertised resync cursor', async () => {
+    const phases: string[] = []
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [
+          { kind: 'snapshot', snapshot },
+          { kind: 'resync_required', cursor: '50' },
+        ],
+        [{ kind: 'snapshot', snapshot: { ...snapshot, cursor: '50' } }],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
+    })
+
+    expect(phases).toEqual(['connecting', 'live', 'resyncing', 'live', 'stale'])
+  })
+
+  it('preserves the immediate resync budget across replacement snapshots', async () => {
+    const phases: string[] = []
+    const resync = { kind: 'resync_required', cursor: '18' } as const
+    const recovered = { kind: 'snapshot', snapshot } as const
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [recovered, resync],
+        [recovered, resync],
+        [recovered, resync],
+        [recovered, resync],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: (projection) => ({ snapshot: projection, accepted: true }),
+    })
+
+    expect(phases.at(-1)).toBe('failed')
+  })
+
+  it('uses the projection accepted by the cache as the follower baseline', async () => {
+    const newerSnapshot = { ...snapshot, cursor: '19' }
+    const projections: WebAttentionSnapshot[] = []
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [
+          { kind: 'snapshot', snapshot },
+          { kind: 'update', cursor: '20', summaries: [replacement] },
+        ],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: () => undefined,
+      onProjection: (projection) => {
+        const accepted =
+          BigInt(projection.cursor) < BigInt(newerSnapshot.cursor) ? newerSnapshot : projection
+        projections.push(accepted)
+        return { snapshot: accepted, accepted: accepted === projection }
+      },
+    })
+
+    expect(projections).toEqual([
+      newerSnapshot,
+      { ...newerSnapshot, cursor: '20', summaries: [replacement] },
+    ])
+  })
+
+  it('does not reset the resync budget for rejected follower snapshots', async () => {
+    const phases: string[] = []
+    const staleSnapshot = { kind: 'snapshot', snapshot } as const
+    const duplicateUpdate = { kind: 'update', cursor: '19', summaries: [replacement] } as const
+    const newerSnapshot = { ...snapshot, cursor: '19' }
+
+    await synchronizeAttention({
+      transport: streamTransport([
+        [staleSnapshot, duplicateUpdate],
+        [staleSnapshot, duplicateUpdate],
+        [staleSnapshot, duplicateUpdate],
+        [staleSnapshot, duplicateUpdate],
+      ]),
+      signal: new AbortController().signal,
+      onPhase: (phase) => phases.push(phase),
+      onProjection: (projection) => ({
+        snapshot: newerSnapshot,
+        accepted: projection.cursor === newerSnapshot.cursor,
+      }),
+    })
+
+    expect(phases.at(-1)).toBe('failed')
   })
 })

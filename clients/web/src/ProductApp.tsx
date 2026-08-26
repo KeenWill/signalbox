@@ -2,17 +2,37 @@ import * as Dialog from '@radix-ui/react-dialog'
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
-import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  AlertTriangle,
+  Command,
+  FileSearch,
+  Menu,
+  Moon,
+  PanelLeftClose,
+  Rows3,
+  Sun,
+  X,
+} from 'lucide-react'
+import {
+  type CSSProperties,
+  type RefObject,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react'
 import { ActivitySurface } from './ActivitySurface'
+import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext, CommandId } from './commands'
 import { invokeCommand } from './commands'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
-  BootstrapContractError,
+  ProductContractError,
   type ProductRouteId,
+  ProductTransportError,
   productRoutes,
   productSurfaceCacheLabel,
   productSurfaceStates,
@@ -318,9 +338,13 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
 }
 
 function ProductToolbar({
+  artifactAvailable,
+  artifactButtonRef,
   context,
   onOpenPalette,
 }: {
+  artifactAvailable: boolean
+  artifactButtonRef: RefObject<HTMLButtonElement | null>
   context: ProductCommandContext
   onOpenPalette: (opener: HTMLElement) => void
 }) {
@@ -334,6 +358,16 @@ function ProductToolbar({
         onClick={() => invokeProductCommand('navigation.open', context)}
       >
         <Menu />
+      </button>
+      <button
+        ref={artifactButtonRef}
+        className="icon-button"
+        type="button"
+        aria-label="Open artifact inspector"
+        disabled={!artifactAvailable}
+        onClick={() => invokeProductCommand('artifact.open', context)}
+      >
+        <FileSearch />
       </button>
       <button
         className="icon-button"
@@ -374,6 +408,82 @@ function ProductToolbar({
   )
 }
 
+// Must stay identical to the `.product-inspector { display: none }` breakpoint in app.css:
+// a wider composition threshold than the visibility threshold would mount the side pane into a
+// hidden aside and focus a Digest input nobody can see.
+const INSPECTOR_SHEET_MEDIA = '(max-width: 1260px)'
+
+function useNarrowInspector(): boolean {
+  const [narrow, setNarrow] = useState(() => window.matchMedia(INSPECTOR_SHEET_MEDIA).matches)
+  useEffect(() => {
+    const query = window.matchMedia(INSPECTOR_SHEET_MEDIA)
+    const update = () => setNarrow(query.matches)
+    query.addEventListener('change', update)
+    return () => query.removeEventListener('change', update)
+  }, [])
+  return narrow
+}
+
+function SelectionInspector({
+  cacheLabel,
+  selectionEvidence,
+  surface,
+  title,
+}: {
+  cacheLabel: string | null
+  selectionEvidence: SessionSelectionEvidence | null
+  surface: ProductRouteId
+  title: string
+}) {
+  return (
+    <>
+      <span className="eyebrow">Inspector</span>
+      <h2>Selection details</h2>
+      <p>
+        {selectionEvidence === null
+          ? 'Select an available operational record to inspect its server-provided evidence.'
+          : 'Bounded server-provided timeline projection for the selected record.'}
+      </p>
+      <dl className="selection-inspector-details">
+        <div>
+          <dt>Surface</dt>
+          <dd>{title}</dd>
+        </div>
+        <div>
+          <dt>Authority</dt>
+          <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
+        </div>
+        {cacheLabel !== null && (
+          <div>
+            <dt>Cache</dt>
+            <dd>{cacheLabel}</dd>
+          </div>
+        )}
+        {surface === 'sessions' && selectionEvidence !== null && (
+          <>
+            <div>
+              <dt>Session</dt>
+              <dd>{selectionEvidence.sessionId}</dd>
+            </div>
+            <div>
+              <dt>Event</dt>
+              <dd>{selectionEvidence.eventSequence}</dd>
+            </div>
+            <div>
+              <dt>Kind</dt>
+              <dd>{selectionEvidence.kind.replaceAll('_', ' ')}</dd>
+            </div>
+            <div>
+              <dt>Projected bytes</dt>
+              <dd>{selectionEvidence.projectedStructuredBytes}</dd>
+            </div>
+          </>
+        )}
+      </dl>
+    </>
+  )
+}
+
 export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
@@ -382,6 +492,19 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const timelineRef = useRef<HTMLDivElement>(null)
   const paletteOpenerRef = useRef<HTMLElement | null>(null)
   const navigationOpenerRef = useRef<HTMLElement | null>(null)
+  const artifactButtonRef = useRef<HTMLButtonElement>(null)
+  const artifactDigestRef = useRef<HTMLInputElement>(null)
+  const bootstrapStatusRef = useRef<HTMLSpanElement>(null)
+  const artifactSideWasOpen = useRef(false)
+  const inspectorWasInSheet = useRef(false)
+  const surfaceEscapeRef = useRef<(() => boolean) | null>(null)
+  const registerSurfaceEscape = useCallback((handler: (() => boolean) | null) => {
+    surfaceEscapeRef.current = handler
+  }, [])
+  const [artifactOpen, setArtifactOpen] = useState(false)
+  const [artifactInspectorState, setArtifactInspectorState] = useState(emptyArtifactInspectorState)
+  const narrowInspector = useNarrowInspector()
+  const [focusAfterBootstrapRecovery, setFocusAfterBootstrapRecovery] = useState(false)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
   const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
   const [selectionEvidence, setSelectionEvidence] = useState<SessionSelectionEvidence | null>(null)
@@ -406,6 +529,15 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
     staleTime: Number.POSITIVE_INFINITY,
   })
+  const artifactAvailable = bootstrap.data?.capabilities.immutable_blob_content === true
+  const bootstrapFailure = bootstrap.error
+    ? bootstrap.error instanceof ProductTransportError
+      ? 'Transport unavailable'
+      : bootstrap.error instanceof ProductContractError
+        ? 'Contract rejected'
+        : 'Bootstrap unavailable'
+    : null
+  const inspectorInSheet = app.layout === 'focus' || narrowInspector
   // Imports reads and continuation mutations are admitted by the same bootstrap the shell validated.
   const productImportApi = useMemo(
     () =>
@@ -425,11 +557,17 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       artifactOriginalIds: [],
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
       focusTimeline: surfaceContext?.focusTimeline ?? (() => timelineRef.current?.focus()),
+      unwindSurface: () => surfaceEscapeRef.current?.() ?? false,
+      openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
       loadTimelineWindow: (anchor) =>
         setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
       navigate: (path) => {
         // A retained exact continuation command owns the surface until it is retried or abandoned.
         if (navigationDisabled) return
+        if (path === '/scenario/streaming') {
+          void navigate({ to: '/scenario/$scenarioId', params: { scenarioId: 'streaming' } })
+          return
+        }
         void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() => {
           requestAnimationFrame(() => mainRef.current?.focus())
         })
@@ -447,6 +585,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       },
     }
   }, [
+    artifactAvailable,
     dispatch,
     importsCommandContext,
     navigate,
@@ -455,10 +594,22 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     timelineIds,
     timelineWindowAvailable,
   ])
+  const artifactSheetOwnsFocus = artifactOpen && inspectorInSheet
   useHotkeys(
     productHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
-      callback: () => {
+      callback: (event) => {
+        if (artifactSheetOwnsFocus) return
+        const target = event.target
+        if (
+          binding.commandId === 'surface.escape' &&
+          (target instanceof HTMLInputElement ||
+            target instanceof HTMLTextAreaElement ||
+            target instanceof HTMLSelectElement ||
+            (target instanceof HTMLElement && target.isContentEditable))
+        ) {
+          return
+        }
         if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
           if (binding.commandId === 'palette.open') {
             const activeElement = document.activeElement
@@ -479,6 +630,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     productHotkeySequenceBindings.map((binding) => ({
       sequence: binding.sequence,
       callback: () => {
+        if (artifactSheetOwnsFocus) return
         if (store.getState().app.overlay === null) {
           if (
             binding.commandId.startsWith('selection.') &&
@@ -501,6 +653,51 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     document.documentElement.dataset.density = app.density
   }, [app.density, app.theme])
 
+  useEffect(() => {
+    if (!focusAfterBootstrapRecovery || !bootstrap.isSuccess) return
+    setFocusAfterBootstrapRecovery(false)
+    const frame = requestAnimationFrame(() => mainRef.current?.focus())
+    return () => cancelAnimationFrame(frame)
+  }, [bootstrap.isSuccess, focusAfterBootstrapRecovery])
+
+  useEffect(() => {
+    const returnedToSidePane = artifactOpen && inspectorWasInSheet.current && !inspectorInSheet
+    if (artifactOpen && !inspectorInSheet && (!artifactSideWasOpen.current || returnedToSidePane)) {
+      artifactSideWasOpen.current = true
+      artifactDigestRef.current?.focus()
+    } else if (!artifactOpen) {
+      artifactSideWasOpen.current = false
+    }
+    inspectorWasInSheet.current = inspectorInSheet
+  }, [artifactOpen, inspectorInSheet])
+
+  const closeArtifactInspector = useCallback(() => {
+    artifactSideWasOpen.current = false
+    setArtifactOpen(false)
+    requestAnimationFrame(() => artifactButtonRef.current?.focus())
+  }, [])
+
+  useEffect(() => {
+    if (!artifactOpen || inspectorInSheet) return undefined
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || app.overlay !== null) return
+      const target = event.target
+      if (
+        target instanceof HTMLInputElement ||
+        target instanceof HTMLTextAreaElement ||
+        target instanceof HTMLSelectElement ||
+        (target instanceof HTMLElement && target.isContentEditable)
+      ) {
+        return
+      }
+      event.preventDefault()
+      event.stopPropagation()
+      closeArtifactInspector()
+    }
+    window.addEventListener('keydown', closeOnEscape, true)
+    return () => window.removeEventListener('keydown', closeOnEscape, true)
+  }, [app.overlay, artifactOpen, closeArtifactInspector, inspectorInSheet])
+
   const copy = surfaceCopy[surface]
   const cacheLabel = productSurfaceCacheLabel(surface)
   const timelineCapability = bootstrap.isPending
@@ -517,31 +714,65 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
     }
   }, [copy.title])
 
-  // Attention and Activity read live projections, so neither surface issues a
-  // request before the daemon contract validates.
-  const projectionSurface = surface === 'attention' || surface === 'activity'
   const content =
-    projectionSurface && !bootstrap.isSuccess ? (
-      <section className="surface-empty" aria-live="polite">
-        <AlertTriangle aria-hidden="true" />
-        <div>
-          <h2>Waiting for a compatible daemon contract</h2>
-          <p>
-            {bootstrap.isError
-              ? 'Operational reads are disabled because the browser could not validate the daemon contract.'
-              : 'Operational reads will begin after the daemon contract has been validated.'}
-          </p>
-          {bootstrap.isError && (
-            <button type="button" onClick={() => void bootstrap.refetch()}>
-              Retry contract validation
-            </button>
-          )}
-        </div>
-      </section>
+    surface === 'attention' && bootstrap.isSuccess ? (
+      <AttentionSurface registerEscapeHandler={registerSurfaceEscape} />
     ) : surface === 'attention' ? (
-      <AttentionSurface />
-    ) : surface === 'activity' ? (
+      <div className="surface-body">
+        <section className="surface-empty" role={bootstrap.isError ? 'alert' : 'status'}>
+          <div>
+            <h2>
+              {bootstrap.isError ? 'Attention contract unavailable' : 'Checking Attention contract'}
+            </h2>
+            <p>
+              {bootstrap.isError
+                ? 'Attention reads remain disabled until the generated bootstrap contract validates.'
+                : 'Attention reads will begin after the generated bootstrap contract validates.'}
+            </p>
+            {bootstrap.isError && (
+              <button
+                type="button"
+                className="bootstrap-retry"
+                onClick={() => {
+                  setFocusAfterBootstrapRecovery(true)
+                  void bootstrap.refetch()
+                }}
+              >
+                Retry contract check
+              </button>
+            )}
+          </div>
+        </section>
+      </div>
+    ) : surface === 'activity' && bootstrap.isSuccess ? (
       <ActivitySurface />
+    ) : surface === 'activity' ? (
+      <div className="surface-body">
+        <section className="surface-empty" role={bootstrap.isError ? 'alert' : 'status'}>
+          <div>
+            <h2>
+              {bootstrap.isError ? 'Activity contract unavailable' : 'Checking Activity contract'}
+            </h2>
+            <p>
+              {bootstrap.isError
+                ? 'Repository activity reads remain disabled until the generated bootstrap contract validates.'
+                : 'Repository activity reads will begin after the generated bootstrap contract validates.'}
+            </p>
+            {bootstrap.isError && (
+              <button
+                type="button"
+                className="bootstrap-retry"
+                onClick={() => {
+                  setFocusAfterBootstrapRecovery(true)
+                  void bootstrap.refetch()
+                }}
+              >
+                Retry contract check
+              </button>
+            )}
+          </div>
+        </section>
+      </div>
     ) : surface === 'sessions' ? (
       <SessionWorkspaceSurface
         onSelectionEvidence={updateSelectionEvidence}
@@ -599,6 +830,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             <h1>{copy.title}</h1>
           </div>
           <ProductToolbar
+            artifactAvailable={artifactAvailable}
+            artifactButtonRef={artifactButtonRef}
             context={context}
             onOpenPalette={(opener) => {
               paletteOpenerRef.current = opener
@@ -608,25 +841,33 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         <div className="surface-question">
           <p>{copy.question}</p>
           <span
+            ref={bootstrapStatusRef}
             className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
             role="status"
             aria-live="polite"
+            aria-atomic="true"
+            tabIndex={-1}
           >
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
               : bootstrap.isError
-                ? bootstrap.error instanceof BootstrapContractError
-                  ? 'Incompatible daemon contract'
-                  : 'Transport unavailable'
+                ? bootstrapFailure
                 : 'Checking contract…'}
           </span>
           {bootstrap.isError && (
             <button
               type="button"
               className="bootstrap-retry"
-              onClick={() => void bootstrap.refetch()}
+              onClick={(event) => {
+                const restoreFocus = document.activeElement === event.currentTarget
+                void bootstrap.refetch().then((result) => {
+                  if (result.isSuccess && restoreFocus) {
+                    requestAnimationFrame(() => bootstrapStatusRef.current?.focus())
+                  }
+                })
+              }}
             >
-              Retry contract
+              Retry bootstrap
             </button>
           )}
         </div>
@@ -634,49 +875,23 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       </main>
       {app.layout === 'workbench' && (
         <aside className="product-inspector" aria-label="Inspector">
-          <span className="eyebrow">Inspector</span>
-          <h2>Selection details</h2>
-          <p>
-            {selectionEvidence === null
-              ? 'Select an available operational record to inspect its server-provided evidence.'
-              : 'Bounded server-provided timeline projection for the selected record.'}
-          </p>
-          <dl>
-            <div>
-              <dt>Surface</dt>
-              <dd>{copy.title}</dd>
-            </div>
-            <div>
-              <dt>Authority</dt>
-              <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
-            </div>
-            {cacheLabel !== null && (
-              <div>
-                <dt>Cache</dt>
-                <dd>{cacheLabel}</dd>
-              </div>
-            )}
-            {surface === 'sessions' && selectionEvidence !== null && (
-              <>
-                <div>
-                  <dt>Session</dt>
-                  <dd>{selectionEvidence.sessionId}</dd>
-                </div>
-                <div>
-                  <dt>Event</dt>
-                  <dd>{selectionEvidence.eventSequence}</dd>
-                </div>
-                <div>
-                  <dt>Kind</dt>
-                  <dd>{selectionEvidence.kind.replaceAll('_', ' ')}</dd>
-                </div>
-                <div>
-                  <dt>Projected bytes</dt>
-                  <dd>{selectionEvidence.projectedStructuredBytes}</dd>
-                </div>
-              </>
-            )}
-          </dl>
+          {artifactOpen && !inspectorInSheet ? (
+            <ArtifactInspector
+              available={artifactAvailable}
+              commandContext={context}
+              digestInputRef={artifactDigestRef}
+              onClose={closeArtifactInspector}
+              state={artifactInspectorState}
+              onStateChange={setArtifactInspectorState}
+            />
+          ) : (
+            <SelectionInspector
+              cacheLabel={cacheLabel}
+              selectionEvidence={selectionEvidence}
+              surface={surface}
+              title={copy.title}
+            />
+          )}
         </aside>
       )}
       <CommandPalette context={context} />
@@ -719,6 +934,40 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               context={context}
               disabled={navigationDisabled}
               onActivate={() => dispatch(actions.overlaySet(null))}
+            />
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+      <Dialog.Root
+        open={artifactOpen && inspectorInSheet && app.overlay === null}
+        onOpenChange={(open) => {
+          if (!open && app.overlay === null) closeArtifactInspector()
+        }}
+      >
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content
+            className="artifact-sheet"
+            aria-describedby="artifact-sheet-description"
+            onOpenAutoFocus={(event) => {
+              event.preventDefault()
+              artifactDigestRef.current?.focus()
+            }}
+            onCloseAutoFocus={(event) => {
+              event.preventDefault()
+            }}
+          >
+            <Dialog.Title className="sr-only">Artifact inspector</Dialog.Title>
+            <Dialog.Description id="artifact-sheet-description" className="sr-only">
+              Resolve and inspect an immutable Signalbox blob.
+            </Dialog.Description>
+            <ArtifactInspector
+              available={artifactAvailable}
+              commandContext={context}
+              digestInputRef={artifactDigestRef}
+              onClose={closeArtifactInspector}
+              state={artifactInspectorState}
+              onStateChange={setArtifactInspectorState}
             />
           </Dialog.Content>
         </Dialog.Portal>

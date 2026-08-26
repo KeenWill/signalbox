@@ -229,15 +229,22 @@ impl RepoWatchPullRequestOperations {
             // `docs/spec/repo-watch.md` reads. A later comment-only or
             // dismissed review therefore reports only where that reviewer
             // holds no opinionated state yet, instead of replacing an approval
-            // or a blocking review the head still carries.
+            // or a blocking review the head still carries. A dismissed review
+            // is retained with no state, so it occupies no opinion of its own:
+            // a comment the same reviewer left on this head reports over it
+            // whichever order the two arrive in.
             match review.state() {
                 Some(ReviewState::Approved | ReviewState::ChangesRequested) => {
                     current_reviews.insert(review.reviewer(), review.state());
                 }
-                Some(ReviewState::Commented) | None => {
-                    current_reviews
-                        .entry(review.reviewer())
-                        .or_insert(review.state());
+                Some(ReviewState::Commented) => {
+                    let effective = current_reviews.entry(review.reviewer()).or_insert(None);
+                    if effective.is_none() {
+                        *effective = review.state();
+                    }
+                }
+                None => {
+                    current_reviews.entry(review.reviewer()).or_insert(None);
                 }
             }
         }
@@ -644,6 +651,16 @@ mod tests {
         let decision = review_decision_for(reviews_by_one_reviewer([
             Some(ReviewState::Commented),
             None,
+        ]));
+
+        assert_eq!(decision, RepoWatchReviewStatus::Commented);
+    }
+
+    #[test]
+    fn comment_only_review_reports_after_a_dismissal_on_the_same_head() {
+        let decision = review_decision_for(reviews_by_one_reviewer([
+            None,
+            Some(ReviewState::Commented),
         ]));
 
         assert_eq!(decision, RepoWatchReviewStatus::Commented);

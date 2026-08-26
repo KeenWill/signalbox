@@ -357,6 +357,30 @@
   box-shadow: inset 3px 0 var(--warning);
 }
 
+/* The product inspector hosts the shared renderer in a narrow pane, so both of its grids stack. */
+.artifact-inspector .artifact-row,
+.artifact-inspector .artifact-image-layout {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.artifact-inspector .artifact-heading,
+.artifact-inspector .artifact-visual {
+  border-right: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.artifact-inspector .artifact-visual {
+  min-height: 144px;
+}
+
+.artifact-inspector .artifact-detail {
+  padding: 0.75rem;
+}
+
+.artifact-inspector .artifact-detail dl div {
+  grid-template-columns: 78px minmax(0, 1fr);
+}
+
 .attachment-workbench {
   display: grid;
   min-height: 0;
