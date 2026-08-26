@@ -1135,6 +1135,15 @@ fn repository_reconciliation_quantum_exhausted(
     reconciliation_quantum.is_some_and(|quantum| processed >= quantum)
 }
 
+fn repository_reconciliation_should_yield(
+    processed: usize,
+    reconciliation_quantum: Option<usize>,
+    continuation_available: bool,
+) -> bool {
+    continuation_available
+        && repository_reconciliation_quantum_exhausted(processed, reconciliation_quantum)
+}
+
 /// Awaits `work`, leaving it cancellable by shutdown.
 ///
 /// Returns `None` when shutdown — or a dropped sender — cancelled the work
@@ -3626,7 +3635,11 @@ impl RepositoryWatchTask {
     }
 
     fn yield_after_reconciliation_quantum(&self, phase: &'static str, processed: usize) -> bool {
-        if !repository_reconciliation_quantum_exhausted(processed, self.reconciliation_quantum) {
+        if !repository_reconciliation_should_yield(
+            processed,
+            self.reconciliation_quantum,
+            self.webhook_nudge.is_some(),
+        ) {
             return false;
         }
         self.request_webhook_drain_continuation();
@@ -3700,6 +3713,7 @@ impl RepositoryWatchTask {
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .map_err(|error| match error.kind() {
+            RepoWatchDifferFailureKind::BaselineCollection => RepositoryWatchAttemptError::Differ,
             RepoWatchDifferFailureKind::EventConstruction => RepositoryWatchAttemptError::Differ,
             // Its own cause code, because the frontier and a differ defect call
             // for different operator responses. The attempt stays retryable: a
@@ -8098,7 +8112,7 @@ mod tests {
         next_cadence_deadline, next_repository_wake, normalize_checks_outcome,
         normalize_pull_request_context, object_id, observe_webhook_work_before_drain,
         owed_dispatch_context_json_parts, record_dispatch_start_nudge_outcome,
-        repository_reconciliation_quantum_exhausted, rule_activation_error, run_until_shutdown,
+        repository_reconciliation_should_yield, rule_activation_error, run_until_shutdown,
         supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
@@ -13181,7 +13195,7 @@ mod tests {
     }
 
     #[test]
-    fn reconciliation_yields_at_the_audited_quantum() {
+    fn reconciliation_yields_at_the_audited_quantum_only_with_a_continuation_wake() {
         let quantum = checked_in_example_configuration()
             .expect("checked-in example parses")
             .numeric_bounds()
@@ -13189,13 +13203,20 @@ mod tests {
             .flatten()
             .and_then(|value| usize::try_from(value).ok())
             .expect("example reconciliation quantum fits usize");
-        assert!(!repository_reconciliation_quantum_exhausted(
+        assert!(!repository_reconciliation_should_yield(
             quantum - 1,
             Some(quantum),
+            true,
         ));
-        assert!(repository_reconciliation_quantum_exhausted(
+        assert!(repository_reconciliation_should_yield(
             quantum,
             Some(quantum),
+            true,
+        ));
+        assert!(!repository_reconciliation_should_yield(
+            quantum,
+            Some(quantum),
+            false,
         ));
     }
 

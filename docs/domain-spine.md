@@ -9010,6 +9010,7 @@ pub enum RepoWatchRepositoryStateError {
 }
 
 pub enum RepoWatchDifferFailureKind {
+    BaselineCollection,
     EventConstruction,
     IdentityFrontier,
 }

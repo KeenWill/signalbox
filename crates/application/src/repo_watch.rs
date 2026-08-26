@@ -1472,6 +1472,7 @@ impl RepoWatchEventStreamKeyV1<'_> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RepoWatchDifferFailure {
+    BaselineCollection(PullRequestNumber),
     EventConstruction(RepoWatchEventConstructionError),
     IdentityFrontier(RepoWatchEventIdentityFrontierError),
 }
@@ -1491,6 +1492,8 @@ enum RepoWatchDifferFailure {
 /// exhausted it, not for the repository.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchDifferFailureKind {
+    /// Compact merged-pull-request baselines were not a unique collection.
+    BaselineCollection,
     /// The differ assembled an event the domain rejects.
     EventConstruction,
     /// The occurrence frontier could not assign the next sequence.
@@ -1505,6 +1508,9 @@ impl RepoWatchDifferError {
     /// Which part of derivation failed.
     pub const fn kind(&self) -> RepoWatchDifferFailureKind {
         match self.0 {
+            RepoWatchDifferFailure::BaselineCollection(_) => {
+                RepoWatchDifferFailureKind::BaselineCollection
+            }
             RepoWatchDifferFailure::EventConstruction(_) => {
                 RepoWatchDifferFailureKind::EventConstruction
             }
@@ -1518,6 +1524,11 @@ impl RepoWatchDifferError {
 impl fmt::Display for RepoWatchDifferError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0 {
+            RepoWatchDifferFailure::BaselineCollection(number) => write!(
+                formatter,
+                "repository-watch differ received duplicate merged baseline {}",
+                number.get()
+            ),
             RepoWatchDifferFailure::EventConstruction(error) => write!(
                 formatter,
                 "repository-watch differ produced an invalid event: {error}"
@@ -1533,6 +1544,7 @@ impl fmt::Display for RepoWatchDifferError {
 impl Error for RepoWatchDifferError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match &self.0 {
+            RepoWatchDifferFailure::BaselineCollection(_) => None,
             RepoWatchDifferFailure::EventConstruction(error) => Some(error),
             RepoWatchDifferFailure::IdentityFrontier(error) => Some(error),
         }
@@ -1579,10 +1591,17 @@ pub fn derive_repo_watch_events_with_merged_baselines(
     ids: &mut impl RepoWatchEventIdGenerator,
 ) -> Result<Vec<RepoWatchEventOccurrenceV1>, RepoWatchDifferError> {
     let mut events = Vec::new();
-    let merged_baselines_by_number = merged_baselines
-        .iter()
-        .map(|baseline| (baseline.number(), baseline))
-        .collect::<BTreeMap<_, _>>();
+    let mut merged_baselines_by_number = BTreeMap::new();
+    for baseline in merged_baselines {
+        if merged_baselines_by_number
+            .insert(baseline.number(), baseline)
+            .is_some()
+        {
+            return Err(RepoWatchDifferError(
+                RepoWatchDifferFailure::BaselineCollection(baseline.number()),
+            ));
+        }
+    }
     let reaction_filter_unchanged =
         previous.is_none_or(|prior| prior.signal_reviewers() == current.signal_reviewers());
     for current_pull_request in current.state().pull_requests() {
@@ -5260,6 +5279,30 @@ mod tests {
         let baseline = RepoWatchMergedPullRequestBaselineV1::try_new(input)?;
 
         assert!(baseline.reactions().is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn compact_merged_baseline_duplicates_fail_before_derivation() -> Result<(), Box<dyn Error>> {
+        let baseline = RepoWatchMergedPullRequestBaselineV1::try_new(merged_baseline_input()?)?;
+        let current = observation(Vec::new(), Vec::new(), Vec::new(), Vec::new())?;
+        let mut identity_frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let error = derive_repo_watch_events_with_merged_baselines(
+            &repository()?,
+            None,
+            &[baseline.clone(), baseline],
+            &current,
+            &mut identity_frontier,
+            &mut FixedEventIds::new(),
+        )
+        .expect_err("duplicate compact subjects fail closed");
+
+        assert_eq!(error.kind(), RepoWatchDifferFailureKind::BaselineCollection);
+        assert_eq!(
+            identity_frontier,
+            RepoWatchEventIdentityFrontierV1::default()
+        );
         Ok(())
     }
 
