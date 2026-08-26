@@ -425,7 +425,23 @@ every version-three pull-request observation. The first successful cursor commit
 on the new runtime derives compact baselines from those full merged observations
 and removes the full entries atomically, so migration neither loses the prior
 comparison state nor requires manual cursor surgery. A version-four reader
-requires the collection rather than treating its absence as empty.
+requires the collection rather than treating its absence as empty. Each baseline
+records the signal-reviewer filter that produced its retained reactions; a later
+hydration suppresses reaction transitions when that filter changed and replaces
+the baseline with the newly filtered provider state. Compact check suites, check
+runs, reviews, and threads are canonical by provider identity, and the
+collection is canonical by pull-request number. A duplicate identity is storage
+corruption rather than a value for a reader or public constructor to choose
+between.
+
+A compact baseline remains while the merged pull request's recurring streams
+remain in the identity frontier. Evicting the baseline alone would make a later
+refresh look like an initial observation and synthesize occurrences for facts
+that did not change; releasing it therefore belongs to the same future
+subject-lifecycle mechanism as releasing those streams. Every merged baseline
+owns at least its terminal pull-request-kind stream, so the existing
+1,000,000-stream safety ceiling also bounds the number of retained baseline
+subjects meanwhile.
 
 No lifecycle releases a stream today, and none may be added without deciding
 which subject provably produces no further occurrence. A merged pull request is
@@ -1384,11 +1400,16 @@ unbounded step ahead of every attempt. The outer deadline is the greater of 60
 seconds and 30 seconds per started MiB of logical cursor payload, capped at 15
 minutes. The stall monitor sizes the logical cursor under the same bound on each
 inspection and uses that payload-derived drain deadline as its unchanged-head
-threshold, so a healthy large-cursor attempt is not reported stalled before its
-own deadline. The deadline spans the drain's provider and database work. Expiry
-cancels that attempt, leaves unfinished deliveries pending, invalidates partial
-provider freshness, emits the closed `webhook_projection_drain_timed_out` cause,
-and, unless only post-terminal dispatch work expired, enters the same bounded
+threshold. Once it observes one queue head, later inspections may increase but
+never reduce that head's threshold; advancing the receipt sequence starts a new
+observation. A cursor compacted during an in-flight drain therefore cannot make
+the same healthy large-cursor attempt look stalled before its earlier bound.
+Both the sizing read and the monitor's pending-receipt inspection are preempted
+by daemon shutdown, rather than making shutdown wait for their database bounds.
+The deadline spans the drain's provider and database work. Expiry cancels that
+attempt, leaves unfinished deliveries pending, invalidates partial provider
+freshness, emits the closed `webhook_projection_drain_timed_out` cause, and,
+unless only post-terminal dispatch work expired, enters the same bounded
 projection backoff as another retryable drain failure. Post-terminal dispatch
 expiry instead arms its fixed dispatch follow-up. The serialized task is
 therefore returned to its scheduler after bounded child cleanup even when an
@@ -1546,25 +1567,31 @@ contains its transition and be recorded as a duplicate. The poll marks the
 baseline superseded instead, and the first drain that finds its page empty
 performs the replacement, deciding both without an await between them. A
 targeted query reconciles just the pull requests it names, so its commit is left
-to the cursor and the shadow is kept; the accepted cost is that what a targeted
-query learns reaches the shadow at the next full poll rather than immediately.
-Pending deliveries are drained before a full poll as well as after it. That
-drain failing is reported and not propagated: acceleration is not allowed to
-cancel the reconciliation sweep, so one delivery whose targeted request keeps
-failing cannot abort every scheduled poll. A poll that observes the same
-transition as an already-admitted delivery cannot advance the cursor past it and
-leave the delivery applying to state that already contains it. A delivery's
-targeted provider queries complete before anything is recorded, so a transient
-provider failure leaves the delivery pending. Once those queries succeed, the
-exact projections and terminal disposition form the durable recovery handoff
-before the cursor write. A later cursor failure does not reopen the delivery;
-the in-memory shadow is discarded so subsequent work reloads the durable cursor
-baseline, while a cursor conflict hands ownership to the intervening poll. On
-daemon restart the baseline is re-seeded from the durable cursor, which is the
-same complete reconciliation a full poll performs. The divergence a re-seeding
-leaves is accepted rather than removed: a delivery projected against a freshly
-seeded baseline records `cross_drain_shadow_gap` on its projections, so the gap
-is explained in the parity view instead of being carried by a durable shadow
+to the cursor. A landed targeted refresh also advances the shadow immediately to
+its refreshed observation and compact baselines while retaining the projection
+frontier already derived for that delivery, so a later delivery cannot compare
+against stale pre-hydration state. A commit-SHA check-rollup query resolves its
+target through either an ordinary pull-request observation or a compact merged
+baseline, keeping post-merge deliveries targetable. Pending deliveries are
+drained before a full poll as well as after it. That drain failing is reported
+and not propagated: acceleration is not allowed to cancel the reconciliation
+sweep, so one delivery whose targeted request keeps failing cannot abort every
+scheduled poll. A poll that observes the same transition as an already-admitted
+delivery cannot advance the cursor past it and leave the delivery applying to
+state that already contains it. A delivery's targeted provider queries complete
+before anything is recorded, so a transient provider failure leaves the delivery
+pending. Once those queries succeed, the exact projections and terminal
+disposition form the durable recovery handoff before the cursor write. A later
+cursor failure does not reopen the delivery; the in-memory shadow is discarded
+so subsequent work reloads the durable cursor baseline, while a cursor conflict
+hands ownership to the intervening poll. On any targeted-completion failure,
+unpublished provider freshness is invalidated so a later unrelated cursor commit
+cannot authorize reuse of state that never reached that cursor. On daemon
+restart the baseline is re-seeded from the durable cursor, which is the same
+complete reconciliation a full poll performs. The divergence a re-seeding leaves
+is accepted rather than removed: a delivery projected against a freshly seeded
+baseline records `cross_drain_shadow_gap` on its projections, so the gap is
+explained in the parity view instead of being carried by a durable shadow
 cursor. `repo_watch_webhook_projection` records each resulting version-one
 content identity and event kind, and the cause of any divergence the producing
 delivery already knows, while `repo_watch_webhook_disposition` atomically

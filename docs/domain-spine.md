@@ -8913,6 +8913,7 @@ impl RepoWatchMergedCheckRunBaselineV1 {
 pub struct RepoWatchMergedPullRequestBaselineInputV1 {
     pub number: PullRequestNumber,
     pub head_sha: CommitSha,
+    pub signal_reviewers: Vec<RepoWatchAuthorLogin>,
     pub labels: Vec<LabelName>,
     pub mergeable_state: MergeableState,
     pub completed_check_suites: Vec<RepoWatchMergedCheckSuiteBaselineV1>,
@@ -8924,9 +8925,14 @@ pub struct RepoWatchMergedPullRequestBaselineInputV1 {
 
 pub struct RepoWatchMergedPullRequestBaselineV1 { /* private */ }
 impl RepoWatchMergedPullRequestBaselineV1 {
-    pub fn new(input: RepoWatchMergedPullRequestBaselineInputV1) -> Self;
-    pub fn from_merged_state(state: &RepoWatchPullRequestState) -> Option<Self>;
-    // accessors: number(), head_sha(), labels(), mergeable_state(),
+    pub fn try_new(
+        input: RepoWatchMergedPullRequestBaselineInputV1,
+    ) -> Result<Self, RepoWatchRepositoryStateError>;
+    pub fn from_merged_state(
+        state: &RepoWatchPullRequestState,
+        signal_reviewers: &[RepoWatchAuthorLogin],
+    ) -> Result<Option<Self>, RepoWatchRepositoryStateError>;
+    // accessors: number(), head_sha(), signal_reviewers(), labels(), mergeable_state(),
     // completed_check_suites(), completed_check_runs(), review_ids(), threads(), reactions()
 }
 

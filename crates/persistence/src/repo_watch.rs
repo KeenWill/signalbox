@@ -18,10 +18,10 @@ use signalbox_application::{
     RepoWatchMergedCheckRunBaselineV1, RepoWatchMergedCheckSuiteBaselineV1,
     RepoWatchMergedPullRequestBaselineInputV1, RepoWatchMergedPullRequestBaselineV1,
     RepoWatchObservation, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-    RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWorkflowRunObservation,
-    repo_watch_events_have_equal_identified_content,
+    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
+    RepoWatchRepositoryStateInput, RepoWatchReviewObservation,
+    RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWorkflowRunObservation, repo_watch_events_have_equal_identified_content,
 };
 use signalbox_domain::{
     BranchName, CheckRunName, CommitSha, GitHubObjectId, LabelName, PullRequestBody,
@@ -122,18 +122,24 @@ impl RepoWatchCursorCandidate {
         }
     }
 
-    pub fn with_event_identity_frontier_and_merged_baselines(
+    pub fn try_with_event_identity_frontier_and_merged_baselines(
         observation: RepoWatchObservation,
         event_identity_frontier: RepoWatchEventIdentityFrontierV1,
         mut merged_pull_request_baselines: Vec<RepoWatchMergedPullRequestBaselineV1>,
-    ) -> Self {
+    ) -> Result<Self, RepoWatchRepositoryStateError> {
         merged_pull_request_baselines.sort_by_key(RepoWatchMergedPullRequestBaselineV1::number);
-        merged_pull_request_baselines.dedup_by_key(|baseline| baseline.number());
-        Self {
+        for adjacent in merged_pull_request_baselines.windows(2) {
+            if adjacent[0].number() == adjacent[1].number() {
+                return Err(RepoWatchRepositoryStateError::DuplicatePullRequest(
+                    adjacent[0].number(),
+                ));
+            }
+        }
+        Ok(Self {
             observation,
             event_identity_frontier,
             merged_pull_request_baselines: merged_pull_request_baselines.into_boxed_slice(),
-        }
+        })
     }
 
     pub const fn observation(&self) -> &RepoWatchObservation {
@@ -1881,6 +1887,7 @@ struct CursorRecord {
 struct MergedPullRequestBaselineRecord {
     number: u64,
     head_sha: String,
+    signal_reviewers: Vec<String>,
     labels: Vec<String>,
     mergeable_state: String,
     completed_check_suites: Vec<MergedCheckSuiteBaselineRecord>,
@@ -2084,6 +2091,11 @@ fn merged_pull_request_baseline_record(
     MergedPullRequestBaselineRecord {
         number: baseline.number().get(),
         head_sha: baseline.head_sha().as_str().to_owned(),
+        signal_reviewers: baseline
+            .signal_reviewers()
+            .iter()
+            .map(|reviewer| reviewer.as_str().to_owned())
+            .collect(),
         labels: baseline
             .labels()
             .iter()
@@ -2381,11 +2393,15 @@ fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, Rep
         .map(decode_merged_pull_request_baseline)
         .collect::<Result<Vec<_>, _>>()?;
     let state = decode_repository_state(record.state)?;
-    let candidate = RepoWatchCursorCandidate::with_event_identity_frontier_and_merged_baselines(
-        RepoWatchObservation::new(signal_reviewers, state),
-        event_identity_frontier,
-        merged_pull_request_baselines,
-    );
+    let candidate =
+        RepoWatchCursorCandidate::try_with_event_identity_frontier_and_merged_baselines(
+            RepoWatchObservation::new(signal_reviewers, state),
+            event_identity_frontier,
+            merged_pull_request_baselines,
+        )
+        .map_err(|_| {
+            RepoWatchPersistenceCorruption::InvalidCursorField("merged_pull_request_baselines")
+        })?;
     let canonical = if legacy_workflow_shape {
         encode_legacy_cursor_candidate(&candidate)?
     } else {
@@ -2461,27 +2477,33 @@ fn decode_merged_pull_request_baseline(
         .into_iter()
         .map(decode_reaction_record)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(RepoWatchMergedPullRequestBaselineV1::new(
-        RepoWatchMergedPullRequestBaselineInputV1 {
-            number: pull_request_number(record.number, "merged_pull_request.number")?,
-            head_sha: CommitSha::try_new(record.head_sha)?,
-            labels: record
-                .labels
-                .into_iter()
-                .map(LabelName::try_new)
-                .collect::<Result<Vec<_>, _>>()?,
-            mergeable_state: repo_watch_mergeable_state_from_str(&record.mergeable_state).ok_or(
-                RepoWatchPersistenceCorruption::UnknownCursorDiscriminator(
-                    "merged_pull_request.mergeable_state",
-                ),
-            )?,
-            completed_check_suites,
-            completed_check_runs,
-            review_ids,
-            threads,
-            reactions,
-        },
-    ))
+    RepoWatchMergedPullRequestBaselineV1::try_new(RepoWatchMergedPullRequestBaselineInputV1 {
+        number: pull_request_number(record.number, "merged_pull_request.number")?,
+        head_sha: CommitSha::try_new(record.head_sha)?,
+        signal_reviewers: record
+            .signal_reviewers
+            .into_iter()
+            .map(RepoWatchAuthorLogin::try_new)
+            .collect::<Result<Vec<_>, _>>()?,
+        labels: record
+            .labels
+            .into_iter()
+            .map(LabelName::try_new)
+            .collect::<Result<Vec<_>, _>>()?,
+        mergeable_state: repo_watch_mergeable_state_from_str(&record.mergeable_state).ok_or(
+            RepoWatchPersistenceCorruption::UnknownCursorDiscriminator(
+                "merged_pull_request.mergeable_state",
+            ),
+        )?,
+        completed_check_suites,
+        completed_check_runs,
+        review_ids,
+        threads,
+        reactions,
+    })
+    .map_err(|_| {
+        RepoWatchPersistenceCorruption::InvalidCursorField("merged_pull_request_baseline").into()
+    })
 }
 
 fn decode_repository_state(
@@ -3485,14 +3507,16 @@ mod tests {
 
     fn merged_baseline_candidate() -> Result<RepoWatchCursorCandidate, Box<dyn Error>> {
         let state = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput::default())?;
-        let baseline =
-            RepoWatchMergedPullRequestBaselineV1::new(RepoWatchMergedPullRequestBaselineInputV1 {
+        let reviewer = RepoWatchAuthorLogin::try_new(String::from("reviewer"))?;
+        let baseline = RepoWatchMergedPullRequestBaselineV1::try_new(
+            RepoWatchMergedPullRequestBaselineInputV1 {
                 number: PullRequestNumber::new(
                     NonZeroU64::new(41).expect("fixture pull-request number is positive"),
                 ),
                 head_sha: CommitSha::try_new(String::from(
                     "1111111111111111111111111111111111111111",
                 ))?,
+                signal_reviewers: vec![reviewer.clone()],
                 labels: vec![LabelName::try_new(String::from("merged"))?],
                 mergeable_state: signalbox_domain::MergeableState::Mergeable,
                 completed_check_suites: vec![RepoWatchMergedCheckSuiteBaselineV1::new(
@@ -3515,16 +3539,17 @@ mod tests {
                 )],
                 reactions: vec![RepoWatchReactionObservation::new(
                     ReactionSubject::PullRequestBody,
-                    RepoWatchAuthorLogin::try_new(String::from("reviewer"))?,
+                    reviewer.clone(),
                     signalbox_domain::ReactionContent::try_new(String::from("+1"))?,
                 )],
-            });
+            },
+        )?;
         Ok(
-            RepoWatchCursorCandidate::with_event_identity_frontier_and_merged_baselines(
-                RepoWatchObservation::new(Vec::new(), state),
+            RepoWatchCursorCandidate::try_with_event_identity_frontier_and_merged_baselines(
+                RepoWatchObservation::new(vec![reviewer], state),
                 RepoWatchEventIdentityFrontierV1::default(),
                 vec![baseline],
-            ),
+            )?,
         )
     }
 
@@ -3595,6 +3620,27 @@ mod tests {
         assert_eq!(
             decoded.merged_pull_request_baselines()[0].number(),
             candidate.merged_pull_request_baselines()[0].number()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_candidate_rejects_duplicate_merged_pull_request_baselines()
+    -> Result<(), Box<dyn Error>> {
+        let candidate = merged_baseline_candidate()?;
+        let baseline = candidate.merged_pull_request_baselines()[0].clone();
+        let number = baseline.number();
+
+        let result =
+            RepoWatchCursorCandidate::try_with_event_identity_frontier_and_merged_baselines(
+                candidate.observation().clone(),
+                candidate.event_identity_frontier().clone(),
+                vec![baseline.clone(), baseline],
+            );
+
+        assert_eq!(
+            result,
+            Err(RepoWatchRepositoryStateError::DuplicatePullRequest(number))
         );
         Ok(())
     }
