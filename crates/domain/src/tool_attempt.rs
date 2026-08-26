@@ -557,8 +557,8 @@ impl CurrentToolAttempt {
         })
     }
 
-    /// Applies pre-execution lookup or argument failure without authorizing an
-    /// executor effect.
+    /// Applies pre-execution lookup, argument, or preauthorization failure
+    /// without authorizing an executor effect.
     pub fn end_preflight_error(
         self,
         error: ToolExecutionError,
@@ -571,7 +571,9 @@ impl CurrentToolAttempt {
         }
         if !matches!(
             error.kind(),
-            ToolExecutionErrorKind::UnknownTool | ToolExecutionErrorKind::InvalidArguments
+            ToolExecutionErrorKind::UnknownTool
+                | ToolExecutionErrorKind::InvalidArguments
+                | ToolExecutionErrorKind::PreauthorizationRejected
         ) {
             return Err(ToolAttemptTransitionError {
                 attempt: self,
@@ -1327,6 +1329,48 @@ mod tests {
         );
     }
 
+    /// S15 / INV-024: an unsent attempt resolves on every preflight error kind
+    /// the durable closed set admits, preauthorization rejection included.
+    #[test]
+    fn s15_inv024_preflight_resolves_every_unsent_error_kind() {
+        for kind in [
+            ToolExecutionErrorKind::UnknownTool,
+            ToolExecutionErrorKind::InvalidArguments,
+            ToolExecutionErrorKind::PreauthorizationRejected,
+        ] {
+            let ended = prepared(ToolEffectClass::ExternalEffect)
+                .end_preflight_error(ToolExecutionError::new(kind, None))
+                .expect("an unsent attempt resolves on a preflight error");
+
+            assert_eq!(
+                ended.end(),
+                &ToolAttemptEnd::KnownFailed {
+                    error: ToolExecutionError::new(kind, None),
+                }
+            );
+        }
+    }
+
+    /// S15 / INV-024: preflight cannot manufacture evidence that only a
+    /// dispatched executor or restart classification may produce.
+    #[test]
+    fn s15_inv024_preflight_cannot_claim_dispatched_or_crash_errors() {
+        for kind in [
+            ToolExecutionErrorKind::ExecutionFailed,
+            ToolExecutionErrorKind::ResultTooLarge,
+            ToolExecutionErrorKind::CrashLost,
+        ] {
+            let error = prepared(ToolEffectClass::ExternalEffect)
+                .end_preflight_error(ToolExecutionError::new(kind, None))
+                .expect_err("preflight cannot claim dispatched evidence");
+
+            assert_eq!(
+                error.failure(),
+                ToolAttemptTransitionFailure::InvalidPreflightError
+            );
+        }
+    }
+
     /// S15 / INV-024: executor observations cannot claim error kinds reserved
     /// for preflight validation or restart classification.
     #[test]
@@ -1334,6 +1378,7 @@ mod tests {
         for kind in [
             ToolExecutionErrorKind::UnknownTool,
             ToolExecutionErrorKind::InvalidArguments,
+            ToolExecutionErrorKind::PreauthorizationRejected,
             ToolExecutionErrorKind::CrashLost,
         ] {
             let authorized = prepared(ToolEffectClass::ExternalEffect)
