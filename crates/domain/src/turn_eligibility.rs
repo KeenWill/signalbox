@@ -10489,10 +10489,10 @@ mod tests {
         );
     }
 
-    /// INV-061: pending steering remains outside the active rendered frontier
+    /// INV-089: pending steering remains outside the active rendered frontier
     /// until a safe-point continuation incorporates it.
     #[test]
-    fn inv061_pending_steering_is_not_an_active_rendered_frontier_origin() {
+    fn inv089_pending_steering_is_not_an_active_rendered_frontier_origin() {
         let session = current_session();
         let active = accepted_origin(1);
         let pending = accepted_origin(2);
@@ -16803,10 +16803,10 @@ mod tests {
         );
     }
 
-    /// INV-015 / INV-061: attachment origins hidden by completed context
+    /// INV-015 / INV-089: attachment origins hidden by completed context
     /// compaction do not contribute to the rendered frontier bound.
     #[test]
-    fn inv015_inv061_rendered_frontier_origins_exclude_compacted_input() {
+    fn inv015_inv089_rendered_frontier_origins_exclude_compacted_input() {
         let session = current_session();
         let hidden_input = accepted_input_id(1);
         let hidden_origin = SemanticTranscriptEntry::from_validated_parts(
