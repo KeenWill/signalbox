@@ -1365,7 +1365,7 @@ mod tests {
     use super::*;
     use signalbox_process_protocol::{
         DelegationOutcome, DelegationProvenance, DelegationReason, FastModeOverlay,
-        ModelSettingsOverlay, ReasoningLevel, SettingOverlay,
+        ModelSettingsOverlay, ReasoningLevel, SettingOverlay, UserInputContent,
     };
 
     const REQUEST: &str = "00000000-0000-0000-0000-000000000123";
@@ -1611,7 +1611,7 @@ mod tests {
                     )),
                     turn_id,
                     acceptance_position: CanonicalU64::new(FIRST_ACCEPTANCE_POSITION),
-                    content: InputContent::new(String::from(QUEUED_USER_INPUT)),
+                    content: UserInputContent::text(String::from(QUEUED_USER_INPUT)),
                 },
                 followed_session(),
             ),
@@ -1654,7 +1654,7 @@ mod tests {
                     )),
                     turn_id: retired_turn,
                     acceptance_position: CanonicalU64::new(1),
-                    content: InputContent::new(String::from("obsolete goal input")),
+                    content: UserInputContent::text(String::from("obsolete goal input")),
                 },
                 followed_session(),
             ),
@@ -1679,7 +1679,7 @@ mod tests {
                     )),
                     turn_id: replacement_turn,
                     acceptance_position: CanonicalU64::new(2),
-                    content: InputContent::new(String::from("replacement goal input")),
+                    content: UserInputContent::text(String::from("replacement goal input")),
                 },
                 followed_session(),
             ),
@@ -1791,7 +1791,7 @@ mod tests {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(
                             FIRST_INPUT_IDENTITY,
                         )),
-                        content: InputContent::new(String::from(FIRST_CONTENT)),
+                        content: UserInputContent::text(String::from(FIRST_CONTENT)),
                     },
                 },
                 ServerMessage::TranscriptTurn {
@@ -1802,7 +1802,7 @@ mod tests {
                         accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(
                             SECOND_INPUT_IDENTITY,
                         )),
-                        content: InputContent::new(String::from(SECOND_CONTENT)),
+                        content: UserInputContent::text(String::from(SECOND_CONTENT)),
                     },
                 },
             ],
