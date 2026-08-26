@@ -9,9 +9,9 @@ use signalbox_model_runtime::{
     DiscardedField, ExchangeFacts, FinishReason, LossCause, NativeErrorFacts, Observation,
     ObservationFact, ObservationSink, ProviderErrorEvidence, ProviderErrorKind, ProviderMessageId,
     ProviderReportedModel, ProviderRequestId, REDACTED, RedactingSink, RefusalEvidence,
-    TerminalEvidence, TerminalTextCapture, TokenUsage, ToolCallId, ToolCallProposal,
-    ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members, redact_json, redact_text,
-    validate_provider_json_nesting,
+    TerminalEvidence, TerminalTextCapture, TokenUsage, ToolArgumentRedaction, ToolCallId,
+    ToolCallProposal, ToolCallsAtLoss, ToolName, provider_json_has_duplicate_members, redact_json,
+    redact_text, validate_provider_json_nesting,
 };
 
 use crate::SUPPORTED_CLAUDE_CLI_VERSION;
@@ -494,34 +494,43 @@ impl<C: Clone> EventDecoder<C> {
                 }
                 let index = self.take_part_index()?;
                 let arguments = sink.redact_tool_arguments("", raw_arguments);
-                // The proposal id leaves the adapter in `ToolCallProposed` and in
-                // the retained assistant content, so later text sits beside it for
-                // the same reason the message id does: an id ending `api_` next to
-                // a following text block opening `key=value` reconstructs the
-                // credential across the two emitted fields.
-                let sanitized_id = sink.redact_provider_id("", &id);
-                sink.add_emitted_identifier(&sanitized_id);
-                let proposal_id = self.unique_tool_id(&id, sanitized_id);
-                let proposal = ToolCallProposal {
-                    id: ToolCallId::new(proposal_id),
-                    name: ToolName::new(name),
-                    arguments_json: arguments.clone(),
-                };
-                self.proposal_indexes.insert(id, self.content.len());
-                self.content.push(AssistantPart::ToolCall(proposal.clone()));
-                if self.delivery == DeliveryMode::Streamed {
-                    sink.observe(Observation {
-                        correlation: self.correlation.clone(),
-                        fact: ObservationFact::ToolArgumentsDelta {
-                            index,
-                            fragment: arguments,
-                        },
-                    });
+                self.proposal_indexes.insert(id.clone(), self.content.len());
+                match arguments {
+                    ToolArgumentRedaction::Admitted(arguments) => {
+                        // The proposal id leaves the adapter in `ToolCallProposed`
+                        // and in the retained assistant content, so later text sits
+                        // beside it for the same reason the message id does: an id
+                        // ending `api_` next to a following text block opening
+                        // `key=value` reconstructs the credential across the two
+                        // emitted fields.
+                        let sanitized_id = sink.redact_provider_id("", &id);
+                        sink.add_emitted_identifier(&sanitized_id);
+                        let proposal_id = self.unique_tool_id(&id, sanitized_id);
+                        let proposal = ToolCallProposal {
+                            id: ToolCallId::new(proposal_id),
+                            name: ToolName::new(name),
+                            arguments_json: arguments.clone(),
+                        };
+                        self.content.push(AssistantPart::ToolCall(proposal.clone()));
+                        if self.delivery == DeliveryMode::Streamed {
+                            sink.observe(Observation {
+                                correlation: self.correlation.clone(),
+                                fact: ObservationFact::ToolArgumentsDelta {
+                                    index,
+                                    fragment: arguments,
+                                },
+                            });
+                        }
+                        sink.observe(Observation {
+                            correlation: self.correlation.clone(),
+                            fact: ObservationFact::ToolCallProposed(proposal),
+                        });
+                    }
+                    ToolArgumentRedaction::Suppressed => {
+                        self.content
+                            .push(AssistantPart::SuppressedToolCall(ToolName::new(name)));
+                    }
                 }
-                sink.observe(Observation {
-                    correlation: self.correlation.clone(),
-                    fact: ObservationFact::ToolCallProposed(proposal),
-                });
             }
             AssistantContent::Other => {
                 return Err(DecodeFailure::stream_protocol(
@@ -878,6 +887,9 @@ impl<C: Clone> EventDecoder<C> {
                 AssistantPart::ToolCall(mut call) => {
                     call.arguments_json = redact_json(&call.arguments_json);
                     Some(AssistantPart::ToolCall(call))
+                }
+                AssistantPart::SuppressedToolCall(name) => {
+                    Some(AssistantPart::SuppressedToolCall(name))
                 }
             })
             .collect()

@@ -605,7 +605,8 @@ pub(super) fn committed_tool_attempt_end(
         | ToolExecutionServiceOutcome::ChildWaitResumed(_)
         | ToolExecutionServiceOutcome::ContinuationCheckpointed(_)
         | ToolExecutionServiceOutcome::ContinuationTargetUnavailable(_)
-        | ToolExecutionServiceOutcome::ContinuationPoolExhausted(_) => None,
+        | ToolExecutionServiceOutcome::ContinuationPoolExhausted(_)
+        | ToolExecutionServiceOutcome::ContinuationContextCompactionRequired(_) => None,
     }
 }
 

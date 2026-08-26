@@ -16,10 +16,9 @@ use signalbox_egress_transport::{
 
 use super::arguments::{MAX_FILE_PATH_BYTES, valid_revision};
 use super::repository_result::{
-    MAX_OBSERVED_DIRECTORY_ENTRIES, MAX_REPOSITORY_FILE_CONTENT_BYTES,
-    MAX_REPOSITORY_FILE_SCAN_BYTES, is_immediate_repository_child,
+    MAX_OBSERVED_DIRECTORY_ENTRIES, MAX_REPOSITORY_FILE_SCAN_BYTES, is_immediate_repository_child,
 };
-use super::result::{MAX_ENCODED_RESULT_BYTES, MAX_RESULT_ITEMS, absolute_https_url};
+use super::result::{MAX_ENCODED_RESULT_BYTES, absolute_https_url};
 use super::review_slog::{
     ReviewerActivity, author_class, authorized_association, disposition_class, finding_title,
     reviewer_verdict_evidence,
@@ -27,9 +26,9 @@ use super::review_slog::{
 use super::{
     ChangeRequestCommentResult, ChangeRequestSummaryFields, ChangeRequestSummaryResult,
     ChangedFile, ChangedFilesResult, CheckStatus, ChecksStatusResult, ChildStackState,
-    CiJobLogResult, CodeHostChangeRequestNumber, CodeHostCursor, CodeHostOperation,
-    CodeHostRepository, CodeHostResult, CodeHostResultCompleteness, CodeHostTransport,
-    CodeHostTransportFailure, ConvergenceStateArguments, ConvergenceStateFields,
+    CiJobLogResult, CodeHostChangeRequestNumber, CodeHostCursor, CodeHostNumericBounds,
+    CodeHostOperation, CodeHostRepository, CodeHostResult, CodeHostResultCompleteness,
+    CodeHostTransport, CodeHostTransportFailure, ConvergenceStateArguments, ConvergenceStateFields,
     ConvergenceStateResult, FilePatchResult, RepositoryDirectoryEntry, RepositoryFileContentFields,
     RepositoryLineRange, RepositoryListDirectoryResult, RepositoryObjectKind,
     RepositoryReadFileResult, RerunFailedJobsResult, ReviewCheck, ReviewDispositionClass,
@@ -44,9 +43,7 @@ const REST_BASE_URL: &str = "https://api.github.com/";
 const GRAPHQL_URL: &str = "https://api.github.com/graphql";
 const USER_AGENT_VALUE: &str = "signalboxd";
 const API_VERSION: &str = "2026-03-10";
-// numeric-bound: tunable - controls the ordinary GitHub exchange wait
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-// numeric-bound: tunable - controls the largest GitHub JSON response accepted
+// numeric-bound: guard - one buffered provider JSON response exhausting process memory
 const MAX_JSON_RESPONSE_BYTES: usize = 512 * 1024;
 // numeric-bound: not-a-bound - fixed maximum JSON escape expansion
 const MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE: usize = 6;
@@ -56,13 +53,13 @@ const MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE: usize = 6;
 // separately instead of treating either as a path.
 // numeric-bound: not-a-bound - fixed GitHub contents response path-field count
 const MAX_REPOSITORY_CONTENTS_PATH_FIELDS_PER_ENTRY: usize = 9;
-// numeric-bound: tunable - the symlink target length this client accepts
+// numeric-bound: guard - the tool contract advertises accepting symlink targets only to this length
 const MAX_REPOSITORY_SYMLINK_TARGET_BYTES: usize = 4 * 1024;
-// numeric-bound: tunable - the submodule URL length this client accepts
+// numeric-bound: guard - the tool contract advertises accepting submodule URLs only to this length
 const MAX_REPOSITORY_SUBMODULE_URL_BYTES: usize = 8 * 1024;
-// numeric-bound: ceiling - budgets per-entry JSON overhead in the response ceiling
+// numeric-bound: guard - fixed entry overhead causing a repository-contents response to exceed buffered response memory
 const MAX_REPOSITORY_CONTENTS_ENTRY_FIXED_BYTES: usize = 8 * 1024;
-// numeric-bound: ceiling - protects memory while listing oversized directories
+// numeric-bound: guard - one repository-contents response exhausting process memory
 const MAX_REPOSITORY_CONTENTS_RESPONSE_BYTES: usize = (MAX_OBSERVED_DIRECTORY_ENTRIES + 1)
     * (MAX_FILE_PATH_BYTES
         * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE
@@ -76,15 +73,11 @@ const COMMIT_SHA_ACCEPT: &str = "application/vnd.github.sha";
 const MAX_COMMIT_SHA_RESPONSE_BYTES: usize = 41;
 const CONTENTS_OBJECT_ACCEPT: &str = "application/vnd.github.object+json";
 const BLOB_RAW_ACCEPT: &str = "application/vnd.github.raw+json";
-// numeric-bound: tunable - controls retained CI job-log detail
-const MAX_JOB_LOG_BYTES: usize = 64 * 1024;
-// numeric-bound: tunable - the redirect location length this client accepts
+// numeric-bound: guard - the client contract advertises accepting redirect URLs only to this length
 const MAX_REDIRECT_URL_BYTES: usize = 8 * 1024;
 const PAGE_SIZE: &str = "100";
 // numeric-bound: not-a-bound - 100 per page across GitHub's 3,000-file exposure
 const MAX_CHANGED_FILE_PAGES: u16 = 30;
-// numeric-bound: tunable - controls stack-comparison concurrency at the code host
-const MAX_STACK_COMPARISONS_IN_FLIGHT: usize = 8;
 
 const REVIEW_THREADS_QUERY: &str = r#"
 query ReviewThreads($owner: String!, $name: String!, $number: Int!) {
@@ -243,19 +236,39 @@ query ThreadOwnership($thread: ID!) {
 }
 "#;
 
-/// Production GitHub transport with fixed endpoint and bounded exchange policy.
+/// Production GitHub transport with fixed endpoints and deployment-supplied policy.
 #[derive(Clone, Debug)]
 pub struct GitHubCodeHostTransport {
     client: Client,
     rest_base: Url,
     graphql_url: Url,
+    bounds: CodeHostNumericBounds,
 }
 
 impl GitHubCodeHostTransport {
     /// Builds the fixed production GitHub transport.
-    pub fn try_new() -> Result<Self, GitHubCodeHostConstructionError> {
+    pub fn try_new(
+        configured_bounds: CodeHostNumericBounds,
+    ) -> Result<Self, GitHubCodeHostConstructionError> {
+        let bounds = CodeHostNumericBounds::new(
+            configured_bounds.request_timeout(),
+            minimum_optional_limit(
+                configured_bounds.job_log_bytes(),
+                Some(MAX_ENCODED_RESULT_BYTES),
+            ),
+            configured_bounds.stack_comparisons_in_flight(),
+            configured_bounds.result_text_bytes(),
+            configured_bounds.result_items(),
+            minimum_optional_limit(
+                configured_bounds.repository_file_content_bytes(),
+                Some(MAX_ENCODED_RESULT_BYTES / MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE),
+            ),
+        );
+        if bounds.stack_comparisons_in_flight() == Some(0) {
+            return Err(GitHubCodeHostConstructionError);
+        }
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = Client::builder()
+        let mut client = Client::builder()
             .tls_backend_rustls()
             .tls_version_min(reqwest::tls::Version::TLS_1_2)
             .tls_danger_accept_invalid_certs(false)
@@ -263,8 +276,11 @@ impl GitHubCodeHostTransport {
             .no_proxy()
             .redirect(Policy::none())
             .retry(reqwest::retry::never())
-            .pool_max_idle_per_host(0)
-            .timeout(DEFAULT_TIMEOUT)
+            .pool_max_idle_per_host(0);
+        if let Some(timeout) = bounds.request_timeout() {
+            client = client.timeout(timeout);
+        }
+        let client = client
             .build()
             .map_err(|_| GitHubCodeHostConstructionError)?;
         let rest_base = Url::parse(REST_BASE_URL).map_err(|_| GitHubCodeHostConstructionError)?;
@@ -273,6 +289,7 @@ impl GitHubCodeHostTransport {
             client,
             rest_base,
             graphql_url,
+            bounds,
         })
     }
 
@@ -299,18 +316,21 @@ impl GitHubCodeHostTransport {
         if number != arguments.number().get() {
             return Err(CodeHostTransportFailure::InvalidResponse);
         }
-        let result = ChangeRequestSummaryResult::try_new(ChangeRequestSummaryFields {
-            number,
-            title: required_string(object, "title")?,
-            body: optional_string(object, "body")?,
-            state: required_string(object, "state")?,
-            draft: required_bool(object, "draft")?,
-            author: optional_object_string(object, "user", "login")?,
-            base_ref: required_string(base, "ref")?,
-            head_ref: required_string(head, "ref")?,
-            head_revision: required_string(head, "sha")?,
-            url: required_string(object, "html_url")?,
-        })
+        let result = ChangeRequestSummaryResult::try_new(
+            self.bounds,
+            ChangeRequestSummaryFields {
+                number,
+                title: required_string(object, "title")?,
+                body: optional_string(object, "body")?,
+                state: required_string(object, "state")?,
+                draft: required_bool(object, "draft")?,
+                author: optional_object_string(object, "user", "login")?,
+                base_ref: required_string(base, "ref")?,
+                head_ref: required_string(head, "ref")?,
+                head_revision: required_string(head, "sha")?,
+                url: required_string(object, "html_url")?,
+            },
+        )
         .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         Ok(CodeHostResult::Summary(result))
     }
@@ -334,12 +354,12 @@ impl GitHubCodeHostTransport {
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         let files = array
             .iter()
-            .map(parse_changed_file)
+            .map(|value| parse_changed_file(self.bounds, value))
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .map(|(file, _patch)| file)
             .collect();
-        let result = ChangedFilesResult::try_new(files, completeness)
+        let result = ChangedFilesResult::try_new(self.bounds, files, completeness)
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         Ok(CodeHostResult::ChangedFiles(result))
     }
@@ -350,7 +370,7 @@ impl GitHubCodeHostTransport {
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         with_read_operation_timeout(
-            DEFAULT_TIMEOUT,
+            self.bounds.request_timeout(),
             self.repository_read_file_transaction(arguments, credential),
         )
         .await
@@ -397,6 +417,7 @@ impl GitHubCodeHostTransport {
                     match body.kind {
                         RepositoryFileBodyKind::Text(selection) => {
                             RepositoryReadFileResult::try_content(
+                                self.bounds,
                                 &arguments,
                                 RepositoryFileContentFields {
                                     source_bytes,
@@ -440,7 +461,7 @@ impl GitHubCodeHostTransport {
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         with_read_operation_timeout(
-            DEFAULT_TIMEOUT,
+            self.bounds.request_timeout(),
             self.repository_list_directory_transaction(arguments, credential),
         )
         .await
@@ -463,7 +484,12 @@ impl GitHubCodeHostTransport {
             RepositoryPathLookup::Directory {
                 entries,
                 completeness: source_completeness,
-            } => bounded_repository_directory_result(&arguments, entries, source_completeness),
+            } => bounded_repository_directory_result(
+                self.bounds,
+                &arguments,
+                entries,
+                source_completeness,
+            ),
             RepositoryPathLookup::File { .. } => {
                 RepositoryListDirectoryResult::try_not_a_directory(
                     &arguments,
@@ -576,7 +602,12 @@ impl GitHubCodeHostTransport {
             .send_authenticated_with_accept(Method::GET, url, None, BLOB_RAW_ACCEPT, credential)
             .await?;
         ensure_expected_status(response.status(), StatusCode::OK)?;
-        select_repository_file_content(response.bytes_stream(), line_range).await
+        select_repository_file_content(
+            response.bytes_stream(),
+            line_range,
+            self.bounds.repository_file_content_bytes(),
+        )
+        .await
     }
 
     fn repository_contents_url(
@@ -598,7 +629,7 @@ impl GitHubCodeHostTransport {
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
         with_read_operation_timeout(
-            DEFAULT_TIMEOUT,
+            self.bounds.request_timeout(),
             self.file_patch_transaction(arguments, credential),
         )
         .await
@@ -651,7 +682,12 @@ impl GitHubCodeHostTransport {
                 .send_authenticated(Method::GET, url, None, credential)
                 .await?;
             let (value, completeness) = self.json_page(response, StatusCode::OK).await?;
-            match inspect_file_patch_page(&value, completeness, arguments.path().as_str())? {
+            match inspect_file_patch_page(
+                self.bounds,
+                &value,
+                completeness,
+                arguments.path().as_str(),
+            )? {
                 FilePatchPageOutcome::Found(result) => {
                     return Ok(CodeHostResult::FilePatch(result));
                 }
@@ -701,9 +737,10 @@ impl GitHubCodeHostTransport {
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         let checks = runs
             .iter()
-            .map(parse_check_status)
+            .map(|value| parse_check_status(self.bounds, value))
             .collect::<Result<Vec<_>, _>>()?;
         let result = ChecksStatusResult::try_new(
+            self.bounds,
             arguments.revision().as_str().to_owned(),
             checks,
             completeness,
@@ -776,14 +813,14 @@ impl GitHubCodeHostTransport {
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         let parsed = nodes
             .iter()
-            .map(parse_review_thread)
+            .map(|value| parse_review_thread(self.bounds, value))
             .collect::<Result<Vec<_>, _>>()?;
         let completeness = if nested_bool(threads, &["pageInfo", "hasNextPage"])? {
             CodeHostResultCompleteness::Truncated
         } else {
             CodeHostResultCompleteness::Complete
         };
-        let result = ReviewThreadsResult::try_new(parsed, completeness)
+        let result = ReviewThreadsResult::try_new(self.bounds, parsed, completeness)
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         Ok(CodeHostResult::ReviewThreads(result))
     }
@@ -827,6 +864,7 @@ impl GitHubCodeHostTransport {
         let (comments_truncated, comments_previous_cursor) = previous_page(comments)?;
         let (reviews_truncated, reviews_previous_cursor) = previous_page(reviews)?;
         let reviewer = reviewer_verdict_evidence(
+            self.bounds,
             &head_revision,
             activities,
             comments_truncated || reviews_truncated,
@@ -841,7 +879,7 @@ impl GitHubCodeHostTransport {
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         let parsed_threads = thread_nodes
             .iter()
-            .map(parse_slog_thread)
+            .map(|value| parse_slog_thread(self.bounds, value))
             .collect::<Result<Vec<_>, _>>()?;
         let mut unresolved_threads = Vec::new();
         let mut open_escalations = Vec::new();
@@ -878,23 +916,26 @@ impl GitHubCodeHostTransport {
             return Err(CodeHostTransportFailure::InvalidResponse);
         }
         let (ci_rollup_state, checks, checks_truncated, checks_next_cursor) =
-            parse_check_rollup(commit)?;
+            parse_check_rollup(self.bounds, commit)?;
 
-        ConvergenceStateResult::try_new(ConvergenceStateFields {
-            head_revision,
-            mergeable_state,
-            ci_rollup_state,
-            checks,
-            checks_truncated,
-            checks_next_cursor,
-            unresolved_threads,
-            open_escalations,
-            buried_escalations,
-            threads_truncated,
-            undispositioned_threads,
-            threads_next_cursor,
-            reviewer,
-        })
+        ConvergenceStateResult::try_new(
+            self.bounds,
+            ConvergenceStateFields {
+                head_revision,
+                mergeable_state,
+                ci_rollup_state,
+                checks,
+                checks_truncated,
+                checks_next_cursor,
+                unresolved_threads,
+                open_escalations,
+                buried_escalations,
+                threads_truncated,
+                undispositioned_threads,
+                threads_next_cursor,
+                reviewer,
+            },
+        )
         .ok_or(CodeHostTransportFailure::InvalidResponse)
     }
 
@@ -940,11 +981,11 @@ impl GitHubCodeHostTransport {
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         let threads = nodes
             .iter()
-            .map(parse_slog_thread)
+            .map(|value| parse_slog_thread(self.bounds, value))
             .map(|parsed| parsed.map(|thread| thread.inventory))
             .collect::<Result<Vec<_>, _>>()?;
         let (truncated, next_cursor) = next_page(connection)?;
-        ThreadInventoryResult::try_new(head_revision, threads, truncated, next_cursor)
+        ThreadInventoryResult::try_new(self.bounds, head_revision, threads, truncated, next_cursor)
             .ok_or(CodeHostTransportFailure::InvalidResponse)
     }
 
@@ -970,12 +1011,11 @@ impl GitHubCodeHostTransport {
         child_cursor: Option<&CodeHostCursor>,
         credential: &CredentialValue,
     ) -> Result<StackStateResult, CodeHostTransportFailure> {
-        tokio::time::timeout(
-            DEFAULT_TIMEOUT,
+        with_read_operation_timeout(
+            self.bounds.request_timeout(),
             self.stack_state_transaction(repository, number, child_cursor, credential),
         )
         .await
-        .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
     }
 
     async fn stack_state_transaction(
@@ -1056,6 +1096,7 @@ impl GitHubCodeHostTransport {
                         )
                         .await?;
                     let state = ChildStackState::try_new(
+                        self.bounds,
                         child.number,
                         child.head_ref,
                         child.head_revision,
@@ -1065,7 +1106,11 @@ impl GitHubCodeHostTransport {
                     .ok_or(CodeHostTransportFailure::InvalidResponse)?;
                     Ok((index, state))
                 })
-                .buffer_unordered(MAX_STACK_COMPARISONS_IN_FLIGHT)
+                .buffer_unordered(
+                    self.bounds
+                        .stack_comparisons_in_flight()
+                        .unwrap_or(usize::MAX),
+                )
                 .collect::<Vec<Result<_, _>>>()
                 .await
                 .into_iter()
@@ -1115,20 +1160,23 @@ impl GitHubCodeHostTransport {
                 children_next_cursor: current_children_next_cursor.as_deref(),
             },
         )?;
-        StackStateResult::try_new(StackStateFields {
-            number: number.get(),
-            base_ref: request.base_ref,
-            base_revision,
-            head_ref: request.head_ref,
-            head_revision: request.head_revision,
-            default_ref: request.default_ref,
-            default_revision,
-            base_commits_not_in_head,
-            main_commits_not_in_base,
-            children,
-            children_truncated,
-            children_next_cursor,
-        })
+        StackStateResult::try_new(
+            self.bounds,
+            StackStateFields {
+                number: number.get(),
+                base_ref: request.base_ref,
+                base_revision,
+                head_ref: request.head_ref,
+                head_revision: request.head_revision,
+                default_ref: request.default_ref,
+                default_revision,
+                base_commits_not_in_head,
+                main_commits_not_in_base,
+                children,
+                children_truncated,
+                children_next_cursor,
+            },
+        )
         .ok_or(CodeHostTransportFailure::InvalidResponse)
     }
 
@@ -1171,12 +1219,11 @@ impl GitHubCodeHostTransport {
         arguments: ReviewGateCheckArguments,
         credential: &CredentialValue,
     ) -> Result<CodeHostResult, CodeHostTransportFailure> {
-        tokio::time::timeout(
-            DEFAULT_TIMEOUT,
+        with_read_operation_timeout(
+            self.bounds.request_timeout(),
             self.review_gate_transaction(arguments, credential),
         )
         .await
-        .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
     }
 
     async fn review_gate_transaction(
@@ -1334,10 +1381,13 @@ impl GitHubCodeHostTransport {
             credential,
         )
         .await?;
-        let remaining = remaining_mutation_budget(started.elapsed())?;
-        tokio::time::timeout(remaining, self.dispatch_thread_reply(arguments, credential))
-            .await
-            .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
+        let remaining =
+            remaining_mutation_budget(self.bounds.request_timeout(), started.elapsed())?;
+        with_mutation_operation_timeout(
+            remaining,
+            self.dispatch_thread_reply(arguments, credential),
+        )
+        .await
     }
 
     async fn dispatch_thread_reply(
@@ -1394,13 +1444,13 @@ impl GitHubCodeHostTransport {
             credential,
         )
         .await?;
-        let remaining = remaining_mutation_budget(started.elapsed())?;
-        tokio::time::timeout(
+        let remaining =
+            remaining_mutation_budget(self.bounds.request_timeout(), started.elapsed())?;
+        with_mutation_operation_timeout(
             remaining,
             self.dispatch_thread_resolve(arguments, credential),
         )
         .await
-        .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
     }
 
     async fn dispatch_thread_resolve(
@@ -1437,7 +1487,7 @@ impl GitHubCodeHostTransport {
             } else {
                 ReviewThreadResolution::Open
             };
-            ThreadResolveResult::try_new(returned_id, resolution)
+            ThreadResolveResult::try_new(self.bounds, returned_id, resolution)
                 .ok_or(CodeHostTransportFailure::InvalidResponse)
         })()
         .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
@@ -1470,7 +1520,8 @@ impl GitHubCodeHostTransport {
         if !absolute_https_url(&redirect) || redirect.fragment().is_some() {
             return Err(CodeHostTransportFailure::InvalidResponse);
         }
-        let remaining = remaining_exchange_timeout(started.elapsed())?;
+        let remaining =
+            remaining_exchange_timeout(self.bounds.request_timeout(), started.elapsed())?;
         let redirect_client = public_destination_client(&redirect, remaining)
             .await
             .map_err(classify_public_destination_error)?;
@@ -1481,10 +1532,12 @@ impl GitHubCodeHostTransport {
             .await
             .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?;
         ensure_expected_status(response.status(), StatusCode::OK)?;
+        let retained_limit =
+            minimum_optional_limit(self.bounds.job_log_bytes(), self.bounds.result_text_bytes());
         let (bytes, completeness) =
-            read_bounded(response.bytes_stream(), MAX_JOB_LOG_BYTES).await?;
-        let (text, completeness) = bounded_lossy_text(&bytes, completeness);
-        let result = CiJobLogResult::try_new(arguments.job_id(), text, completeness)
+            read_optionally_bounded(response.bytes_stream(), retained_limit).await?;
+        let (text, completeness) = bounded_lossy_text(&bytes, completeness, retained_limit);
+        let result = CiJobLogResult::try_new(self.bounds, arguments.job_id(), text, completeness)
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         Ok(CodeHostResult::CiJobLog(result))
     }
@@ -1645,6 +1698,10 @@ impl GitHubCodeHostTransport {
 }
 
 impl CodeHostTransport for GitHubCodeHostTransport {
+    fn numeric_bounds(&self) -> CodeHostNumericBounds {
+        self.bounds
+    }
+
     async fn execute(
         &mut self,
         operation: CodeHostOperation,
@@ -1833,15 +1890,16 @@ async fn bounded_json_page(
 }
 
 fn bounded_repository_directory_result(
+    bounds: CodeHostNumericBounds,
     arguments: &super::RepositoryListDirectoryArguments,
     entries: Vec<RepositoryDirectoryEntry>,
     source_completeness: CodeHostResultCompleteness,
 ) -> Option<RepositoryListDirectoryResult> {
     let observed_entries = entries.len();
-    let mut entries = entries
-        .into_iter()
-        .take(MAX_RESULT_ITEMS)
-        .collect::<Vec<_>>();
+    let mut entries = match bounds.result_items() {
+        Some(limit) => entries.into_iter().take(limit).collect::<Vec<_>>(),
+        None => entries,
+    };
     let mut completeness = if source_completeness == CodeHostResultCompleteness::Truncated
         || observed_entries > entries.len()
     {
@@ -1851,6 +1909,7 @@ fn bounded_repository_directory_result(
     };
     loop {
         let encoded_len = RepositoryListDirectoryResult::entries_encoded_len(
+            bounds,
             arguments,
             entries.clone(),
             observed_entries,
@@ -1858,6 +1917,7 @@ fn bounded_repository_directory_result(
         )?;
         if encoded_len <= MAX_ENCODED_RESULT_BYTES {
             return RepositoryListDirectoryResult::try_entries(
+                bounds,
                 arguments,
                 entries,
                 observed_entries,
@@ -1990,6 +2050,7 @@ fn parse_repository_directory_entry(
 async fn select_repository_file_content<S, B, E>(
     mut stream: S,
     line_range: Option<RepositoryLineRange>,
+    retained_limit: Option<usize>,
 ) -> Result<RepositoryFileBody, CodeHostTransportFailure>
 where
     S: futures_util::Stream<Item = Result<B, E>> + Unpin,
@@ -2023,7 +2084,7 @@ where
                 observed_selected_bytes = observed_selected_bytes
                     .checked_add(1)
                     .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-                if retained.len() == MAX_REPOSITORY_FILE_CONTENT_BYTES {
+                if retained_limit.is_some_and(|limit| retained.len() == limit) {
                     completeness = CodeHostResultCompleteness::Truncated;
                     if line_range.is_none() {
                         source_exhausted = false;
@@ -2192,6 +2253,28 @@ where
     Ok((body, CodeHostResultCompleteness::Complete))
 }
 
+async fn read_optionally_bounded<S, B, E>(
+    mut stream: S,
+    limit: Option<usize>,
+) -> Result<(Vec<u8>, CodeHostResultCompleteness), CodeHostTransportFailure>
+where
+    S: futures_util::Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+{
+    let Some(limit) = limit else {
+        let mut body = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            body.extend_from_slice(
+                chunk
+                    .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
+                    .as_ref(),
+            );
+        }
+        return Ok((body, CodeHostResultCompleteness::Complete));
+    };
+    read_bounded(stream, limit).await
+}
+
 fn ensure_expected_status(
     status: StatusCode,
     expected: StatusCode,
@@ -2219,17 +2302,29 @@ const fn classify_public_destination_error(
 fn bounded_lossy_text(
     bytes: &[u8],
     completeness: CodeHostResultCompleteness,
+    limit: Option<usize>,
 ) -> (String, CodeHostResultCompleteness) {
     let mut text = String::from_utf8_lossy(bytes).into_owned();
-    if text.len() <= MAX_JOB_LOG_BYTES {
+    let Some(limit) = limit else {
+        return (text, completeness);
+    };
+    if text.len() <= limit {
         return (text, completeness);
     }
-    let mut boundary = MAX_JOB_LOG_BYTES;
+    let mut boundary = limit;
     while !text.is_char_boundary(boundary) {
         boundary -= 1;
     }
     text.truncate(boundary);
     (text, CodeHostResultCompleteness::Truncated)
+}
+
+fn minimum_optional_limit(left: Option<usize>, right: Option<usize>) -> Option<usize> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (Some(limit), None) | (None, Some(limit)) => Some(limit),
+        (None, None) => None,
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2240,6 +2335,7 @@ enum FilePatchPageOutcome {
 }
 
 fn inspect_file_patch_page(
+    bounds: CodeHostNumericBounds,
     value: &serde_json::Value,
     completeness: CodeHostResultCompleteness,
     path: &str,
@@ -2249,13 +2345,13 @@ fn inspect_file_patch_page(
         .ok_or(CodeHostTransportFailure::InvalidResponse)?;
     let parsed = array
         .iter()
-        .map(parse_changed_file)
+        .map(|value| parse_changed_file(bounds, value))
         .collect::<Result<Vec<_>, _>>()?;
     if let Some((file, patch)) = parsed
         .into_iter()
         .find(|(file, _patch)| file.path() == path)
     {
-        let result = FilePatchResult::try_new(file, patch)
+        let result = FilePatchResult::try_new(bounds, file, patch)
             .ok_or(CodeHostTransportFailure::InvalidResponse)?;
         return Ok(FilePatchPageOutcome::Found(result));
     }
@@ -2266,10 +2362,12 @@ fn inspect_file_patch_page(
 }
 
 fn parse_changed_file(
+    bounds: CodeHostNumericBounds,
     value: &serde_json::Value,
 ) -> Result<(ChangedFile, Option<String>), CodeHostTransportFailure> {
     let object = required_object(value)?;
     let file = ChangedFile::try_new(
+        bounds,
         required_string(object, "filename")?,
         required_string(object, "status")?,
         required_u64(object, "additions")?,
@@ -2280,9 +2378,13 @@ fn parse_changed_file(
     Ok((file, patch))
 }
 
-fn parse_check_status(value: &serde_json::Value) -> Result<CheckStatus, CodeHostTransportFailure> {
+fn parse_check_status(
+    bounds: CodeHostNumericBounds,
+    value: &serde_json::Value,
+) -> Result<CheckStatus, CodeHostTransportFailure> {
     let object = required_object(value)?;
     CheckStatus::try_new(
+        bounds,
         required_u64(object, "id")?,
         required_string(object, "name")?,
         required_string(object, "status")?,
@@ -2293,6 +2395,7 @@ fn parse_check_status(value: &serde_json::Value) -> Result<CheckStatus, CodeHost
 }
 
 fn parse_review_thread(
+    bounds: CodeHostNumericBounds,
     value: &serde_json::Value,
 ) -> Result<ReviewThread, CodeHostTransportFailure> {
     let object = required_object(value)?;
@@ -2302,24 +2405,28 @@ fn parse_review_thread(
         .ok_or(CodeHostTransportFailure::InvalidResponse)?;
     let comments = comment_nodes
         .iter()
-        .map(parse_review_thread_comment)
+        .map(|value| parse_review_thread_comment(bounds, value))
         .collect::<Result<Vec<_>, _>>()?;
-    ReviewThread::try_new(ReviewThreadFields {
-        id: required_string(object, "id")?,
-        resolved: required_bool(object, "isResolved")?,
-        outdated: required_bool(object, "isOutdated")?,
-        path: required_string(object, "path")?,
-        line: optional_u64(object, "line")?,
-        comments,
-        comments_truncated: nested_bool(
-            required(object, "comments")?,
-            &["pageInfo", "hasNextPage"],
-        )?,
-    })
+    ReviewThread::try_new(
+        bounds,
+        ReviewThreadFields {
+            id: required_string(object, "id")?,
+            resolved: required_bool(object, "isResolved")?,
+            outdated: required_bool(object, "isOutdated")?,
+            path: required_string(object, "path")?,
+            line: optional_u64(object, "line")?,
+            comments,
+            comments_truncated: nested_bool(
+                required(object, "comments")?,
+                &["pageInfo", "hasNextPage"],
+            )?,
+        },
+    )
     .ok_or(CodeHostTransportFailure::InvalidResponse)
 }
 
 fn parse_review_thread_comment(
+    bounds: CodeHostNumericBounds,
     value: &serde_json::Value,
 ) -> Result<ReviewThreadComment, CodeHostTransportFailure> {
     let object = required_object(value)?;
@@ -2331,6 +2438,7 @@ fn parse_review_thread_comment(
         .map(|author| required_string(author, "login"))
         .transpose()?;
     ReviewThreadComment::try_new(
+        bounds,
         required_string(object, "id")?,
         author,
         required_string(object, "body")?,
@@ -2348,6 +2456,7 @@ struct ParsedSlogThread {
 }
 
 fn parse_slog_thread(
+    bounds: CodeHostNumericBounds,
     value: &serde_json::Value,
 ) -> Result<ParsedSlogThread, CodeHostTransportFailure> {
     let object = required_object(value)?;
@@ -2394,19 +2503,22 @@ fn parse_slog_thread(
     let path = required_string(object, "path")?;
     let resolved = required_bool(object, "isResolved")?;
     let disposition = disposition_class(&reply_evidence);
-    let identity = ReviewThreadIdentity::try_new(id.clone(), path.clone(), title.clone())
+    let identity = ReviewThreadIdentity::try_new(bounds, id.clone(), path.clone(), title.clone())
         .ok_or(CodeHostTransportFailure::InvalidResponse)?;
-    let inventory = ReviewThreadInventoryItem::try_new(ReviewThreadInventoryFields {
-        id,
-        path,
-        line: optional_u64(object, "line")?,
-        resolved,
-        outdated: required_bool(object, "isOutdated")?,
-        author,
-        author_class: author_class(actor_type.as_deref()),
-        finding_title: title,
-        disposition,
-    })
+    let inventory = ReviewThreadInventoryItem::try_new(
+        bounds,
+        ReviewThreadInventoryFields {
+            id,
+            path,
+            line: optional_u64(object, "line")?,
+            resolved,
+            outdated: required_bool(object, "isOutdated")?,
+            author,
+            author_class: author_class(actor_type.as_deref()),
+            finding_title: title,
+            disposition,
+        },
+    )
     .ok_or(CodeHostTransportFailure::InvalidResponse)?;
     Ok(ParsedSlogThread {
         identity,
@@ -2475,6 +2587,7 @@ fn page(
 type CheckRollup = (Option<String>, Vec<ReviewCheck>, bool, Option<String>);
 
 fn parse_check_rollup(
+    bounds: CodeHostNumericBounds,
     commit: &serde_json::Map<String, serde_json::Value>,
 ) -> Result<CheckRollup, CodeHostTransportFailure> {
     let Some(rollup) = commit.get("statusCheckRollup") else {
@@ -2492,23 +2605,26 @@ fn parse_check_rollup(
         .as_array()
         .ok_or(CodeHostTransportFailure::InvalidResponse)?
         .iter()
-        .map(parse_rollup_context)
+        .map(|value| parse_rollup_context(bounds, value))
         .collect::<Result<Vec<_>, _>>()?;
     let (truncated, cursor) = next_page(contexts)?;
     Ok((Some(state), checks, truncated, cursor))
 }
 
 fn parse_rollup_context(
+    bounds: CodeHostNumericBounds,
     value: &serde_json::Value,
 ) -> Result<ReviewCheck, CodeHostTransportFailure> {
     let object = required_object(value)?;
     match required_string(object, "__typename")?.as_str() {
         "CheckRun" => ReviewCheck::try_new(
+            bounds,
             required_string(object, "name")?,
             required_string(object, "status")?,
             optional_string(object, "conclusion")?,
         ),
         "StatusContext" => ReviewCheck::try_new(
+            bounds,
             required_string(object, "context")?,
             String::from("completed"),
             Some(required_string(object, "state")?),
@@ -2629,32 +2745,61 @@ fn parse_stack_comparison(
 }
 
 async fn with_read_operation_timeout<T>(
-    timeout: Duration,
+    timeout: Option<Duration>,
     operation: impl Future<Output = Result<T, CodeHostTransportFailure>>,
 ) -> Result<T, CodeHostTransportFailure> {
-    tokio::time::timeout(timeout, operation)
-        .await
-        .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, operation)
+            .await
+            .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?,
+        None => operation.await,
+    }
 }
 
-fn remaining_exchange_timeout(elapsed: Duration) -> Result<Duration, CodeHostTransportFailure> {
-    DEFAULT_TIMEOUT
-        .checked_sub(elapsed)
-        .filter(|remaining| !remaining.is_zero())
-        .ok_or(CodeHostTransportFailure::DispatchUnknown)
+async fn with_mutation_operation_timeout<T>(
+    timeout: Option<Duration>,
+    operation: impl Future<Output = Result<T, CodeHostTransportFailure>>,
+) -> Result<T, CodeHostTransportFailure> {
+    match timeout {
+        Some(timeout) => tokio::time::timeout(timeout, operation)
+            .await
+            .map_err(|_| CodeHostTransportFailure::DispatchUnknown)?,
+        None => operation.await,
+    }
+}
+
+fn remaining_exchange_timeout(
+    timeout: Option<Duration>,
+    elapsed: Duration,
+) -> Result<Option<Duration>, CodeHostTransportFailure> {
+    timeout
+        .map(|timeout| {
+            timeout
+                .checked_sub(elapsed)
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or(CodeHostTransportFailure::DispatchUnknown)
+        })
+        .transpose()
 }
 
 /// Bounds a mutation phase to the whole-exchange budget its ownership
 /// confirmation has not consumed, so confirmation and mutation together
-/// respect the transport's single 30-second exchange timeout. Exhaustion
+/// respect the transport's single configured exchange timeout. Exhaustion
 /// here proves the mutation was never dispatched; a timeout after dispatch
 /// is transport loss with dispatch unknown, which the executor classifies as
 /// commit-ambiguous for a mutating declaration.
-fn remaining_mutation_budget(elapsed: Duration) -> Result<Duration, CodeHostTransportFailure> {
-    DEFAULT_TIMEOUT
-        .checked_sub(elapsed)
-        .filter(|remaining| !remaining.is_zero())
-        .ok_or(CodeHostTransportFailure::MutationNotDispatched)
+fn remaining_mutation_budget(
+    timeout: Option<Duration>,
+    elapsed: Duration,
+) -> Result<Option<Duration>, CodeHostTransportFailure> {
+    timeout
+        .map(|timeout| {
+            timeout
+                .checked_sub(elapsed)
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or(CodeHostTransportFailure::MutationNotDispatched)
+        })
+        .transpose()
 }
 
 fn reject_graphql_errors(value: &serde_json::Value) -> Result<(), CodeHostTransportFailure> {
@@ -2945,8 +3090,22 @@ mod tests {
     const FILE_PATCH_HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
     const FILE_PATCH_MOVED_REVISION: &str = "3333333333333333333333333333333333333333";
     const FILE_PATCH_SERVER_TIMEOUT: Duration = Duration::from_secs(5);
+    const TEST_REPOSITORY_FILE_CONTENT_BYTES: usize = 64;
+    const TEST_RESULT_ITEMS: usize = 3;
+    const TEST_JOB_LOG_BYTES: usize = 7;
     const REPOSITORY_REVISION: &str = "4444444444444444444444444444444444444444";
     const REPOSITORY_BLOB: &str = "5555555555555555555555555555555555555555";
+
+    const fn repository_test_bounds() -> CodeHostNumericBounds {
+        CodeHostNumericBounds::new(
+            None,
+            None,
+            None,
+            None,
+            Some(TEST_RESULT_ITEMS),
+            Some(TEST_REPOSITORY_FILE_CONTENT_BYTES),
+        )
+    }
     fn missing_revision_body() -> Vec<u8> {
         serde_json::json!({
             "message": format!("No commit found for the ref {REPOSITORY_REVISION}"),
@@ -2983,59 +3142,69 @@ mod tests {
     fn gate_stack_state() -> StackStateResult {
         const BASE_REVISION: &str = "1111111111111111111111111111111111111111";
         const HEAD_REVISION: &str = "2222222222222222222222222222222222222222";
-        StackStateResult::try_new(StackStateFields {
-            number: 17,
-            base_ref: String::from("main"),
-            base_revision: String::from(BASE_REVISION),
-            head_ref: String::from("feature"),
-            head_revision: String::from(HEAD_REVISION),
-            default_ref: String::from("main"),
-            default_revision: String::from(BASE_REVISION),
-            base_commits_not_in_head: 0,
-            main_commits_not_in_base: 0,
-            children: Vec::new(),
-            children_truncated: false,
-            children_next_cursor: None,
-        })
+        StackStateResult::try_new(
+            crate::code_host::test_numeric_bounds(),
+            StackStateFields {
+                number: 17,
+                base_ref: String::from("main"),
+                base_revision: String::from(BASE_REVISION),
+                head_ref: String::from("feature"),
+                head_revision: String::from(HEAD_REVISION),
+                default_ref: String::from("main"),
+                default_revision: String::from(BASE_REVISION),
+                base_commits_not_in_head: 0,
+                main_commits_not_in_base: 0,
+                children: Vec::new(),
+                children_truncated: false,
+                children_next_cursor: None,
+            },
+        )
         .expect("fixture stack evidence is admitted")
     }
 
     fn gate_convergence_state(thread: Option<ReviewThreadIdentity>) -> ConvergenceStateResult {
-        let reviewer = ReviewerVerdictEvidence::try_new(ReviewerVerdictFields {
-            status: ReviewerVerdictStatus::Missing,
-            reviewed_revision: None,
-            reviewed_at: None,
-            starvation_after_verdict: false,
-            latest_starvation_at: None,
-            latest_review_request_at: None,
-            review_request_in_flight: false,
-            source_truncated: false,
-            comments_previous_cursor: None,
-            reviews_previous_cursor: None,
-        })
+        let reviewer = ReviewerVerdictEvidence::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ReviewerVerdictFields {
+                status: ReviewerVerdictStatus::Missing,
+                reviewed_revision: None,
+                reviewed_at: None,
+                starvation_after_verdict: false,
+                latest_starvation_at: None,
+                latest_review_request_at: None,
+                review_request_in_flight: false,
+                source_truncated: false,
+                comments_previous_cursor: None,
+                reviews_previous_cursor: None,
+            },
+        )
         .expect("fixture reviewer evidence is admitted");
-        ConvergenceStateResult::try_new(ConvergenceStateFields {
-            head_revision: String::from("2222222222222222222222222222222222222222"),
-            mergeable_state: String::from("MERGEABLE"),
-            ci_rollup_state: Some(String::from("SUCCESS")),
-            checks: Vec::new(),
-            checks_truncated: false,
-            checks_next_cursor: None,
-            unresolved_threads: thread.clone().into_iter().collect(),
-            open_escalations: Vec::new(),
-            buried_escalations: Vec::new(),
-            undispositioned_threads: thread.into_iter().collect(),
-            threads_truncated: false,
-            threads_next_cursor: None,
-            reviewer,
-        })
+        ConvergenceStateResult::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ConvergenceStateFields {
+                head_revision: String::from("2222222222222222222222222222222222222222"),
+                mergeable_state: String::from("MERGEABLE"),
+                ci_rollup_state: Some(String::from("SUCCESS")),
+                checks: Vec::new(),
+                checks_truncated: false,
+                checks_next_cursor: None,
+                unresolved_threads: thread.clone().into_iter().collect(),
+                open_escalations: Vec::new(),
+                buried_escalations: Vec::new(),
+                undispositioned_threads: thread.into_iter().collect(),
+                threads_truncated: false,
+                threads_next_cursor: None,
+                reviewer,
+            },
+        )
         .expect("fixture convergence evidence is admitted")
     }
 
     /// REST paths and pagination are derived only from checked typed segments.
     #[test]
     fn repository_url_uses_fixed_versioned_github_shape() {
-        let transport = GitHubCodeHostTransport::try_new().expect("fixed transport constructs");
+        let transport = GitHubCodeHostTransport::try_new(crate::code_host::test_numeric_bounds())
+            .expect("fixed transport constructs");
 
         let url = transport
             .repository_url(
@@ -3048,6 +3217,36 @@ mod tests {
         assert_eq!(
             url.as_str(),
             "https://api.github.com/repos/owner/repository/pulls/17/files?per_page=100&page=1"
+        );
+    }
+
+    #[test]
+    fn stack_comparison_concurrency_requires_positive_or_unbounded_configuration() {
+        let zero = CodeHostNumericBounds::new(None, None, Some(0), None, None, None);
+
+        assert!(GitHubCodeHostTransport::try_new(zero).is_err());
+        assert!(GitHubCodeHostTransport::try_new(crate::code_host::test_numeric_bounds()).is_ok());
+    }
+
+    #[tokio::test]
+    async fn absent_request_timeout_leaves_the_operation_unbounded() {
+        let result = with_read_operation_timeout(None, std::future::ready(Ok(17_u8))).await;
+
+        assert_eq!(result, Ok(17));
+    }
+
+    #[test]
+    fn unbounded_retention_policy_cannot_raise_transport_memory_guards() {
+        let transport = GitHubCodeHostTransport::try_new(crate::code_host::test_numeric_bounds())
+            .expect("fixed transport constructs");
+
+        assert_eq!(
+            transport.bounds.job_log_bytes(),
+            Some(MAX_ENCODED_RESULT_BYTES)
+        );
+        assert_eq!(
+            transport.bounds.repository_file_content_bytes(),
+            Some(MAX_ENCODED_RESULT_BYTES / MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE)
         );
     }
 
@@ -3475,7 +3674,7 @@ mod tests {
     async fn repository_file_range_truncation_is_witnessed_inside_selection() {
         const REQUESTED_START: u32 = 2;
         const REQUESTED_END: u32 = 3;
-        let selected_prefix = format!("{}\n", "x".repeat(MAX_REPOSITORY_FILE_CONTENT_BYTES - 1));
+        let selected_prefix = format!("{}\n", "x".repeat(TEST_REPOSITORY_FILE_CONTENT_BYTES - 1),);
         let source = format!("first\n{selected_prefix}y").into_bytes();
         let (transport, listener) = repository_test_transport().await;
         let metadata = repository_file_value("src/lines.rs", source.len()).to_string();
@@ -3516,7 +3715,7 @@ mod tests {
         let requests = repository_server_result(server).await;
 
         assert_eq!(result["source_bytes"], source.len());
-        assert_eq!(result["returned_bytes"], MAX_REPOSITORY_FILE_CONTENT_BYTES);
+        assert_eq!(result["returned_bytes"], TEST_REPOSITORY_FILE_CONTENT_BYTES);
         assert_eq!(result["returned_lines"], 1);
         assert_eq!(result["start_line"], REQUESTED_START);
         assert_eq!(result["end_line"], REQUESTED_START);
@@ -3640,7 +3839,7 @@ mod tests {
     /// partial final-line posture alongside explicit truncation.
     #[tokio::test]
     async fn repository_file_read_reports_honest_truncation() {
-        let source = vec![b'x'; MAX_REPOSITORY_FILE_CONTENT_BYTES + 1];
+        let source = vec![b'x'; TEST_REPOSITORY_FILE_CONTENT_BYTES + 1];
         let (transport, listener) = repository_test_transport().await;
         let metadata = repository_file_value("src/large.rs", source.len()).to_string();
         let source_for_server = source.clone();
@@ -3675,7 +3874,7 @@ mod tests {
 
         assert_eq!(result["outcome"], "content");
         assert_eq!(result["source_bytes"], source.len());
-        assert_eq!(result["returned_bytes"], MAX_REPOSITORY_FILE_CONTENT_BYTES);
+        assert_eq!(result["returned_bytes"], TEST_REPOSITORY_FILE_CONTENT_BYTES);
         assert_eq!(result["returned_lines"], 1);
         assert_eq!(result["start_line"], 1);
         assert_eq!(result["end_line"], 1);
@@ -3686,7 +3885,7 @@ mod tests {
                 .as_str()
                 .expect("typed content remains text")
                 .len(),
-            MAX_REPOSITORY_FILE_CONTENT_BYTES
+            TEST_REPOSITORY_FILE_CONTENT_BYTES
         );
         assert_eq!(requests, file_read_requests("src/large.rs"));
     }
@@ -3695,9 +3894,10 @@ mod tests {
     /// the aggregate result budget; the retained prefix exposes that truncation.
     #[test]
     fn repository_directory_listing_respects_encoded_result_budget() {
-        const OBSERVED_ENTRIES: usize = MAX_RESULT_ITEMS;
+        const OBSERVED_ENTRIES: usize = MAX_ENCODED_RESULT_BYTES / MAX_FILE_PATH_BYTES + 1;
         let arguments = repository_list_arguments("src");
         let result = bounded_repository_directory_result(
+            crate::code_host::test_numeric_bounds(),
             &arguments,
             repository_escaping_directory_entries(OBSERVED_ENTRIES),
             CodeHostResultCompleteness::Complete,
@@ -3886,7 +4086,7 @@ mod tests {
     /// escaped path and still reach bounded projection.
     #[tokio::test]
     async fn repository_directory_ingress_admits_escaped_path_bound() {
-        const OBSERVED_ENTRIES: usize = MAX_RESULT_ITEMS + 10;
+        const OBSERVED_ENTRIES: usize = MAX_OBSERVED_DIRECTORY_ENTRIES / 8;
         const PRIOR_RESPONSE_CAP: usize = (MAX_OBSERVED_DIRECTORY_ENTRIES + 1)
             * (MAX_FILE_PATH_BYTES * MAX_JSON_ESCAPE_BYTES_PER_SOURCE_BYTE + 256);
         let (transport, listener) = repository_test_transport().await;
@@ -3924,7 +4124,7 @@ mod tests {
     /// and returned counts instead of discarding the truncation signal.
     #[tokio::test]
     async fn repository_directory_listing_reports_honest_truncation() {
-        const OBSERVED_ENTRIES: usize = MAX_RESULT_ITEMS + 1;
+        const OBSERVED_ENTRIES: usize = TEST_RESULT_ITEMS + 1;
         let (transport, listener) = repository_test_transport().await;
         let directory =
             repository_directory_value("src", repository_directory_entries(OBSERVED_ENTRIES))
@@ -3948,14 +4148,14 @@ mod tests {
 
         assert_eq!(result["outcome"], "entries");
         assert_eq!(result["observed_entries"], OBSERVED_ENTRIES);
-        assert_eq!(result["returned_entries"], MAX_RESULT_ITEMS);
+        assert_eq!(result["returned_entries"], TEST_RESULT_ITEMS);
         assert_eq!(result["truncated"], true);
         assert_eq!(
             result["entries"]
                 .as_array()
                 .expect("typed entries remain an array")
                 .len(),
-            MAX_RESULT_ITEMS
+            TEST_RESULT_ITEMS
         );
         assert_eq!(request, path_lookup_requests("src"));
     }
@@ -3967,7 +4167,8 @@ mod tests {
         let address = listener
             .local_addr()
             .expect("listener address is available");
-        let mut transport = GitHubCodeHostTransport::try_new().expect("fixed transport constructs");
+        let mut transport = GitHubCodeHostTransport::try_new(repository_test_bounds())
+            .expect("fixed transport constructs");
         transport.rest_base =
             Url::parse(&format!("http://{address}/")).expect("loopback REST base is valid");
         (transport, listener)
@@ -4100,7 +4301,7 @@ mod tests {
     }
 
     fn repository_directory_entries_with_suffix_duplicate() -> Vec<serde_json::Value> {
-        let mut entries = repository_directory_entries(MAX_RESULT_ITEMS);
+        let mut entries = repository_directory_entries(TEST_RESULT_ITEMS);
         entries.push(entries[0].clone());
         entries
     }
@@ -4301,7 +4502,9 @@ mod tests {
             listener,
             revision_transition,
         ));
-        let mut transport = GitHubCodeHostTransport::try_new().expect("fixed transport constructs");
+        let mut transport =
+            GitHubCodeHostTransport::try_new(crate::code_host::test_numeric_bounds())
+                .expect("fixed transport constructs");
         transport.rest_base =
             Url::parse(&format!("http://{address}/")).expect("loopback REST base is valid");
         let arguments = moved_head_file_patch_arguments();
@@ -4436,15 +4639,24 @@ mod tests {
     fn file_patch_search_reaches_the_second_changed_file_page() {
         let target_path = "src/target.rs";
         let target_value = changed_file_value(String::from(target_path));
-        let expected_file =
-            ChangedFile::try_new(String::from(target_path), String::from("added"), 1, 0)
-                .expect("fixture changed file is bounded");
-        let expected =
-            FilePatchResult::try_new(expected_file, Some(String::from("@@ -0,0 +1 @@\n+fixture")))
-                .expect("fixture patch is bounded");
+        let expected_file = ChangedFile::try_new(
+            crate::code_host::test_numeric_bounds(),
+            String::from(target_path),
+            String::from("added"),
+            1,
+            0,
+        )
+        .expect("fixture changed file is bounded");
+        let expected = FilePatchResult::try_new(
+            crate::code_host::test_numeric_bounds(),
+            expected_file,
+            Some(String::from("@@ -0,0 +1 @@\n+fixture")),
+        )
+        .expect("fixture patch is bounded");
 
         assert_eq!(
             inspect_file_patch_page(
+                crate::code_host::test_numeric_bounds(),
                 &first_changed_file_page(),
                 CodeHostResultCompleteness::Truncated,
                 target_path,
@@ -4453,6 +4665,7 @@ mod tests {
         );
         assert_eq!(
             inspect_file_patch_page(
+                crate::code_host::test_numeric_bounds(),
                 &serde_json::Value::Array(vec![target_value]),
                 CodeHostResultCompleteness::Complete,
                 target_path,
@@ -4472,12 +4685,17 @@ mod tests {
             "patch": "@@ -1 +1 @@\n-old\n+new",
             "status": "modified",
         });
-        let expected_file =
-            ChangedFile::try_new(String::from("src/lib.rs"), String::from("modified"), 7, 2)
-                .expect("fixture changed file is bounded");
+        let expected_file = ChangedFile::try_new(
+            crate::code_host::test_numeric_bounds(),
+            String::from("src/lib.rs"),
+            String::from("modified"),
+            7,
+            2,
+        )
+        .expect("fixture changed file is bounded");
 
         assert_eq!(
-            parse_changed_file(&value),
+            parse_changed_file(crate::code_host::test_numeric_bounds(), &value),
             Ok((expected_file, Some(String::from("@@ -1 +1 @@\n-old\n+new"))))
         );
     }
@@ -4493,6 +4711,7 @@ mod tests {
             "status": "modified",
         });
         let expected_file = ChangedFile::try_new(
+            crate::code_host::test_numeric_bounds(),
             String::from("assets/image.png"),
             String::from("modified"),
             0,
@@ -4500,7 +4719,10 @@ mod tests {
         )
         .expect("fixture changed file is bounded");
 
-        assert_eq!(parse_changed_file(&value), Ok((expected_file, None)));
+        assert_eq!(
+            parse_changed_file(crate::code_host::test_numeric_bounds(), &value),
+            Ok((expected_file, None))
+        );
     }
 
     /// Paths returned by GitHub retain canonical repository-relative
@@ -4509,28 +4731,44 @@ mod tests {
     fn returned_paths_reject_noncanonical_values() {
         let absolute_path = String::from("/src/lib.rs");
         let noncanonical_path = String::from("src/../lib.rs");
-        let absolute_changed_file =
-            ChangedFile::try_new(absolute_path.clone(), String::from("modified"), 1, 0);
-        let absolute_review_thread = ReviewThread::try_new(ReviewThreadFields {
-            id: String::from("PRRT_absolute_fixture"),
-            resolved: false,
-            outdated: false,
-            path: absolute_path,
-            line: Some(1),
-            comments: Vec::new(),
-            comments_truncated: false,
-        });
-        let noncanonical_changed_file =
-            ChangedFile::try_new(noncanonical_path.clone(), String::from("modified"), 1, 0);
-        let noncanonical_review_thread = ReviewThread::try_new(ReviewThreadFields {
-            id: String::from("PRRT_noncanonical_fixture"),
-            resolved: false,
-            outdated: false,
-            path: noncanonical_path,
-            line: Some(1),
-            comments: Vec::new(),
-            comments_truncated: false,
-        });
+        let absolute_changed_file = ChangedFile::try_new(
+            crate::code_host::test_numeric_bounds(),
+            absolute_path.clone(),
+            String::from("modified"),
+            1,
+            0,
+        );
+        let absolute_review_thread = ReviewThread::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ReviewThreadFields {
+                id: String::from("PRRT_absolute_fixture"),
+                resolved: false,
+                outdated: false,
+                path: absolute_path,
+                line: Some(1),
+                comments: Vec::new(),
+                comments_truncated: false,
+            },
+        );
+        let noncanonical_changed_file = ChangedFile::try_new(
+            crate::code_host::test_numeric_bounds(),
+            noncanonical_path.clone(),
+            String::from("modified"),
+            1,
+            0,
+        );
+        let noncanonical_review_thread = ReviewThread::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ReviewThreadFields {
+                id: String::from("PRRT_noncanonical_fixture"),
+                resolved: false,
+                outdated: false,
+                path: noncanonical_path,
+                line: Some(1),
+                comments: Vec::new(),
+                comments_truncated: false,
+            },
+        );
 
         assert_eq!(absolute_changed_file, None);
         assert_eq!(absolute_review_thread, None);
@@ -4541,17 +4779,25 @@ mod tests {
     /// File-shaped results cannot identify the repository root directory.
     #[test]
     fn returned_file_paths_reject_repository_root() {
-        let root_changed_file =
-            ChangedFile::try_new(String::from("."), String::from("modified"), 1, 0);
-        let root_review_thread = ReviewThread::try_new(ReviewThreadFields {
-            id: String::from("PRRT_root_fixture"),
-            resolved: false,
-            outdated: false,
-            path: String::from("."),
-            line: Some(1),
-            comments: Vec::new(),
-            comments_truncated: false,
-        });
+        let root_changed_file = ChangedFile::try_new(
+            crate::code_host::test_numeric_bounds(),
+            String::from("."),
+            String::from("modified"),
+            1,
+            0,
+        );
+        let root_review_thread = ReviewThread::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ReviewThreadFields {
+                id: String::from("PRRT_root_fixture"),
+                resolved: false,
+                outdated: false,
+                path: String::from("."),
+                line: Some(1),
+                comments: Vec::new(),
+                comments_truncated: false,
+            },
+        );
 
         assert_eq!(root_changed_file, None);
         assert_eq!(root_review_thread, None);
@@ -4597,7 +4843,7 @@ mod tests {
     #[tokio::test]
     async fn file_patch_transaction_has_one_timeout_budget() {
         let result = with_read_operation_timeout(
-            Duration::ZERO,
+            Some(Duration::ZERO),
             std::future::pending::<Result<(), CodeHostTransportFailure>>(),
         )
         .await;
@@ -4609,10 +4855,13 @@ mod tests {
     /// later used for DNS admission and the credential-free download.
     #[test]
     fn job_log_redirect_uses_remaining_exchange_timeout() {
-        const ELAPSED: Duration = Duration::from_secs(7);
-        const EXPECTED_REMAINING: Duration = Duration::from_secs(23);
+        const ELAPSED: Duration = Duration::from_secs(3);
+        const EXPECTED_REMAINING: Duration = Duration::from_secs(8);
 
-        assert_eq!(remaining_exchange_timeout(ELAPSED), Ok(EXPECTED_REMAINING));
+        assert_eq!(
+            remaining_exchange_timeout(Some(Duration::from_secs(11)), ELAPSED),
+            Ok(Some(EXPECTED_REMAINING))
+        );
     }
 
     /// A read-only server failure remains an infrastructure failure rather
@@ -4979,6 +5228,7 @@ mod tests {
         let stack = gate_stack_state();
         let initial_convergence = gate_convergence_state(None);
         let thread = ReviewThreadIdentity::try_new(
+            crate::code_host::test_numeric_bounds(),
             String::from("PRRT_gate"),
             String::from("src/lib.rs"),
             String::from("Finding title"),
@@ -5024,7 +5274,8 @@ mod tests {
             }
         });
 
-        let thread = parse_slog_thread(&value).expect("fixture thread is admitted");
+        let thread = parse_slog_thread(crate::code_host::test_numeric_bounds(), &value)
+            .expect("fixture thread is admitted");
 
         assert_eq!(
             thread.inventory.disposition(),
@@ -5052,7 +5303,7 @@ mod tests {
         });
 
         assert_eq!(
-            parse_slog_thread(&value),
+            parse_slog_thread(crate::code_host::test_numeric_bounds(), &value),
             Err(CodeHostTransportFailure::InvalidResponse)
         );
     }
@@ -5062,10 +5313,14 @@ mod tests {
     #[test]
     fn lossy_job_log_text_remains_bounded() {
         const INVALID_UTF8: u8 = 0xff;
-        const EXPECTED_TEXT_BYTES: usize = MAX_JOB_LOG_BYTES - 1;
-        let bytes = vec![INVALID_UTF8; MAX_JOB_LOG_BYTES];
+        const EXPECTED_TEXT_BYTES: usize = TEST_JOB_LOG_BYTES - 1;
+        let bytes = vec![INVALID_UTF8; TEST_JOB_LOG_BYTES];
 
-        let (text, completeness) = bounded_lossy_text(&bytes, CodeHostResultCompleteness::Complete);
+        let (text, completeness) = bounded_lossy_text(
+            &bytes,
+            CodeHostResultCompleteness::Complete,
+            Some(TEST_JOB_LOG_BYTES),
+        );
 
         assert_eq!(text.len(), EXPECTED_TEXT_BYTES);
         assert_eq!(completeness, CodeHostResultCompleteness::Truncated);
@@ -5162,7 +5417,9 @@ mod tests {
         let address = listener
             .local_addr()
             .expect("listener address is available");
-        let mut transport = GitHubCodeHostTransport::try_new().expect("fixed transport constructs");
+        let mut transport =
+            GitHubCodeHostTransport::try_new(crate::code_host::test_numeric_bounds())
+                .expect("fixed transport constructs");
         transport.graphql_url = Url::parse(&format!("http://{address}/graphql"))
             .expect("loopback GraphQL URL is valid");
         (transport, listener)
@@ -5513,13 +5770,16 @@ mod tests {
 
     /// The mutation phase receives only the exchange budget the ownership
     /// confirmation left unconsumed, so both requests together respect the
-    /// transport's single 30-second exchange timeout.
+    /// transport's single configured exchange timeout.
     #[test]
     fn thread_mutation_uses_the_remaining_exchange_budget() {
-        const ELAPSED: Duration = Duration::from_secs(7);
-        const EXPECTED_REMAINING: Duration = Duration::from_secs(23);
+        const ELAPSED: Duration = Duration::from_secs(3);
+        const EXPECTED_REMAINING: Duration = Duration::from_secs(8);
 
-        assert_eq!(remaining_mutation_budget(ELAPSED), Ok(EXPECTED_REMAINING));
+        assert_eq!(
+            remaining_mutation_budget(Some(Duration::from_secs(11)), ELAPSED),
+            Ok(Some(EXPECTED_REMAINING))
+        );
     }
 
     /// A confirmation that exhausts the whole exchange budget proves the
@@ -5527,7 +5787,7 @@ mod tests {
     #[test]
     fn an_exhausted_exchange_budget_proves_no_dispatch() {
         assert_eq!(
-            remaining_mutation_budget(DEFAULT_TIMEOUT),
+            remaining_mutation_budget(Some(Duration::from_secs(11)), Duration::from_secs(11),),
             Err(CodeHostTransportFailure::MutationNotDispatched)
         );
     }
