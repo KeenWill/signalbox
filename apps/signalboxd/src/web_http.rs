@@ -4316,41 +4316,61 @@ mod tests {
         assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
     }
 
-    /// Pins the authority contract the browser-listener section states for the
-    /// usage routes this slice adds. Usage summaries and call detail carry
-    /// per-session spend, model identity, and call provenance across the whole
-    /// installation, so a rebound origin must not reach them any more than it
-    /// may reach the session reads beside them.
+    /// Drives one route with a rebound origin and returns what it answered.
+    ///
+    /// Request plumbing only: the status and body it hands back are what the
+    /// calling test asserts on.
+    async fn rebound_origin_response(path: &str) -> (StatusCode, serde_json::Value) {
+        let request = Request::get(path)
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+        (status, body)
+    }
+
+    /// Asserts one unauthenticated read turned a rebound origin away at the
+    /// loopback gate, before any session-attached content was read.
     ///
     /// Two layers enforce this, and the assertion is deliberately about the
     /// guarantee rather than either one: `same_origin_router` gates the whole
     /// listener, and `session_reads` gates these routes again. Removing the
-    /// inner `route_layer` alone therefore does not make this fail — the same
-    /// is true of every sibling assertion here — so what it holds is the
+    /// inner `route_layer` alone therefore does not make a caller fail — the
+    /// same is true of every sibling assertion here — so what this holds is the
     /// promise a reader depends on, not a particular layer's presence.
-    #[tokio::test]
-    async fn usage_reads_reject_non_loopback_host_authorities() {
-        for path in ["/api/usage/summary", "/api/usage/calls"] {
-            let request = Request::get(path)
-                .header(header::HOST, "attacker.example")
-                .body(Body::empty())
-                .expect("the request is valid");
-            let response = production_router(None, None, None, None)
-                .oneshot(request)
-                .await
-                .expect("the production router responds");
-            let status = response.status();
-            let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
-                .expect("the rejection is structured JSON");
+    ///
+    /// `#[track_caller]` puts a failure at the calling test, so each route
+    /// names itself.
+    #[track_caller]
+    fn assert_rebound_origin_rejected(status: StatusCode, body: &serde_json::Value) {
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["kind"], "transport");
+        assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
 
-            assert_eq!(
-                status,
-                StatusCode::FORBIDDEN,
-                "`{path}` must reject a non-loopback authority",
-            );
-            assert_eq!(body["error"]["kind"], "transport");
-            assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
-        }
+    /// The bounded usage summary carries per-session spend and resolved model
+    /// identity across the whole installation, so a rebound origin must not
+    /// reach it any more than it may reach the session reads beside it.
+    #[tokio::test]
+    async fn usage_summary_reads_reject_non_loopback_host_authorities() {
+        let (status, body) = rebound_origin_response("/api/usage/summary").await;
+
+        assert_rebound_origin_rejected(status, &body);
+    }
+
+    /// Usage-call detail carries per-call spend, resolved model identity, and
+    /// call provenance, so it is protected exactly as the summary above it is.
+    #[tokio::test]
+    async fn usage_call_reads_reject_non_loopback_host_authorities() {
+        let (status, body) = rebound_origin_response("/api/usage/calls").await;
+
+        assert_rebound_origin_rejected(status, &body);
     }
 
     /// Drives a session read at the loopback gate and reports only the status.
