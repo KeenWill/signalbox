@@ -831,6 +831,7 @@ async fn inv062_prepared_model_call_remains_scheduler_eligible() -> Result<(), B
     let StartEligibleTurnOutcome::Activated(_) = activation_service.execute(session).await? else {
         panic!("the prepared-call sweep fixture turn activates")
     };
+    record_empty_instruction_manifest(&pool, session).await?;
 
     let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe0_6201));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
