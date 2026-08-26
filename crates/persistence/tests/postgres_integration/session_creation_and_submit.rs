@@ -3061,6 +3061,18 @@ async fn multipart_replay_fixture(
             Some(TurnId::from_uuid(Uuid::from_u128(MULTIPART_TURN_ID))),
         )
         .await?;
+    match &first {
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_),
+        )) => {}
+        SubmitInputHandlingOutcome::Recorded(
+            SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+            | SubmitInputResult::Rejected(_),
+        )
+        | SubmitInputHandlingOutcome::ConflictingReuse { .. } => panic!(
+            "the multipart fixture submission must record a turn-origin acceptance, not {first:?}"
+        ),
+    }
 
     Ok(MultipartReplayFixture {
         container,
@@ -3071,7 +3083,7 @@ async fn multipart_replay_fixture(
     })
 }
 
-/// INV-012: equal multipart replay returns the original durable receipt.
+/// INV-012: equal multipart replay returns the original durable acceptance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
