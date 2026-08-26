@@ -7307,6 +7307,136 @@ impl<Reader: SessionReader> LoadSessionService<Reader> {
 }
 ```
 
+## application: search
+
+```rust
+pub const fn max_search_query_bytes() -> usize;
+pub const fn max_search_page_items() -> u16;
+pub const fn max_search_snippet_bytes() -> usize;
+pub const fn max_search_projection_text_bytes() -> usize;
+
+pub enum SearchTextError { Empty, TooLong, ContainsNul }
+
+pub struct SearchText(/* private String */);
+impl SearchText {
+    pub fn try_new(value: String) -> Result<Self, SearchTextError>;
+    pub fn as_str(&self) -> &str;
+}
+
+pub enum SearchStrategy { Lexical }
+
+pub enum SearchScope { Global, Session(SessionId) }
+
+pub struct SearchPageLimitError;
+
+pub struct SearchPageLimit(/* private u16 */);
+impl SearchPageLimit {
+    pub const fn new(value: u16) -> Result<Self, SearchPageLimitError>;
+    pub const fn get(self) -> u16;
+}
+
+pub struct SearchCursor { /* private */ }
+impl SearchCursor {
+    pub const fn new(address: TimelineAddress, projection: NonZeroU64) -> Self;
+    pub const fn address(self) -> TimelineAddress;
+    pub const fn projection(self) -> NonZeroU64;
+}
+
+pub struct SearchQuery {
+    pub strategy: SearchStrategy,
+    pub scope: SearchScope,
+    pub text: SearchText,
+    pub limit: SearchPageLimit,
+    pub after: Option<SearchCursor>,
+}
+
+pub enum SearchContentClass {
+    UserTranscript,
+    AssistantTranscript,
+    ToolArguments,
+    ToolResult,
+    SessionMetadata,
+    AttachmentFilename,
+    AttachmentMediaMetadata,
+    DerivedTextArtifact,
+}
+
+pub struct SearchArtifactId(/* private Uuid */);
+impl SearchArtifactId {
+    pub const fn from_uuid(value: Uuid) -> Self;
+    pub const fn into_uuid(self) -> Uuid;
+}
+
+pub enum SearchProjectionTextError { Empty, TooLong, ContainsNul }
+
+pub struct SearchProjectionText(/* private String */);
+impl SearchProjectionText {
+    pub fn try_new(value: String) -> Result<Self, SearchProjectionTextError>;
+    pub fn as_str(&self) -> &str;
+}
+
+pub enum SearchArtifactProjectionClass {
+    AttachmentFilename,
+    AttachmentMediaMetadata,
+    DerivedText,
+}
+
+pub struct SearchArtifactProjection {
+    pub session: SessionId,
+    pub address: TimelineAddress,
+    pub artifact: SearchArtifactId,
+    pub class: SearchArtifactProjectionClass,
+    pub text: SearchProjectionText,
+}
+
+pub enum SearchResultSource {
+    Session(SessionId),
+    AcceptedInput { input: AcceptedInputId, turn: TurnId },
+    SteeringInput { input: AcceptedInputId, source_turn: TurnId },
+    TurnTranscriptEntry { entry: SemanticTranscriptEntryId, turn: TurnId },
+    SessionTranscriptEntry { entry: SemanticTranscriptEntryId },
+    ToolRequest { request: ToolRequestId, turn: TurnId },
+    ToolAttempt { attempt: ToolAttemptId, turn: TurnId },
+    Attachment { attachment: SearchArtifactId },
+    DerivedArtifact { artifact: SearchArtifactId },
+}
+
+pub struct SearchHighlight { pub start_byte: u16, pub end_byte: u16 }
+pub struct SearchResult {
+    pub session: SessionId,
+    pub address: TimelineAddress,
+    pub projection: NonZeroU64,
+    pub source: SearchResultSource,
+    pub content_class: SearchContentClass,
+    pub snippet: String,
+    pub highlights: Vec<SearchHighlight>,
+}
+pub struct SearchPage {
+    pub results: Vec<SearchResult>,
+    pub next: Option<SearchCursor>,
+}
+
+pub trait SearchReader {
+    type Error;
+    fn search(&self, query: SearchQuery)
+        -> impl Future<Output = Result<SearchPage, Self::Error>> + Send;
+}
+
+pub trait SearchProjectionWriter {
+    type Error;
+    fn publish(&self, projection: SearchArtifactProjection)
+        -> impl Future<Output = Result<(), Self::Error>> + Send;
+}
+
+pub struct SearchService<Reader> { /* private */ }
+impl<Reader> SearchService<Reader> {
+    pub const fn new(reader: Reader) -> Self;
+}
+impl<Reader: SearchReader> SearchService<Reader> {
+    pub async fn search(&self, query: SearchQuery) -> Result<SearchPage, Reader::Error>;
+}
+```
+
 ## application: session_timeline
 
 ```rust
@@ -12524,6 +12654,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
+| application: search                                | 21 (+4 free fn) (incl. 2 traits) |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: model_execution                       | 41 (incl. 8 traits)              |
 | application: tool_loop                             | 28 (incl. 5 traits)              |
@@ -12545,4 +12676,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **403 (+16 free fn)**            |
+| **signalbox-application total**                    | **422 (+20 free fn)**            |

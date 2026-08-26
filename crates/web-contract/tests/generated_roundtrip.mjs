@@ -10,11 +10,35 @@ import {
   decodeWebContractBootstrap,
   decodeWebContractExample,
   decodeWebImportListPage,
+  decodeWebSearchPage,
   decodeWebSessionTimelineDescriptor,
   decodeWebSessionTimelineWindow,
 } from "../../../clients/web/src/generated/web-contract.mjs";
 
 const fixtureUrl = new URL("./fixtures/example.json", import.meta.url);
+
+function searchPage() {
+  return {
+    results: [
+      {
+        session_id: "00000000-0000-0000-0000-000000000991",
+        address: { event_sequence: "1" },
+        projection_id: "1",
+        source: {
+          kind: "session",
+          session_id: "00000000-0000-0000-0000-000000000991",
+        },
+        content_class: "session_metadata",
+        snippet: "café",
+        highlights: [{ start_byte: 0, end_byte: 5 }],
+      },
+    ],
+    continuation: {
+      address: { event_sequence: "1" },
+      projection_id: "1",
+    },
+  };
+}
 
 function assertCanonicalNumberSpelling(parameters_json) {
   const digest = `sha256:${"a1".repeat(32)}`;
@@ -87,6 +111,7 @@ test("generated bootstrap decoder rejects another contract version", () => {
         contract: { name: "signalbox.web-http", version: "999" },
         capabilities: {
           bounded_json: true,
+          bounded_lexical_search: true,
           same_origin_json_mutations: true,
           ndjson_streaming: true,
           immutable_blob_content: true,
@@ -99,6 +124,9 @@ test("generated bootstrap decoder rejects another contract version", () => {
         limits: {
           max_json_body_bytes: 65536,
           max_ndjson_item_bytes: 65536,
+          max_search_page_items: 100,
+          max_search_query_bytes: 512,
+          max_search_snippet_bytes: 512,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
         },
@@ -114,6 +142,7 @@ test("generated bootstrap decoder rejects a disabled required capability", () =>
         contract: { name: "signalbox.web-http", version: "2" },
         capabilities: {
           bounded_json: true,
+          bounded_lexical_search: true,
           bounded_session_timeline: true,
           same_origin_json_mutations: true,
           ndjson_streaming: true,
@@ -126,6 +155,9 @@ test("generated bootstrap decoder rejects a disabled required capability", () =>
         limits: {
           max_json_body_bytes: 65536,
           max_ndjson_item_bytes: 65536,
+          max_search_page_items: 100,
+          max_search_query_bytes: 512,
+          max_search_snippet_bytes: 512,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
         },
@@ -1136,6 +1168,7 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
         contract: { name: "signalbox.web-http", version: "2" },
         capabilities: {
           bounded_json: true,
+          bounded_lexical_search: true,
           same_origin_json_mutations: true,
           ndjson_streaming: true,
           immutable_blob_content: true,
@@ -1148,6 +1181,9 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
         limits: {
           max_json_body_bytes: 1,
           max_ndjson_item_bytes: 65536,
+          max_search_page_items: 100,
+          max_search_query_bytes: 512,
+          max_search_snippet_bytes: 512,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
         },
@@ -1371,6 +1407,156 @@ test("generated descriptor decoder rejects a fact beyond u64", () => {
         observed_through: "1",
       }),
     /unsigned 64-bit integer/,
+  );
+});
+
+test("generated search decoder rejects an invalid projection identity", () => {
+  const page = searchPage();
+  page.continuation.projection_id = "0";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /continuation must be one recognized variant/,
+  );
+});
+
+test("generated search decoder rejects more than one bounded page", () => {
+  const page = searchPage();
+  page.results = Array.from({ length: 101 }, () => page.results[0]);
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /results must be at most 100 items/,
+  );
+});
+
+test("generated search decoder rejects an oversized UTF-8 snippet", () => {
+  const page = searchPage();
+  page.results[0].snippet = "é".repeat(257);
+  page.results[0].highlights = [];
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /snippet must be at most 512 UTF-8 bytes/,
+  );
+});
+
+test("generated search decoder rejects a highlight inside a UTF-8 character", () => {
+  const page = searchPage();
+  page.results[0].highlights = [{ start_byte: 4, end_byte: 5 }];
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /range on UTF-8 boundaries/,
+  );
+});
+
+test("generated search decoder rejects overlapping highlight ranges", () => {
+  const page = searchPage();
+  page.results[0].highlights = [
+    { start_byte: 0, end_byte: 3 },
+    { start_byte: 2, end_byte: 5 },
+  ];
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /ordered non-overlapping in-bounds UTF-8 byte range/,
+  );
+});
+
+test("generated search decoder rejects too many highlight ranges", () => {
+  const page = searchPage();
+  page.results[0].snippet = "x".repeat(512);
+  page.results[0].highlights = Array.from({ length: 513 }, () => ({
+    start_byte: 0,
+    end_byte: 1,
+  }));
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /highlights must be at most 512 items/,
+  );
+});
+
+test("generated search decoder rejects continuation on an empty page", () => {
+  const empty = searchPage();
+  empty.results = [];
+  assert.throws(
+    () => decodeWebSearchPage(empty),
+    /cursor anchored to the final search result/,
+  );
+});
+
+test("generated search decoder rejects a continuation address mismatch", () => {
+  const mismatched = searchPage();
+  mismatched.continuation.address.event_sequence = "2";
+  assert.throws(
+    () => decodeWebSearchPage(mismatched),
+    /cursor anchored to the final search result/,
+  );
+});
+
+test("generated search decoder rejects a continuation projection mismatch", () => {
+  const mismatchedProjection = searchPage();
+  mismatchedProjection.continuation.projection_id = "2";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedProjection),
+    /cursor anchored to the final search result/,
+  );
+});
+
+test("generated search decoder rejects out-of-order result addresses", () => {
+  const page = searchPage();
+  const newer = structuredClone(page.results[0]);
+  newer.address.event_sequence = "2";
+  newer.projection_id = "2";
+  page.results.push(newer);
+  page.continuation.address.event_sequence = "2";
+  page.continuation.projection_id = "2";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /strictly descending search result key/,
+  );
+});
+
+test("generated search decoder rejects out-of-order same-address projections", () => {
+  const page = searchPage();
+  page.results[0].projection_id = "2";
+  const outOfOrder = structuredClone(page.results[0]);
+  outOfOrder.projection_id = "3";
+  page.results.push(outOfOrder);
+  page.continuation.projection_id = "3";
+
+  assert.throws(
+    () => decodeWebSearchPage(page),
+    /strictly descending search result key/,
+  );
+});
+
+test("generated search decoder rejects malformed result identities", () => {
+  const page = searchPage();
+  page.results[0].session_id = "not-a-uuid";
+
+  assert.throws(() => decodeWebSearchPage(page), /matching/);
+});
+
+test("generated search decoder rejects a contradictory source session", () => {
+  const mismatchedSession = searchPage();
+  mismatchedSession.results[0].source.session_id =
+    "00000000-0000-0000-0000-000000000992";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedSession),
+    /source consistent with the result session and content class/,
+  );
+});
+
+test("generated search decoder rejects a contradictory content class", () => {
+  const mismatchedContent = searchPage();
+  mismatchedContent.results[0].content_class = "tool_result";
+  assert.throws(
+    () => decodeWebSearchPage(mismatchedContent),
+    /source consistent with the result session and content class/,
   );
 });
 

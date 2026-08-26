@@ -1,7 +1,9 @@
 # Sessions and the transcript
 
 The bounded browser session descriptor and historical timeline foundation are
-verified against this PR (`agent/web-session-timeline`).
+verified against this PR (`agent/web-session-timeline`). The bounded
+lexical-search projection and query boundary are verified against this PR
+(`agent/web-search-usage`).
 
 Dedicated-compaction usage as the next queued-turn headroom baseline is verified
 against this PR (`agent/daemon-live-compaction-source-headroom`).
@@ -726,6 +728,61 @@ retained preferentially, so moving among the first, latest, and an arbitrary
 million-event address never makes lifetime history a client-memory precondition.
 Transcript `full`, `condensed`, and `results` remain local presentation choices
 and do not alter any server query.
+
+## Bounded browser lexical search
+
+Version-one browser search is lexical. `GET /api/search` accepts natural product
+text, an optional exact session, a page size, and an opaque continuation made
+from a stable timeline address plus projection identity. It accepts only the
+`lexical` strategy and passes text to PostgreSQL `plainto_tsquery`; PostgreSQL
+operators and query syntax are not product semantics. The application strategy
+boundary remains explicit so a future semantic or hybrid strategy does not
+change the lexical request into a database query language.
+
+The dedicated PostgreSQL full-text projection indexes canonical accepted user
+text, final assistant transcript text, model-visible tool arguments and results,
+current session title/tags/searchable attributes, explicitly published
+attachment filenames and media metadata, and durable derived text. The
+implemented producers are durable transitions that project their own text as
+they commit: input acceptance, steering acceptance, a terminal model call, a
+tool batch transition, context compaction, and session-metadata installation.
+Context summaries are the implemented transcript-owned derived-text producer.
+Attachment filenames, attachment media metadata, and explicitly derived text
+artifacts are classes the schema admits and a read returns, and no producer in
+the daemon publishes them. The projection performs no implicit attachment
+reading, OCR, text extraction, or model pass.
+
+Publication through the typed projection-writer port is committed unimplemented
+functionality: no present producer calls it. The compatibility constraint is
+that a producer adopting the port publishes only text its durable contract
+explicitly supplies, and only after its own source exists.
+
+Every result carries its session, stable timeline address, typed owning
+session/input/turn transcript entry/tool request/tool attempt/attachment/derived
+artifact identity, closed content class, and a plain-text snippet with UTF-8
+byte highlight ranges. The address is directly usable with the timeline `around`
+read even when the matching region is not loaded. Each returned source is
+correlated with both its canonical record and the exact durable event that
+supplies its reveal address — an input's acceptance event, an assistant entry's
+terminal call transition, a summary's compaction event, a tool item's batch
+transition, the session's creation event — and a transcript-entry source must
+carry the payload kind its content class asserts. An unknown stored source or
+content class, malformed identity, invalid address, mismatched reveal event, or
+contradictory source shape fails closed, including when the offending row is
+only the unreturned lookahead item fetched to decide a continuation.
+
+Requests accept 1 through 100 results and at most 512 UTF-8 query bytes. Each
+returned snippet is at most 512 UTF-8 bytes. Results have a stable strict
+newest-address-first keyset order by `(event_sequence, projection_id)`; the
+adapter fetches at most one item beyond the requested page to decide whether to
+return a continuation. A bounded per-term GIN probe runs first: a query
+containing a term with no match returns an empty page immediately, a query whose
+rarest term stays under a fixed candidate cap is served from that term's
+index-driven candidate set, and only queries in which every term is common use
+the newest-first keyset traversal, whose page then fills within a bounded
+ordered prefix. Snippets and validity checks are computed for returned rows
+only, never per examined candidate. Search never materializes or scans a session
+transcript in the browser.
 
 ## Semantic transcript entries
 

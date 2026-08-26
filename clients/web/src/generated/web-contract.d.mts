@@ -81,6 +81,7 @@ export type WebBlobViewKind = "download" | "browser_native" | "thumbnail" | "pre
 export type WebContractCapabilities = {
   readonly blob_derivations: boolean;
   readonly bounded_json: boolean;
+  readonly bounded_lexical_search: boolean;
   readonly bounded_session_timeline: boolean;
   readonly image_derivatives: boolean;
   readonly immutable_blob_content: boolean;
@@ -98,6 +99,9 @@ export type WebContractIdentity = {
 export type WebContractLimits = {
   readonly max_json_body_bytes: number;
   readonly max_ndjson_item_bytes: number;
+  readonly max_search_page_items: number;
+  readonly max_search_query_bytes: number;
+  readonly max_search_snippet_bytes: number;
   readonly max_timeline_window_bytes: number;
   readonly max_timeline_window_items: number;
 };
@@ -178,6 +182,59 @@ export type WebModelSelection = {
   readonly kind: "alias";
 };
 
+export type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_arguments" | "tool_result" | "session_metadata" | "attachment_filename" | "attachment_media_metadata" | "derived_text_artifact";
+
+export type WebSearchHighlight = {
+  readonly end_byte: number;
+  readonly start_byte: number;
+};
+
+export type WebSearchProjectionId = string;
+
+export type WebSearchResult = {
+  readonly address: WebTimelineAddress;
+  readonly content_class: WebSearchContentClass;
+  readonly highlights: ReadonlyArray<WebSearchHighlight>;
+  readonly projection_id: WebSearchProjectionId;
+  readonly session_id: WebSessionId;
+  readonly snippet: string;
+  readonly source: WebSearchResultSource;
+};
+
+export type WebSearchResultSource = {
+  readonly kind: "session";
+  readonly session_id: WebSessionId;
+} | {
+  readonly accepted_input_id: WebUuid;
+  readonly kind: "accepted_input";
+  readonly turn_id: WebUuid;
+} | {
+  readonly accepted_input_id: WebUuid;
+  readonly kind: "steering_input";
+  readonly source_turn_id: WebUuid;
+} | {
+  readonly kind: "turn_transcript_entry";
+  readonly semantic_entry_id: WebUuid;
+  readonly turn_id: WebUuid;
+} | {
+  readonly kind: "session_transcript_entry";
+  readonly semantic_entry_id: WebUuid;
+} | {
+  readonly kind: "tool_request";
+  readonly tool_request_id: WebUuid;
+  readonly turn_id: WebUuid;
+} | {
+  readonly kind: "tool_attempt";
+  readonly tool_attempt_id: WebUuid;
+  readonly turn_id: WebUuid;
+} | {
+  readonly attachment_id: WebUuid;
+  readonly kind: "attachment";
+} | {
+  readonly artifact_id: WebUuid;
+  readonly kind: "derived_artifact";
+};
+
 export type WebSessionId = string;
 
 export type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
@@ -208,6 +265,8 @@ export type WebTimelineAddress = {
 export type WebTimelineEventSequence = string;
 
 export type WebU64 = string;
+
+export type WebUuid = string;
 
 export type WebContractBootstrap = {
   readonly capabilities: WebContractCapabilities;
@@ -326,6 +385,14 @@ export type WebImportContinuationResponse = {
   readonly session_id: string;
 };
 
+export type WebSearchPage = {
+  readonly continuation: {
+  readonly address: WebTimelineAddress;
+  readonly projection_id: WebSearchProjectionId;
+} | null;
+  readonly results: ReadonlyArray<WebSearchResult>;
+};
+
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
@@ -341,3 +408,4 @@ export function decodeWebImportEntryWindowRequest(value: unknown): WebImportEntr
 export function decodeWebImportEntryWindow(value: unknown): WebImportEntryWindow;
 export function decodeWebImportContinuationRequest(value: unknown): WebImportContinuationRequest;
 export function decodeWebImportContinuationResponse(value: unknown): WebImportContinuationResponse;
+export function decodeWebSearchPage(value: unknown): WebSearchPage;
