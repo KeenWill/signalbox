@@ -2,13 +2,32 @@
 
 use signalbox_domain::{CommitSha, MergeableState};
 
+/// Whether the provider reports a pull request as draft.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PullRequestDraftState {
+    /// The pull request is ready for review.
+    ReadyForReview,
+    /// The pull request is a draft.
+    Draft,
+}
+
+impl PullRequestDraftState {
+    /// Returns the provider-compatible draft flag.
+    pub const fn is_draft(self) -> bool {
+        match self {
+            Self::ReadyForReview => false,
+            Self::Draft => true,
+        }
+    }
+}
+
 /// Provider check source and its normalized state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PullRequestCheckState {
-    /// A GitHub check run.
-    CheckRun {
-        /// Whether GitHub reports the run complete.
-        completed: bool,
+    /// A GitHub check run that is not complete.
+    CheckRunInProgress,
+    /// A completed GitHub check run.
+    CheckRunCompleted {
         /// Provider conclusion when the run has one.
         conclusion: Option<String>,
     },
@@ -45,36 +64,35 @@ impl PullRequestCheck {
     /// Whether this exact check is excluded from convergence gating.
     pub fn is_non_gating(&self) -> bool {
         self.name.ends_with("(report only)")
-            || matches!(self.state, PullRequestCheckState::StatusContext { .. })
-                && self.name.eq_ignore_ascii_case("CodeRabbit")
+            || match &self.state {
+                PullRequestCheckState::StatusContext { .. } => {
+                    self.name.eq_ignore_ascii_case("CodeRabbit")
+                }
+                PullRequestCheckState::CheckRunInProgress
+                | PullRequestCheckState::CheckRunCompleted { .. } => false,
+            }
     }
 
     /// Whether the provider state satisfies the convergence predicate.
     pub fn is_green(&self) -> bool {
         match &self.state {
-            PullRequestCheckState::CheckRun {
-                completed: true,
+            PullRequestCheckState::CheckRunCompleted {
                 conclusion: Some(conclusion),
             } => matches!(conclusion.as_str(), "SUCCESS" | "NEUTRAL" | "SKIPPED"),
             PullRequestCheckState::StatusContext { state } => state == "SUCCESS",
-            PullRequestCheckState::CheckRun { .. } => false,
+            PullRequestCheckState::CheckRunInProgress
+            | PullRequestCheckState::CheckRunCompleted { conclusion: None } => false,
         }
     }
 
     /// Returns the stable provider state rendered into commissioned context.
     pub fn observed_state(&self) -> &str {
         match &self.state {
-            PullRequestCheckState::CheckRun {
+            PullRequestCheckState::CheckRunCompleted {
                 conclusion: Some(conclusion),
-                ..
             } => conclusion,
-            PullRequestCheckState::CheckRun {
-                completed: true,
-                conclusion: None,
-            } => "COMPLETED",
-            PullRequestCheckState::CheckRun {
-                completed: false, ..
-            } => "IN_PROGRESS",
+            PullRequestCheckState::CheckRunCompleted { conclusion: None } => "COMPLETED",
+            PullRequestCheckState::CheckRunInProgress => "IN_PROGRESS",
             PullRequestCheckState::StatusContext { state } => state,
         }
     }
@@ -85,7 +103,7 @@ impl PullRequestCheck {
 pub struct PullRequestConvergenceFacts {
     head_sha: CommitSha,
     checked_head_sha: Option<CommitSha>,
-    draft: bool,
+    draft: PullRequestDraftState,
     unresolved_review_threads: u64,
     mergeable_state: MergeableState,
     checks: Box<[PullRequestCheck]>,
@@ -96,7 +114,7 @@ impl PullRequestConvergenceFacts {
     pub fn new(
         head_sha: CommitSha,
         checked_head_sha: Option<CommitSha>,
-        draft: bool,
+        draft: PullRequestDraftState,
         unresolved_review_threads: u64,
         mergeable_state: MergeableState,
         checks: Vec<PullRequestCheck>,
@@ -122,7 +140,7 @@ impl PullRequestConvergenceFacts {
     }
 
     /// Reports the provider draft flag. Draft is context, not a blocker.
-    pub const fn draft(&self) -> bool {
+    pub const fn draft(&self) -> PullRequestDraftState {
         self.draft
     }
 
@@ -232,7 +250,7 @@ mod tests {
         PullRequestConvergenceFacts::new(
             sha('a'),
             checked_head_sha,
-            false,
+            PullRequestDraftState::ReadyForReview,
             unresolved,
             mergeable,
             checks,
@@ -247,8 +265,7 @@ mod tests {
             MergeableState::Mergeable,
             vec![PullRequestCheck::new(
                 String::from("test"),
-                PullRequestCheckState::CheckRun {
-                    completed: true,
+                PullRequestCheckState::CheckRunCompleted {
                     conclusion: Some(String::from("SUCCESS")),
                 },
             )],
@@ -265,10 +282,7 @@ mod tests {
             MergeableState::Conflicting,
             vec![PullRequestCheck::new(
                 String::from("test"),
-                PullRequestCheckState::CheckRun {
-                    completed: false,
-                    conclusion: None,
-                },
+                PullRequestCheckState::CheckRunInProgress,
             )],
         ));
         assert_eq!(
@@ -294,8 +308,7 @@ mod tests {
             vec![
                 PullRequestCheck::new(
                     String::from("advisory (report only)"),
-                    PullRequestCheckState::CheckRun {
-                        completed: true,
+                    PullRequestCheckState::CheckRunCompleted {
                         conclusion: Some(String::from("FAILURE")),
                     },
                 ),
@@ -320,8 +333,7 @@ mod tests {
             MergeableState::Mergeable,
             vec![PullRequestCheck::new(
                 name.clone(),
-                PullRequestCheckState::CheckRun {
-                    completed: true,
+                PullRequestCheckState::CheckRunCompleted {
                     conclusion: Some(failure.clone()),
                 },
             )],

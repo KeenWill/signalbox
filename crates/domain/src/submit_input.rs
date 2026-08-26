@@ -22,10 +22,10 @@ use std::{
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputQueuePriority, AcceptedInputQueueWork, AcceptedInputSchedulingProjection, Actor,
-    AppliedInterruptCommandResult, AppliedInterruptState, CurrentTurnAttemptState, DeliveryRequest,
-    DurableCommandId, FrozenAliasDefinition, FrozenModelSelection, GoalGeneration, GoalTurnSource,
-    ModelAlias, ModelCapabilityCatalog, ModelChangeAdjustment, ModelSelectionRequest,
-    ModelSettingsOverlay, OriginConfiguration, OriginModelSettingsError,
+    AppliedInterruptCommandResult, AppliedInterruptState, BlobDigest, CurrentTurnAttemptState,
+    DeliveryRequest, DurableCommandId, FrozenAliasDefinition, FrozenModelSelection, GoalGeneration,
+    GoalTurnSource, ModelAlias, ModelCapabilityCatalog, ModelChangeAdjustment,
+    ModelSelectionRequest, ModelSettingsOverlay, OriginConfiguration, OriginModelSettingsError,
     PerInputConfigurationChoices, ReconciliationReason, Session, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionId, SessionInputPosition, SteeringBinding,
     TurnDisposition, TurnId, UserContent, ValidatedModelSettings,
@@ -99,6 +99,31 @@ impl SubmitInput {
             result: SubmitInputResult::Rejected(SubmitInputRejectedResult::SessionNotFound {
                 session,
             }),
+        }
+    }
+
+    /// Prepares a terminal rejection for an attachment without a catalogued
+    /// verified replica.
+    pub fn prepare_attachment_blob_not_found(self, digest: BlobDigest) -> PreparedSubmitInput {
+        PreparedSubmitInput {
+            command: self,
+            result: SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::AttachmentBlobNotFound { digest },
+            ),
+        }
+    }
+
+    /// Prepares a terminal rejection when distinct attachment bytes exceed
+    /// the configured verification-work ceiling.
+    pub fn prepare_attachment_byte_budget_exceeded(
+        self,
+        maximum_bytes: u64,
+    ) -> PreparedSubmitInput {
+        PreparedSubmitInput {
+            command: self,
+            result: SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::AttachmentByteBudgetExceeded { maximum_bytes },
+            ),
         }
     }
 
@@ -1298,6 +1323,16 @@ impl SubmitInputPendingSteeringAppliedResult {
 /// Typed authoritative input-acceptance rejections.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum SubmitInputRejectedResult {
+    /// An attachment digest had no catalogued verified replica.
+    AttachmentBlobNotFound {
+        /// The unavailable immutable byte identity.
+        digest: BlobDigest,
+    },
+    /// Distinct attachment bytes exceeded the deployment ceiling.
+    AttachmentByteBudgetExceeded {
+        /// The configured maximum aggregate byte count.
+        maximum_bytes: u64,
+    },
     /// The target session did not exist.
     SessionNotFound {
         /// The absent target.
@@ -1888,6 +1923,14 @@ struct SubmitInputPendingSteeringAppliedReconstitutionFacts {
 enum SubmitInputReconstitutionFacts {
     AppliedTurnOrigin(Box<SubmitInputTurnOriginAppliedReconstitutionFacts>),
     AppliedPendingSteering(Box<SubmitInputPendingSteeringAppliedReconstitutionFacts>),
+    RejectedAttachmentBlobNotFound {
+        result_session: SessionId,
+        result_digest: BlobDigest,
+    },
+    RejectedAttachmentByteBudgetExceeded {
+        result_session: SessionId,
+        result_maximum_bytes: u64,
+    },
     RejectedSessionNotFound {
         result_session: SessionId,
     },
@@ -2026,6 +2069,32 @@ pub struct SubmitInputAppliedPendingSteeringReconstitutionInput {
     pub accepted_delivery: DeliveryRequest,
     /// The immutable session acceptance position.
     pub accepted_position: SessionInputPosition,
+}
+
+/// Named facts for reconstructing a missing attachment-blob rejection.
+#[derive(Clone, Debug)]
+pub struct SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput {
+    /// The canonical durable command.
+    pub command: SubmitInput,
+    /// The actor spelling stored with the command.
+    pub stored_actor: Actor,
+    /// The target session identity stored in the result.
+    pub result_session: SessionId,
+    /// The unavailable attachment digest stored in the result.
+    pub result_digest: BlobDigest,
+}
+
+/// Named facts for reconstructing an attachment-byte-budget rejection.
+#[derive(Clone, Debug)]
+pub struct SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput {
+    /// The canonical durable command.
+    pub command: SubmitInput,
+    /// The actor spelling stored with the command.
+    pub stored_actor: Actor,
+    /// The target session identity stored in the result.
+    pub result_session: SessionId,
+    /// The configured maximum aggregate byte count stored in the result.
+    pub result_maximum_bytes: u64,
 }
 
 /// Named facts for reconstructing a missing-session rejection.
@@ -2303,6 +2372,46 @@ impl SubmitInputReconstitutionInput {
                     accepted_position,
                 },
             )),
+        }
+    }
+
+    /// Supplies a recorded missing attachment-blob result.
+    pub fn rejected_attachment_blob_not_found(
+        input: SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput,
+    ) -> Self {
+        let SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput {
+            command,
+            stored_actor,
+            result_session,
+            result_digest,
+        } = input;
+        Self {
+            command,
+            stored_actor,
+            facts: SubmitInputReconstitutionFacts::RejectedAttachmentBlobNotFound {
+                result_session,
+                result_digest,
+            },
+        }
+    }
+
+    /// Supplies a recorded attachment-byte-budget result.
+    pub fn rejected_attachment_byte_budget_exceeded(
+        input: SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
+    ) -> Self {
+        let SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput {
+            command,
+            stored_actor,
+            result_session,
+            result_maximum_bytes,
+        } = input;
+        Self {
+            command,
+            stored_actor,
+            facts: SubmitInputReconstitutionFacts::RejectedAttachmentByteBudgetExceeded {
+                result_session,
+                result_maximum_bytes,
+            },
         }
     }
 
@@ -2872,6 +2981,50 @@ impl SubmitInputReconstitutionInput {
                         binding,
                     },
                 ))
+            }
+            SubmitInputReconstitutionFacts::RejectedAttachmentBlobNotFound {
+                result_session,
+                result_digest,
+            } => {
+                if result_session != self.command.session {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::ResultSessionMismatch,
+                    ));
+                }
+                if !self.command.content.parts().iter().any(|part| {
+                    matches!(
+                        part,
+                        crate::UserContentPart::Attachment { digest, .. }
+                            if *digest == result_digest
+                    )
+                }) {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::AttachmentDigestMismatch,
+                    ));
+                }
+                SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBlobNotFound {
+                    digest: result_digest,
+                })
+            }
+            SubmitInputReconstitutionFacts::RejectedAttachmentByteBudgetExceeded {
+                result_session,
+                result_maximum_bytes,
+            } => {
+                if result_session != self.command.session {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::ResultSessionMismatch,
+                    ));
+                }
+                if result_maximum_bytes == 0 {
+                    return Err(fail(
+                        SubmitInputReconstitutionFailure::AttachmentBudgetMismatch,
+                    ));
+                }
+                SubmitInputResult::Rejected(
+                    SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                        maximum_bytes: result_maximum_bytes,
+                    },
+                )
             }
             SubmitInputReconstitutionFacts::RejectedSessionNotFound { result_session } => {
                 if result_session != self.command.session {
@@ -3601,6 +3754,10 @@ pub enum SubmitInputReconstitutionFailure {
     AppliedDeliveryIsNotNextSafePoint,
     /// A terminal result names another session.
     ResultSessionMismatch,
+    /// A missing-blob rejection names no attachment in the command.
+    AttachmentDigestMismatch,
+    /// A byte-budget rejection has no positive maximum or attachment.
+    AttachmentBudgetMismatch,
     /// The accepted-input effect names another command.
     AcceptedCommandMismatch,
     /// The result and accepted-input effect name different inputs.
@@ -3750,6 +3907,8 @@ mod tests {
         SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput,
         SubmitInputRejectedActiveTurnMismatchReconstitutionInput,
         SubmitInputRejectedActiveTurnPresentReconstitutionInput,
+        SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput,
+        SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
         SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput,
         SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
         SubmitInputRejectedNoActiveTurnReconstitutionInput, SubmitInputRejectedResult,
@@ -3777,14 +3936,15 @@ mod tests {
         AcceptedInputQueuePriority, AcceptedInputSchedulingProjection,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputStartingLineage,
         AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, ActiveTurnPhase,
-        ActiveTurnSchedulingReconstitutionInput, Actor, DangerousToolAutoApproval, DeliveryRequest,
-        DescendantTerminationScope, FastModeOverlay, FastModeSupport, FrozenAliasDefinition,
-        FrozenModelSelection, InitialSemanticTranscriptEntryPayload, IssuedOperationRef,
-        ModelCallDisposition, ModelCallReconstitutionInput, ModelCallReconstitutionState,
-        ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
-        ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay,
-        ModelSettingsPrecedence, NonEmptyIssuedOperationRefs, NormalizedToolArguments,
-        OriginConfiguration, OriginModelSettingsError, PerInputConfigurationChoices,
+        ActiveTurnSchedulingReconstitutionInput, Actor, AttachmentKind, BlobDigest,
+        DangerousToolAutoApproval, DeclaredMediaType, DeliveryRequest, DescendantTerminationScope,
+        FastModeOverlay, FastModeSupport, FrozenAliasDefinition, FrozenModelSelection,
+        InitialSemanticTranscriptEntryPayload, IssuedOperationRef, ModelCallDisposition,
+        ModelCallReconstitutionInput, ModelCallReconstitutionState, ModelCapabilities,
+        ModelCapabilityCatalog, ModelCapabilityDefinition, ModelSelectionOverride,
+        ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence,
+        NonEmptyIssuedOperationRefs, NormalizedToolArguments, OriginConfiguration,
+        OriginModelSettingsError, PerInputConfigurationChoices,
         PinnedProviderTargetReconstitutionInput, ReasoningLevel, ReconciliationReason,
         ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
         ResolvedProviderTarget, SemanticTranscriptEntryReconstitutionInput,
@@ -3794,7 +3954,7 @@ mod tests {
         SessionInputPosition, SessionReconstitutionInput, SettingOverlay, SteeringBinding,
         ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolName,
         ToolRequestOrdinal, ToolRequestReconstitutionInput, TranscriptAncestry, TurnDisposition,
-        UserContent,
+        UserContent, UserContentPart,
     };
 
     fn version(value: u64) -> SessionConfigurationDefaultsVersion {
@@ -3846,6 +4006,24 @@ mod tests {
             content(text),
             DeliveryRequest::StartWhenNoActiveTurn {
                 configuration: choices(expected, ModelSelectionOverride::UseSessionDefault),
+            },
+        )
+    }
+
+    fn attachment_command(command: u128, digest: BlobDigest) -> SubmitInput {
+        SubmitInput::new(
+            command_id(command),
+            session_id(1),
+            UserContent::try_parts(vec![UserContentPart::Attachment {
+                digest,
+                kind: AttachmentKind::File,
+                media_type: DeclaredMediaType::try_new("application/octet-stream".to_owned())
+                    .expect("test media type is valid"),
+                display_filename: None,
+            }])
+            .expect("test attachment content is valid"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: choices(1, ModelSelectionOverride::UseSessionDefault),
             },
         )
     }
@@ -5889,6 +6067,78 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn attachment_authority_rejections_reconstitute_exact_evidence() {
+        let digest = BlobDigest::from_bytes([0x5a; 32]);
+        let command = attachment_command(0x51, digest);
+
+        let missing = SubmitInputReconstitutionInput::rejected_attachment_blob_not_found(
+            SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput {
+                command: command.clone(),
+                stored_actor: Actor::User,
+                result_session: session_id(1),
+                result_digest: digest,
+            },
+        )
+        .reconstitute()
+        .expect("matching missing-blob evidence reconstructs");
+        assert!(matches!(
+            missing.result(),
+            SubmitInputResult::Rejected(
+                SubmitInputRejectedResult::AttachmentBlobNotFound { digest: stored }
+            ) if *stored == digest
+        ));
+
+        let budget = SubmitInputReconstitutionInput::rejected_attachment_byte_budget_exceeded(
+            SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput {
+                command: command.clone(),
+                stored_actor: Actor::User,
+                result_session: session_id(1),
+                result_maximum_bytes: 4096,
+            },
+        )
+        .reconstitute()
+        .expect("matching byte-budget evidence reconstructs");
+        assert!(matches!(
+            budget.result(),
+            SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: 4096
+            })
+        ));
+
+        let text_budget = SubmitInputReconstitutionInput::rejected_attachment_byte_budget_exceeded(
+            SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput {
+                command: start_command(0x52, "text-only frontier input", 1),
+                stored_actor: Actor::User,
+                result_session: session_id(1),
+                result_maximum_bytes: 4096,
+            },
+        )
+        .reconstitute()
+        .expect("frontier-driven byte-budget evidence reconstructs for text input");
+        assert!(matches!(
+            text_budget.result(),
+            SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: 4096
+            })
+        ));
+
+        let mismatch = SubmitInputReconstitutionInput::rejected_attachment_blob_not_found(
+            SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput {
+                command,
+                stored_actor: Actor::User,
+                result_session: session_id(1),
+                result_digest: BlobDigest::from_bytes([0x6b; 32]),
+            },
+        )
+        .reconstitute()
+        .expect_err("a digest absent from the command fails closed");
+        assert_eq!(
+            mismatch.failure(),
+            SubmitInputReconstitutionFailure::AttachmentDigestMismatch
+        );
+    }
+
     /// INV-002 / INV-012: complete applied facts reconstruct the canonical
     /// result, while a cross-wired content fact fails closed.
     #[test]
@@ -6115,7 +6365,14 @@ mod tests {
             .expect("the canonical reclassified origin has exact accepted content");
 
         assert_eq!(content.accepted_input(), accepted_input_id(0x73));
-        assert_eq!(content.content().text().as_str(), "reclassified steering");
+        assert_eq!(
+            content
+                .content()
+                .single_text()
+                .expect("the fixture has exactly one text part")
+                .as_str(),
+            "reclassified steering"
+        );
     }
 
     /// Replays a rejection whose reclassified origin's source turn ended with

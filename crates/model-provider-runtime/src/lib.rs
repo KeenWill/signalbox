@@ -1518,7 +1518,14 @@ fn render_runtime_messages(messages: &[ModelConversationMessage]) -> Vec<Convers
                 collecting_tool_results = false;
             }
             ModelConversationMessage::User { content, .. } => {
-                rendered.push(ConversationMessage::user_text(content.text().as_str()));
+                rendered.push(ConversationMessage {
+                    role: ConversationRole::User,
+                    parts: content
+                        .parts()
+                        .iter()
+                        .map(|part| MessagePart::Text(part.as_str().to_owned()))
+                        .collect(),
+                });
                 assistant_call = None;
                 collecting_tool_results = false;
             }

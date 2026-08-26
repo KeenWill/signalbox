@@ -57,9 +57,9 @@ use signalbox_persistence::{
     submit_input::SubmitInputRepository, tool_loop::PostgresToolLoopRepository,
 };
 use signalbox_process_protocol::{
-    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputContent,
-    InputDelivery, ModelSettingsOverlay, ProtocolVersion, RequestId, ServerMessage, ToolDecision,
-    decode_server_line, encode_client_line,
+    CanonicalU64, CanonicalUuid, ClientFrame, ClientRequest, CommandId, InputDelivery,
+    ModelSettingsOverlay, ProtocolVersion, RequestId, ServerMessage, ToolDecision,
+    UserInputContent, decode_server_line, encode_client_line,
 };
 use signalbox_tools_exec::{
     BwrapAvailability, CaptureCompleteness, ProcessOutcome, ProcessOutput, ProcessRequest,
@@ -398,7 +398,12 @@ impl ToolLoopFixture {
     ) -> (
         FixtureExecution<Catalog, Executor>,
         Arc<ScriptedModel<ModelCallId>>,
-    ) {
+    )
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
         self.execution_with_model_shutdown(scripts, catalog, executor, None)
     }
 
@@ -411,7 +416,12 @@ impl ToolLoopFixture {
     ) -> (
         FixtureExecution<Catalog, Executor>,
         Arc<ScriptedModel<ModelCallId>>,
-    ) {
+    )
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
         self.execution_with_model_shutdown(scripts, catalog, executor, Some(shutdown))
     }
 
@@ -424,7 +434,12 @@ impl ToolLoopFixture {
     ) -> (
         FixtureExecution<Catalog, Executor>,
         Arc<ScriptedModel<ModelCallId>>,
-    ) {
+    )
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
         self.execution_with_model_shutdown_and_limit(
             scripts,
             catalog,
@@ -443,7 +458,12 @@ impl ToolLoopFixture {
     ) -> (
         FixtureExecution<Catalog, Executor>,
         Arc<ScriptedModel<ModelCallId>>,
-    ) {
+    )
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
         self.execution_with_model_shutdown_and_limit(
             scripts,
             catalog,
@@ -463,7 +483,12 @@ impl ToolLoopFixture {
     ) -> (
         FixtureExecution<Catalog, Executor>,
         Arc<ScriptedModel<ModelCallId>>,
-    ) {
+    )
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
         let runtime = Arc::new(ScriptedModel::<ModelCallId>::following(scripts));
         let provider = RuntimeModelCallProvider::new(
             RecordingScriptedModel {
@@ -484,7 +509,12 @@ impl ToolLoopFixture {
                 provider,
                 automatic_tool_round_limit,
             )
-            .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor),
+            .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor)
+            .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+                self.pool.clone(),
+                None,
+                Vec::new(),
+            )),
             runtime,
         )
     }
@@ -531,6 +561,11 @@ impl ToolLoopFixture {
                 None,
             )
             .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor)
+            .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+                self.pool.clone(),
+                None,
+                Vec::new(),
+            ))
             .with_approval_judge(judge, None, configuration),
             runtime,
             judge_runtime,
@@ -2201,10 +2236,11 @@ async fn delegated_park_resumes_into_fresh_judge_composition() -> Result<(), Box
     first_execution
         .execute(Box::new(fixture.activated.clone()))
         .await?;
-    let (scheduled, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
-        .find_sessions()
-        .await?
-        .into_parts();
+    let (scheduled, _dispatch_starts, continuation) =
+        PostgresEligibilitySweep::new(fixture.pool.clone())
+            .find_sessions()
+            .await?
+            .into_parts();
     let resumable = PostgresToolLoopRepository::new(fixture.pool.clone())
         .find_resumable_turn(fixture.session)
         .await?;
@@ -3190,7 +3226,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
             "entries": [{
                 "position": 1,
                 "kind": "user",
-                "content": FIXTURE_USER_CONTENT,
+                "content": r#"[{"type":"text","text":"offline tool-loop request"}]"#,
                 "content_truncated": false
             }, {
                 "position": 2,
@@ -4077,10 +4113,11 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
     fixture
         .decide(request, ToolApprovalDecision::Approve)
         .await?;
-    let (resumable, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
-        .find_sessions()
-        .await?
-        .into_parts();
+    let (resumable, _dispatch_starts, continuation) =
+        PostgresEligibilitySweep::new(fixture.pool.clone())
+            .find_sessions()
+            .await?
+            .into_parts();
     assert!(!continuation);
     assert_eq!(resumable, vec![fixture.session]);
     let (restarted_execution, restarted_runtime) = fixture.execution(
@@ -4683,7 +4720,7 @@ async fn s02_s08_s10_inv016_inv036_steering_consumed_at_continuation_completes()
         .await?;
     let request = fixture.wait_for_requests(1).await?[0];
 
-    let steering_content = InputContent::new(String::from("steer the parked tool round"));
+    let steering_content = UserInputContent::text(String::from("steer the parked tool round"));
     let steering_frame = ClientFrame::try_new_for_version(
         ProtocolVersion::One,
         RequestId::try_new(1)?,

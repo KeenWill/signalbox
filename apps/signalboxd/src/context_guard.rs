@@ -24,6 +24,7 @@ use signalbox_persistence::{
 
 use crate::{
     ActivatedTurnExecution, HubModelConfiguration, TurnPassExecutionStage,
+    WorkspaceInstructionRuntime, WorkspaceInstructionRuntimeError,
     process_runtime::compact_automatically, report_ambiguous_commit,
     usage_limits::reported_usage_requires_compaction,
 };
@@ -415,6 +416,14 @@ pub enum ContextGuardedTurnPassError<CountError, ExecutionError> {
         /// Typed activation-and-failure commit error.
         source: CommitActivationPreviewError,
     },
+    /// Queued-turn discovery or durable manifest recording failed before the
+    /// counted activation commit.
+    WorkspaceInstructions {
+        /// Selected queued turn.
+        turn: TurnId,
+        /// Typed instruction preparation failure.
+        source: WorkspaceInstructionRuntimeError,
+    },
     /// Execution after exact guarded activation failed.
     Execution {
         /// Stage at which execution orchestration failed.
@@ -463,6 +472,7 @@ where
             }
             Self::Compaction { failure_class, .. } => *failure_class,
             Self::CompactionFailureClosure { source, .. } => source.operator_failure_class(),
+            Self::WorkspaceInstructions { source, .. } => source.operator_failure_class(),
             Self::Execution { source, .. } => source.operator_failure_class(),
         }
     }
@@ -478,6 +488,7 @@ where
             Self::ContextStillExceeded(_) => "context_window_exceeded",
             Self::Compaction { cause_code, .. } => cause_code,
             Self::CompactionFailureClosure { source, .. } => source.operator_failure_cause_code(),
+            Self::WorkspaceInstructions { source, .. } => source.operator_failure_cause_code(),
             Self::Execution { source, .. } => source.operator_failure_cause_code(),
             Self::ActivationSessionMismatch(_) => "activation_session_mismatch",
         }
@@ -495,6 +506,7 @@ pub struct ContextGuardedTurnPass<Counter, Catalog, Execution> {
     runtime_models: RuntimeModelCatalog,
     model_configuration: HubModelConfiguration,
     compaction_model: Arc<dyn ContextCompactionModel>,
+    workspace_instructions: Option<WorkspaceInstructionRuntime>,
     execution: Execution,
 }
 
@@ -514,6 +526,7 @@ where
             .field("runtime_models", &self.runtime_models)
             .field("model_configuration", &self.model_configuration)
             .field("compaction_model", &"[context compaction model]")
+            .field("workspace_instructions", &self.workspace_instructions)
             .field("execution", &self.execution)
             .finish()
     }
@@ -540,8 +553,19 @@ impl<Counter, Catalog, Execution> ContextGuardedTurnPass<Counter, Catalog, Execu
             runtime_models,
             model_configuration,
             compaction_model,
+            workspace_instructions: None,
             execution,
         }
+    }
+
+    /// Records the empty queued-turn manifest needed by the atomic counted
+    /// activation and first-call checkpoint.
+    pub fn with_workspace_instructions(
+        mut self,
+        workspace_instructions: WorkspaceInstructionRuntime,
+    ) -> Self {
+        self.workspace_instructions = Some(workspace_instructions);
+        self
     }
 }
 
@@ -566,7 +590,8 @@ where
             | ContextGuardedTurnPassError::Render { turn, .. }
             | ContextGuardedTurnPassError::Count { turn, .. }
             | ContextGuardedTurnPassError::Compaction { turn, .. }
-            | ContextGuardedTurnPassError::CompactionFailureClosure { turn, .. } => Some(*turn),
+            | ContextGuardedTurnPassError::CompactionFailureClosure { turn, .. }
+            | ContextGuardedTurnPassError::WorkspaceInstructions { turn, .. } => Some(*turn),
             ContextGuardedTurnPassError::CountCancelled(turn)
             | ContextGuardedTurnPassError::ContextWindowUnavailable(turn)
             | ContextGuardedTurnPassError::ContextStillExceeded(turn)
@@ -585,6 +610,7 @@ where
         let runtime_models = self.runtime_models.clone();
         let model_configuration = self.model_configuration.clone();
         let compaction_model = Arc::clone(&self.compaction_model);
+        let workspace_instructions = self.workspace_instructions.clone();
         let execution = self.execution.clone();
         async move {
             execution.resume_active(session).await.map_err(|source| {
@@ -760,8 +786,30 @@ where
                         compacted_turn = Some(turn);
                         continue;
                     }
+                    let prepared_instructions = if let Some(workspace_instructions) = &workspace_instructions {
+                        let Some(prepared) = workspace_instructions
+                            .prepare_counted_activation(session, turn)
+                            .await
+                            .map_err(|source| {
+                                ContextGuardedTurnPassError::WorkspaceInstructions {
+                                    turn,
+                                    source,
+                                }
+                            })?
+                        else {
+                            continue;
+                        };
+                        Some(prepared)
+                    } else {
+                        None
+                    };
                     let committed = activation
-                        .commit_counted_preview(preview, prospective, &model_calls)
+                        .commit_counted_preview(
+                            preview,
+                            prospective,
+                            &model_calls,
+                            prepared_instructions.as_ref().map(|prepared| prepared.evidence()),
+                        )
                         .await
                         .map_err(|error| match error {
                             CommitActivationPreviewError::Activation(error) => {
@@ -769,6 +817,12 @@ where
                             }
                             CommitActivationPreviewError::ModelCall(error) => {
                                 ContextGuardedTurnPassError::Operation { turn, source: error }
+                            }
+                            CommitActivationPreviewError::WorkspaceInstructions(error) => {
+                                ContextGuardedTurnPassError::WorkspaceInstructions {
+                                    turn,
+                                    source: WorkspaceInstructionRuntimeError::Persistence(error),
+                                }
                             }
                         })?;
                     match committed {
@@ -822,6 +876,7 @@ fn guarded_failure_stage<CountError, ExecutionError>(
         ContextGuardedTurnPassError::CompactionFailureClosure { .. } => {
             "context_compaction_failure_closure"
         }
+        ContextGuardedTurnPassError::WorkspaceInstructions { .. } => "workspace_instructions",
         ContextGuardedTurnPassError::Execution { stage, .. } => stage.operator_label(),
         ContextGuardedTurnPassError::ActivationSessionMismatch(_) => "activation_correlation",
     }

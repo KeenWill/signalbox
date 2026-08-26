@@ -42,7 +42,8 @@ use signalbox_persistence::{
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSignal, FatalExecutionSupervisor, FileCredentialAccess,
     HubModelConfiguration, ModelAdapter, PostgresProviderModelExecution,
-    PostgresScriptedModelExecution,
+    PostgresScriptedModelExecution, WorkspaceInstructionPreparedExecution,
+    WorkspaceInstructionRuntime,
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::{
@@ -286,7 +287,7 @@ async fn poll_terminal_transcript(
     loop {
         let rows = sqlx::query_as::<_, TranscriptRow>(
             "SELECT entry.payload_kind,
-                    accepted.content_text,
+                    accepted_part.text_value,
                     entry.assistant_text_value
                FROM turn_lifecycle AS lifecycle
                JOIN context_frontier_member AS member
@@ -298,6 +299,10 @@ async fn poll_terminal_transcript(
                LEFT JOIN accepted_input AS accepted
                  ON accepted.session_id = entry.source_session_id
                 AND accepted.accepted_input_id = entry.origin_accepted_input_id
+               LEFT JOIN accepted_input_content_part AS accepted_part
+                 ON accepted_part.accepted_input_id = accepted.accepted_input_id
+                AND accepted_part.position = 0
+                AND accepted_part.part_kind = 'text'
               WHERE lifecycle.session_id = $1
                 AND lifecycle.turn_id = $2
                 AND lifecycle.state_kind = 'terminal'
@@ -407,6 +412,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         credential_pin,
         credential_families,
         automatic_tool_round_limit,
+        instruction_roots,
         provider,
     ) = match provider {
         DebugProvider::Scripted { reply } => {
@@ -431,6 +437,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 // `None` is what selects the fallback reference.
                 None,
                 None,
+                Vec::new(),
                 DebugProviderRuntime::Scripted(
                     AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
                 ),
@@ -489,6 +496,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 configuration.runtime_model_catalog(),
                 diagnostic_model_identity_limit,
             );
+            let instruction_roots = configuration.workspace_instructions().roots().to_vec();
             (
                 selection,
                 configuration.target_catalog(),
@@ -496,6 +504,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 configuration.session_credential_pin(),
                 Some(configuration.credential_family_catalog()),
                 automatic_tool_round_limit,
+                instruction_roots,
                 DebugProviderRuntime::Anthropic(provider),
             )
         }
@@ -575,13 +584,18 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),
     );
+    let workspace_instructions =
+        WorkspaceInstructionRuntime::new(pool.clone(), None, instruction_roots);
     let transcript = match provider {
         DebugProviderRuntime::Scripted(reply) => {
             let (execution, fatal_execution) =
-                FatalExecutionSupervisor::new(PostgresScriptedModelExecution::new(
-                    repository,
-                    InProcessAttemptDispatchGate::default(),
-                    reply,
+                FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+                    PostgresScriptedModelExecution::new(
+                        repository,
+                        InProcessAttemptDispatchGate::default(),
+                        reply,
+                    ),
+                    workspace_instructions,
                 ));
             let (pass, pass_failure) =
                 ObservableDebugPass::new(ActivatedTurnPass::new(activation, execution));
@@ -597,11 +611,14 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         }
         DebugProviderRuntime::Anthropic(provider) => {
             let (execution, fatal_execution) =
-                FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-                    repository,
-                    InProcessAttemptDispatchGate::default(),
-                    provider,
-                    automatic_tool_round_limit,
+                FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+                    PostgresProviderModelExecution::new(
+                        repository,
+                        InProcessAttemptDispatchGate::default(),
+                        provider,
+                        automatic_tool_round_limit,
+                    ),
+                    workspace_instructions,
                 ));
             let (pass, pass_failure) =
                 ObservableDebugPass::new(ActivatedTurnPass::new(activation, execution));

@@ -72,7 +72,7 @@ use testcontainers_modules::{
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
 
-use support::blocked_backends_reached;
+use support::{blocked_backends_reached, record_empty_instruction_manifest};
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_review_workflow_integration";
@@ -757,6 +757,9 @@ async fn insert_active_turn_with_offset(
         .await
         .expect("fixture turn activates");
     assert!(matches!(outcome, StartEligibleTurnOutcome::Activated(_)));
+    record_empty_instruction_manifest(pool, session)
+        .await
+        .expect("fixture turn records its empty instruction manifest");
 }
 
 fn finding(

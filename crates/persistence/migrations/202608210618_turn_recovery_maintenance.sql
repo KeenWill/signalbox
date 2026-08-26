@@ -9,9 +9,16 @@ CREATE TABLE automatic_reconciliation_discovery_state (
 INSERT INTO automatic_reconciliation_discovery_state (singleton)
 VALUES (true);
 
+-- Supersession laps carry a high-water mark for the same reason discovery laps
+-- do: a recovery becomes superseded by a `turn_lifecycle` change rather than by
+-- anything the supersession statement writes, so a row the cursor has already
+-- passed can acquire that disposition afterwards. Without a mark, a steady
+-- arrival rate keeps every page full, the cursor never wraps to NULL, and the
+-- older rows starve.
 CREATE TABLE automatic_reconciliation_supersession_state (
     singleton boolean PRIMARY KEY DEFAULT true CHECK (singleton),
-    after_turn_id uuid
+    after_turn_id uuid,
+    high_turn_id uuid
 );
 
 INSERT INTO automatic_reconciliation_supersession_state (singleton)

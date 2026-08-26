@@ -7,14 +7,17 @@ mod command_registry;
 mod conversation_import_codec;
 mod lock_inventory;
 mod model_settings_resolution;
+mod user_content;
 
 pub mod approval_judge;
+pub mod approval_judge_eval;
 pub mod automatic_reconciliation;
 pub mod blob;
 pub mod commissioned_dispatch;
 pub mod context_compaction;
 pub mod convergence_sweep;
 pub mod conversation_import;
+pub mod conversation_import_discovery;
 pub mod conversation_listing;
 pub mod create_session;
 pub mod create_session_from_imported_frontier;
@@ -23,6 +26,7 @@ pub mod goal_turn;
 pub mod hub_fence;
 pub mod mapping;
 pub mod model_execution;
+pub mod operator_status;
 pub mod outbox;
 pub mod plan;
 pub mod process_read;
@@ -46,8 +50,11 @@ pub mod session_timeline;
 pub mod start_eligible_turn;
 pub mod startup;
 pub mod submit_input;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod tool_loop;
 pub mod turn_liveness;
+pub mod workspace_instructions;
 
 pub use session_credentials::{
     ModelCredentialFamilyCatalog, ModelCredentialFamilyCatalogError, SessionCredentialPin,

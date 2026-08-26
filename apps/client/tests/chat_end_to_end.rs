@@ -47,6 +47,7 @@ use signalbox_test_bin::test_bin_path;
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSupervisor, LocalProcessListener,
     PostgresProviderModelExecution, ProcessRuntime, ProcessRuntimeError,
+    WorkspaceInstructionRuntime,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -409,11 +410,12 @@ context_window_tokens = {CONTEXT_WINDOW_TOKENS}
                 provider,
                 None,
             )
-            .with_tool_loop(
-                tool_dispatch_gate,
-                tool_catalog,
-                CompletingFixtureExecutor,
-            ),
+            .with_tool_loop(tool_dispatch_gate, tool_catalog, CompletingFixtureExecutor)
+            .with_workspace_instructions(WorkspaceInstructionRuntime::new(
+                pool.clone(),
+                None,
+                Vec::new(),
+            )),
         );
         let pass = ActivatedTurnPass::new(
             StartEligibleTurnService::new(

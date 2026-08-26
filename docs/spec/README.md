@@ -55,6 +55,7 @@ owned by a sibling page is linked, never restated.
 - [Review workflows](review-workflows.md)
 - [Persistence protocol](persistence-protocol.md)
 - [Blob storage](blob-storage.md)
+- [File and media interpretation](file-and-media.md)
 - [Identity, commands, and telemetry correlation](identity-and-commands.md)
 - [Model-runtime substrate](runtime-substrate.md)
 - [Model and session settings](model-session-settings.md)
@@ -63,6 +64,7 @@ owned by a sibling page is linked, never restated.
 - [Process protocol](process-protocol.md)
 - [Repository watch and event dispatch](repo-watch.md)
 - [Pull-request convergence reconciliation](convergence-reconciliation.md)
+- [Workspace instructions and skills](workspace-instructions.md)
 - [Program substrate](program-substrate.md)
 - [Evaluation system](eval-system.md)
 

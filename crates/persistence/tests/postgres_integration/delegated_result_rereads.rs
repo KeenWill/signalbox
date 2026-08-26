@@ -1202,9 +1202,9 @@ async fn s17_inv032_automatic_delegated_reconciliation_closes_parent_delivery()
         )
         .await?;
     let recovery = PostgresAutomaticReconciliationRepository::new(pool.clone());
-    let batch = recovery.claim_due(None).await?;
+    let batch = recovery.claim_due().await?;
     let claimed = batch.claimed()[0];
-    let outcome = recovery.reconcile(claimed, None).await?;
+    let outcome = recovery.reconcile(claimed).await?;
     let evidence: (
         String,
         String,
@@ -1586,6 +1586,7 @@ async fn delegated_initial_task_activates_without_an_accepted_input() -> Result<
     else {
         panic!("the unchanged delegated child activation must commit");
     };
+    record_empty_instruction_manifest(&pool, SessionId::from_uuid(child)).await?;
     let delegated = activated
         .delegated()
         .expect("activation preserves its delegated origin family");
@@ -1796,7 +1797,7 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
         .await?;
 
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
-    let (candidates, continuation) = EligibilitySweep::find_sessions(&mut sweep)
+    let (candidates, _dispatch_starts, continuation) = EligibilitySweep::find_sessions(&mut sweep)
         .await?
         .into_parts();
     assert!(!continuation);
@@ -1889,7 +1890,7 @@ async fn s17_inv032_foreground_delegation_result_is_a_durable_sweep_candidate()
     .execute(&pool)
     .await?;
 
-    let (candidates, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (candidates, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();

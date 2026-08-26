@@ -723,7 +723,12 @@ async fn run_case(
         InProcessToolDispatchGate::default(),
         suite.catalog.clone(),
         suite.executor.clone(),
-    );
+    )
+    .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+        database.pool.clone(),
+        None,
+        Vec::new(),
+    ));
     timeout(TURN_TIMEOUT, execution.execute(Box::new(activated)))
         .await
         .map_err(|_| io::Error::other("the daemon tool eval turn exceeded its timeout"))??;

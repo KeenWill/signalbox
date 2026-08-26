@@ -109,6 +109,20 @@ controls unless an adapter's owning section records a capability-limited
 advisory exception; an adapter never silently presents prompt instructions as
 hard transport controls.
 
+**Committed unimplemented functionality — workspace-instruction transport.** The
+instruction-admission slice adds
+`workspace_instructions: Option<WorkspaceInstructionRegion>` beside `system` and
+conversation history. The region is a validated nonempty exact UTF-8 byte value
+bounded by the selected target's declared workspace-instruction byte capacity;
+the runtime neither parses nor rewrites its daemon-authored wrappers. Validation
+rejects a present region unless the resolved target and adapter mapping both
+declare `typed_system` support and sufficient byte capacity. Each adapter maps
+the field only to its provider's instruction/system transport, after the system
+prompt and before conversation messages, and fails before send when that mapping
+cannot preserve the boundary. It may not concatenate the region into ordinary
+system text, emit a user/tool message, or enable a native project-file loader.
+No present runtime operation carries this field until that slice lands.
+
 The `RuntimeModelCallProvider` bridge sets every operation it prepares to
 `Streamed`. Both HTTP adapters honor that mode by setting the provider-native
 stream flag and decoding the response as SSE; `Buffered` remains available to

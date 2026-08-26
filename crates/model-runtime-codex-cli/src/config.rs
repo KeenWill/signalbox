@@ -1,7 +1,7 @@
 //! Adapter configuration.
 
-use std::path::PathBuf;
 use std::time::Duration;
+use std::{collections::HashMap, path::PathBuf};
 
 /// Configuration for [`crate::CodexCliRuntime`].
 ///
@@ -20,6 +20,10 @@ pub struct CodexCliConfig {
     /// Codex login. Operations prepared by this runtime must carry this exact
     /// reference.
     pub credential_reference: signalbox_model_runtime::CredentialReference,
+    /// Per-profile login homes. Values are path references only; the adapter
+    /// never reads their auth material. See
+    /// `docs/spec/configuration-and-credentials.md#the-codex_home-delivery`.
+    pub credential_homes: HashMap<signalbox_model_runtime::CredentialReference, PathBuf>,
     /// Optional positive whole-process timeout representable by the runtime clock.
     pub exchange_timeout: Option<Duration>,
     /// Grace after a cancellation interrupt before force-killing the process.
@@ -46,11 +50,22 @@ impl CodexCliConfig {
             executable: executable.into(),
             working_directory: working_directory.into(),
             credential_reference,
+            credential_homes: HashMap::new(),
             exchange_timeout: None,
             interrupt_grace: Duration::from_secs(2),
             post_kill_reap_bound,
             event_limit: 8 * 1024 * 1024,
             stderr_limit: 64 * 1024,
         }
+    }
+
+    /// Supplies admitted per-profile `CODEX_HOME` paths under the delivery
+    /// contract in `docs/spec/configuration-and-credentials.md`.
+    pub fn with_credential_homes(
+        mut self,
+        homes: impl IntoIterator<Item = (signalbox_model_runtime::CredentialReference, PathBuf)>,
+    ) -> Self {
+        self.credential_homes = homes.into_iter().collect();
+        self
     }
 }

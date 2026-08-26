@@ -1,6 +1,6 @@
 //! Durable daemon-owned reconciliation of ambiguous physical operations.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, future::Future, time::Duration};
 
 use signalbox_application::{
     AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
@@ -12,7 +12,11 @@ use signalbox_domain::{
     AmbiguousModelCallTurnIdentities, ContextFrontierId, PendingSteeringReclassificationIdentity,
     ReconstitutedToolAttempt, SemanticTranscriptEntryId, TurnId,
 };
-use sqlx::{PgConnection, PgPool, Row};
+use sqlx::{
+    PgConnection, PgPool, Postgres, Row, Transaction,
+    pool::{MaybePoolConnection, PoolConnection},
+};
+use tokio::time::timeout;
 
 use crate::{
     commit_failure_is_ambiguous,
@@ -38,6 +42,148 @@ use crate::{
 /// completed attempt and claiming the next one just in time.
 // numeric-bound: guard - prevents a durable claim deadline from expiring before work starts
 const CLAIM_WINDOW: i64 = 1;
+
+/// Admitted attempts the claim statement schedules, one `CASE` arm each.
+// numeric-bound: not-a-bound - the claim statement's fixed CASE arity, which the ladder must match
+const RETRY_LADDER_ARITY: usize = 5;
+
+/// How long any one reconciliation statement waits for a contended row.
+///
+/// Every transaction here takes inventoried row locks unqualified: none skips a
+/// locked row and none refuses to wait. A client-side deadline bounds only the
+/// daemon's patience, because dropping a future queues a `ROLLBACK` rather than
+/// sending a `CancelRequest`: the backend keeps waiting and the pooled
+/// connection stays checked out for the full real wait while the caller has
+/// already given up. Under live traffic that turns contention into connection
+/// exhaustion.
+///
+/// `lock_timeout` bounds the database work itself and raises `55P03`, which this
+/// repository records as an ordinary infrastructure failure against the attempt
+/// budget. It is installed before anything is read or written, so it can only
+/// interrupt a lock wait, never a commit.
+///
+/// It is published because what makes it correct is its relationship to the
+/// caller's deadline: the caller must let this budget expire first, which
+/// [`reconciliation_deadline`] enforces.
+// numeric-bound: guard - prevents a contended statement from holding a pooled connection for the whole real wait
+pub const RECONCILIATION_LOCK_WAIT: Duration = Duration::from_secs(1);
+
+/// How long one reconciliation transaction waits to reach a pooled connection.
+///
+/// Cancelling an acquisition is safe in a way cancelling a statement is not: no
+/// transaction has begun, nothing has been sent, and so there is no work whose
+/// fate could be unknown.
+// numeric-bound: guard - prevents a saturated pool from consuming the attempt's deadline before it begins
+pub const RECONCILIATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
+
+/// The smallest caller deadline that lets the database-side budgets expire first.
+///
+/// The caller's deadline starts before the pool is asked for a connection, so a
+/// deadline at or below the acquisition plus lock budgets would end the attempt
+/// before `55P03` could arrive, stranding the connection this module exists to
+/// protect. A deployment-configured bound is raised to this floor.
+// numeric-bound: guard - keeps a configured attempt deadline above the database-side budgets
+pub const RECONCILIATION_DEADLINE_FLOOR: Duration =
+    RECONCILIATION_ACQUIRE_WAIT.saturating_add(RECONCILIATION_LOCK_WAIT);
+
+/// The last-resort deadline for one reconciliation transaction.
+///
+/// This is the only bound the deployment configures. It sits above the
+/// database-side budgets as the last resort for a backend that has stopped
+/// answering at all, and it never bounds the uncancellable `BEGIN` stretch: a
+/// caller that gives up abandons its own wait while the opened transaction
+/// completes and rolls back on a connection nobody is racing.
+///
+/// An unconfigured deployment keeps the shipped default rather than running
+/// unbounded, and a configured bound below [`RECONCILIATION_DEADLINE_FLOOR`] is
+/// raised to it.
+// numeric-bound: guard - prevents an unconfigured deployment from waiting forever on a backend that stopped answering
+pub const RECONCILIATION_DEADLINE_DEFAULT: Duration = Duration::from_secs(5);
+
+/// The margin must hold as an arithmetic fact, not as a comment: a
+/// database-side budget raised to meet the shipped deadline would silently
+/// restore the strand these bounds exist to prevent.
+const _: () = assert!(
+    RECONCILIATION_DEADLINE_DEFAULT.as_millis() > RECONCILIATION_DEADLINE_FLOOR.as_millis(),
+    "the shipped reconciliation deadline must outlast its database-side budgets"
+);
+
+/// Resolves the deployment's configured attempt bound into the enforced deadline.
+#[must_use]
+pub fn reconciliation_deadline(configured: Option<Duration>) -> Duration {
+    configured
+        .unwrap_or(RECONCILIATION_DEADLINE_DEFAULT)
+        .max(RECONCILIATION_DEADLINE_FLOOR)
+}
+
+/// Reaches a pooled connection under [`RECONCILIATION_ACQUIRE_WAIT`].
+///
+/// The budget covers the acquisition alone. `Pool::begin` would put `BEGIN`
+/// inside it, and cancelling that is not a smaller failure but the exact one
+/// this module exists to prevent.
+async fn acquire_bounded(
+    pool: &PgPool,
+) -> Result<PoolConnection<Postgres>, AutomaticReconciliationRepositoryError> {
+    timeout(RECONCILIATION_ACQUIRE_WAIT, pool.acquire())
+        .await
+        .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+        .map_err(AutomaticReconciliationRepositoryError::from)
+}
+
+/// Drives `work` where a caller that gives up cannot cancel it.
+///
+/// Dropping a future is the only way an `async` caller abandons work. Driving
+/// the operation on its own task separates the two: the caller's deadline
+/// abandons the join handle, while the task keeps running and finishes what it
+/// sent.
+async fn uncancellable<T>(
+    work: impl Future<Output = Result<T, AutomaticReconciliationRepositoryError>> + Send + 'static,
+) -> Result<T, AutomaticReconciliationRepositoryError>
+where
+    T: Send + 'static,
+{
+    tokio::spawn(work)
+        .await
+        .unwrap_or_else(|_| Err(sqlx::Error::WorkerCrashed.into()))
+}
+
+/// Opens the transaction and installs its budget, both beyond cancellation.
+///
+/// `BEGIN` and the `lock_timeout` statement are the one stretch no database-side
+/// budget covers, because the budget is what the second of them installs.
+/// Running the stretch on its own task makes it uncancellable rather than merely
+/// unbounded, so from the returned transaction onward
+/// [`RECONCILIATION_LOCK_WAIT`] is in force and the caller's deadline is what the
+/// specification says it is: a last resort sitting above a database-side budget
+/// that expires first. `COMMIT` is never interrupted.
+async fn begin_budgeted(
+    pool: &PgPool,
+) -> Result<Transaction<'static, Postgres>, AutomaticReconciliationRepositoryError> {
+    let connection = acquire_bounded(pool).await?;
+    uncancellable(async move {
+        let mut transaction =
+            Transaction::begin(MaybePoolConnection::PoolConnection(connection), None).await?;
+        bound_reconciliation_lock_wait(&mut transaction).await?;
+        Ok(transaction)
+    })
+    .await
+}
+
+/// Applies [`RECONCILIATION_LOCK_WAIT`] to the transaction on `connection`.
+///
+/// Called before the transaction reads or writes anything, so the only statement
+/// the budget can interrupt is one waiting for a row. A bound that could fire
+/// later might interrupt the commit instead, and the caller would then not know
+/// whether the attempt had ended.
+async fn bound_reconciliation_lock_wait(
+    connection: &mut PgConnection,
+) -> Result<(), AutomaticReconciliationRepositoryError> {
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(format!("{}ms", RECONCILIATION_LOCK_WAIT.as_millis()))
+        .execute(connection)
+        .await?;
+    Ok(())
+}
 
 fn decode_operation(
     model_call: Option<uuid::Uuid>,
@@ -222,12 +368,11 @@ impl PostgresAutomaticReconciliationRepository {
     }
 
     /// Discovers exact ambiguity waits and claims one due window under the
-    /// configured optional transaction bound.
+    /// module's layered database-side budgets.
     pub async fn claim_due(
         &self,
-        transaction_bound: impl Into<Option<Duration>>,
     ) -> Result<AutomaticReconciliationBatch, AutomaticReconciliationRepositoryError> {
-        let mut transaction = self.begin_bounded(transaction_bound.into()).await?;
+        let mut transaction = begin_budgeted(&self.pool).await?;
         discover_recoveries(&mut transaction, CLAIM_WINDOW).await?;
         let attempt_budget = self
             .attempt_budget
@@ -237,10 +382,13 @@ impl PostgresAutomaticReconciliationRepository {
         settle_abandoned_attempts(&mut transaction, attempt_budget, CLAIM_WINDOW).await?;
         mark_superseded_recoveries(&mut transaction, CLAIM_WINDOW).await?;
         let exhausted_rows = mark_exhausted_recoveries(&mut transaction, attempt_budget).await?;
-        let rows = sqlx::query(crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLAIM)
+        let mut claim = sqlx::query(crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLAIM)
             .bind(CLAIM_WINDOW)
-            .fetch_all(&mut *transaction)
-            .await?;
+            .bind(attempt_budget.unwrap_or(i32::MAX));
+        for seconds in self.retry_ladder_seconds()? {
+            claim = claim.bind(seconds);
+        }
+        let rows = claim.fetch_all(&mut *transaction).await?;
         transaction.commit().await.map_err(Self::commit_error)?;
 
         let mut claimed = Vec::with_capacity(rows.len());
@@ -284,9 +432,8 @@ impl PostgresAutomaticReconciliationRepository {
     pub async fn reconcile(
         &self,
         claimed: ClaimedAutomaticReconciliation,
-        transaction_bound: impl Into<Option<Duration>>,
     ) -> Result<AutomaticReconciliationOutcome, AutomaticReconciliationRepositoryError> {
-        let mut transaction = self.begin_bounded(transaction_bound.into()).await?;
+        let mut transaction = begin_budgeted(&self.pool).await?;
         lock_delegated_child_endpoint_sessions(&mut transaction, claimed.session())
             .await
             .map_err(AutomaticReconciliationRepositoryError::Model)?;
@@ -506,9 +653,8 @@ impl PostgresAutomaticReconciliationRepository {
         &self,
         claimed: ClaimedAutomaticReconciliation,
         failure: AutomaticReconciliationFailureKind,
-        transaction_bound: impl Into<Option<Duration>>,
     ) -> Result<(), AutomaticReconciliationRepositoryError> {
-        let mut transaction = self.begin_bounded(transaction_bound.into()).await?;
+        let mut transaction = begin_budgeted(&self.pool).await?;
         let rows = sqlx::query(
             "UPDATE automatic_reconciliation_attempt
                 SET outcome_kind = $3, finished_at = statement_timestamp()
@@ -556,38 +702,48 @@ impl PostgresAutomaticReconciliationRepository {
         Ok(())
     }
 
+    /// Renders the deployment's retry policy as the claim statement's ladder.
+    ///
+    /// The claim statement carries one `CASE` arm per admitted attempt, so its
+    /// arity is part of the contract with this policy: the schedule the daemon
+    /// enforces lives in the deployment's configuration rather than in the SQL
+    /// string, which is what keeps the two from diverging silently.
+    ///
+    /// An unconfigured base backoff yields an all-`NULL` ladder, which the
+    /// statement reads as the chain's "no claimable deadline" semantics. Every
+    /// slot shares one base, so the statement tests only the first.
+    fn retry_ladder_seconds(
+        &self,
+    ) -> Result<[Option<i64>; RETRY_LADDER_ARITY], AutomaticReconciliationRepositoryError> {
+        let mut ladder = [None; RETRY_LADDER_ARITY];
+        let Some(base) = self.retry_backoff_base else {
+            return Ok(ladder);
+        };
+        for (index, slot) in ladder.iter_mut().enumerate() {
+            let ordinal = u32::try_from(index)
+                .map_err(|_| {
+                    AutomaticReconciliationRepositoryError::Corruption("retry ladder ordinal")
+                })?
+                .saturating_add(1);
+            let attempt = AutomaticReconciliationAttempt::try_from_u32(ordinal).ok_or(
+                AutomaticReconciliationRepositoryError::Corruption("retry ladder ordinal"),
+            )?;
+            let seconds = i64::try_from(
+                attempt
+                    .retry_backoff(base, self.retry_backoff_cap)
+                    .as_secs(),
+            )
+            .map_err(|_| AutomaticReconciliationRepositoryError::Corruption("retry backoff"))?;
+            *slot = Some(seconds);
+        }
+        Ok(ladder)
+    }
+
     fn commit_error(source: sqlx::Error) -> AutomaticReconciliationRepositoryError {
         AutomaticReconciliationRepositoryError::Database {
             commit_ambiguous: commit_failure_is_ambiguous(&source),
             source,
         }
-    }
-
-    /// Starts a transaction and installs its configured optional server bound.
-    ///
-    /// A client-side future timeout cannot cancel PostgreSQL work that is
-    /// already running. When configured, installing the bound in PostgreSQL
-    /// keeps an abandoned client from leaving a transaction queued on the
-    /// shared outbox allocator after the daemon has moved on to later recovery
-    /// work.
-    async fn begin_bounded(
-        &self,
-        transaction_bound: Option<Duration>,
-    ) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, AutomaticReconciliationRepositoryError> {
-        let mut transaction = self.pool.begin().await?;
-        if let Some(transaction_bound) = transaction_bound {
-            let timeout_millis = i64::try_from(transaction_bound.as_millis())
-                .ok()
-                .filter(|millis| *millis > 0)
-                .ok_or(AutomaticReconciliationRepositoryError::Corruption(
-                    "transaction bound",
-                ))?;
-            sqlx::query("SELECT set_config('transaction_timeout', $1, true)")
-                .bind(format!("{timeout_millis}ms"))
-                .execute(&mut *transaction)
-                .await?;
-        }
-        Ok(transaction)
     }
 }
 
@@ -715,4 +871,58 @@ async fn finish_attempt(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        RECONCILIATION_ACQUIRE_WAIT, RECONCILIATION_DEADLINE_DEFAULT,
+        RECONCILIATION_DEADLINE_FLOOR, RECONCILIATION_LOCK_WAIT, reconciliation_deadline,
+    };
+    use std::time::Duration;
+
+    /// The floor is what keeps a configured deadline from ending an attempt
+    /// before the database-side budgets can report, which is the failure mode
+    /// the layered bounds exist to close.
+    #[test]
+    fn the_deadline_floor_covers_both_database_side_budgets() {
+        assert_eq!(
+            RECONCILIATION_DEADLINE_FLOOR,
+            RECONCILIATION_ACQUIRE_WAIT + RECONCILIATION_LOCK_WAIT
+        );
+    }
+
+    /// A deployment cannot configure a deadline that would expire inside the
+    /// uncancellable `BEGIN` stretch: it is raised to the floor instead.
+    #[test]
+    fn a_configured_bound_below_the_begin_budget_is_raised_to_the_floor() {
+        let undercutting = Duration::from_millis(1);
+        assert!(undercutting < RECONCILIATION_ACQUIRE_WAIT);
+        assert_eq!(
+            reconciliation_deadline(Some(undercutting)),
+            RECONCILIATION_DEADLINE_FLOOR
+        );
+        assert_eq!(
+            reconciliation_deadline(Some(RECONCILIATION_ACQUIRE_WAIT)),
+            RECONCILIATION_DEADLINE_FLOOR
+        );
+    }
+
+    /// A configured deadline above the floor is honoured exactly.
+    #[test]
+    fn a_configured_bound_above_the_floor_is_honoured() {
+        let configured = Duration::from_secs(30);
+        assert_eq!(reconciliation_deadline(Some(configured)), configured);
+    }
+
+    /// An unconfigured deployment keeps the shipped default rather than
+    /// running the attempt unbounded.
+    #[test]
+    fn an_unconfigured_deployment_keeps_the_shipped_default() {
+        assert_eq!(
+            reconciliation_deadline(None),
+            RECONCILIATION_DEADLINE_DEFAULT
+        );
+        assert!(RECONCILIATION_DEADLINE_DEFAULT > RECONCILIATION_DEADLINE_FLOOR);
+    }
 }

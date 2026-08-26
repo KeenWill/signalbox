@@ -48,9 +48,14 @@ current-head authentication is additionally verified against the parent slice
 (`agent/scoped-visibility`). The read-scope enforcement and process surface are
 verified against this PR (`agent/scoped-visibility-wiring`).
 Defaults-replacement settings admission and its locked expected-epoch handoff
-are verified against this PR (`agent/model-settings-execution`).
-Deployment-owned system-prompt and metadata-count admission is verified against
-this PR (`agent/bounds-required-config-protocol`).
+are verified against this PR (`agent/model-settings-execution`). The
+automatic-reconciliation child outcome — the failed result carrying the
+`ChildResultUnavailable` reason and the exact reconciled child turn that the
+daemon's durable attempt seals for a parent whose delegated call the provider
+can never settle — is verified against this PR
+(`agent/turn-lifecycle-hardening`). Deployment-owned system-prompt and
+metadata-count admission is verified against this PR
+(`agent/bounds-required-config-protocol`).
 
 ## Session identity and creation provenance
 
@@ -348,6 +353,29 @@ pins its target and non-secret credential reference at its own model-call
 boundary. The predecessor's prepared or in-flight call retains its existing
 pins, so credential affinity and provider prompt-cache prefixes do not move
 mid-call (INV-046).
+
+**Committed unimplemented functionality — instruction-aware replacement.** Once
+workspace-instruction admission exists, a replacement for a session with a
+nonempty admitted set rejects its proposed model selection unless every target
+the current configuration can select from that direct selection or alias has a
+typed system-instruction transport and capacity for the complete retained
+workspace-instruction region. The replacement checks this before committing the
+successor defaults epoch. What this page requires is the atomicity, not a lock
+recipe: the replacement must resolve every possible target and validate the
+complete retained region under the same serialization it commits the successor
+epoch under, so an admission or activation occurs wholly before or after it and
+cannot invalidate the evidence it checked. Which rows that serialization takes,
+in what order, and in which mode belong to the
+[persistence lock protocol](persistence-protocol.md#lock-protocol), which owns
+that inventory for every transaction and is the only place it is stated.
+Rejection is typed and leaves the current defaults and admitted set unchanged.
+No present replacement path performs this check because no present surface
+admits a bundle. The owning
+[model-selection validation](configuration-and-credentials.md#model-selection-validation)
+also performs the same retained-region check when each later origin is accepted,
+after resolving its alias against the then-current catalog. Replacement-time
+validation therefore does not stand in for acceptance-time validation after an
+alias retarget or daemon restart.
 
 ### Session system prompt
 
@@ -1005,8 +1033,8 @@ INV-007, INV-036).
 
 ### Bounds
 
-The multipart value and application admission apply the exact structural,
-text-byte, and attachment-metadata bounds owned by
+The multipart value applies the exact structural, text-byte, and
+attachment-metadata bounds owned by
 [blob storage](blob-storage.md#multipart-user-content) before typed command
 construction, so no command identifier is claimed for a structurally invalid
 value. Typed construction and the registry claim precede the current-state
@@ -1163,7 +1191,13 @@ carry the exact terminal child turn. Returned content is derived only from the
 proof-bearing completed call; independently supplied text cannot authorize a
 result. A completed turn with empty or oversized returned text records the
 distinct `ChildResultUnavailable` reason. Reconciliation-required work is not
-terminal delegation evidence and produces no outcome. **Committed unimplemented
+terminal delegation evidence on its own and produces no outcome while its
+ambiguity stands. Automatic reconciliation is the exception: the daemon's
+durable attempt seals the child as a failed result carrying that same
+`ChildResultUnavailable` reason and the exact reconciled child turn, in the
+transaction that commits the terminal transition, so a parent waiting on a call
+whose provider outcome can never be established is woken by evidence rather than
+left waiting on a turn that has already ended. **Committed unimplemented
 functionality.** Durable terminal-result reconstitution is not exposed by this
 foundation slice; the persistence slice must consume a sealed reconstituted
 ended-call/turn projection rather than accepting parallel raw identities or

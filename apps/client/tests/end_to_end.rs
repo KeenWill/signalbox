@@ -55,6 +55,7 @@ use signalboxd::{
     ActivatedTurnExecution, ActivatedTurnPass, FatalExecutionSupervisor, FileCredentialAccess,
     HubModelConfiguration, LocalProcessListener, ModelAdapter, PostgresProviderModelExecution,
     ProcessRuntime, ProcessRuntimeError, SessionTemplateConfiguration,
+    WorkspaceInstructionPreparedExecution, WorkspaceInstructionRuntime,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
@@ -1790,15 +1791,18 @@ context_window_tokens = 200000
         model_configuration,
     );
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                pool.clone(),
-                targets,
-                ModelCallCredentialReference::new("scripted-imported-continuation"),
+        FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    pool.clone(),
+                    targets,
+                    ModelCallCredentialReference::new("scripted-imported-continuation"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
-            None,
+            WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new()),
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -1902,12 +1906,39 @@ context_window_tokens = 200000
     let imported_assistant_content = transcript
         .find(&fixture.imported_assistant)
         .expect("the transcript contains the imported assistant fixture");
-    let live_user_label = transcript
-        .find("user turn=")
+    let live_user_line = transcript
+        .lines()
+        .find(|line| line.starts_with("user_content source_session="))
         .expect("the transcript labels the live user entry");
-    let live_user_content = transcript
-        .find(&fixture.live_user)
-        .expect("the transcript contains the live user fixture");
+    let live_user_label = transcript
+        .find(live_user_line)
+        .expect("the live user line belongs to the transcript");
+    let (identity_fields, parts) = live_user_line
+        .strip_prefix("user_content ")
+        .and_then(|line| line.split_once(" parts="))
+        .expect("the live user entry has canonical metadata and parts");
+    let identity_fields = identity_fields.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(identity_fields.len(), 4);
+    for (field, prefix) in
+        identity_fields
+            .iter()
+            .zip(["source_session=", "entry=", "accepted_input=", "turn="])
+    {
+        let value = field
+            .strip_prefix(prefix)
+            .expect("the live user identity fields use canonical labels");
+        let parsed =
+            uuid::Uuid::parse_str(value).expect("the live user identity fields contain UUIDs");
+        assert_eq!(parsed.hyphenated().to_string(), value);
+    }
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(parts)?,
+        serde_json::json!([{"type": "text", "text": fixture.live_user}])
+    );
+    let live_user_content = live_user_label
+        + live_user_line
+            .find(&fixture.live_user)
+            .expect("the canonical live user parts contain the fixture");
     let live_assistant_label = transcript
         .find("assistant turn=")
         .expect("the transcript labels the live assistant entry");
@@ -2043,15 +2074,18 @@ context_window_tokens = 200000
         model_configuration,
     );
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                pool.clone(),
-                targets,
-                ModelCallCredentialReference::new("scripted-terminal"),
+        FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    pool.clone(),
+                    targets,
+                    ModelCallCredentialReference::new("scripted-terminal"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
-            None,
+            WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new()),
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2430,15 +2464,18 @@ context_window_tokens = 200000
     assert_eq!(activation_recovery.stderr, pass_activated.stderr);
 
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(
-                pool.clone(),
-                targets,
-                ModelCallCredentialReference::new("scripted-review"),
+        FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(
+                    pool.clone(),
+                    targets,
+                    ModelCallCredentialReference::new("scripted-review"),
+                ),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
             ),
-            InProcessAttemptDispatchGate::default(),
-            provider,
-            None,
+            WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new()),
         ));
     execution.execute(activated).await?;
     assert!(!fatal_execution.is_triggered());
@@ -2824,7 +2861,12 @@ context_window_tokens = 200000
             provider,
             None,
         )
-        .with_tool_loop(tool_dispatch_gate, tool_catalog, CompletingFixtureExecutor),
+        .with_tool_loop(tool_dispatch_gate, tool_catalog, CompletingFixtureExecutor)
+        .with_workspace_instructions(WorkspaceInstructionRuntime::new(
+            pool.clone(),
+            None,
+            Vec::new(),
+        )),
     );
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -2985,12 +3027,15 @@ async fn terminal_client_completes_the_real_anthropic_path() -> Result<(), Box<d
         model_configuration,
     );
     let (execution, fatal_execution) =
-        FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-            PostgresModelCallRepository::new(pool.clone(), targets, credential_reference)
-                .with_session_credentials(credential_families),
-            InProcessAttemptDispatchGate::default(),
-            provider,
-            None,
+        FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+            PostgresProviderModelExecution::new(
+                PostgresModelCallRepository::new(pool.clone(), targets, credential_reference)
+                    .with_session_credentials(credential_families),
+                InProcessAttemptDispatchGate::default(),
+                provider,
+                None,
+            ),
+            WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new()),
         ));
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
