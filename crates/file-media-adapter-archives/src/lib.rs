@@ -1046,6 +1046,13 @@ fn entries_output(
         "format": kind.reader(),
     }))
     .map_err(|_| FileMediaProviderFailure::Failed)?;
+    // Entry names are untrusted, and JSON escaping can double the bytes each one
+    // contributes. A bounded inventory of admitted names can therefore still serialize
+    // past the declared output bound, so report that as the typed output failure rather
+    // than emitting a body the runtime would reject as a processor fault.
+    if body_json.len() > OUTPUT_BYTES {
+        return Ok(ProcessorReadOutput::OutputUnitTooLarge);
+    }
     Ok(ProcessorReadOutput::Structured {
         body_json,
         truncated: false,

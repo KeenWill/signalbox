@@ -702,6 +702,67 @@ pub fn zip_inside_zstd_skippable_frame() -> Result<Vec<u8>, Box<dyn Error>> {
     Ok(bytes)
 }
 
+/// A decoder-valid ZIP whose central directory carries the longest entry names the adapter
+/// admits, each built almost entirely from the one character JSON escaping doubles. Every
+/// record points at a single empty local record, so the archive stays under the source
+/// ceiling and inside the entry-count ceiling while the enumerated inventory serializes
+/// past the declared `entries` output bound.
+pub fn zip_with_escape_expanding_entry_names() -> Result<Vec<u8>, Box<dyn Error>> {
+    const NAME_BYTES: usize = 512;
+    const RECORDS: usize = 469;
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"PK\x03\x04");
+    bytes.extend_from_slice(&20_u16.to_le_bytes());
+    bytes.extend_from_slice(&0x0800_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u32.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+
+    let directory_start = u32::try_from(bytes.len())?;
+    for index in 0..RECORDS {
+        let mut name = vec![b'"'; NAME_BYTES];
+        *name
+            .get_mut(index)
+            .ok_or("entry name needs a unique byte")? = b'a';
+        bytes.extend_from_slice(b"PK\x01\x02");
+        bytes.extend_from_slice(&20_u16.to_le_bytes());
+        bytes.extend_from_slice(&20_u16.to_le_bytes());
+        bytes.extend_from_slice(&0x0800_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&u16::try_from(NAME_BYTES)?.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u16.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        bytes.extend_from_slice(&name);
+    }
+
+    let directory_bytes = u32::try_from(bytes.len())? - directory_start;
+    let records = u16::try_from(RECORDS)?;
+    bytes.extend_from_slice(b"PK\x05\x06");
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    bytes.extend_from_slice(&records.to_le_bytes());
+    bytes.extend_from_slice(&records.to_le_bytes());
+    bytes.extend_from_slice(&directory_bytes.to_le_bytes());
+    bytes.extend_from_slice(&directory_start.to_le_bytes());
+    bytes.extend_from_slice(&0_u16.to_le_bytes());
+    Ok(bytes)
+}
+
 #[derive(Clone, Copy)]
 enum ZipEntryKind {
     File,
