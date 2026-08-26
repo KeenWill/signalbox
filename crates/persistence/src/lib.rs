@@ -10,11 +10,13 @@ mod model_settings_resolution;
 mod user_content;
 
 pub mod approval_judge;
+pub mod approval_judge_eval;
 pub mod blob;
 pub mod commissioned_dispatch;
 pub mod context_compaction;
 pub mod convergence_sweep;
 pub mod conversation_import;
+pub mod conversation_import_discovery;
 pub mod conversation_listing;
 pub mod create_session;
 pub mod create_session_from_imported_frontier;
