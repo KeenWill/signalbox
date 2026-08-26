@@ -26,10 +26,6 @@ BEGIN
     UPDATE session_timeline_fact
        SET attention_activity_recorded_at = NEW.recorded_at
      WHERE session_id = NEW.session_id;
-    IF NOT FOUND THEN
-        RAISE EXCEPTION 'attention activity requires a session timeline fact'
-            USING ERRCODE = '23503';
-    END IF;
     RETURN NULL;
 END;
 $$;

@@ -290,6 +290,12 @@ async fn missing_activity_fact_fails_the_default_catalog_page_closed() -> Result
         .bind(complete.summaries[0].session.into_uuid())
         .execute(&pool)
         .await?;
+    sqlx::query(
+        "INSERT INTO operator_attention_change (session_id, fact_kind) VALUES ($1, 'runner')",
+    )
+    .bind(complete.summaries[0].session.into_uuid())
+    .execute(&pool)
+    .await?;
     let error = repository
         .snapshot(AttentionQuery::hot_page())
         .await
