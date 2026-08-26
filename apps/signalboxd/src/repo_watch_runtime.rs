@@ -51,9 +51,10 @@ use signalbox_domain::{
 use signalbox_model_runtime::{CredentialAccess, CredentialReference};
 use signalbox_persistence::repo_watch::{
     PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest, RepoWatchCursor,
-    RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchObservedReviewState,
-    RepoWatchPlannedStaleReviewClearance, RepoWatchStaleReviewClearanceOutcome,
-    RepoWatchStaleReviewClearanceRenewal, RepoWatchStoreError,
+    RepoWatchCursorCandidate, RepoWatchCursorGeneration, RepoWatchEventProducer,
+    RepoWatchObservedReviewState, RepoWatchPlannedStaleReviewClearance,
+    RepoWatchStaleReviewClearanceOutcome, RepoWatchStaleReviewClearanceRenewal,
+    RepoWatchStoreError,
 };
 use signalbox_persistence::repo_watch_dispatch::{
     PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError,
@@ -3035,20 +3036,33 @@ impl RepositoryWatchTask {
         let webhook_store = self.webhook_store.clone();
         let poller = Arc::clone(&self.poller);
         let repository = self.repository.clone();
-        // A committed disposition, not a projected one: this delivery owns a
-        // cursor advance rather than a shadow projection, and it is the only
-        // durable evidence of that ownership when the applied observation
-        // derived no event. Recording it here — before the cursor write, where
-        // the two-step handoff already records the terminal row — is what lets
-        // the parity view end its measurement at the repository's first primary
-        // commit instead of at the first webhook-produced event, which a
-        // context-only delivery never writes.
-        let terminal = RepoWatchWebhookTerminalRequest::try_new(
-            projections,
-            RepoWatchWebhookDisposition::Committed,
-            None,
-        )
-        .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        // The disposition records what this delivery did, not what mode was
+        // configured (`202608250500_repo_watch_webhook_primary.sql`), and the
+        // commit request already carries that fact: `from_webhook` marks rows a
+        // primary delivery owns, and `new` marks the poll-produced rows a
+        // targeted refresh reconciles through the poller's own credential.
+        //
+        // A committed disposition is the only durable evidence of primary
+        // ownership when the applied observation derived no event, and
+        // recording it here — before the cursor write, where the two-step
+        // handoff already records the terminal row — is what lets the parity
+        // view end its measurement at the repository's first primary commit
+        // instead of at the first webhook-produced event, which a context-only
+        // delivery never writes.
+        //
+        // A shadow-mode targeted refresh reaches this helper too, by way of
+        // `complete_targeted_webhook_projection`. Its rows are poll-produced
+        // and its projections are the shadow observations parity compares
+        // against them, so it stays `Projected`: recording it as committed
+        // would set `primary_start` for the repository and permanently drop
+        // every later poll event from parity in a deployment that never entered
+        // primary mode, ending the very measurement the delivery belongs to.
+        let disposition = match request.producer() {
+            RepoWatchEventProducer::Webhook => RepoWatchWebhookDisposition::Committed,
+            RepoWatchEventProducer::Poll => RepoWatchWebhookDisposition::Projected,
+        };
+        let terminal = RepoWatchWebhookTerminalRequest::try_new(projections, disposition, None)
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
         let supersession_epoch = self.webhook_shadow_supersession_epoch;
         self.webhook_targeted_completion = Some(RetainedTargetedWebhookCompletion::new(
             tokio::spawn(async move {
@@ -12798,6 +12812,69 @@ mod tests {
         assert!(
             fixture.task.poller.freshness().is_empty(),
             "a fetch that never reached the cursor authorizes no later reuse"
+        );
+        Ok(())
+    }
+
+    /// A shadow-mode targeted refresh shares the primary path's completion
+    /// helper but is not the repository's promotion: it reconciles through the
+    /// poller's own credential, so the rows it writes are poll-produced and its
+    /// projections are exactly what parity compares against them. Recording it
+    /// as committed would set the repository's `primary_start` and permanently
+    /// drop every later poll event from the measurement it belongs to, in a
+    /// deployment that never entered primary mode.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_shadow_targeted_refresh_records_a_projected_disposition()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admission = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admission).await?;
+        let mut fixture = webhook_task(&pool).await?;
+        assert!(
+            !fixture.task.webhook_primary,
+            "the fixture stays in shadow mode"
+        );
+
+        let observation = complete_typed_observation().await;
+        let pull_request = PullRequestNumber::new(
+            NonZeroU64::new(PULL_NUMBER).expect("fixture pull-request number is positive"),
+        );
+        let prepared = PreparedTargetedRefresh {
+            generation: RepoWatchCursorGeneration::INITIAL,
+            candidate: RepoWatchCursorCandidate::new(review_only_blocked_observation().await),
+            events: Vec::new(),
+            queried: vec![RepoWatchTargetedRefreshV1::PullRequestHydration { pull_request }],
+        };
+
+        let settlement = fixture
+            .task
+            .complete_targeted_webhook_projection(
+                prepared,
+                admission.key(),
+                Vec::new(),
+                WebhookShadowBaseline {
+                    observation,
+                    identity_frontier: RepoWatchEventIdentityFrontierV1::default(),
+                },
+            )
+            .await
+            .expect("the targeted commit settles");
+
+        assert_eq!(
+            settlement,
+            TargetedRefreshSettlement::Landed,
+            "the fixture cursor is at the generation this commit expects"
+        );
+        let disposition = webhook_store
+            .load_disposition(admission.key())
+            .await?
+            .expect("a targeted refresh reaches a terminal disposition");
+        assert_eq!(
+            disposition.disposition(),
+            RepoWatchWebhookDisposition::Projected,
+            "a shadow targeted refresh is not the repository's first primary commit"
         );
         Ok(())
     }

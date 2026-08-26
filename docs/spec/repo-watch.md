@@ -1531,8 +1531,14 @@ content identity and event kind, and the cause of any divergence the producing
 delivery already knows, while `repo_watch_webhook_disposition` atomically
 records projected, committed, duplicate-state, superseded, ignored, or
 quarantined terminal disposition. Primary mode restores the committed spelling
-the shadow-only ruling had withdrawn, and a delivery that owns a cursor advance
-records it in place of projected; no resulting cursor generation is added. The
+the shadow-only ruling had withdrawn, and a primary delivery — the one whose
+commit records the `webhook` producer — records it in place of projected. A
+shadow-mode targeted refresh also advances the cursor, but it reconciles through
+the poller's own credential and its rows keep the `poll` producer, so it keeps
+recording projected: those rows are the poll side of the very measurement its
+projections are compared against, and reading such a refresh as the repository's
+promotion would end that measurement in a deployment that never entered primary
+mode. No resulting cursor generation is added. The
 ruling that authorized write mode chose the two-step durable handoff below,
 which records the terminal disposition *before* the cursor write, so no
 disposition row can name the generation its own write produces; the generation a
