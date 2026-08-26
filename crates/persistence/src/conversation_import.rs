@@ -520,6 +520,20 @@ impl ImportedConversationRepository {
         let raw_source_bytes = encoded.raw_source_bytes()?;
         let normalized_source_record_bytes = encoded.normalized_source_record_bytes()?;
         let normalized_entry_bytes = encoded.normalized_entry_bytes()?;
+        // Publish before resolving a duplicate. The ingestion contract in
+        // `docs/spec/blob-storage.md` makes re-ingest rediscover the object: a
+        // missing or corrupt routed object is repaired from the supplied
+        // bytes, and an identity whose only healthy replica sits in a
+        // historical store gains one in the currently routed store. Resolving
+        // first would instead run a checked load against the damaged replica
+        // and return `Integrity`, so an exact re-import could never repair the
+        // aggregate. Publication short-circuits on a live-verified routed
+        // replica, so the healthy duplicate path still uploads nothing, and
+        // replica registration is idempotent.
+        let publications = publish_raw_blobs(self.blob_storage.as_ref(), &encoded.raws).await?;
+        let mut registration = self.pool.begin().await?;
+        register_raw_blobs(&mut registration, &publications).await?;
+        registration.commit().await?;
         if let Some(existing) = self
             .resolve_existing_snapshot(
                 &conversation,
@@ -531,7 +545,6 @@ impl ImportedConversationRepository {
         {
             return Ok(existing);
         }
-        let publications = publish_raw_blobs(self.blob_storage.as_ref(), &encoded.raws).await?;
         let mut transaction = self.pool.begin().await?;
         register_raw_blobs(&mut transaction, &publications).await?;
         insert_raw_blob_references(&mut transaction, &encoded.raws).await?;

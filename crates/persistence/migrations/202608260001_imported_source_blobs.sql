@@ -1,3 +1,12 @@
+-- This file carries a prefix above every prefix on `main` rather than the blob
+-- stack's original `2026081100xx` reservation. `202608250601` merged first and
+-- its backfill reads `imported_raw_source_record.raw_bytes`, which the column
+-- drop below removes; a lower prefix would apply this reset before that
+-- recorded migration and leave its backfill unparseable on a fresh database.
+-- The reserved block therefore no longer exceeds `main`, and the ordering
+-- guarantee in `docs/spec/persistence-protocol.md` selects the later prefix
+-- instead of editing a migration that is already immutable.
+--
 -- Pre-production reset: a database containing relational imported-source
 -- bytes does not cross this schema boundary. Imported conversations can have
 -- produced native sessions and commands, so remove the complete imported-rooted
@@ -76,6 +85,17 @@ BEGIN
                      JOIN review_finding_event AS event
                        ON event.finding_id = finding.finding_id
                     WHERE finding.run_id = affected.run_id
+                   UNION
+                   -- The producing side of the same edge. An affected pass can
+                   -- record an event on a finding owned by an unrelated run;
+                   -- deleting that pass cascades the event through
+                   -- `review_finding_event_pass_fk` and leaves the subject run
+                   -- with an `event_ordinal` gap that
+                   -- `require_review_finding_event_sequence` treats as
+                   -- unreachable, so the subject run is reset with it.
+                   SELECT event.finding_run_id AS run_id
+                     FROM review_finding_event AS event
+                    WHERE event.event_pass_run_id = affected.run_id
                ) AS adjacent ON true
     )
     SELECT run_id FROM affected_run;
@@ -203,6 +223,24 @@ BEGIN
         ON request.request_id = approval.request_id
      WHERE approval.user_command_id IS NOT NULL
        AND request.session_id IN (
+               SELECT session_id FROM imported_reset_session
+           )
+    ON CONFLICT DO NOTHING;
+
+    -- A rejected decision (`already_resolved`, `not_earliest_undecided`)
+    -- records no `tool_approval_decision` row at all, and
+    -- `decide_tool_request_command` carries no `session_id`, so neither the
+    -- generic capture above nor the applied-decision capture reaches it. Its
+    -- named request still cascades away with the imported session, which would
+    -- leave the typed receipt and its durable claim replaying request
+    -- identities this migration erased. Own it through the request instead;
+    -- applied receipts already captured above deduplicate.
+    INSERT INTO imported_reset_command (command_id)
+    SELECT decision.command_id
+      FROM decide_tool_request_command AS decision
+      JOIN tool_request AS request
+        ON request.request_id = decision.request_id
+     WHERE request.session_id IN (
                SELECT session_id FROM imported_reset_session
            )
     ON CONFLICT DO NOTHING;

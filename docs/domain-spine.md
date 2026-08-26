@@ -7386,6 +7386,7 @@ impl ScriptedModelCallProvider {
     // last_prepared_messages(), last_prepared_tools(), last_prepared_system_prompt()
 }
 // impl ModelCallProvider
+```
 
 ## application: tool_loop
 

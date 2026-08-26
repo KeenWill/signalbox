@@ -272,7 +272,7 @@ async fn postgres_before_import_blob_migration()
         .await?;
     for migration in MIGRATOR
         .iter()
-        .take_while(|migration| migration.version < 202608110019)
+        .take_while(|migration| migration.version < 202608260001)
     {
         connection.apply("_sqlx_migrations", migration).await?;
     }
@@ -463,7 +463,7 @@ async fn apply_migrations_from(pool: &PgPool, version: i64) -> Result<(), Box<dy
         .await?;
     for migration in MIGRATOR
         .iter()
-        .filter(|migration| migration.version >= version && migration.version < 202608110019)
+        .filter(|migration| migration.version >= version && migration.version < 202608260001)
     {
         connection.apply("_sqlx_migrations", migration).await?;
     }
@@ -1041,7 +1041,7 @@ async fn inv090_one_time_import_migration_installs_only_the_final_schema()
     .await?;
     assert_eq!(before, (1, 1, 3));
 
-    apply_exact_migration(&pool, 202608110019).await?;
+    apply_exact_migration(&pool, 202608260001).await?;
     sqlx::raw_sql(
         "ALTER TABLE tool_request
              DROP CONSTRAINT tool_request_fixture_session_fk;
