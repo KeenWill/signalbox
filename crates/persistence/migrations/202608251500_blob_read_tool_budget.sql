@@ -49,6 +49,12 @@ ALTER TABLE tool_attempt
         )
     );
 
+-- Replaces the guard installed by 202607250001_tool_loop.sql and amended by
+-- 202608080101_runner_recovery_turn_phase.sql. A full replacement restates
+-- every accumulated predicate: the only change here is admitting
+-- `preauthorization_rejected` as unsent terminal evidence and refusing it after
+-- dispatch. The runner-loss lineage predicate below is carried verbatim from
+-- 202608080101 and is not relaxed.
 CREATE OR REPLACE FUNCTION reject_tool_attempt_invalid_change()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -137,10 +143,37 @@ BEGIN
             OR (
                 OLD.effect_class = 'external_effect'
                 AND NEW.error_kind = 'crash_lost'
+                -- Carried unchanged from
+                -- 202608080101_runner_recovery_turn_phase.sql: only the exact
+                -- current lineage — the active awaiting-recovery phase bound to
+                -- this attempt, its bound lease, and that lease's current
+                -- lost-unclaimed head — admits crash loss for a dispatched
+                -- external effect. An attempt_id match alone would accept a
+                -- stale proof from an earlier lease generation.
                 AND NOT EXISTS (
                     SELECT 1
-                      FROM runner_lease_no_execution_proof AS proof
-                     WHERE proof.attempt_id = NEW.attempt_id
+                      FROM turn_lifecycle AS lifecycle
+                      JOIN runner_physical_attempt_lease_binding AS binding
+                        ON binding.attempt_id = OLD.attempt_id
+                      JOIN runner_lease_generation AS lease
+                        ON lease.lease_id = binding.lease_id
+                       AND lease.attempt_id = OLD.attempt_id
+                       AND lease.session_id = OLD.session_id
+                      JOIN runner_current_lease_event AS lease_head
+                        ON lease_head.lease_id = lease.lease_id
+                       AND lease_head.generation = lease.generation
+                      JOIN runner_lease_event AS lease_event
+                        ON lease_event.lease_id = lease_head.lease_id
+                       AND lease_event.generation = lease_head.generation
+                       AND lease_event.event_ordinal = lease_head.event_ordinal
+                     WHERE lifecycle.session_id = OLD.session_id
+                       AND lifecycle.turn_id = OLD.turn_id
+                       AND lifecycle.state_kind = 'active'
+                       AND lifecycle.active_phase_kind =
+                            'awaiting_runner_recovery'
+                       AND lifecycle.runner_recovery_tool_attempt_id =
+                            OLD.attempt_id
+                       AND lease_event.state_kind = 'lost_unclaimed'
                 )
             )
        )
