@@ -6,7 +6,6 @@ import {
   registeredArtifactKinds,
   selectBlobView,
   selectImageView,
-  selectViewDerivation,
 } from './ArtifactRenderer'
 import {
   artifactOriginalIds,
@@ -22,6 +21,7 @@ import {
   jpegDescriptor,
   jpegOriginalView,
   selectBoundedOriginalView,
+  selectProvenViewDerivation,
 } from './artifactScenario'
 import {
   ARTIFACT_EXPANDED_CHARACTERS,
@@ -177,9 +177,28 @@ describe('artifact renderer compatibility', () => {
       derivations: [unrelated, previewDerivation],
     }
 
-    expect(selectViewDerivation(imageArtifact, view)?.derivation_id).toBe(
+    expect(selectProvenViewDerivation(imageArtifact, view)?.derivation_id).toBe(
       previewDerivation.derivation_id,
     )
+  })
+
+  it('rejects a view whose kind contract and digest binding sit on different derivations', () => {
+    const misboundPreview = {
+      ...previewDerivation,
+      derivation_id: '0198f321-2300-7000-8000-000000000003',
+      input_digests: [`sha256:${'9a'.repeat(32)}`],
+    }
+    const arbitraryBinding = {
+      ...previewDerivation,
+      derivation_id: '0198f321-2300-7000-8000-000000000004',
+      transformation_name: 'image.arbitrary',
+    }
+    const view = {
+      ...imagePreviewView,
+      derivations: [misboundPreview, arbitraryBinding],
+    }
+
+    expect(selectProvenViewDerivation(imageArtifact, view)).toBeUndefined()
   })
 
   it('names a thumbnail fallback as a thumbnail', () => {
