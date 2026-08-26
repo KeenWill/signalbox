@@ -174,6 +174,7 @@ impl ReportedUsageCompaction {
     pub async fn compact_if_needed(
         &self,
         session: SessionId,
+        observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
     ) -> Result<(), ReportedUsageCompactionError> {
         let Some(candidate) = self.compaction_candidate(session).await? else {
             return Ok(());
@@ -185,6 +186,7 @@ impl ReportedUsageCompaction {
             &self.compaction_model,
             session,
             turn,
+            observe_prepared,
         )
         .await
         {
@@ -728,6 +730,7 @@ where
                             &compaction_model,
                             session,
                             turn,
+                            None,
                         )
                         .await
                         {

@@ -9004,7 +9004,7 @@ async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
 
     let failed_turn = reported_usage_still_exceeded_turn(
         compaction
-            .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()))
+            .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
             .await,
     );
 

@@ -403,9 +403,17 @@ fn startup_recovery_created_ambiguous_wait(outcome: &StartupScanSessionOutcome) 
 /// instead keeps recovery correlated with the evidence that justifies it — a
 /// compaction still holding the session boundary — and leaves every other
 /// shape to the watchdog that owns it.
+///
+/// `abandoned_call` is that evidence stated exactly. The session alone is not
+/// enough to name it: expiry inside the read-only preflight leaves no durable
+/// call at all, and by the time a delayed attempt opens this transaction a
+/// later admitted pass can be running a different compaction for the same
+/// session, which selecting on the session would terminalize. Only the call the
+/// expired window itself made durable is recovered here.
 pub(crate) async fn recover_abandoned_compaction_in_transaction(
     connection: &mut PgConnection,
     requested_session: SessionId,
+    abandoned_call: ModelCallId,
     write_lock_wait: Option<Duration>,
 ) -> Result<Option<StartupScanSessionOutcome>, StartupScanRepositoryError> {
     let (session_exists, scheduler_session, active_turn) =
@@ -425,7 +433,13 @@ pub(crate) async fn recover_abandoned_compaction_in_transaction(
         }
         return Ok(None);
     }
-    recover_context_compaction(connection, requested_session, active_turn).await
+    recover_context_compaction(
+        connection,
+        requested_session,
+        Some(abandoned_call),
+        active_turn,
+    )
+    .await
 }
 
 pub(crate) async fn recover_observed_slot_held_in_transaction<Generator>(
@@ -517,7 +531,7 @@ where
     }
 
     if let Some(recovered) =
-        recover_context_compaction(connection, requested_session, active_turn).await?
+        recover_context_compaction(connection, requested_session, None, active_turn).await?
     {
         return Ok(TransactionDecision::Commit(recovered));
     }
@@ -965,9 +979,15 @@ pub(crate) async fn insert_prepared_failure(
     Ok(failed)
 }
 
+/// `only_call`, when given, restricts recovery to that exact compaction call.
+/// A startup scan passes `None`: it runs before anything else can be inside the
+/// session, so whatever nonterminal compaction it finds is by construction the
+/// one the prior process abandoned. The expiry handoff cannot assume that and
+/// names its call.
 async fn recover_context_compaction(
     connection: &mut PgConnection,
     session: SessionId,
+    only_call: Option<ModelCallId>,
     active_turn: Option<Uuid>,
 ) -> Result<Option<StartupScanSessionOutcome>, StartupScanRepositoryError> {
     let rows = sqlx::query(
@@ -979,11 +999,16 @@ async fn recover_context_compaction(
             AND command.model_call_id = call.model_call_id
           WHERE COALESCE(call.session_id, command.session_id) = $1
             AND (
+                $2::uuid IS NULL
+                OR COALESCE(call.model_call_id, command.model_call_id) = $2
+            )
+            AND (
                 call.state_kind <> 'terminal'
                 OR command.result_kind = 'pending'
             )",
     )
     .bind(session_id_to_uuid(session))
+    .bind(only_call.map(ModelCallId::into_uuid))
     .fetch_all(&mut *connection)
     .await?;
     if rows.is_empty() {

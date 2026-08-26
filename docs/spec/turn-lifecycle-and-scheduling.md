@@ -518,24 +518,29 @@ the sweep (INV-007).
   instead: it has no turn to name, and its dedicated compaction call is durable
   work no other in-process path reconciles, so expiry there terminalizes that
   compaction rather than reporting nothing. Recovery stays correlated with the
-  evidence that justifies it. The handoff runs detached after its slot is
-  released and waits between attempts, so a later eligibility sweep may already
-  have activated a healthy successor turn by the time it reaches the database; a
-  session found holding no unterminalized compaction is therefore left exactly
-  as it stands, whatever else it is running, rather than recovered as a startup
-  scan recovers a session no other process can be inside. The handoff marks the
-  correlated cancellation so fatal supervision does not mistake the scheduler's
-  bounded drop for an unrelated failure, then spends four bounded database
-  attempts, the first immediate and the rest at the configured cadence, across
-  correlating the turn and recovering it. Each operation has a three-second
-  ceiling, which is wider than the repository's ordered connection,
-  scheduler-row, and write-lock budgets so those can return typed failures
-  instead of being masked by the wrapper. A lock refusal is preserved as its
-  typed turn-liveness cause even when the shared startup transition raises it
-  from its nested session or turn work. Other lock refusals retry after six
-  seconds, spacing the four attempts across tens-of-seconds commit handoffs
-  under outbox contention. Any other database, ambiguous, or non-infrastructure
-  failure retains the two-minute cadence.
+  evidence that justifies it, named exactly: the window reports the compaction
+  call it has made durable, and only that call is recovered. The window reports
+  nothing until one exists, so expiry inside the read-only boundary preflight
+  owes no recovery at all. Naming the session alone would not be enough. The
+  handoff runs detached after its slot is released and waits between attempts,
+  so by the time it reaches the database a later eligibility sweep may already
+  have activated a healthy successor turn, or begun a compaction of its own;
+  session-wide recovery would terminalize either. A session where the named call
+  no longer holds the boundary is therefore left exactly as it stands, whatever
+  else it is running, rather than recovered as a startup scan recovers a session
+  no other process can be inside. The handoff marks the correlated cancellation
+  so fatal supervision does not mistake the scheduler's bounded drop for an
+  unrelated failure, then spends four bounded database attempts, the first
+  immediate and the rest at the configured cadence, across correlating the turn
+  and recovering it. Each operation has a three-second ceiling, which is wider
+  than the repository's ordered connection, scheduler-row, and write-lock
+  budgets so those can return typed failures instead of being masked by the
+  wrapper. A lock refusal is preserved as its typed turn-liveness cause even
+  when the shared startup transition raises it from its nested session or turn
+  work. Other lock refusals retry after six seconds, spacing the four attempts
+  across tens-of-seconds commit handoffs under outbox contention. Any other
+  database, ambiguous, or non-infrastructure failure retains the two-minute
+  cadence.
 
   Expiry bounds a pass's tenure, which is not the claim that its turn stopped
   progressing: one admitted pass drives a whole model/tools loop, including

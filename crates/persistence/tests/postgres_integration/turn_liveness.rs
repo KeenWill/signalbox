@@ -675,7 +675,10 @@ async fn s11_compaction_recovery_spares_a_session_holding_no_abandoned_compactio
     let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
 
     let recovered = repository
-        .recover_abandoned_compaction(successor.session)
+        .recover_abandoned_compaction(
+            successor.session,
+            ModelCallId::from_uuid(Uuid::from_u128(0x15_a20)),
+        )
         .await?;
     let state: (String,) = sqlx::query_as(
         "SELECT state_kind FROM turn_lifecycle WHERE session_id = $1 AND turn_id = $2",
@@ -711,7 +714,7 @@ async fn s12_compaction_recovery_terminalizes_the_boundary_its_expired_pass_aban
     let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
 
     let recovered = repository
-        .recover_abandoned_compaction(abandoned.session)
+        .recover_abandoned_compaction(abandoned.session, abandoned.call)
         .await?;
     let call: (String, Option<String>) = sqlx::query_as(
         "SELECT state_kind, terminal_disposition_kind
@@ -777,7 +780,7 @@ async fn s13_compaction_recovery_refuses_a_contended_scheduler_row_inside_its_bu
         .await?;
 
     let error = repository
-        .recover_abandoned_compaction(abandoned.session)
+        .recover_abandoned_compaction(abandoned.session, abandoned.call)
         .await
         .expect_err("the held scheduler row outlasts the budget before that row is reached");
     scheduler_holder.rollback().await?;
@@ -786,6 +789,48 @@ async fn s13_compaction_recovery_refuses_a_contended_scheduler_row_inside_its_bu
         error.operator_failure_cause_code(),
         "turn_liveness_terminalization_lock_unavailable"
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S14: compaction recovery names the exact call its expired window made
+/// durable, so a later pass's live compaction is not the one it terminalizes.
+///
+/// Expiry inside the read-only preflight leaves no durable call at all, and the
+/// handoff waits between attempts, so by the time it reaches the database a
+/// later admitted pass can be running a different compaction for the same
+/// session. Selecting on the session alone would terminalize that one.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s14_compaction_recovery_spares_a_compaction_its_window_never_prepared()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let successor = abandoned_pre_activation_compaction(&pool, 0x15_d00).await?;
+    let repository = PostgresTurnLivenessRepository::new(pool.clone(), terminalization_bounds());
+
+    let recovered = repository
+        .recover_abandoned_compaction(
+            successor.session,
+            ModelCallId::from_uuid(Uuid::from_u128(0x15_d99)),
+        )
+        .await?;
+    let call: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM context_compaction_model_call
+          WHERE session_id = $1 AND model_call_id = $2",
+    )
+    .bind(successor.session.into_uuid())
+    .bind(successor.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(
+        recovered.is_none(),
+        "this compaction belongs to a later pass, so {recovered:?} must report nothing to recover"
+    );
+    assert_eq!(call, (String::from("prepared"), None));
 
     pool.close().await;
     drop(container);

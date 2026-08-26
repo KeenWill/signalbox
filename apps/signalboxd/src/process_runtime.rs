@@ -7429,6 +7429,7 @@ pub(crate) async fn compact_automatically(
     model: &Arc<dyn ContextCompactionModel>,
     session: SessionId,
     turn: TurnId,
+    observe_prepared: Option<&(dyn Fn(ModelCallId) + Send + Sync)>,
 ) -> Result<AppliedContextCompaction, AutomaticContextCompactionError> {
     let defaults = match ProcessReadRepository::new(model_calls.pool().clone())
         .read_session_defaults(session, None)
@@ -7538,6 +7539,9 @@ pub(crate) async fn compact_automatically(
             Err(error) => return Err(AutomaticContextCompactionError::Repository(error)),
         }
     };
+    if let Some(observe_prepared) = observe_prepared {
+        observe_prepared(prepared.call());
+    }
     let rendered_range = match retry_context_compaction_range_database_reads(|| {
         load_context_compaction_range(model_calls.pool(), &prepared)
     })

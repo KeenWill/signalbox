@@ -16,7 +16,8 @@ use signalbox_application::{
     StartupScanSessionOutcome, TurnLivenessEvidence,
 };
 use signalbox_domain::{
-    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, SessionId, TurnAttemptId,
+    AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, ModelCallId, SessionId,
+    TurnAttemptId,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Decimal, types::Uuid};
 use tokio::time::timeout;
@@ -320,12 +321,18 @@ impl PostgresTurnLivenessRepository {
     /// Bounding the acquisition and both lock waits server-side is what makes
     /// the caller's deadline a backstop rather than the only bound.
     ///
-    /// `Ok(None)` means the session held no unterminalized compaction — the
-    /// pass expired inside the read-only preflight, or its compaction committed
-    /// before the future was dropped — and nothing was touched.
+    /// `abandoned_call` names the exact compaction the expired window made
+    /// durable. The session alone would not distinguish it from a compaction a
+    /// later admitted pass is running now, which a delayed attempt would
+    /// otherwise terminalize.
+    ///
+    /// `Ok(None)` means that call no longer holds the boundary — it committed
+    /// before the pass future was dropped, or a prior attempt of this same
+    /// handoff already terminalized it — and nothing was touched.
     pub async fn recover_abandoned_compaction(
         &self,
         session: SessionId,
+        abandoned_call: ModelCallId,
     ) -> Result<Option<StartupScanSessionOutcome>, TurnLivenessRepositoryError> {
         let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
             .await
@@ -339,6 +346,7 @@ impl PostgresTurnLivenessRepository {
         let recovered = crate::startup::recover_abandoned_compaction_in_transaction(
             &mut transaction,
             session,
+            abandoned_call,
             self.bounds.write_lock_wait,
         )
         .await
