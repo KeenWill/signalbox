@@ -10,6 +10,7 @@ import {
 } from './commands'
 import { FleetTable } from './FleetTable'
 import { ArtifactWorkbench } from './features/artifacts/ArtifactRenderer'
+import { artifactOriginalIds, artifactPreviewIds } from './features/artifacts/artifactScenario'
 import {
   SCENARIO_FLEET_WINDOW_ITEMS,
   SCENARIO_TIMELINE_WINDOW_ITEMS,
@@ -91,17 +92,19 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: knownId === 'blobs' ? artifactPreviewIds : [],
+      artifactOriginalIds: knownId === 'blobs' ? artifactOriginalIds : [],
       navigate: (path) =>
         void navigate({
           to: '/$surface',
           params: { surface: path.slice(1) as ProductRouteId },
         }),
       focusTimeline: () => {
-        const active = document.activeElement
-        if (active instanceof HTMLElement) active.blur()
         const target =
-          knownId === 'blobs' ? '[data-command-focus-target]' : '[aria-label="Session timeline"]'
-        document.querySelector<HTMLElement>(target)?.focus()
+          document.querySelector<HTMLElement>('[aria-label="Session timeline"]') ??
+          document.querySelector<HTMLElement>('.artifact-heading[aria-pressed="true"]') ??
+          document.querySelector<HTMLElement>('.artifact-heading')
+        target?.focus()
       },
     }),
     [dispatch, knownId, navigate, timelineIds],
@@ -205,7 +208,7 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
         </header>
         <div className="primary-stack">
           {knownId === 'blobs' ? (
-            <ArtifactWorkbench />
+            <ArtifactWorkbench commandContext={commandContext} />
           ) : (
             <Transcript
               key={`timeline-${knownId}`}

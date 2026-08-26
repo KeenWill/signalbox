@@ -14,7 +14,7 @@ use signalbox_model_runtime::{
     AssistantPart, CancellationSignal, CompletionFinish, ConversationMessage, ConversationRole,
     CredentialReference, DeliveryMode, LossCause, MessagePart, ModelOperation, ModelRuntime,
     Observation, ObservationFact, PreparationFailure, PreparationOutcome, ProviderErrorKind,
-    RequestedTarget, ResolvedTarget, StreamInterruption, StructuredDecodeFailure,
+    REDACTED, RequestedTarget, ResolvedTarget, StreamInterruption, StructuredDecodeFailure,
     StructuredOutputContract, TerminalEvidence, TokenUsage, ToolCallId, ToolCallProposal,
     ToolCallsAtLoss, ToolChoice, ToolDefinition, ToolName, decode_structured,
 };
@@ -157,6 +157,9 @@ fn collect_assistant_parts(parts: &[AssistantPart], material: &mut Vec<String>) 
             }
             AssistantPart::RedactedThinking { data } => material.push(data.clone()),
             AssistantPart::ToolCall(proposal) => collect_tool_proposal(proposal, material),
+            AssistantPart::SuppressedToolCall(name) => {
+                material.push(name.as_str().to_string());
+            }
         }
     }
 }
@@ -438,6 +441,7 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     );
     assert_eq!(result.spawns, 1);
     assert!(result.argv.contains("exec\n--json\n--ephemeral"));
+    assert!(result.argv.contains("--output-last-message"));
     assert!(result.argv.contains("--ignore-user-config"));
     assert!(result.argv.contains("--ignore-rules"));
     assert!(result.argv.contains(&disabled_capability_argv()));
@@ -452,6 +456,42 @@ async fn buffered_completion_is_terminal_only_after_turn_completed() {
     assert!(result.argv.contains("--config\nproject_doc_max_bytes=0"));
     assert!(result.argv.contains(RESOLVED_TARGET));
     assert!(result.prompt.contains(scenario));
+}
+
+#[tokio::test]
+async fn completed_turn_recovers_the_clis_independently_retained_final_message() {
+    let result = execute_scenario(
+        "output_last_message_recovery",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![AssistantPart::Text(fixtures::BUFFERED_ANSWER.to_string())]
+    );
+    assert_eq!(result.spawns, 1);
+}
+
+/// INV-035: a final message recovered from the CLI-owned file still follows
+/// the preceding JSONL redaction state; the second channel cannot bypass a
+/// credential marker retained from an earlier event.
+#[tokio::test]
+async fn inv_035_output_last_message_consults_the_jsonl_redaction_state() {
+    let result = execute_scenario(
+        "output_last_message_split_credential",
+        DeliveryMode::Buffered,
+        OperationShape::Text,
+        CancellationSignal::never(),
+    )
+    .await;
+    let diagnostic = boundary_material(&result);
+
+    assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_STREAM_TOKEN));
+    assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(result.spawns, 1);
 }
 
 /// Exact ordered argv fragment generated from the audited production fixture,
@@ -599,6 +639,15 @@ async fn inv_035_buffered_reasoning_marker_suppresses_tool_arguments() {
 
     assert!(!diagnostic.contains(fixtures::SENSITIVE_SPLIT_AUTHORIZATION));
     assert!(diagnostic.contains("[redacted]"));
+    assert_eq!(
+        completed(&result.evidence).content,
+        vec![
+            AssistantPart::Text(REDACTED.to_string()),
+            AssistantPart::SuppressedToolCall(signalbox_model_runtime::ToolName::new(
+                fixtures::TOOL_NAME,
+            )),
+        ]
+    );
     assert_eq!(result.spawns, 1);
 }
 
@@ -2646,8 +2695,9 @@ async fn cancellation_kills_descendants_after_the_group_leader_exits() {
         fake_cli(),
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
     );
-    config.exchange_timeout = Duration::from_secs(5);
+    config.exchange_timeout = Some(Duration::from_secs(5));
     config.interrupt_grace = Duration::from_millis(100);
     let runtime = CodexCliRuntime::new(config).expect("offline runtime configuration is valid");
     let prepared = prepare(
@@ -2719,8 +2769,9 @@ async fn cancellation_grace_cannot_extend_the_exchange_deadline() {
         fake_cli(),
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
     );
-    config.exchange_timeout = Duration::from_secs(5);
+    config.exchange_timeout = Some(Duration::from_secs(5));
     config.interrupt_grace = Duration::from_secs(10);
     let runtime = CodexCliRuntime::new(config).expect("offline runtime configuration is valid");
     let prepared = prepare(
@@ -3392,12 +3443,13 @@ async fn selected_member_home_reaches_each_spawn_and_changes_with_the_reference(
         .expect("second synthetic home is nonempty");
     let first_reference = CredentialReference::new("codex-a");
     let second_reference = CredentialReference::new("codex-b");
-    let mut config = CodexCliConfig::new(fake_cli(), temporary.path(), first_reference.clone())
-        .with_credential_homes([
-            (first_reference.clone(), first_home.clone()),
-            (second_reference.clone(), second_home.clone()),
-        ]);
-    config.exchange_timeout = OFFLINE_HARNESS_TIMEOUT;
+    let mut config =
+        CodexCliConfig::new(fake_cli(), temporary.path(), first_reference.clone(), None)
+            .with_credential_homes([
+                (first_reference.clone(), first_home.clone()),
+                (second_reference.clone(), second_home.clone()),
+            ]);
+    config.exchange_timeout = Some(OFFLINE_HARNESS_TIMEOUT);
     config.interrupt_grace = Duration::from_millis(100);
     let runtime = CodexCliRuntime::new(config).expect("synthetic homes are admitted");
     let mut first_operation = operation(
@@ -3783,6 +3835,7 @@ fn relative_executable_is_rejected_at_construction() {
         "codex",
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
     );
 
     let error = CodexCliRuntime::new(config)
@@ -3797,6 +3850,7 @@ fn relative_working_directory_is_rejected_at_construction() {
         fake_cli(),
         ".",
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
     );
 
     let error = CodexCliRuntime::new(config)
@@ -3812,8 +3866,9 @@ fn unrepresentable_exchange_timeout_is_rejected_at_construction() {
         fake_cli(),
         temporary.path(),
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
     );
-    config.exchange_timeout = Duration::MAX;
+    config.exchange_timeout = Some(Duration::MAX);
 
     let error = CodexCliRuntime::new(config)
         .expect_err("execution must never panic while constructing its process deadline");
@@ -3927,8 +3982,9 @@ fn runtime_with_timeout(
         executable,
         working_directory,
         CredentialReference::new(CREDENTIAL_REFERENCE),
+        None,
     );
-    config.exchange_timeout = exchange_timeout;
+    config.exchange_timeout = Some(exchange_timeout);
     config.interrupt_grace = Duration::from_millis(100);
     CodexCliRuntime::new(config).expect("offline runtime configuration is valid")
 }
@@ -4757,7 +4813,8 @@ fn tool_ids(content: &[AssistantPart]) -> Vec<&str> {
             AssistantPart::ToolCall(proposal) => Some(proposal.id.as_str()),
             AssistantPart::Text(_)
             | AssistantPart::Thinking { .. }
-            | AssistantPart::RedactedThinking { .. } => None,
+            | AssistantPart::RedactedThinking { .. }
+            | AssistantPart::SuppressedToolCall(_) => None,
         })
         .collect()
 }
