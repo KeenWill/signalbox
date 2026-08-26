@@ -65,7 +65,7 @@ use signalbox_model_runtime::{
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiPreparedRequest, OpenAiRuntime};
 use signalbox_persistence::{
     ModelCredentialFamilyCatalog, SessionCredentialPin, SessionModelCredential,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
     process_read::{
@@ -707,7 +707,7 @@ async fn run_case(
     let (session, turn, activated) = database.start_turn(&prompt).await?;
     let tracker = OperationTracker::default();
     let runtime = EvalOpenAiRuntime::new(forced_tool, tracker.clone())?;
-    let provider = RuntimeModelCallProvider::new(runtime, database.runtime_models.clone());
+    let provider = RuntimeModelCallProvider::new(runtime, database.runtime_models.clone(), None);
     let execution = PostgresProviderModelExecution::new(
         PostgresModelCallRepository::new(
             database.pool.clone(),
@@ -717,6 +717,7 @@ async fn run_case(
         .with_session_credentials(database.credential_families.clone()),
         InProcessAttemptDispatchGate::default(),
         provider,
+        None,
     )
     .with_tool_loop(
         InProcessToolDispatchGate::default(),
@@ -6974,8 +6975,8 @@ impl ForcedToolSequence {
 
 impl EvalOpenAiRuntime {
     fn new(forced_tool: Option<&str>, tracker: OperationTracker) -> EvalResult<Self> {
-        let mut config = OpenAiConfig::new();
-        config.exchange_timeout = EXCHANGE_TIMEOUT;
+        let mut config = OpenAiConfig::new(None);
+        config.exchange_timeout = Some(EXCHANGE_TIMEOUT);
         Ok(Self {
             inner: OpenAiRuntime::new(config, EnvironmentCredential)?,
             forced: ForcedToolSequence::new(forced_tool),
@@ -10442,7 +10443,7 @@ impl EvalDatabase {
             .with_user(DATABASE_USER)
             .with_password(DATABASE_PASSWORD)
             .with_cmd(disposable_postgres_server_args())
-            .with_mount(disposable_postgres_state_tmpfs())
+            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
             .with_tag(POSTGRES_IMAGE_TAG)
             .with_labels(disposable_test_container_labels())
             .start()

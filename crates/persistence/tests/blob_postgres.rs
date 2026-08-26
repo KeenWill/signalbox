@@ -8,13 +8,18 @@
 
 use std::{error::Error, sync::Arc};
 
+use signalbox_application::BlobDerivationRecordOutcome;
 use signalbox_blob_store::{BlobObjectKey, BlobStoreName, ExpectedBlob, MAX_BLOB_STORES};
-use signalbox_domain::BlobDigest;
+use signalbox_domain::{
+    BlobDerivation, BlobDerivationId, BlobDerivationProducer, BlobDigest, BlobTransformation,
+    BlobTransformationName,
+};
 use signalbox_persistence::{
     blob::{
         BlobCatalogCorruption, BlobCatalogRepository, BlobReplicaRecord, BlobStoreBindingRecord,
     },
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    blob_derivation::BlobDerivationRepository,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -42,7 +47,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -80,6 +85,56 @@ fn replica(expected: ExpectedBlob, store: &str) -> BlobReplicaRecord {
 
 fn binding(name: &str, namespace: u128) -> BlobStoreBindingRecord {
     BlobStoreBindingRecord::new(store(name), Uuid::from_u128(namespace))
+}
+
+fn thumbnail_derivation(input: BlobDigest, output: BlobDigest) -> BlobDerivation {
+    BlobDerivation::try_new(
+        BlobDerivationId::from_uuid(Uuid::from_u128(0x5a10_0700)),
+        [input],
+        BlobTransformation::try_new(
+            BlobTransformationName::try_new("image.thumbnail")
+                .expect("the fixture transformation name is valid"),
+            1,
+            &serde_json::json!({"edge_px": 256, "format": "image/png"}),
+        )
+        .expect("the fixture transformation is valid"),
+        BlobDerivationProducer::Deterministic {
+            implementation: BlobDigest::digest(b"thumbnail-worker-v1"),
+        },
+        [output],
+    )
+    .expect("the fixture derivation is valid")
+}
+
+async fn derivation_repository_fixture() -> Result<
+    (
+        ContainerAsync<Postgres>,
+        PgPool,
+        BlobDerivationRepository,
+        ExpectedBlob,
+        ExpectedBlob,
+    ),
+    Box<dyn Error>,
+> {
+    let (container, pool) = migrated_postgres().await?;
+    let catalog = BlobCatalogRepository::new(pool.clone());
+    let input = expected_blob(CONTENT);
+    let output = expected_blob(OTHER_CONTENT);
+    let store_binding = binding(PRIMARY_STORE, PRIMARY_NAMESPACE);
+    catalog
+        .register_verified_replica(input, store_binding.clone(), replica(input, PRIMARY_STORE))
+        .await?;
+    catalog
+        .register_verified_replica(output, store_binding, replica(output, PRIMARY_STORE))
+        .await?;
+
+    Ok((
+        container,
+        pool.clone(),
+        BlobDerivationRepository::new(pool),
+        input,
+        output,
+    ))
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -494,6 +549,314 @@ async fn recorded_store_bindings_use_bytewise_name_order() -> Result<(), Box<dyn
     let bindings = repository.recorded_store_bindings().await?;
 
     assert_eq!(bindings.as_ref(), &[punctuated, letters]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-078: replaying one deterministic derivation returns its immutable record.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv078_deterministic_blob_derivation_replay_returns_the_record()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
+    let derivation = thumbnail_derivation(input.digest(), output.digest());
+    let key = derivation
+        .deterministic_key()
+        .expect("the fixture producer is deterministic");
+
+    let recorded = repository.record(derivation.clone()).await?;
+    let replay = repository.record(derivation.clone()).await?;
+    let loaded = repository.find_deterministic(key).await?;
+
+    assert_eq!(
+        recorded,
+        BlobDerivationRecordOutcome::Recorded(derivation.clone())
+    );
+    assert_eq!(
+        replay,
+        BlobDerivationRecordOutcome::Existing(derivation.clone())
+    );
+    assert_eq!(loaded, Some(derivation));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-078: the exact 4,096-byte canonical parameter boundary round-trips.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv078_canonical_parameter_boundary_round_trips() -> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
+    let transformation = BlobTransformation::try_new(
+        BlobTransformationName::try_new("image.boundary")
+            .expect("the boundary transformation name is valid"),
+        1,
+        &serde_json::json!({"payload": "x".repeat(4082)}),
+    )
+    .expect("the canonical boundary parameters are valid");
+    assert_eq!(transformation.parameters_json().len(), 4096);
+    let derivation = BlobDerivation::try_new(
+        BlobDerivationId::from_uuid(Uuid::from_u128(0x5a10_0710)),
+        [input.digest()],
+        transformation,
+        BlobDerivationProducer::Deterministic {
+            implementation: BlobDigest::digest(b"boundary-worker-v1"),
+        },
+        [output.digest()],
+    )
+    .expect("the boundary derivation is valid");
+    let key = derivation
+        .deterministic_key()
+        .expect("the boundary producer is deterministic");
+
+    repository.record(derivation.clone()).await?;
+    let loaded = repository.find_deterministic(key).await?;
+
+    assert_eq!(loaded, Some(derivation));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-078: canonical JSON strings containing NUL round-trip without a jsonb cast.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv078_canonical_nul_string_round_trips() -> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
+    let transformation = BlobTransformation::try_new(
+        BlobTransformationName::try_new("image.nul").expect("the NUL transformation name is valid"),
+        1,
+        &serde_json::json!({"value": "\u{0}"}),
+    )
+    .expect("the canonical NUL parameters are valid");
+    let derivation = BlobDerivation::try_new(
+        BlobDerivationId::from_uuid(Uuid::from_u128(0x5a10_0713)),
+        [input.digest()],
+        transformation,
+        BlobDerivationProducer::Deterministic {
+            implementation: BlobDigest::digest(b"nul-worker-v1"),
+        },
+        [output.digest()],
+    )
+    .expect("the NUL derivation is valid");
+    let key = derivation
+        .deterministic_key()
+        .expect("the NUL producer is deterministic");
+
+    repository.record(derivation.clone()).await?;
+    let loaded = repository.find_deterministic(key).await?;
+
+    assert_eq!(loaded, Some(derivation));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-078: arbitrary-precision canonical numbers round-trip without a jsonb cast.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv078_arbitrary_precision_parameter_round_trips() -> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
+    let parameters: serde_json::Value = serde_json::from_str("{\"value\":1e+999}")?;
+    let transformation = BlobTransformation::try_new(
+        BlobTransformationName::try_new("image.precision")
+            .expect("the precision transformation name is valid"),
+        1,
+        &parameters,
+    )
+    .expect("the arbitrary-precision parameters are valid");
+    let derivation = BlobDerivation::try_new(
+        BlobDerivationId::from_uuid(Uuid::from_u128(0x5a10_0714)),
+        [input.digest()],
+        transformation,
+        BlobDerivationProducer::Deterministic {
+            implementation: BlobDigest::digest(b"precision-worker-v1"),
+        },
+        [output.digest()],
+    )
+    .expect("the arbitrary-precision derivation is valid");
+    let key = derivation
+        .deterministic_key()
+        .expect("the arbitrary-precision producer is deterministic");
+
+    repository.record(derivation.clone()).await?;
+    let loaded = repository.find_deterministic(key).await?;
+
+    assert_eq!(loaded, Some(derivation));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-078: an immutable derivation row rejects updates.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv078_derivation_rows_reject_updates() -> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
+    repository
+        .record(thumbnail_derivation(input.digest(), output.digest()))
+        .await?;
+
+    let error = sqlx::query("UPDATE blob_derivation SET transformation_version = 2")
+        .execute(&pool)
+        .await
+        .expect_err("the immutability trigger rejects the update");
+
+    assert!(
+        error
+            .to_string()
+            .contains("blob derivation records are immutable")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-078: immutable derivation satellites reject undeclared extra outputs.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv078_derivation_satellites_reject_extra_outputs() -> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
+    let derivation = thumbnail_derivation(input.digest(), output.digest());
+    repository.record(derivation.clone()).await?;
+
+    let error = sqlx::query(
+        "INSERT INTO blob_derivation_output (derivation_id, output_ordinal, digest)
+         VALUES ($1, 1, $2)",
+    )
+    .bind(derivation.id().into_uuid())
+    .bind(output.digest().as_bytes().as_slice())
+    .execute(&pool)
+    .await
+    .expect_err("the completeness trigger rejects the extra output");
+
+    assert!(
+        error
+            .to_string()
+            .contains("blob derivation record is incomplete")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-078: immutable derivation records reject truncation.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv078_derivation_records_reject_truncation() -> Result<(), Box<dyn Error>> {
+    let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
+    repository
+        .record(thumbnail_derivation(input.digest(), output.digest()))
+        .await?;
+
+    let error = sqlx::query("TRUNCATE blob_derivation CASCADE")
+        .execute(&pool)
+        .await
+        .expect_err("the truncate trigger rejects the statement");
+
+    assert!(
+        error
+            .to_string()
+            .contains("blob derivation records are immutable")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-078: deterministic provenance requires an implementation digest.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv078_deterministic_provenance_rejects_a_null_implementation()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _repository, _input, _output) = derivation_repository_fixture().await?;
+
+    let error = sqlx::query(
+        "INSERT INTO blob_derivation (
+             derivation_id, deterministic_key, transformation_name, transformation_version,
+             parameters_canonical, producer_class, implementation_digest,
+             execution_id, model_call_id, input_count, output_count
+         ) VALUES ($1, $2, 'image.thumbnail', 1, '{}',
+                   'deterministic', NULL, NULL, NULL, 1, 1)",
+    )
+    .bind(Uuid::from_u128(0x5a10_0711))
+    .bind(
+        BlobDigest::digest(b"null implementation key")
+            .as_bytes()
+            .as_slice(),
+    )
+    .execute(&pool)
+    .await
+    .expect_err("producer provenance rejects a null implementation");
+
+    assert!(error.to_string().contains("blob_derivation_producer_shape"));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-078: derivation satellites require contiguous zero-based ordinals.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv078_derivation_satellites_reject_noncontiguous_ordinals() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _repository, input, output) = derivation_repository_fixture().await?;
+    let derivation_id = Uuid::from_u128(0x5a10_0712);
+    let mut malformed = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO blob_derivation (
+             derivation_id, deterministic_key, transformation_name, transformation_version,
+             parameters_canonical, producer_class, implementation_digest,
+             execution_id, model_call_id, input_count, output_count
+         ) VALUES ($1, $2, 'image.thumbnail', 1, '{}',
+                   'deterministic', $3, NULL, NULL, 1, 1)",
+    )
+    .bind(derivation_id)
+    .bind(
+        BlobDigest::digest(b"malformed ordinal key")
+            .as_bytes()
+            .as_slice(),
+    )
+    .bind(BlobDigest::digest(b"implementation").as_bytes().as_slice())
+    .execute(&mut *malformed)
+    .await?;
+    sqlx::query(
+        "INSERT INTO blob_derivation_input (derivation_id, input_ordinal, digest)
+         VALUES ($1, 15, $2)",
+    )
+    .bind(derivation_id)
+    .bind(input.digest().as_bytes().as_slice())
+    .execute(&mut *malformed)
+    .await?;
+    sqlx::query(
+        "INSERT INTO blob_derivation_output (derivation_id, output_ordinal, digest)
+         VALUES ($1, 0, $2)",
+    )
+    .bind(derivation_id)
+    .bind(output.digest().as_bytes().as_slice())
+    .execute(&mut *malformed)
+    .await?;
+
+    let error = malformed
+        .commit()
+        .await
+        .expect_err("completeness rejects non-contiguous ordinals");
+
+    assert!(
+        error
+            .to_string()
+            .contains("blob derivation record is incomplete")
+    );
 
     pool.close().await;
     drop(container);

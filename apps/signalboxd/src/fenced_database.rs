@@ -28,16 +28,23 @@ pub struct FencedHubDatabase {
 
 impl FencedHubDatabase {
     /// Opens a production database, establishes the singleton guard, fences the
-    /// prior generation, and returns only the new fenced pool.
-    pub async fn connect_production(database_url: &str) -> Result<Self, FencedHubDatabaseError> {
+    /// prior generation, and returns only the new fenced pool with the optional
+    /// deployment-owned connection floor.
+    pub async fn connect_production(
+        database_url: &str,
+        min_connections: Option<u32>,
+    ) -> Result<Self, FencedHubDatabaseError> {
         let options = production_connection_options(database_url)
             .map_err(FencedHubDatabaseError::ParseOptions)?;
-        Self::connect_with(options).await
+        Self::connect_with(options, min_connections).await
     }
 
     /// Establishes one guarded incarnation using already parsed connection
     /// options. This is also the local integration-test construction boundary.
-    pub async fn connect_with(options: PgConnectOptions) -> Result<Self, FencedHubDatabaseError> {
+    pub async fn connect_with(
+        options: PgConnectOptions,
+        min_connections: Option<u32>,
+    ) -> Result<Self, FencedHubDatabaseError> {
         let bootstrap = PgPoolOptions::new()
             .max_connections(1)
             .connect_with(options.clone())
@@ -54,7 +61,7 @@ impl FencedHubDatabase {
             .map_err(FencedHubDatabaseError::AdvanceFence)?;
         bootstrap.close().await;
         let pool = advanced_fence
-            .connect_pool(options)
+            .connect_pool(options, min_connections)
             .await
             .map_err(FencedHubDatabaseError::ConnectFencedPool)?;
         let generation = advanced_fence.generation();
@@ -111,6 +118,46 @@ impl Drop for FencedHubDatabase {
             mem::forget(guard);
         }
     }
+}
+
+/// Result of one non-disruptive fenced-pool floor reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FencedPoolFloorReconciliation {
+    /// The physical-session floor was already present.
+    Satisfied,
+    /// Idle service capacity was preserved instead of being held by maintenance.
+    DeferredForIdleCapacity,
+    /// Demand had exhausted idle capacity, so one missing session was opened.
+    Replenished,
+}
+
+/// Reopens one missing physical session without consuming idle service
+/// capacity.
+///
+/// SQLx opens a session only after its idle inventory is empty. Reconciliation
+/// therefore defers while any idle session remains; holding that inventory to
+/// force construction would steal capacity from ordinary work for the whole
+/// connection attempt. Once demand has consumed the idle inventory, one
+/// acquisition opens one missing session and immediately returns it. Callers
+/// own the attempt deadline and repeat bound.
+pub async fn reconcile_fenced_pool_floor(
+    pool: &PgPool,
+    minimum: u32,
+) -> Result<FencedPoolFloorReconciliation, sqlx::Error> {
+    let current = pool.size();
+    if current >= minimum {
+        return Ok(FencedPoolFloorReconciliation::Satisfied);
+    }
+    if pool.num_idle() > 0 {
+        return Ok(FencedPoolFloorReconciliation::DeferredForIdleCapacity);
+    }
+    let connection = pool.acquire().await?;
+    drop(connection);
+    Ok(if pool.size() > current {
+        FencedPoolFloorReconciliation::Replenished
+    } else {
+        FencedPoolFloorReconciliation::DeferredForIdleCapacity
+    })
 }
 
 /// Sanitized guarded-database startup failure.

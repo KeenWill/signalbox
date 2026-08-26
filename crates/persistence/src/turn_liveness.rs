@@ -9,11 +9,11 @@
 //! for a terminal turn — repository-watch dispatch release included — fires
 //! without this module naming any of them.
 
-use std::{error::Error, fmt, time::Duration};
+use std::{error::Error, fmt, future::Future, time::Duration};
 
 use signalbox_application::{
     ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StaleTurnOutcome,
-    TurnLivenessEvidence,
+    StartupScanSessionOutcome, TurnLivenessEvidence,
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, SessionId, TurnAttemptId,
@@ -27,7 +27,8 @@ use crate::mapping::{
 use crate::session::{SessionRepositoryError, load_session_from_connection};
 use crate::startup::{
     StartupScanCorruption, StartupScanIdentityCollision, StartupScanRepositoryError,
-    insert_prepared_failure, map_scheduling_error,
+    TransactionDecision, insert_prepared_failure, map_scheduling_error,
+    recover_observed_slot_held_in_transaction,
 };
 use crate::submit_input::load_scheduling_projection;
 
@@ -39,49 +40,28 @@ use crate::submit_input::load_scheduling_projection;
 /// bound holds whatever the population is.
 const QUIESCENT_INVENTORY_PAGE_SIZE: i64 = 256;
 
-/// How long one terminalization waits for the session's scheduler row.
-///
-/// The attempt takes that row under an exclusive row lock, and the transactions holding it —
-/// activation, submission, startup recovery — are short. A wait longer than
-/// this means the session is busy, which is itself evidence against the turn
-/// being wedged, so failing fast costs nothing: the turn stays due and its lap
-/// reaches it again. What an unbounded wait would cost is the whole serial
-/// phase, which one stuck transaction could hold for as long as it lived.
-///
-/// The value is what keeps the phase inside its interval in the worst case: a
-/// windowful of attempts that all wait the full bound is sixteen seconds, the
-/// same budget a windowful of committing transactions is estimated at.
-// numeric-bound: tunable - bounds one terminalization's wait for the scheduler row
-const TERMINALIZATION_LOCK_WAIT: &str = "250ms";
+/// Deployment policy for liveness-terminalization database waits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TurnLivenessPersistenceBounds {
+    lock_wait: Option<Duration>,
+    acquire_wait: Option<Duration>,
+    write_lock_wait: Option<Duration>,
+}
 
-/// The same wait, applied to reaching a connection at all.
-///
-/// The shared pool's own acquisition timeout is thirty seconds, which a
-/// windowful of attempts would multiply into half an hour of a phase that is
-/// supposed to fit inside a one-minute interval. Cancelling an acquisition is
-/// safe in a way cancelling later work would not be: no transaction has begun,
-/// so there is nothing whose fate could be unknown.
-// numeric-bound: tunable - bounds one terminalization's wait for a pooled connection
-const TERMINALIZATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
-
-/// How long the rest of the attempt waits for any lock, once the row is held.
-///
-/// The write phase needs its own budget rather than the acquisition one or none
-/// at all. Not the acquisition budget: appending to the outbox takes the shared
-/// `outbox_sequence_state` row, which every writer in the daemon holds from its
-/// first append until it commits, so a wait of a few hundred milliseconds there
-/// is ordinary traffic rather than a stall, and refusing on it would make the
-/// pass fail whenever the daemon was busy. And not `0`, which is what this
-/// previously reset to: an unbounded wait lets one indefinite holder of that
-/// row stall the whole reconciliation loop, which is the failure the
-/// acquisition budget exists to prevent, reintroduced one statement later.
-///
-/// A second is two orders of magnitude above a brief hold and still detects a
-/// stalled holder within one interval. Tripping it costs a retry rather than a
-/// turn: the attempt has written nothing durable, the transaction rolls back,
-/// and the lap reaches the turn again.
-// numeric-bound: tunable - bounds the write phase's wait for any contended row
-const TERMINALIZATION_WRITE_LOCK_WAIT: &str = "1s";
+impl TurnLivenessPersistenceBounds {
+    /// Binds every terminalization wait to validated daemon configuration.
+    pub const fn new(
+        lock_wait: Option<Duration>,
+        acquire_wait: Option<Duration>,
+        write_lock_wait: Option<Duration>,
+    ) -> Self {
+        Self {
+            lock_wait,
+            acquire_wait,
+            write_lock_wait,
+        }
+    }
+}
 
 /// Infrastructure or integrity failure while supervising turn liveness.
 ///
@@ -94,7 +74,7 @@ const TERMINALIZATION_WRITE_LOCK_WAIT: &str = "1s";
 pub enum TurnLivenessRepositoryError {
     /// Reading the quiescent active-turn inventory failed.
     Inventory(sqlx::Error),
-    /// The session's scheduler row stayed locked past the attempt's wait.
+    /// A required terminalization row stayed locked past the attempt's wait.
     TerminalizationLockUnavailable(sqlx::Error),
     /// A database operation on the terminalization path failed.
     TerminalizationDatabase {
@@ -118,10 +98,9 @@ impl TurnLivenessRepositoryError {
 
     /// Classifies a failure of the statement that takes the scheduler row.
     ///
-    /// Only this site can report a refused lock, rather than any statement that
-    /// happens to raise the code: a refusal means "someone else is working on
-    /// this session", which is true of the row this statement waits for and of
-    /// nothing else the transaction goes on to touch.
+    /// The shared transition conversion applies the same classification to a
+    /// refusal from a later guarded lock site. This direct constructor keeps a
+    /// different driver failure on the scheduler statement ordinary.
     fn terminalization_lock(error: sqlx::Error) -> Self {
         if lock_wait_expired(&error) {
             return Self::TerminalizationLockUnavailable(error);
@@ -142,7 +121,7 @@ impl fmt::Display for TurnLivenessRepositoryError {
             Self::TerminalizationLockUnavailable(source) => {
                 write!(
                     formatter,
-                    "stale-turn terminalization could not lock the session scheduler row: {source}"
+                    "stale-turn terminalization could not acquire a required row lock: {source}"
                 )
             }
             Self::TerminalizationDatabase { source, .. } => {
@@ -196,7 +175,13 @@ impl ClassifyOperatorFailure for TurnLivenessRepositoryError {
 
 impl From<StartupScanRepositoryError> for TurnLivenessRepositoryError {
     fn from(error: StartupScanRepositoryError) -> Self {
-        Self::Terminalization(error)
+        match error {
+            StartupScanRepositoryError::Database {
+                source,
+                commit_ambiguous: false,
+            } if lock_wait_expired(&source) => Self::TerminalizationLockUnavailable(source),
+            error => Self::Terminalization(error),
+        }
     }
 }
 
@@ -204,12 +189,13 @@ impl From<StartupScanRepositoryError> for TurnLivenessRepositoryError {
 #[derive(Clone, Debug)]
 pub struct PostgresTurnLivenessRepository {
     pool: PgPool,
+    bounds: TurnLivenessPersistenceBounds,
 }
 
 impl PostgresTurnLivenessRepository {
     /// Uses the supplied shared pool for liveness supervision.
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, bounds: TurnLivenessPersistenceBounds) -> Self {
+        Self { pool, bounds }
     }
 
     /// Reads one bounded page of active turns with no work in flight.
@@ -245,19 +231,14 @@ impl PostgresTurnLivenessRepository {
             .acquire()
             .await
             .map_err(TurnLivenessRepositoryError::Inventory)?;
-        let fetched = read_slot_held_active_turns(
-            &mut connection,
-            None,
-            after,
-            QUIESCENT_INVENTORY_PAGE_SIZE,
-        )
-        .await
-        .map_err(TurnLivenessRepositoryError::Inventory)?;
+        let fetched = read_slot_held_active_turns(&mut connection, None, after)
+            .await
+            .map_err(TurnLivenessRepositoryError::Inventory)?;
         Ok(QuiescentActiveTurnPage::new(fetched))
     }
 
-    /// Reads the slot-held observation for one exact session.
-    pub async fn slot_held_active_turn(
+    /// Reads the current slot-held observation for one exact session.
+    pub async fn observed_slot_held_turn(
         &self,
         session: SessionId,
     ) -> Result<Option<StaleTurnCandidate>, TurnLivenessRepositoryError> {
@@ -266,30 +247,63 @@ impl PostgresTurnLivenessRepository {
             .acquire()
             .await
             .map_err(TurnLivenessRepositoryError::Inventory)?;
-        let fetched = read_slot_held_active_turns(&mut connection, Some(session), None, 1)
+        read_exact_slot_held_candidate(&mut connection, session)
             .await
-            .map_err(TurnLivenessRepositoryError::Inventory)?;
-        Ok(fetched.candidates.first().copied())
+            .map_err(TurnLivenessRepositoryError::Inventory)
     }
 
-    /// Reads one exact running active turn for scheduler-pass expiry recovery.
+    /// Reconciles one exact slot-held observation under the session locks.
     ///
-    /// Unlike the slot-held watchdog inventory, this includes the quiescent
-    /// shape immediately after activation. The expiry path separately binds
-    /// the returned observation to the exact turn from the expired pass.
-    pub async fn recoverable_active_turn(
+    /// `None` means the turn or its progress evidence changed before the lock
+    /// was acquired. That is an ordinary supersession, never authority to
+    /// recover whichever turn happens to be active now.
+    pub async fn recover_observed_slot_held_turn<Generator>(
         &self,
-        session: SessionId,
-    ) -> Result<Option<StaleTurnCandidate>, TurnLivenessRepositoryError> {
-        let mut connection = self
-            .pool
-            .acquire()
+        candidate: StaleTurnCandidate,
+        identities: AcceptedInputTurnFailureIdentities,
+        ids: &mut Generator,
+    ) -> Result<Option<StartupScanSessionOutcome>, TurnLivenessRepositoryError>
+    where
+        Generator: signalbox_application::StartupScanIdGenerator + Send,
+    {
+        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
             .await
-            .map_err(TurnLivenessRepositoryError::Inventory)?;
-        let fetched = read_recoverable_active_turn(&mut connection, session)
+            .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(postgres_lock_timeout(self.bounds.lock_wait))
+            .execute(&mut *transaction)
             .await
-            .map_err(TurnLivenessRepositoryError::Inventory)?;
-        Ok(fetched.candidates.first().copied())
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        let decision =
+            recover_observed_slot_held_in_transaction(&mut transaction, candidate, identities, ids)
+                .await
+                .map_err(TurnLivenessRepositoryError::from)?;
+        match decision {
+            None => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(TurnLivenessRepositoryError::terminalization)?;
+                Ok(None)
+            }
+            Some(TransactionDecision::Commit(outcome)) => {
+                transaction.commit().await.map_err(|error| {
+                    TurnLivenessRepositoryError::TerminalizationDatabase {
+                        commit_ambiguous: crate::commit_failure_is_ambiguous(&error),
+                        source: error,
+                    }
+                })?;
+                Ok(Some(outcome))
+            }
+            Some(TransactionDecision::Rollback(outcome)) => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(TurnLivenessRepositoryError::terminalization)?;
+                Ok(Some(outcome))
+            }
+        }
     }
 
     /// Terminalizes one observed-stale turn as failed under the session locks.
@@ -302,7 +316,7 @@ impl PostgresTurnLivenessRepository {
         candidate: StaleTurnCandidate,
         identities: AcceptedInputTurnFailureIdentities,
     ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
-        let mut transaction = timeout(TERMINALIZATION_ACQUIRE_WAIT, self.pool.begin())
+        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
             .await
             .unwrap_or(Err(sqlx::Error::PoolTimedOut))
             .map_err(TurnLivenessRepositoryError::terminalization)?;
@@ -312,11 +326,17 @@ impl PostgresTurnLivenessRepository {
         // might interrupt the commit instead, and this pass would then not know
         // whether the turn ended.
         sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-            .bind(TERMINALIZATION_LOCK_WAIT)
+            .bind(postgres_lock_timeout(self.bounds.lock_wait))
             .execute(&mut *transaction)
             .await
             .map_err(TurnLivenessRepositoryError::terminalization)?;
-        let outcome = terminalize_in_transaction(&mut transaction, candidate, identities).await;
+        let outcome = terminalize_in_transaction(
+            &mut transaction,
+            candidate,
+            identities,
+            self.bounds.write_lock_wait,
+        )
+        .await;
         match outcome {
             Ok(StaleTurnOutcome::Terminalized) => {
                 transaction.commit().await.map_err(|error| {
@@ -567,7 +587,6 @@ const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
         AND tenure.end_disposition IS NULL
         AND (
             tenure.state_kind = 'stop_requested'
-            OR active.origin_kind = 'delegation'
             OR EXISTS (
                 SELECT 1
                   FROM model_call AS live
@@ -591,39 +610,6 @@ const SLOT_HELD_ACTIVE_TURNS: &str = "SELECT active.session_id,
         AND ($2::uuid IS NULL OR active.session_id > $2)
       ORDER BY active.session_id
       LIMIT $3";
-
-/// Exact-session inventory for a scheduler pass that expired while executing
-/// a known turn. It admits both quiescent and slot-held running shapes while
-/// excluding durable waits through the active-phase predicate.
-const RECOVERABLE_ACTIVE_TURN: &str = "SELECT active.session_id,
-            active.turn_id,
-            active.current_attempt_id,
-            (SELECT newest.event_sequence
-               FROM outbox_event AS newest
-              WHERE newest.session_id = active.session_id
-                AND newest.event_kind NOT IN (
-                    'session_created',
-                    'session_model_settings_changed',
-                    'turn_model_settings_resolved',
-                    'input_accepted',
-                    'goal_turn_retired',
-                    'runner_state_transition'
-                )
-              ORDER BY newest.event_sequence DESC
-              LIMIT 1) AS outbox_frontier
-       FROM turn_lifecycle AS active
-       JOIN turn_attempt AS tenure
-         ON tenure.turn_attempt_id = active.current_attempt_id
-        AND tenure.turn_id = active.turn_id
-        AND tenure.session_id = active.session_id
-      WHERE active.session_id = $1
-        AND active.state_kind = 'active'
-        AND NOT active.delegation_runtime_terminal
-        AND active.active_phase_kind = 'running'
-        AND tenure.state_kind IN ('prepared', 'running', 'stop_requested')
-        AND tenure.end_variant IS NULL
-        AND tenure.end_disposition IS NULL
-      LIMIT 1";
 
 /// Reads one page, leaving classification of any failure to the caller.
 ///
@@ -699,49 +685,22 @@ async fn read_slot_held_active_turns(
     connection: &mut PgConnection,
     session: Option<SessionId>,
     after: Option<SessionId>,
-    limit: i64,
 ) -> Result<FetchedPage, sqlx::Error> {
     let rows = sqlx::query(SLOT_HELD_ACTIVE_TURNS)
         .bind(session.map(session_id_to_uuid))
         .bind(after.map(session_id_to_uuid))
-        .bind(limit)
+        .bind(QUIESCENT_INVENTORY_PAGE_SIZE)
         .fetch_all(connection)
         .await?;
     decode_candidate_page(rows)
 }
 
-async fn read_recoverable_active_turn(
+pub(crate) async fn read_exact_slot_held_candidate(
     connection: &mut PgConnection,
     session: SessionId,
-) -> Result<FetchedPage, sqlx::Error> {
-    let rows = sqlx::query(RECOVERABLE_ACTIVE_TURN)
-        .bind(session_id_to_uuid(session))
-        .fetch_all(connection)
-        .await?;
-    decode_candidate_page(rows)
-}
-
-/// Revalidates one exact slot-held observation on a connection whose scheduler
-/// row is already locked by the caller.
-///
-/// The unlocked inventory and locked recovery check deliberately share the
-/// statement and decoder, preventing either path from adopting weaker evidence.
-pub(crate) async fn slot_held_candidate_matches(
-    connection: &mut PgConnection,
-    candidate: StaleTurnCandidate,
-) -> Result<bool, sqlx::Error> {
-    let fetched =
-        read_slot_held_active_turns(connection, Some(candidate.session()), None, 1).await?;
-    Ok(fetched.candidates.first().copied() == Some(candidate))
-}
-
-/// Revalidates one exact running-turn observation under the scheduler lock.
-pub(crate) async fn recoverable_candidate_matches(
-    connection: &mut PgConnection,
-    candidate: StaleTurnCandidate,
-) -> Result<bool, sqlx::Error> {
-    let fetched = read_recoverable_active_turn(connection, candidate.session()).await?;
-    Ok(fetched.candidates.first().copied() == Some(candidate))
+) -> Result<Option<StaleTurnCandidate>, sqlx::Error> {
+    let page = read_slot_held_active_turns(connection, Some(session), None).await?;
+    Ok(page.candidates.first().copied())
 }
 
 /// Reads one outbox sequence as the token the ledger compares, or nothing if
@@ -773,6 +732,7 @@ async fn terminalize_in_transaction(
     connection: &mut PgConnection,
     candidate: StaleTurnCandidate,
     identities: AcceptedInputTurnFailureIdentities,
+    write_lock_wait: Option<Duration>,
 ) -> Result<StaleTurnOutcome, TurnLivenessRepositoryError> {
     let locks = sqlx::query(crate::lock_inventory::STARTUP_RECOVERY)
         .bind(session_id_to_uuid(candidate.session()))
@@ -786,7 +746,7 @@ async fn terminalize_in_transaction(
     // mistaken for a stall, and finite so that one indefinite holder of it
     // cannot stall this loop.
     sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-        .bind(TERMINALIZATION_WRITE_LOCK_WAIT)
+        .bind(postgres_lock_timeout(write_lock_wait))
         .execute(&mut *connection)
         .await
         .map_err(TurnLivenessRepositoryError::terminalization)?;
@@ -893,29 +853,35 @@ async fn terminalize_in_transaction(
     Ok(StaleTurnOutcome::Terminalized)
 }
 
+async fn optional_timeout<F>(
+    bound: Option<Duration>,
+    future: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: Future,
+{
+    match bound {
+        Some(bound) => timeout(bound, future).await,
+        None => Ok(future.await),
+    }
+}
+
+fn postgres_lock_timeout(bound: Option<Duration>) -> String {
+    match bound {
+        Some(bound) => format!("{}us", bound.as_micros().max(1)),
+        None => String::from("0"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ClassifyOperatorFailure, FetchedPage, QUIESCENT_INVENTORY_PAGE_SIZE,
-        QuiescentActiveTurnPage, RECOVERABLE_ACTIVE_TURN, SLOT_HELD_ACTIVE_TURNS,
-        TERMINALIZATION_LOCK_WAIT, TERMINALIZATION_WRITE_LOCK_WAIT, TurnLivenessRepositoryError,
+        QuiescentActiveTurnPage, TurnLivenessRepositoryError, postgres_lock_timeout,
     };
     use signalbox_application::{StaleTurnCandidate, TurnLivenessEvidence};
     use signalbox_domain::{SessionId, TurnAttemptId, TurnId};
     use sqlx::types::Uuid;
-
-    #[test]
-    fn expiry_inventory_admits_quiescent_and_slot_held_running_shapes() {
-        assert!(RECOVERABLE_ACTIVE_TURN.contains("active.active_phase_kind = 'running'"));
-        assert!(RECOVERABLE_ACTIVE_TURN.contains("'prepared', 'running', 'stop_requested'"));
-        assert!(!RECOVERABLE_ACTIVE_TURN.contains("EXISTS ("));
-        assert!(!RECOVERABLE_ACTIVE_TURN.contains("active_tool_round_call_id IS NULL"));
-    }
-
-    #[test]
-    fn outer_watchdog_admits_quiescent_delegated_running_turns() {
-        assert!(SLOT_HELD_ACTIVE_TURNS.contains("active.origin_kind = 'delegation'"));
-    }
 
     fn candidate(session: u128) -> StaleTurnCandidate {
         StaleTurnCandidate::new(
@@ -955,19 +921,19 @@ mod tests {
         assert_eq!(empty.resume_after(), None);
     }
 
-    /// An attempt bounds two different waits, on two different rows, for two
-    /// different questions — so the budgets are not the same number.
     #[test]
-    fn an_attempt_carries_two_lock_budgets() {
-        assert_eq!(TERMINALIZATION_LOCK_WAIT, "250ms");
-        assert_eq!(TERMINALIZATION_WRITE_LOCK_WAIT, "1s");
-        assert_ne!(TERMINALIZATION_LOCK_WAIT, TERMINALIZATION_WRITE_LOCK_WAIT);
+    fn postgres_lock_waits_preserve_bounded_and_unbounded_policy() {
+        assert_eq!(
+            postgres_lock_timeout(Some(std::time::Duration::from_micros(7))),
+            "7us"
+        );
+        assert_eq!(postgres_lock_timeout(None), "0");
     }
 
-    /// Only the statement taking the scheduler row reports contention, so a
-    /// failure raised anywhere else is an ordinary one whatever it carries.
+    /// Only PostgreSQL's lock-refusal code reports contention, so a different
+    /// driver failure remains ordinary infrastructure.
     #[test]
-    fn a_failure_away_from_the_lock_site_is_an_ordinary_one() {
+    fn a_non_lock_driver_failure_is_an_ordinary_one() {
         let failure = TurnLivenessRepositoryError::terminalization(sqlx::Error::PoolTimedOut);
 
         assert!(matches!(
