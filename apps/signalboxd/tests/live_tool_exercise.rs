@@ -907,9 +907,18 @@ fn assert_own_transcript(results: &[Value]) -> SmokeResult {
         return Err(io::Error::other("conversation round returned the wrong result count").into());
     };
     let visible = transcript["entries"].as_array().is_some_and(|entries| {
-        entries
-            .iter()
-            .any(|entry| entry["content"] == TRANSCRIPT_MARKER)
+        entries.iter().any(|entry| {
+            entry["content"]
+                .as_str()
+                .and_then(|content| serde_json::from_str::<Value>(content).ok())
+                .is_some_and(|content| {
+                    content
+                        == serde_json::json!([{
+                            "type": "text",
+                            "text": TRANSCRIPT_MARKER,
+                        }])
+                })
+        })
     });
     assert!(
         visible,

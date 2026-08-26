@@ -2872,7 +2872,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
             "entries": [{
                 "position": 1,
                 "kind": "user",
-                "content": FIXTURE_USER_CONTENT,
+                "content": r#"[{"type":"text","text":"offline tool-loop request"}]"#,
                 "content_truncated": false
             }, {
                 "position": 2,

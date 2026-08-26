@@ -6375,9 +6375,19 @@ async fn dispatched_sessions_commit_their_initial_context_and_queued_turn_atomic
            JOIN turn_lifecycle AS turn ON turn.turn_id = delivery.turn_id
            JOIN submit_input_command AS command
              ON command.command_id = delivery.submit_command_id
+           JOIN submit_input_command_content_part AS part
+             ON part.command_id = command.command_id
+            AND part.position = 0
           WHERE delivery.dispatch_id = $1
             AND turn.state_kind = 'queued'
-            AND command.content_text = $2",
+            AND part.part_kind = 'text'
+            AND part.text_value = $2
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM submit_input_command_content_part AS later_part
+                 WHERE later_part.command_id = command.command_id
+                   AND later_part.position > 0
+            )",
     )
     .bind(fixture.dispatch_id.as_uuid())
     .bind(DISPATCH_CONTEXT)
