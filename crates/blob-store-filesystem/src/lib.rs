@@ -637,6 +637,52 @@ impl FilesystemBlobStore {
         Ok(OpenedBlob::new(byte_length, Box::new(file)))
     }
 
+    async fn open_verified_inner(
+        &self,
+        expected: ExpectedBlob,
+        key: &BlobObjectKey,
+    ) -> Result<OpenedBlob, BlobStoreError> {
+        if !filesystem_key_is_admitted(key) {
+            return Err(BlobStoreError::unavailable("reject reserved object key"));
+        }
+        let (mut file, byte_length) =
+            open_private_regular_file(self.root.clone(), key.clone(), "open verified object")
+                .await?;
+        #[cfg(target_os = "linux")]
+        let _publication_lock = acquire_publication_lock(
+            self.publication_directory.clone(),
+            FlockOperation::LockShared,
+        )
+        .await?;
+        #[cfg(not(target_os = "linux"))]
+        let _publication_lock =
+            acquire_publication_lock(self.publication_directory.clone(), ()).await?;
+        let publication_directory = self.publication_directory.clone();
+        let (temporary, pinned_file) =
+            tokio::task::spawn_blocking(move || create_temporary_blob_file(publication_directory))
+                .await
+                .map_err(|source| BlobStoreError::io("join verified spool creation", source))?
+                .map_err(|source| BlobStoreError::io("create verified spool", source))?;
+        let mut pinned_file = tokio::fs::File::from_std(pinned_file);
+        verify_opened_file_into(
+            &mut file,
+            &mut pinned_file,
+            expected,
+            "verify opened object",
+        )
+        .await?;
+        pinned_file
+            .flush()
+            .await
+            .map_err(|source| BlobStoreError::io("flush verified spool", source))?;
+        pinned_file
+            .seek(std::io::SeekFrom::Start(0))
+            .await
+            .map_err(|source| BlobStoreError::io("rewind verified spool", source))?;
+        remove_temporary_file(temporary).await?;
+        Ok(OpenedBlob::new(byte_length, Box::new(pinned_file)))
+    }
+
     async fn open_range_inner(
         &self,
         expected: ExpectedBlob,
@@ -676,6 +722,14 @@ impl BlobStore for FilesystemBlobStore {
 
     fn open<'a>(&'a self, key: &'a BlobObjectKey) -> BlobStoreFuture<'a, OpenedBlob> {
         Box::pin(self.open_inner(key))
+    }
+
+    fn open_verified<'a>(
+        &'a self,
+        expected: ExpectedBlob,
+        key: &'a BlobObjectKey,
+    ) -> BlobStoreFuture<'a, OpenedBlob> {
+        Box::pin(self.open_verified_inner(expected, key))
     }
 
     fn open_range<'a>(
@@ -767,6 +821,24 @@ async fn verify_opened_file(
     expected: ExpectedBlob,
     operation: &'static str,
 ) -> Result<(), BlobStoreError> {
+    verify_opened_file_with_destination(file, None, expected, operation).await
+}
+
+async fn verify_opened_file_into(
+    file: &mut tokio::fs::File,
+    destination: &mut tokio::fs::File,
+    expected: ExpectedBlob,
+    operation: &'static str,
+) -> Result<(), BlobStoreError> {
+    verify_opened_file_with_destination(file, Some(destination), expected, operation).await
+}
+
+async fn verify_opened_file_with_destination(
+    file: &mut tokio::fs::File,
+    mut destination: Option<&mut tokio::fs::File>,
+    expected: ExpectedBlob,
+    operation: &'static str,
+) -> Result<(), BlobStoreError> {
     let mut digest = Sha256::new();
     let mut observed_length = 0_u64;
     let mut buffer = vec![0_u8; STREAM_BUFFER_BYTES];
@@ -793,6 +865,12 @@ async fn verify_opened_file(
             ));
         }
         digest.update(&buffer[..read]);
+        if let Some(destination) = destination.as_deref_mut() {
+            destination
+                .write_all(&buffer[..read])
+                .await
+                .map_err(|source| BlobStoreError::io("write verified spool", source))?;
+        }
     }
     let observed_digest = BlobDigest::from_bytes(digest.finalize().into());
     if observed_length == expected.byte_length() && observed_digest == expected.digest() {

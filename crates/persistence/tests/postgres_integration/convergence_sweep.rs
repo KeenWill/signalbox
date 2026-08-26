@@ -96,8 +96,8 @@ async fn record_zero_delay_facts_failure(
             Some(observation),
             ConvergenceSweepFailureKind::FactsFetch,
             ConvergenceSweepRetryPolicy {
-                backoff_base: Duration::ZERO,
-                backoff_cap: Duration::ZERO,
+                backoff_base: Some(Duration::ZERO),
+                backoff_cap: Some(Duration::ZERO),
             },
         )
         .await?;
@@ -291,8 +291,8 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             ConvergenceSweepRetryPolicy {
-                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
-                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+                backoff_base: Some(Duration::from_secs(RETRY_DELAY_SECONDS)),
+                backoff_cap: Some(Duration::from_secs(RETRY_DELAY_CAP_SECONDS)),
             },
         )
         .await?;
@@ -304,8 +304,8 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             ConvergenceSweepRetryPolicy {
-                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
-                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+                backoff_base: Some(Duration::from_secs(RETRY_DELAY_SECONDS)),
+                backoff_cap: Some(Duration::from_secs(RETRY_DELAY_CAP_SECONDS)),
             },
         )
         .await?;
@@ -317,8 +317,8 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             ConvergenceSweepRetryPolicy {
-                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
-                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+                backoff_base: Some(Duration::from_secs(RETRY_DELAY_SECONDS)),
+                backoff_cap: Some(Duration::from_secs(RETRY_DELAY_CAP_SECONDS)),
             },
         )
         .await?;
@@ -330,8 +330,8 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             ConvergenceSweepRetryPolicy {
-                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
-                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+                backoff_base: Some(Duration::from_secs(RETRY_DELAY_SECONDS)),
+                backoff_cap: Some(Duration::from_secs(RETRY_DELAY_CAP_SECONDS)),
             },
         )
         .await?;
@@ -343,8 +343,8 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             ConvergenceSweepRetryPolicy {
-                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
-                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+                backoff_base: Some(Duration::from_secs(RETRY_DELAY_SECONDS)),
+                backoff_cap: Some(Duration::from_secs(RETRY_DELAY_CAP_SECONDS)),
             },
         )
         .await?;
@@ -384,14 +384,60 @@ async fn transient_failures_retry_then_park_with_an_operator_need() -> Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn unbounded_retry_delay_has_no_claimable_deadline() -> Result<(), Box<dyn Error>> {
+    let (_container, pool, _database_url) = migrated_postgres().await?;
+    let store = PostgresConvergenceSweepStore::new(pool.clone());
+    let repository = repository()?;
+
+    let disposition = store
+        .record_failure(
+            Uuid::from_u128(6),
+            &repository,
+            pull_request(),
+            Some(&observation()?),
+            ConvergenceSweepFailureKind::FactsFetch,
+            ConvergenceSweepRetryPolicy {
+                backoff_base: None,
+                backoff_cap: None,
+            },
+        )
+        .await?;
+    let (state_kind, retry_is_infinite): (String, bool) = sqlx::query_as(
+        "SELECT state_kind, retry_not_before = 'infinity'::timestamptz
+           FROM convergence_sweep_target
+          WHERE repository = $1 AND pull_request_number = $2",
+    )
+    .bind(repository.as_str())
+    .bind(rust_decimal::Decimal::from(pull_request().get()))
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(
+        disposition,
+        ConvergenceSweepFailureDisposition::RetryScheduled
+    );
+    assert_eq!(state_kind, "retry_wait");
+    assert!(retry_is_infinite);
+    assert!(
+        !store
+            .load_target(&repository, pull_request())
+            .await?
+            .expect("the retrying target is durable")
+            .retry_ready()
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn retry_backoff_saturates_at_the_configured_cap() -> Result<(), Box<dyn Error>> {
     let (_container, pool, _database_url) = migrated_postgres().await?;
     let store = PostgresConvergenceSweepStore::new(pool.clone());
     let repository = repository()?;
     let observation = observation()?;
     let policy = ConvergenceSweepRetryPolicy {
-        backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
-        backoff_cap: Duration::from_secs(BINDING_RETRY_DELAY_CAP_SECONDS),
+        backoff_base: Some(Duration::from_secs(RETRY_DELAY_SECONDS)),
+        backoff_cap: Some(Duration::from_secs(BINDING_RETRY_DELAY_CAP_SECONDS)),
     };
 
     let first = record_capped_backoff_attempt(
@@ -483,8 +529,8 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             ConvergenceSweepRetryPolicy {
-                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
-                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+                backoff_base: Some(Duration::from_secs(RETRY_DELAY_SECONDS)),
+                backoff_cap: Some(Duration::from_secs(RETRY_DELAY_CAP_SECONDS)),
             },
         )
         .await?;
@@ -496,8 +542,8 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             Some(&observation),
             ConvergenceSweepFailureKind::FactsFetch,
             ConvergenceSweepRetryPolicy {
-                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
-                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+                backoff_base: Some(Duration::from_secs(RETRY_DELAY_SECONDS)),
+                backoff_cap: Some(Duration::from_secs(RETRY_DELAY_CAP_SECONDS)),
             },
         )
         .await?;
@@ -509,8 +555,8 @@ async fn a_different_failure_kind_starts_an_independent_lineage() -> Result<(), 
             Some(&observation),
             ConvergenceSweepFailureKind::CommissionRefused,
             ConvergenceSweepRetryPolicy {
-                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
-                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+                backoff_base: Some(Duration::from_secs(RETRY_DELAY_SECONDS)),
+                backoff_cap: Some(Duration::from_secs(RETRY_DELAY_CAP_SECONDS)),
             },
         )
         .await?;
@@ -832,8 +878,8 @@ async fn generic_failure_recording_rejects_no_model_activity() -> Result<(), Box
             Some(&observation),
             ConvergenceSweepFailureKind::NoModelActivity,
             ConvergenceSweepRetryPolicy {
-                backoff_base: Duration::from_secs(RETRY_DELAY_SECONDS),
-                backoff_cap: Duration::from_secs(RETRY_DELAY_CAP_SECONDS),
+                backoff_base: Some(Duration::from_secs(RETRY_DELAY_SECONDS)),
+                backoff_cap: Some(Duration::from_secs(RETRY_DELAY_CAP_SECONDS)),
             },
         )
         .await
