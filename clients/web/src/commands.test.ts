@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { invokeCommand } from './commands'
+import { commandById, invokeCommand } from './commands'
 import { productCommandRegistry } from './productCommands'
 import { actions, selectApp, store } from './state'
 
@@ -264,5 +264,44 @@ describe('command registry', () => {
     invokeCommand('selection.last', context)
 
     expect(loaded).toEqual(['first', 'latest'])
+  })
+
+  it('withholds the artifact inspector until a surface owns an opener', () => {
+    const artifact = commandById('artifact.open')
+    const base = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+    }
+
+    expect(artifact.available(base)).toBe(false)
+    expect(artifact.available({ ...base, openArtifactInspector: () => undefined })).toBe(true)
+  })
+
+  it('routes artifact inspection through the owning surface opener', () => {
+    let opened = 0
+
+    invokeCommand('artifact.open', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+      openArtifactInspector: () => {
+        opened += 1
+      },
+    })
+
+    expect(opened).toBe(1)
+  })
+
+  it('keeps the artifact inspector reachable from product surfaces', () => {
+    const productCommandIds: readonly string[] = productCommandRegistry.map((command) => command.id)
+
+    expect(productCommandIds).toContain('artifact.open')
   })
 })

@@ -164,3 +164,11 @@ export const saveBrowserPreferences = (preferences: BrowserPreferences): void =>
     // Browser persistence is optional; the active Redux state remains authoritative.
   }
 }
+
+export const applyPresentationPreferences = (
+  preferences: Pick<BrowserPreferences, 'density' | 'theme'>,
+  root: HTMLElement = document.documentElement,
+): void => {
+  root.dataset.theme = preferences.theme
+  root.dataset.density = preferences.density
+}
