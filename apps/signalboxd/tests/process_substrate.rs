@@ -7,10 +7,13 @@
 use std::error::Error;
 
 use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options,
 };
-use signalboxd::{FencedHubDatabase, SingleHubGuard, SingleHubGuardError};
+use signalboxd::{
+    FencedHubDatabase, FencedPoolFloorReconciliation, SingleHubGuard, SingleHubGuardError,
+    reconcile_fenced_pool_floor,
+};
 use sqlx::{Connection, PgPool, postgres::PgPoolOptions};
 use testcontainers_modules::{
     postgres::Postgres,
@@ -28,7 +31,7 @@ async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dy
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -89,7 +92,7 @@ async fn single_hub_guard_loss_is_observable() -> Result<(), Box<dyn Error>> {
 async fn fenced_database_close_drains_pool_before_guard_release() -> Result<(), Box<dyn Error>> {
     let (container, control_pool, database_url) = postgres().await?;
     let options = local_test_connection_options(&database_url)?;
-    let database = FencedHubDatabase::connect_with(options).await?;
+    let database = FencedHubDatabase::connect_with(options, None).await?;
     let pool = database.pool().clone();
     let checkout_a = pool.acquire().await?;
     let checkout_b = pool.acquire().await?;
@@ -126,6 +129,53 @@ async fn fenced_database_close_drains_pool_before_guard_release() -> Result<(), 
     Ok(())
 }
 
+/// A retired physical session is restored to the deployment floor without
+/// replacing the fenced pool or its generation.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn fenced_pool_floor_reconciliation_reopens_retired_sessions() -> Result<(), Box<dyn Error>> {
+    const FLOOR: u32 = 4;
+    let (container, control_pool, database_url) = postgres().await?;
+    let options = local_test_connection_options(&database_url)?;
+    let database = FencedHubDatabase::connect_with(options, None).await?;
+    let pool = database.pool().clone();
+    let mut warm_a = pool.acquire().await?;
+    let mut warm_b = pool.acquire().await?;
+    let mut warm_c = pool.acquire().await?;
+    let retired = pool.acquire().await?.detach();
+    retired.close().await?;
+    warm_a.return_to_pool().await;
+    warm_b.return_to_pool().await;
+    warm_c.return_to_pool().await;
+
+    assert_eq!(pool.size(), FLOOR - 1);
+
+    assert_eq!(
+        reconcile_fenced_pool_floor(&pool, FLOOR).await?,
+        FencedPoolFloorReconciliation::DeferredForIdleCapacity
+    );
+    assert_eq!(pool.size(), FLOOR - 1);
+
+    let mut checkout_a = pool.acquire().await?;
+    let mut checkout_b = pool.acquire().await?;
+    let mut checkout_c = pool.acquire().await?;
+
+    assert_eq!(pool.num_idle(), 0);
+    assert_eq!(
+        reconcile_fenced_pool_floor(&pool, FLOOR).await?,
+        FencedPoolFloorReconciliation::Replenished
+    );
+
+    assert_eq!(pool.size(), FLOOR);
+    checkout_a.return_to_pool().await;
+    checkout_b.return_to_pool().await;
+    checkout_c.return_to_pool().await;
+    database.close().await?;
+    control_pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// Explicit fenced-database shutdown cannot release the singleton guard while
 /// a connection detached from SQLx pool accounting retains generation
 /// authority.
@@ -134,7 +184,7 @@ async fn fenced_database_close_drains_pool_before_guard_release() -> Result<(), 
 async fn fenced_database_close_waits_for_a_detached_pool_session() -> Result<(), Box<dyn Error>> {
     let (container, control_pool, database_url) = postgres().await?;
     let options = local_test_connection_options(&database_url)?;
-    let database = FencedHubDatabase::connect_with(options).await?;
+    let database = FencedHubDatabase::connect_with(options, None).await?;
     let detached = database.pool().acquire().await?.detach();
     let close = database.close();
     tokio::pin!(close);
@@ -165,7 +215,7 @@ async fn fenced_database_close_waits_for_a_detached_pool_session() -> Result<(),
 async fn implicit_fenced_database_drop_retains_guard() -> Result<(), Box<dyn Error>> {
     let (container, control_pool, database_url) = postgres().await?;
     let options = local_test_connection_options(&database_url)?;
-    let database = FencedHubDatabase::connect_with(options).await?;
+    let database = FencedHubDatabase::connect_with(options, None).await?;
     let escaped_pool = database.pool().clone();
     let checkout = escaped_pool.acquire().await?;
 
@@ -194,7 +244,7 @@ async fn implicit_fenced_database_drop_retains_guard() -> Result<(), Box<dyn Err
 async fn successor_waits_for_every_prior_fenced_pool_session() -> Result<(), Box<dyn Error>> {
     let (container, control_pool, database_url) = postgres().await?;
     let options = local_test_connection_options(&database_url)?;
-    let first = FencedHubDatabase::connect_with(options.clone()).await?;
+    let first = FencedHubDatabase::connect_with(options.clone(), None).await?;
     assert_eq!(first.generation().get(), 2);
     let prior_pool = first.pool().clone();
     let mut prior_checkout_a = prior_pool.acquire().await?;
@@ -224,7 +274,7 @@ async fn successor_waits_for_every_prior_fenced_pool_session() -> Result<(), Box
         .await?;
     assert!(terminated);
 
-    let successor = FencedHubDatabase::connect_with(options);
+    let successor = FencedHubDatabase::connect_with(options, None);
     tokio::pin!(successor);
     assert!(
         tokio::time::timeout(std::time::Duration::from_millis(100), &mut successor)

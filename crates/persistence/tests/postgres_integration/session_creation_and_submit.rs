@@ -1,6 +1,7 @@
 //! Session creation, configuration defaults, submitted input, and first turn activation.
 
 use crate::*;
+use signalbox_application::SubmitInputRequestError;
 use signalbox_domain::{AttachmentKind, BlobDigest, DeclaredMediaType, UserContentPart};
 
 fn attachment_part(digest: BlobDigest) -> UserContentPart {
@@ -2772,6 +2773,47 @@ async fn inv002_inv007_inv008_inv012_submit_schema_is_closed_and_normalized()
     assert_eq!(
         error.as_database_error().and_then(|error| error.code()),
         Some("23503".into())
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The deployment's configured accepted-input content bound is enforced at
+/// application admission: oversized text fails before the typed command
+/// exists, so it never reaches SQL and claims no durable identifier.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn content_size_bound_rejects_oversized_text_at_application() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+
+    const CONFIGURED_MAX_UTF8_BYTES: usize = 11;
+    let oversized = UserContent::try_text("a".repeat(CONFIGURED_MAX_UTF8_BYTES + 1))
+        .expect("domain text is intentionally unbounded");
+    let error = SubmitInputRequest::try_new_with_content_limit(
+        DurableCommandId::from_uuid(Uuid::from_u128(0x320)),
+        SessionId::from_uuid(Uuid::from_u128(0x720)),
+        oversized,
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+        Some(CONFIGURED_MAX_UTF8_BYTES),
+    )
+    .expect_err("text over the provisional bound fails application admission");
+    assert_eq!(
+        error,
+        SubmitInputRequestError::OversizedContent {
+            utf8_byte_length: CONFIGURED_MAX_UTF8_BYTES + 1,
+            max_utf8_bytes: CONFIGURED_MAX_UTF8_BYTES,
+        }
+    );
+    let claimed: i64 = sqlx::query_scalar("SELECT count(*) FROM durable_command")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        claimed, 0,
+        "content rejected before typed-command construction claims no durable identifier"
     );
 
     pool.close().await;

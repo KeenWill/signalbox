@@ -10,9 +10,8 @@ use signalbox_domain::{
     AcceptedInputEligibilityFailure, AcceptedInputSchedulingProjection,
     AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities, ActivatedTurn,
     ActiveTurnPhase, CurrentTurnAttemptState, DelegatedTurnActivationInput,
-    DelegatedWakeTurnActivationInput, DelegationContent, ModelCallId,
-    PreparedAcceptedInputTurnActivation, PreparedDelegatedTurnActivation, PreparedTurnActivation,
-    SemanticTranscriptEntryId,
+    DelegatedWakeTurnActivationInput, DelegationContent, PreparedAcceptedInputTurnActivation,
+    PreparedDelegatedTurnActivation, PreparedTurnActivation, SemanticTranscriptEntryId,
     SemanticTranscriptEntryPayload as InitialSemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, SessionId,
     ToolRequestId, TurnId,
@@ -28,7 +27,10 @@ use crate::{
         defaults_version_to_numeric, input_position_to_numeric, positive_u64_from_numeric,
         session_id_to_uuid, turn_id_to_uuid,
     },
-    model_execution::{SnapshotAppend, SnapshotAppendError, insert_snapshot_append},
+    model_execution::{
+        SnapshotAppend, SnapshotAppendError, insert_snapshot_append,
+        lock_delegated_child_endpoint_sessions,
+    },
     outbox::{self, OutboxEvent},
     session::{SessionCorruption, SessionRepositoryError, load_session_from_connection},
     submit_input::{
@@ -257,6 +259,16 @@ pub enum CommitActivationPreviewOutcome {
     Stale,
 }
 
+/// Outcome of atomically activating and failing a turn whose required
+/// automatic context compaction could not complete.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CommitCompactionFailurePreviewOutcome {
+    /// The exact preview activated and terminalized as failed without a call.
+    Failed(TurnId),
+    /// Authoritative state changed after preview; the caller must restart the pass.
+    Stale,
+}
+
 enum TransactionDecision {
     Commit(StartEligibleTurnOutcome),
     Rollback(StartEligibleTurnOutcome),
@@ -334,7 +346,7 @@ impl StartEligibleTurnRepository {
     pub async fn commit_counted_preview(
         &self,
         preview: PreparedActivationPreview,
-        call: ModelCallId,
+        prospective: crate::model_execution::ProspectiveModelCall,
         model_calls: &crate::model_execution::PostgresModelCallRepository,
         instruction_evidence: Option<CountedActivationInstructionEvidence<'_>>,
     ) -> Result<CommitActivationPreviewOutcome, CommitActivationPreviewError> {
@@ -391,6 +403,10 @@ impl StartEligibleTurnRepository {
                 .map_err(CommitActivationPreviewError::Activation)?;
             return Ok(CommitActivationPreviewOutcome::Stale);
         }
+        let outbox_order_guard =
+            crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
+                .await
+                .map_err(CommitActivationPreviewError::ModelCall)?;
         let activated = insert_prepared_activation(&mut transaction, current)
             .await
             .map_err(CommitActivationPreviewError::Activation)?;
@@ -403,7 +419,12 @@ impl StartEligibleTurnRepository {
             .map_err(CommitActivationPreviewError::WorkspaceInstructions)?;
         }
         model_calls
-            .checkpoint_counted_activation_in_transaction(&mut transaction, session, call)
+            .checkpoint_counted_activation_in_transaction(
+                &mut transaction,
+                &activated,
+                &prospective,
+                outbox_order_guard,
+            )
             .await
             .map_err(CommitActivationPreviewError::ModelCall)?;
         transaction.commit().await.map_err(|error| {
@@ -415,6 +436,90 @@ impl StartEligibleTurnRepository {
         Ok(CommitActivationPreviewOutcome::Activated(Box::new(
             activated,
         )))
+    }
+
+    /// Revalidates one preview and atomically closes it as a call-free failed
+    /// turn after required automatic context compaction failed.
+    pub async fn commit_compaction_failure_preview(
+        &self,
+        preview: PreparedActivationPreview,
+        model_calls: &crate::model_execution::PostgresModelCallRepository,
+        identities: signalbox_domain::FailedModelCallTurnIdentities,
+        recovery_cause: Option<crate::goal::GoalExecutionFailureRecoveryCause>,
+    ) -> Result<CommitCompactionFailurePreviewOutcome, CommitActivationPreviewError> {
+        let session = preview.prepared.turn().session();
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(StartEligibleTurnRepositoryError::from)
+            .map_err(CommitActivationPreviewError::Activation)?;
+        // A delegated-child failure publishes into its parent session. Keep
+        // that endpoint pair ahead of the child scheduler in the global lock
+        // order, matching every other delegated terminalization path.
+        lock_delegated_child_endpoint_sessions(&mut transaction, session)
+            .await
+            .map_err(CommitActivationPreviewError::ModelCall)?;
+        let session_uuid = session_id_to_uuid(session);
+        let (session_exists, scheduler_session) =
+            sqlx::query_as::<_, (bool, Option<Uuid>)>(crate::lock_inventory::START_ELIGIBLE_TURN)
+                .bind(session_uuid)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+        if !session_exists || scheduler_session.is_none() {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitCompactionFailurePreviewOutcome::Stale);
+        }
+        let current = prepare_preview(&mut transaction, session, preview.identities)
+            .await
+            .map_err(CommitActivationPreviewError::Activation)?;
+        let Some(current) = current else {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitCompactionFailurePreviewOutcome::Stale);
+        };
+        if current != preview.prepared {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitCompactionFailurePreviewOutcome::Stale);
+        }
+        let _outbox_order_guard =
+            crate::model_execution::acquire_model_call_outbox_order_guard(&mut transaction)
+                .await
+                .map_err(CommitActivationPreviewError::ModelCall)?;
+        let activated = insert_prepared_activation(&mut transaction, current)
+            .await
+            .map_err(CommitActivationPreviewError::Activation)?;
+        let turn = activated.turn();
+        model_calls
+            .fail_automatic_compaction_in_transaction(
+                &mut transaction,
+                session,
+                turn,
+                identities,
+                recovery_cause,
+            )
+            .await
+            .map_err(CommitActivationPreviewError::ModelCall)?;
+        transaction.commit().await.map_err(|error| {
+            let commit_ambiguous = commit_failure_is_ambiguous(&error);
+            CommitActivationPreviewError::Activation(
+                StartEligibleTurnRepositoryError::from_database(error, commit_ambiguous),
+            )
+        })?;
+        Ok(CommitCompactionFailurePreviewOutcome::Failed(turn))
     }
 
     /// Locks one session scheduler row, reconstitutes complete scheduling

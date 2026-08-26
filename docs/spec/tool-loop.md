@@ -11,6 +11,9 @@ version cross-link was re-verified through this PR
 The executor-failure containment contract is verified against this PR
 (`agent/executor-failure-turn-containment`).
 
+Bounded daemon-owned reconciliation of an ambiguous tool attempt is verified
+against this PR (`agent/daemon-live-tool-recovery-reconcile`).
+
 The session-delegation scheduling executor and daemon catalog composition are
 verified against PR #462 (`agent/delegation-runtime-daemon-v2`).
 
@@ -25,6 +28,12 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture �
 The immutable repository-watch authority supplied to a dispatched approval judge
 and the unattended-escalation terminal path are verified against this PR
 (`agent/headless-approval-escalation`).
+
+The operator-attended park after an operator-commissioned approval escalation is
+verified against this PR (`agent/daemon-live-headless-approval-park`).
+
+The automatic non-executable denial of credential-suppressed tool arguments is
+verified against this PR (`agent/daemon-live-redacted-tool-recovery`).
 
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
@@ -56,16 +65,20 @@ against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
 extension through PR #265 (`agent/tool-batch-tier0`). The Tier 1 code-host
 catalog extension is verified through PR #270 (`agent/tool-batch-tier1`), the
-deterministic review-slog extension through PR #306 (`agent/review-slog-tools`),
-the failed-attempt operator event together with the credential-shaped code-host
-detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
-decision surface through PR #291 (`agent/turn-control-verbs`), and
-runner-protocol batch reconstitution through PR #260
-(`agent/runner-protocol-domain`). Template-derived blanket creation was verified
-through PR #311 (`agent/session-templates-spec`), and the exact-origin
-`web_fetch` egress policy and complete bounded file-patch lookup through PR #330
-(`agent/audit-verified-fixes`). The exact-revision repository-read extension is
-verified through PR #348 (`agent/repository-read-tools`) at implementation ref
+review-thread aggregate retention bound through PR #1181
+(`agent/daemon-live-review-thread-result-budget`) and its scrubbed-result
+enforcement through this PR (`agent/daemon-live-review-thread-scrub-budget`),
+the deterministic review-slog extension through PR #306
+(`agent/review-slog-tools`), the failed-attempt operator event together with the
+credential-shaped code-host detail through PR #285
+(`agent/dev-instance-code-host-credential`), the client decision surface through
+PR #291 (`agent/turn-control-verbs`), and runner-protocol batch reconstitution
+through PR #260 (`agent/runner-protocol-domain`). Template-derived blanket
+creation was verified through PR #311 (`agent/session-templates-spec`), and the
+exact-origin `web_fetch` egress policy and complete bounded file-patch lookup
+through PR #330 (`agent/audit-verified-fixes`). The exact-revision
+repository-read extension is verified through PR #348
+(`agent/repository-read-tools`) at implementation ref
 `2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
 at this foundation proposal extends the same laws to the runner locus. The
 explicit-approval `AlwaysConfirm` declaration is verified through PR #366
@@ -180,17 +193,20 @@ implemented decision sources are:
   automatic approval;
 - `SessionOverride` — an exact runner-placement tool override supplied automatic
   approval;
-- `Delegate` — an authority-checked approval-judge call decided the request; and
+- `Delegate` — an authority-checked approval-judge call decided the request;
 - `UserOverride` — a user-recorded one-shot override of a delegate denial
-  supplied approval when the session re-proposed the denied command.
+  supplied approval when the session re-proposed the denied command; and
+- `RuntimeSafety` — the provider credential boundary suppressed the complete
+  argument object, so the producing-call transaction recorded a fixed denial
+  before any executor could observe the request.
 
 A delegated decision names the exact direct model selection and dedicated model
 call that made it, and retains the judge rationale as nonempty text of at most
 4,096 bytes. A user decision instead names its exact durable command. A consumed
 user override names its override durable command and the exact delegate-denied
 request it overrides — user agency exercised in advance through that command.
-Automatic policy has no decider or rationale. Neither automated path can claim
-user agency (INV-020).
+Automatic policy and runtime-safety denial have no decider or rationale. None of
+the automated paths can claim user agency (INV-020).
 
 Each daemon tool mapping may declare one approval posture: `Auto`, `Delegated`,
 or `Human`. The selected posture is frozen into every resulting request. For
@@ -287,34 +303,30 @@ proposed request rather than as instruction. The context comes from the
 append-only dispatch action and triggering event, not from mutable provider
 state or text reconstructed from the goal.
 
-The judge may approve or deny only a request frozen as `Delegated`. In a session
-without repository-watch dispatch authority, an `EscalateToHuman` result stores
-the completed call but no approval decision and leaves the same request parked.
-A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous` terminal judge call
+The judge may approve or deny only a request frozen as `Delegated`. Outside a
+repository-watch-dispatched session, including in an operator-commissioned
+session judged under its recorded fence, an `EscalateToHuman` result stores the
+completed call but no approval decision and leaves the same request parked. A
+`KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous` terminal judge call
 likewise retains that attended park while immediately admitting a user decision,
 so a terminal judge failure cannot prevent that decision. In a session judged
-under dispatch authority, no user attends the approval wait — unless steering
-accepted while the judge was outstanding still names the judged turn, which is a
-user attending it, or the session has already recorded an escalation while the
-commissioned goal's authority still stands, which means an operator resumed this
-work by hand — nothing else can, because the block an escalation writes is
-exempt from automatic resumption. Either turn keeps the attended park described
-above: its completed `EscalateToHuman` leaves the turn active and the request
-parked for that user, exactly as in a session no dispatch created, and no steer
-is reclassified or stranded by a terminalization it did not expect. Otherwise a
+under repository-watch dispatch authority, no user attends the approval wait
+unless steering accepted while the judge was outstanding still names the judged
+turn. A repository-watch session that already recorded an escalation is also
+attended: its exceptional block has no automatic resumption, so only an operator
+could have resumed it. Either turn keeps the attended park described above: its
+completed `EscalateToHuman` leaves the turn active and the request parked for
+that user, exactly as in a session no dispatch created, and no steer is
+reclassified or stranded by a terminalization it did not expect. Otherwise a
 completed `EscalateToHuman` closes every unresolved request in the active batch
 as `ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
-judge escalation as its typed cause, and blocks the commissioned goal for
-execution failure while that goal's authority still stands. A generation
-stopped, achieved, or superseded during the provider round-trip is failed but
-not blocked: [goal mode](goal-mode.md) fixes that the authority the block would
-record has already ended, and a released batch whose authority ended this way is
-the stale work [repository watch](repo-watch.md) terminalizes rather than parks.
-The same transaction records an append-only audit row linking the judge call and
-rationale, request, dispatch action, terminal attempt, failure entry, and
-terminal frontier. The blocked goal then participates in the ordinary
-repository-watch release and re-arm rules instead of leaving the active turn
-parked.
+judge escalation as its typed cause, and records an append-only audit row
+linking the judge call and rationale, request, dispatch action, terminal
+attempt, failure entry, and terminal frontier. Repository-watch work atomically
+blocks its still-authoritative goal under the exceptional no-resume policy and
+participates in the ordinary release and re-arm rules. A generation stopped,
+achieved, or superseded during the provider round-trip remains ended, so
+reconciliation has nothing to resume.
 
 A request frozen as `Human` admits only an escalation result from a delegate; a
 delegate approval or denial is rejected by both domain reconstruction and
@@ -752,6 +764,15 @@ therefore leaves a provider-renderable conversation while the typed lifecycle
 and outbox boundaries retain the physical tool-attempt uncertainty instead of
 fabricating a model call or an execution result (INV-005, INV-006, INV-025,
 INV-029, INV-037).
+
+Without an interrupt, the daemon durably claims the same exact tool-attempt
+ambiguity through the automatic-reconciliation ledger. Under the session
+scheduler lock it rebuilds the complete batch, projects the same
+proposal-ordered result suffix, and terminalizes through the same tool
+reconciliation-required boundary. A concurrent authoritative transition wins and
+supersedes the claim. Infrastructure or integrity failures are recorded and
+retried with bounded backoff; after five attempts the wait stays visible with
+operator action required.
 
 The schema independently enforces no live tool attempt while the lifecycle is
 `awaiting_tool_approval`, at most one nonterminal tool attempt per turn,
@@ -1277,7 +1298,12 @@ The declarations and compact result objects are:
 - `change_request_review_threads` accepts `repository` and `number`; it returns
   the first 100 threads and, within each, the first 100 comments. A thread
   carries opaque id, resolution and outdated posture, path, optional line,
-  comments, and `comments_truncated`; the outer result carries `truncated`.
+  comments, and `comments_truncated`; the outer result carries `truncated`. The
+  configured code-host result-text byte bound applies to the complete encoded,
+  credential-scrubbed result. Exhausting it retains an ordered
+  thread-and-comment prefix, marks a shortened comment page with
+  `comments_truncated`, and marks an omitted thread suffix with outer
+  `truncated`.
 - `change_request_thread_reply` accepts `repository`, `number`, an opaque
   `thread_id`, and nonempty `body`; it returns the created comment node id and
   URL. The named change request is the mutation's authority target: an opaque

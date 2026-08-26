@@ -130,34 +130,28 @@ impl PostgresEligibilitySweep {
                         WHERE released.dispatch_id = lease.dispatch_id
                    )
                 UNION
-                SELECT terminal.session_id
-                  FROM turn_lifecycle AS terminal
-                  JOIN goal_turn AS terminal_goal
-                    ON terminal_goal.session_id = terminal.session_id
-                   AND terminal_goal.turn_id = terminal.turn_id
-                  JOIN goal_event AS current_event
-                    ON current_event.session_id = terminal.session_id
-                 WHERE terminal.state_kind = 'terminal'
-                   AND current_event.event_kind IN (
+                SELECT current_event.session_id
+                  FROM (
+                        SELECT DISTINCT ON (event.session_id)
+                               event.session_id, event.event_kind
+                          FROM goal_event AS event
+                         ORDER BY event.session_id,
+                                  event.event_ordinal DESC
+                       ) AS current_event
+                  JOIN LATERAL (
+                        SELECT lifecycle.state_kind
+                          FROM goal_turn AS goal
+                          JOIN turn_lifecycle AS lifecycle
+                            ON lifecycle.session_id = goal.session_id
+                           AND lifecycle.turn_id = goal.turn_id
+                         WHERE goal.session_id = current_event.session_id
+                         ORDER BY lifecycle.acceptance_position DESC
+                         LIMIT 1
+                       ) AS latest_goal ON true
+                 WHERE current_event.event_kind IN (
                        'commissioned', 'resumed', 'superseded'
                    )
-                   AND NOT EXISTS (
-                       SELECT 1
-                         FROM goal_event AS later_event
-                        WHERE later_event.session_id = current_event.session_id
-                          AND later_event.event_ordinal > current_event.event_ordinal
-                   )
-                   AND NOT EXISTS (
-                       SELECT 1
-                         FROM goal_turn AS later_goal
-                         JOIN turn_lifecycle AS later_lifecycle
-                           ON later_lifecycle.session_id = later_goal.session_id
-                          AND later_lifecycle.turn_id = later_goal.turn_id
-                        WHERE later_goal.session_id = terminal_goal.session_id
-                          AND later_lifecycle.acceptance_position
-                              > terminal.acceptance_position
-                   )
-                 GROUP BY terminal.session_id
+                   AND latest_goal.state_kind = 'terminal'
                 UNION
                 SELECT active.session_id
                   FROM turn_lifecycle AS active
