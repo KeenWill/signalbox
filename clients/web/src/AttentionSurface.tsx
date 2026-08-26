@@ -177,9 +177,12 @@ export function AttentionSurface({
   }
   const restartMonitor = () => {
     focusReplacement.current = true
-    void attention.refetch().then(() => {
-      setMonitorGeneration((generation) => generation + 1)
-    })
+    // Every follow response opens with its own coherent snapshot, so the follower never needs
+    // the ordinary read to establish a baseline. Restarting concurrently keeps recovery from
+    // depending on an HTTP read that can stay pending: both projections are still arbitrated
+    // by cursor, in the query function and in onProjection, whichever settles first.
+    setMonitorGeneration((generation) => generation + 1)
+    void attention.refetch()
   }
   const monitorCanRestart = phase === 'failed' || phase === 'stale'
   const retryAttention = () => {

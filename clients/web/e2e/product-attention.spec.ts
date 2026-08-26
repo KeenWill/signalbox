@@ -1,4 +1,4 @@
-import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { expect, type Page, type Route, type TestInfo, test } from '@playwright/test'
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 
 const approvalSessionId = '018f1840-6f3d-7a8b-9c1d-0e2f3a4b5c61'
@@ -234,6 +234,36 @@ const installStaleMonitorScenario = async (page: Page) => {
   return () => followRequests
 }
 
+// The monitor goes stale after its single follow response, and every read after the one that
+// mounts the page is held open, modelling a daemon whose stream is healthy while its ordinary
+// read stalls.
+const installHeldSnapshotReadMonitorScenario = async (page: Page) => {
+  let followRequests = 0
+  let snapshotRequests = 0
+  const heldReads: Route[] = []
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  await page.route('**/api/attention/follow', (route) => {
+    followRequests += 1
+    return route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: attentionFixture })}\n`,
+      contentType: 'application/x-ndjson',
+    })
+  })
+  await page.route('**/api/attention', (route) => {
+    snapshotRequests += 1
+    if (snapshotRequests > 1) {
+      heldReads.push(route)
+      return undefined
+    }
+    return route.fulfill({ json: attentionFixture })
+  })
+  return {
+    followRequests: () => followRequests,
+    releaseHeldReads: () =>
+      Promise.all(heldReads.map((route) => route.fulfill({ json: attentionFixture }))),
+  }
+}
+
 const installNewerHttpSnapshotScenario = async (page: Page) => {
   const newerSnapshot = { ...nextAttentionFixture, cursor: '43' }
   await page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
@@ -424,6 +454,17 @@ test('restarts a stale Attention monitor in place', async ({ page }) => {
   await page.getByRole('button', { name: 'Restart monitor' }).click()
 
   await expect.poll(followRequests).toBe(2)
+})
+
+test('restarts the Attention monitor while the snapshot read is pending', async ({ page }) => {
+  const scenario = await installHeldSnapshotReadMonitorScenario(page)
+  await page.goto('/attention')
+
+  await expect(page.getByText('Monitor paused')).toBeVisible()
+  await page.getByRole('button', { name: 'Restart monitor' }).click()
+
+  await expect.poll(scenario.followRequests).toBe(2)
+  await scenario.releaseHeldReads()
 })
 
 test('keeps a newer HTTP snapshot than an in-flight follower snapshot', async ({ page }) => {
