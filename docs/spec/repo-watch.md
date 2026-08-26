@@ -1627,11 +1627,15 @@ page never follows each session separately.
 last observed event, last event that matched an actionable rule, last dispatch
 attempt, and last achieved-and-released automation settlement. It reports held
 slots and outstanding obligations separately, including the held release
-blockers and whether an obligation is ready, occupied, cooling down, or parked.
-Repository health includes explicit five-minute and one-hour webhook windows,
-latest and one-hour maximum projection latency, and event-kind counts. Activity
-times come from durable record timestamps; neither session age nor activity time
-is inferred from a UUID.
+blockers and whether an obligation is ready, occupied by a watch dispatch, held
+by a live independently commissioned session, cooling down, or parked. The
+external hold is its own reported state because that session owns no dispatch
+identity, and readiness is conjoined from the durable outstanding-obligation
+view rather than recomputed, so this read cannot report an obligation ready that
+admission refuses. Repository health includes explicit five-minute and one-hour
+webhook windows, latest and one-hour maximum projection latency, and event-kind
+counts. Activity times come from durable record timestamps; neither session age
+nor activity time is inferred from a UUID.
 
 **Implemented behavior.** Pull-request provider state comes from the normalized
 durable cursor and reports lifecycle, draft state, mergeability, completed-check

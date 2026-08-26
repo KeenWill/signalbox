@@ -17,13 +17,14 @@ use signalbox_application::{
     CommissionDispatchRequest, CommissionedDispatchFence, ModelCallCredentialReference,
     RepoWatchBranchHead, RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
     RepoWatchConvergenceVerdict, RepoWatchDispatchService, RepoWatchDispatchTransaction,
-    RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObservation,
-    RepoWatchPagePosition, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
-    RepoWatchPullRequestStateInput, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-    RepoWatchResolvedTemplate, RepoWatchReviewDecision, RepoWatchRuleEvaluation,
-    RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver, RepoWatchWorkflowRunObservation,
-    StartEligibleTurnOutcome, StartEligibleTurnService, UuidV7CommissionedDispatchIdGenerator,
-    UuidV7RepoWatchDispatchIdGenerator, UuidV7StartEligibleTurnIdGenerator,
+    RepoWatchEventContentIdentityV1, RepoWatchEventOccurrenceV1, RepoWatchObligationReadiness,
+    RepoWatchObservation, RepoWatchPagePosition, RepoWatchPullRequestLifecycle,
+    RepoWatchPullRequestState, RepoWatchPullRequestStateInput, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome, RepoWatchTemplateResolver,
+    RepoWatchWorkflowRunObservation, StartEligibleTurnOutcome, StartEligibleTurnService,
+    UuidV7CommissionedDispatchIdGenerator, UuidV7RepoWatchDispatchIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator,
 };
 use signalbox_domain::{
     AcceptedInputId, ActiveTurnPhase, AssistantResponsePart, BranchName,
@@ -8529,6 +8530,31 @@ async fn repository_watch_observes_operator_commission_target_ownership()
             .await?
             .is_none(),
         "a live external blocker keeps the obligation out of the dispatch loader"
+    );
+
+    // The operator read has to agree with the loader it describes. A live
+    // external blocker leaves no occupying dispatch and no cooldown, so a
+    // readiness recomputed without that term would announce work as ready that
+    // admission refuses.
+    let blocked_work =
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+            .work(
+                repository.clone(),
+                RepoWatchPagePosition::Exhausted,
+                RepoWatchPagePosition::Start,
+            )
+            .await?;
+
+    assert_eq!(
+        blocked_work
+            .queued_obligations
+            .iter()
+            .map(|obligation| obligation.readiness.clone())
+            .collect::<Vec<_>>(),
+        vec![RepoWatchObligationReadiness::ExternallyBlocked {
+            sessions: vec![fixture.session],
+        }],
+        "the operator read names the live external session holding the obligation"
     );
 
     let stopped = GoalRepository::new(fixture.pool.clone())

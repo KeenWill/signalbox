@@ -3,9 +3,9 @@
 use std::{collections::BTreeMap, future::Future, time::SystemTime};
 
 use signalbox_domain::{
-    BranchName, CommitSha, MergeableState, PullRequestNumber, PullRequestTitle,
-    RepoWatchDispatchId, RepoWatchEventId, RepoWatchEventKindNameV1, RepoWatchRuleId,
-    RepositorySlug, ReviewState, SessionId,
+    BranchName, CommissionedDispatchId, CommitSha, MergeableState, PullRequestNumber,
+    PullRequestTitle, RepoWatchDispatchId, RepoWatchEventId, RepoWatchEventKindNameV1,
+    RepoWatchRuleId, RepositorySlug, ReviewState, SessionId,
 };
 
 use crate::{
@@ -315,6 +315,11 @@ pub enum RepoWatchObligationReadiness {
         dispatch: RepoWatchDispatchId,
         sessions: Vec<SessionId>,
     },
+    /// Held by a live independently commissioned session rather than a
+    /// repository-watch dispatch, which owns no dispatch identity here.
+    ExternallyBlocked {
+        sessions: Vec<SessionId>,
+    },
     Cooldown {
         eligible_at: Option<SystemTime>,
     },
@@ -393,7 +398,7 @@ pub enum RepoWatchSessionPurpose {
         template: String,
     },
     OperatorCommission {
-        dispatch: RepoWatchDispatchId,
+        dispatch: CommissionedDispatchId,
         template: String,
     },
 }
