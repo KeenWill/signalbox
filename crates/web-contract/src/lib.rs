@@ -802,6 +802,128 @@ pub struct WebApiErrorResponse {
     pub error: WebApiError,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionState {
+    Active,
+    Queued,
+    Blocked,
+    AwaitingApproval,
+    Ambiguous,
+    AwaitingToolRecovery,
+    AwaitingReconciliation,
+    RunnerLost,
+    Idle,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionAction {
+    ProvideGoalNeed,
+    DecideApproval,
+    ReconcileTurn,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionActivityKind {
+    Session,
+    Turn,
+    Goal,
+    ApprovalJudge,
+    Runner,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionGoalBlock {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub generation: String,
+    pub reason: WebAttentionBlockedReason,
+    /// At most 128 Unicode scalar values; exact text is in session detail.
+    #[schemars(length(max = 128))]
+    pub need_summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionJudgeFacts {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub actionable: String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub completed: String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub escalated: String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub failed: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionActivity {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub unix_milliseconds: String,
+    pub kind: WebAttentionActivityKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionSummary {
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub session_id: String,
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub current_turn_id: Option<String>,
+    pub state: WebAttentionState,
+    pub action: Option<WebAttentionAction>,
+    pub goal_block: Option<WebAttentionGoalBlock>,
+    pub judge: WebAttentionJudgeFacts,
+    pub last_activity: WebAttentionActivity,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionSnapshot {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub cursor: String,
+    #[schemars(length(max = 32))]
+    pub summaries: Vec<WebAttentionSummary>,
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub continuation_after_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebAttentionStreamEvent {
+    Snapshot {
+        snapshot: WebAttentionSnapshot,
+    },
+    Update {
+        #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+        cursor: String,
+        #[schemars(length(max = 32))]
+        summaries: Vec<WebAttentionSummary>,
+    },
+    ResyncRequired {
+        #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+        cursor: String,
+    },
+}
+
 /// One generated file and its repository-relative destination.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GeneratedArtifact {
@@ -911,6 +1033,16 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             schema: timeline_window_schema,
         },
         ContractSchema {
+            name: "WebAttentionSnapshot",
+            decoder: "decodeWebAttentionSnapshot",
+            schema: canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value()),
+        },
+        ContractSchema {
+            name: "WebAttentionStreamEvent",
+            decoder: "decodeWebAttentionStreamEvent",
+            schema: canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value()),
+        },
+        ContractSchema {
             name: "WebImportListRequest",
             decoder: "decodeWebImportListRequest",
             schema: canonical_schema(schemars::schema_for!(WebImportListRequest).to_value()),
@@ -990,6 +1122,22 @@ const schemas = {schema_values};
 
 function fail(path, expected) {{
   throw new TypeError(`${{path}} must be ${{expected}}`);
+}}
+
+function isWellFormedUnicode(value) {{
+  for (let index = 0; index < value.length; index += 1) {{
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {{
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {{
+        return false;
+      }}
+      index += 1;
+    }} else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {{
+      return false;
+    }}
+  }}
+  return true;
 }}
 
 function resolveReference(root, reference) {{
@@ -1116,25 +1264,87 @@ function assertSchema(root, schema, value, path) {{
     if (typeof value !== "string") {{
       fail(path, "string");
     }}
-    if (schema.minLength !== undefined && value.length < schema.minLength) {{
-      fail(path, `at least ${{schema.minLength}} characters`);
+    if (!isWellFormedUnicode(value)) {{
+      fail(path, "well-formed Unicode scalar values");
     }}
-    if (schema.maxLength !== undefined && value.length > schema.maxLength) {{
-      fail(path, `at most ${{schema.maxLength}} characters`);
+    if (
+      (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+      value.length > 20
+    ) {{
+      fail(path, "an unsigned 64-bit integer");
+    }}
+    if (schema.minLength !== undefined && Array.from(value).length < schema.minLength) {{
+      fail(path, `at least ${{schema.minLength}} Unicode scalar values`);
     }}
     if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {{
       fail(path, `matching ${{schema.pattern}}`);
     }}
     if (
       (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
-      (value.length > 20 || BigInt(value) > 18446744073709551615n)
+      BigInt(value) > 18446744073709551615n
     ) {{
       fail(path, "an unsigned 64-bit integer");
+    }}
+    if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {{
+      fail(path, `at most ${{schema.maxLength}} Unicode scalar values`);
     }}
     return;
   }}
   if (typeof value !== schema.type) {{
     fail(path, schema.type);
+  }}
+}}
+
+function assertAttentionSummary(summary, path) {{
+  const action = summary.action ?? null;
+  const goalBlock = summary.goal_block ?? null;
+  const valid =
+    (summary.state === "blocked" &&
+      (action === "provide_goal_need" ||
+        (action === null && goalBlock?.reason === "execution_failure"))) ||
+    (summary.state === "awaiting_approval" &&
+      (action === null || action === "decide_approval")) ||
+    (summary.state === "ambiguous" && action === "reconcile_turn") ||
+    ([
+      "active",
+      "queued",
+      "awaiting_tool_recovery",
+      "awaiting_reconciliation",
+      "runner_lost",
+      "idle",
+    ].includes(summary.state) && action === null);
+  if (!valid) {{
+    fail(`${{path}}.action`, `consistent with attention state ${{JSON.stringify(summary.state)}}`);
+  }}
+  const validGoalBlock =
+    (summary.state === "blocked" && goalBlock !== null) ||
+    summary.state === "runner_lost" ||
+    (summary.state !== "blocked" && goalBlock === null);
+  if (!validGoalBlock) {{
+    fail(
+      `${{path}}.goal_block`,
+      `consistent with attention state ${{JSON.stringify(summary.state)}}`,
+    );
+  }}
+}}
+
+function assertAttentionSummaries(summaries, path) {{
+  summaries.forEach((summary, index) =>
+    assertAttentionSummary(summary, `${{path}}[${{index}}]`),
+  );
+}}
+
+function assertAttentionSnapshot(snapshot, path) {{
+  assertAttentionSummaries(snapshot.summaries, `${{path}}.summaries`);
+  const continuation = snapshot.continuation_after_session_id ?? null;
+  if (continuation !== null) {{
+    const last = snapshot.summaries.at(-1);
+    if (last === undefined || continuation !== last.session_id) {{
+      fail(
+        `${{path}}.continuation_after_session_id`,
+        "the last returned session identity",
+      );
+    }}
   }}
 }}
 
@@ -1506,12 +1716,32 @@ export function decodeWebBlobDescriptor(value) {{
   }}
   return value;
 }}
+
+export function decodeWebAttentionSnapshot(value) {{
+  assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  assertAttentionSnapshot(value, "attention_snapshot");
+  return value;
+}}
+
+export function decodeWebAttentionStreamEvent(value) {{
+  assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  if (value.kind === "snapshot") {{
+    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+  }} else if (value.kind === "update") {{
+    assertAttentionSummaries(value.summaries, "attention_event.summaries");
+  }}
+  return value;
+}}
 "##,
     );
     for schema in schemas {
-        // The blob descriptor decoder carries hand-written structural invariants
-        // beyond its schema shape and is emitted verbatim in the template above.
-        if schema.name == "WebBlobDescriptor" {
+        // These decoders carry hand-written structural invariants beyond their
+        // schema shape (blob view provenance, attention state/action agreement)
+        // and are emitted verbatim in the template above.
+        if matches!(
+            schema.name,
+            "WebBlobDescriptor" | "WebAttentionSnapshot" | "WebAttentionStreamEvent"
+        ) {
             continue;
         }
         let path = schema.name.to_ascii_lowercase();
@@ -1549,6 +1779,13 @@ fn declaration_module(schemas: &[ContractSchema]) -> Result<String, GenerateWebC
             schema,
             typescript_type(&schema.schema, &schema.schema, &mut definitions)?,
         ));
+    }
+    // A root DTO reached by `$ref` from another root (the attention stream event
+    // embeds the attention snapshot) also lands in `definitions`. Its root
+    // export below already declares the name, so keeping the definition too
+    // would emit the same `export type` twice.
+    for (schema, _) in &roots {
+        definitions.remove(schema.name);
     }
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
@@ -1674,8 +1911,8 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        WebContractBootstrap, WebContractExample, WebSessionId, WebTimelineEventSequence, WebU64,
-        generated_artifacts,
+        WebAttentionStreamEvent, WebContractBootstrap, WebContractExample, WebSessionId,
+        WebTimelineEventSequence, WebU64, generated_artifacts,
     };
 
     #[track_caller]
@@ -1736,6 +1973,29 @@ mod tests {
             serde_json::from_str(fixture).expect("generated fixture is JSON");
 
         assert_eq!(encoded, fixture_value);
+    }
+
+    #[test]
+    fn attention_stream_event_rejects_unknown_variant_fields() {
+        let encoded = r#"{"kind":"resync_required","cursor":"1","unexpected":true}"#;
+
+        assert!(serde_json::from_str::<WebAttentionStreamEvent>(encoded).is_err());
+    }
+
+    #[test]
+    fn attention_runtime_decoder_enforces_string_patterns() {
+        let runtime = generated_artifacts()
+            .expect("the Rust schemas can generate browser artifacts")
+            .into_iter()
+            .find(|artifact| artifact.path == "clients/web/src/generated/web-contract.mjs")
+            .expect("the runtime decoder artifact exists")
+            .contents;
+
+        assert!(runtime.contains("new RegExp(schema.pattern, \"u\").test(value)"));
+        assert!(runtime.contains(r#""pattern": "^(0|[1-9][0-9]*)$""#));
+        assert!(runtime.contains(
+            r#""pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$""#,
+        ));
     }
 
     #[test]

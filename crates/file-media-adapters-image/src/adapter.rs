@@ -33,6 +33,7 @@ pub(crate) async fn probe(
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(format.media_type()),
             strength: ProbeStrength::Strong,
+            evidence_bytes: u64::try_from(prefix.len()).map_err(|_| ProcessorFailure::Failed)?,
         })
     } else {
         Ok(ProcessorProbeOutput::NoMatch)

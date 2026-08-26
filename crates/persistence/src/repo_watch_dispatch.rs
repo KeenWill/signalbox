@@ -2322,9 +2322,11 @@ async fn insert_evaluation(
     let affected = sqlx::query(
         "INSERT INTO repo_watch_rule_evaluation
             (repository, rule_id, rule_version, event_id,
-             cursor_generation, event_ordinal, outcome_kind, dispatch_id)
+             cursor_generation, event_ordinal, outcome_kind, dispatch_id,
+             pull_request_number)
          SELECT event.repository, $2, $3, event.event_id,
-                event.cursor_generation, event.event_ordinal, $4, $5
+                event.cursor_generation, event.event_ordinal, $4, $5,
+                event.pull_request_number
            FROM repo_watch_event AS event
           WHERE event.event_id = $1
             AND event.repository = $6",

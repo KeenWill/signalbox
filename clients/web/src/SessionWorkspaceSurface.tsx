@@ -11,6 +11,7 @@ import {
   useState,
 } from 'react'
 import { invokeCommand } from './commands'
+import { MissingAttachmentState } from './features/artifacts/ArtifactAttachments'
 import type { WebSessionTimelineWindow } from './generated/web-contract.mjs'
 import {
   BoundedSessionHistory,
@@ -569,23 +570,38 @@ export function SessionWorkspaceSurface({
                     <small>{item.projected_structured_bytes} B</small>
                   </div>
                   {isExpanded && (
-                    <dl id={`session-timeline-detail-${id}`} className="session-item-detail">
-                      <div>
-                        <dt>Address</dt>
-                        <dd>
-                          {sessionId}:{id}
-                        </dd>
-                      </div>
-                      <div>
-                        <dt>Projection</dt>
-                        <dd>Header only; rich event detail is not exposed</dd>
-                      </div>
-                    </dl>
+                    <>
+                      <dl id={`session-timeline-detail-${id}`} className="session-item-detail">
+                        <div>
+                          <dt>Address</dt>
+                          <dd>
+                            {sessionId}:{id}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Projection</dt>
+                          <dd>Header only; rich event detail is not exposed</dd>
+                        </div>
+                      </dl>
+                      {item.kind === 'input_accepted' && (
+                        <MissingAttachmentState placement="transcript" />
+                      )}
+                    </>
                   )}
                 </div>
               )
             })}
           </div>
+          <section className="session-composer" aria-labelledby="session-composer-heading">
+            <header>
+              <div>
+                <span className="eyebrow">Input surface</span>
+                <h3 id="session-composer-heading">Composer</h3>
+              </div>
+              <span className="availability-tag">Committed · unavailable</span>
+            </header>
+            <MissingAttachmentState placement="composer" />
+          </section>
         </section>
       )}
     </div>

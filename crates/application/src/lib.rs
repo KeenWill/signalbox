@@ -4,6 +4,7 @@
 //! depending inward on `signalbox-domain`.
 
 mod approval_judge;
+mod attention;
 mod blob_derivation;
 mod commissioned_dispatch;
 mod convergence_reconciliation;
@@ -16,6 +17,7 @@ mod model_execution;
 mod operator_failure;
 mod replace_session_defaults;
 mod repo_watch;
+mod repo_watch_operations;
 mod repo_watch_webhook;
 mod review_orchestration;
 mod review_workflow;
@@ -40,6 +42,12 @@ pub use approval_judge::{
     ApprovalJudgeCompletionIdentities, ApprovalJudgeDispatchAuthority,
     ApprovalJudgeDispatchProvenance, ApprovalJudgePullRequestAuthority,
     ApprovalJudgePullRequestAuthorityInput,
+};
+pub use attention::{
+    AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
+    AttentionChanges, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts, AttentionReader,
+    AttentionSnapshot, AttentionState, AttentionSummary, max_attention_change_items,
+    max_attention_goal_summary_characters, max_attention_snapshot_items,
 };
 pub use blob_derivation::{
     BlobDerivationIdGenerator, BlobDerivationRecordOutcome, BlobDerivationServiceError,
@@ -121,6 +129,19 @@ pub use repo_watch::{
     RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
     UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
     repo_watch_events_have_equal_identified_content,
+};
+pub use repo_watch_operations::{
+    RepoWatchActivityPage, RepoWatchAutomationStatus, RepoWatchChecksStatus, RepoWatchDraftStatus,
+    RepoWatchEventCursor, RepoWatchEventKindCount, RepoWatchHeldCursor, RepoWatchHeldSlot,
+    RepoWatchHeldSlotBlocker, RepoWatchLatestWebhook, RepoWatchObligationCursor,
+    RepoWatchObligationId, RepoWatchObligationReadiness, RepoWatchOperationsReader,
+    RepoWatchOperatorDispatch, RepoWatchOperatorEvent, RepoWatchOperatorSettlement,
+    RepoWatchPagePosition, RepoWatchPullRequestOperations, RepoWatchPullRequestOperationsFacts,
+    RepoWatchPullRequestPage, RepoWatchPullRequestSession, RepoWatchPullRequestSessionPage,
+    RepoWatchQueuedObligation, RepoWatchRepositoryStatus, RepoWatchRepositoryStatusPage,
+    RepoWatchReviewStatus, RepoWatchSessionCursor, RepoWatchSessionPurpose,
+    RepoWatchWebhookActivity, RepoWatchWebhookDisposition, RepoWatchWebhookWindow,
+    RepoWatchWorkPage, max_repo_watch_activity_page_items, max_repo_watch_operations_page_items,
 };
 pub use repo_watch_webhook::{
     RepoWatchBranchHeadPreviousV1, RepoWatchObservationApplyV1, RepoWatchObservationChangeV1,

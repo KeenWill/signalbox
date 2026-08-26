@@ -2244,7 +2244,24 @@ async fn load_delegated_parked_attachment_frontier(
         ActiveTurnPhaseStorageKind::Running => {
             let stop_requested_call: Option<Uuid> = row.try_get("stop_requested_model_call_id")?;
             let Some(stop_requested_call) = stop_requested_call else {
-                return Ok(None);
+                // A turn executing a tool batch keeps the `running` phase
+                // while the call that produced the batch is already terminal,
+                // so this is the delegated spelling of the state the
+                // accepted-input path reads through
+                // `active_rendered_frontier_origins`. The batch's yielded
+                // frontier is the delegated turn's retained context; without
+                // it, accounting would fall back to the earliest queued base
+                // and omit both that frontier and its pending steering.
+                // A delegated turn with neither a cancellation-requested call
+                // nor an active batch has a live model call, which the
+                // live-execution path reads instead.
+                return Ok(load_active_batch_from_connection(connection, session, turn)
+                    .await
+                    .map_err(map_tool_loop_error)?
+                    .map(|batch| DelegatedParkedAttachmentFrontier {
+                        turn,
+                        snapshot: batch.yielded_snapshot().clone(),
+                    }));
             };
             let frontier = sqlx::query_scalar::<_, Uuid>(
                 "SELECT context_frontier_id

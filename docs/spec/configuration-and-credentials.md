@@ -9,7 +9,9 @@ composed bounded session descriptor and historical-window routes are verified
 against this PR (`agent/web-session-timeline`). The version-two imports
 capabilities and production adapter are verified against this PR
 (`agent/web-discovery-reads`). Contract version two and its blob routes are
-verified against this PR (`agent/web-blob-delivery`).
+verified against this PR (`agent/web-blob-delivery`). The fleet-attention
+snapshot and monitor stream are verified against this PR
+(`agent/web-attention-projections`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -207,12 +209,13 @@ daemon does not emit permissive CORS headers and adds no account, login,
 bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
 listener therefore rejects non-loopback binds; any future remote deployment
 requires an explicit authentication and transport-security design first.
-Unauthenticated session descriptor, timeline, and blob reads additionally
-require a loopback `Host` authority: `localhost` or an IPv4 or IPv6 loopback
-address, with an optional port. Another authority receives a structured
-`403 Forbidden` transport error with code `non_loopback_host_rejected` before
-session data, blob metadata, or blob bytes are read, and before a descriptor
-read may start image derivation work.
+Unauthenticated session reads — the session descriptor, the session timeline,
+the operator attention snapshot and its follow stream, and the blob descriptor
+and content routes — additionally require a loopback `Host` authority:
+`localhost` or an IPv4 or IPv6 loopback address, with an optional port. Another
+authority receives a structured `403 Forbidden` transport error with code
+`non_loopback_host_rejected` before session data, blob metadata, or blob bytes
+are read, and before a descriptor read may start image derivation work.
 
 `GET /api/bootstrap` describes the production browser contract. It returns the
 exact contract family `signalbox.web-http`, version `2`, the `bounded_json`,
@@ -231,6 +234,33 @@ historical-window route shapes and semantics are owned by
 The descriptor, content, and download routes beneath `/api/blobs/{digest}` are
 the same-origin surface owned by
 [blob storage](blob-storage.md#browser-delivery-views-and-derivations).
+
+`GET /api/attention` returns at most 32 session summaries from one read-only
+repeatable-read snapshot, ordered by session identity. A continuation names the
+last session identity and opens the next keyset page; it is not a count-based or
+fixed-tail feed. Each summary carries the current turn classification, exact
+operator action when one is owed, a typed blocked-goal reason and a need summary
+of at most 128 Unicode scalar values, approval-judge outcome counts, and the
+last publication-timestamped durable activity fact. Exact blocked-goal need text
+remains available from the session detail read rather than entering the hot
+fleet page.
+
+Runner loss, model-call recovery ambiguity, tool recovery, reconciliation,
+approval wait, blocked goal, active, queued, and idle remain distinct states.
+Tool recovery carries no reconciliation action because no current command writes
+that wait. The projection uses one set query over the selected identities and
+never constructs the fleet by following individual sessions.
+
+`GET /api/attention/follow` begins with the first coherent attention page and
+its durable change-journal cursor, then emits summary replacements only for
+changed session identities. One incremental read examines at most 32 journal
+records. A larger cursor gap emits `resync_required` with the current cursor and
+ends that stream; it never skips records or continues from a partial gap. The
+HTTP producer retains only the item currently being encoded and waits between
+empty polls. An initial projection failure returns a typed HTTP error before
+streaming begins. The append-only change journal timestamps commits explicitly;
+historical creation is seeded only from the durable command claim time and never
+inferred from UUID bits.
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and

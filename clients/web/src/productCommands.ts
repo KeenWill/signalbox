@@ -103,6 +103,14 @@ const productNavigationCommands = [
     ],
     run: (context: ProductCommandContext) => context.navigate('/settings'),
   },
+  {
+    id: 'navigate.scenario',
+    title: 'Go to Scenario Studio',
+    description: 'Open the streaming interaction scenario.',
+    category: 'Navigate',
+    bindings: [],
+    run: (context: ProductCommandContext) => context.navigate('/scenario/streaming'),
+  },
 ] as const
 
 export const productCommandRegistry = [
