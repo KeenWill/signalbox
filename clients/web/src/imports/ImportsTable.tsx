@@ -21,10 +21,12 @@ const formatLabel = (format: WebImportSummary['format']): string => {
 export function ImportsTable({
   rows,
   selectedId,
+  selectionDisabled,
   onSelect,
 }: {
   rows: readonly WebImportSummary[]
   selectedId: string | null
+  selectionDisabled: boolean
   onSelect: (id: string) => void
 }) {
   'use no memo'
@@ -38,6 +40,7 @@ export function ImportsTable({
             type="button"
             className="import-select"
             aria-label={`Inspect ${row.original.display_title ?? row.original.imported_conversation_id}`}
+            disabled={selectionDisabled}
             onClick={() => onSelect(row.original.imported_conversation_id)}
           >
             <strong>{row.original.display_title ?? 'Untitled import'}</strong>
@@ -53,19 +56,19 @@ export function ImportsTable({
       {
         accessorKey: 'entry_count',
         header: 'Entries',
-        cell: ({ row }) => BigInt(row.original.entry_count).toLocaleString(),
+        cell: ({ row }) => row.original.entry_count.toLocaleString(),
       },
       {
         accessorKey: 'source_session_id',
         header: 'Source session evidence',
         cell: ({ row }) => {
           const evidence = row.original.source_session_id
-          if (!evidence) return 'Unknown or inconsistent source-session evidence'
+          if (!evidence) return 'Not attested'
           return `${evidence.leading_text}${evidence.completeness === 'truncated' ? '…' : ''}`
         },
       },
     ],
-    [onSelect],
+    [onSelect, selectionDisabled],
   )
   const table = useLegacyTable({
     data: [...rows],

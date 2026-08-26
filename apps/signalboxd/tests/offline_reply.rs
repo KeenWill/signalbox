@@ -4,6 +4,8 @@
     reason = "the standalone integration test uses assertion panics and explicit fixture expectations"
 )]
 
+mod support;
+
 use std::{error::Error, process::Command, time::Duration};
 
 use signalbox_application::{
@@ -33,19 +35,20 @@ use signalbox_model_runtime::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
+    process_read::{ProcessReadRepository, ProcessTranscriptEntry},
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     submit_input::SubmitInputRepository,
 };
 use signalbox_test_bin::test_bin_path;
 use signalboxd::{
-    ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration,
+    ActivatedTurnPass, FatalExecutionSupervisor, GoalModeNumericBounds,
     PostgresGoalPassDisposition, PostgresProviderModelExecution,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -144,7 +147,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -316,14 +319,15 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         nudge,
         tool_dispatch_gate.clone(),
     );
+    let submitted_content = UserContent::try_text(String::from("offline user request"))
+        .expect("fixture user content is admitted");
     let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
         SubmitInputAppliedResult::TurnOrigin(origin),
     )) = submit
         .execute(SubmitInputRequest::try_new(
             DurableCommandId::from_uuid(Uuid::from_u128(0x2003)),
             session,
-            UserContent::try_text(String::from("offline user request"))
-                .expect("fixture user content is admitted"),
+            submitted_content.clone(),
             DeliveryRequest::StartWhenNoActiveTurn {
                 configuration: PerInputConfigurationChoices::new(
                     SessionConfigurationDefaultsVersion::first(),
@@ -351,17 +355,18 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         )
         .expect("fixture runtime definition is valid")])
         .expect("one fixture runtime target is unique");
+    let assistant_reply = String::from("offline assistant reply");
     let runtime = ScriptedModel::single(Script::delivering(TerminalEvidence::Completed(
         CompletionEvidence {
             exchange: ExchangeFacts::default(),
             message_id: None,
             reported_model: Some(ProviderReportedModel::new(SERVED_PROVIDER_MODEL)),
             finish: CompletionFinish::EndTurn,
-            content: vec![AssistantPart::Text(String::from("offline assistant reply"))],
+            content: vec![AssistantPart::Text(assistant_reply.clone())],
             usage: TokenUsage::unreported(),
         },
     )));
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models, None);
     let credential_reference = ModelCallCredentialReference::new("scripted-test");
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
@@ -372,8 +377,14 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         )
-        .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor),
+        .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor)
+        .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+            pool.clone(),
+            None,
+            Vec::new(),
+        )),
     );
     let pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -400,44 +411,37 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
         "post-activation execution failure must stop this isolated scheduler"
     );
 
-    let transcript = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
-        "SELECT entry.payload_kind,
-                accepted.content_text,
-                entry.assistant_text_value
-           FROM turn_lifecycle AS lifecycle
-           JOIN context_frontier_member AS member
-             ON member.owning_session_id = lifecycle.session_id
-            AND member.context_frontier_id = lifecycle.terminal_frontier_id
-           JOIN semantic_transcript_entry AS entry
-             ON entry.source_session_id = member.source_session_id
-            AND entry.semantic_entry_id = member.semantic_entry_id
-           LEFT JOIN accepted_input AS accepted
-             ON accepted.session_id = entry.source_session_id
-            AND accepted.accepted_input_id = entry.origin_accepted_input_id
-          WHERE lifecycle.session_id = $1
-            AND lifecycle.turn_id = $2
-          ORDER BY member.member_position",
-    )
-    .bind(session.into_uuid())
-    .bind(turn.into_uuid())
-    .fetch_all(&pool)
-    .await?;
-    assert_eq!(
-        transcript,
-        vec![
-            (
-                String::from("origin_accepted_input"),
-                Some(String::from("offline user request")),
-                None,
-            ),
-            (
-                String::from("assistant_text"),
-                None,
-                Some(String::from("offline assistant reply")),
-            ),
-            (String::from("turn_completed"), None, None),
-        ]
-    );
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(session)
+        .await?
+        .expect("the fixture session has a transcript");
+    let [user_entry, assistant_entry, completed_entry] = transcript.entries() else {
+        panic!("the completed fixture transcript has exactly three entries");
+    };
+    let ProcessTranscriptEntry::User {
+        content: persisted_content,
+        ..
+    } = user_entry
+    else {
+        panic!("the first transcript entry must be user content: {user_entry:?}");
+    };
+    assert_eq!(persisted_content, &submitted_content);
+    let ProcessTranscriptEntry::Assistant {
+        content: persisted_reply,
+        ..
+    } = assistant_entry
+    else {
+        panic!("the second transcript entry must be assistant content: {assistant_entry:?}");
+    };
+    assert_eq!(persisted_reply, &assistant_reply);
+    let ProcessTranscriptEntry::TurnCompleted {
+        turn: completed_turn,
+        ..
+    } = completed_entry
+    else {
+        panic!("the third transcript entry must complete the turn: {completed_entry:?}");
+    };
+    assert_eq!(*completed_turn, turn);
 
     let terminal_shape: (i64, i64, i64) = sqlx::query_as(
         "SELECT
@@ -521,7 +525,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
 async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_retry()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let configuration = HubModelConfiguration::parse(GOAL_MODEL_CONFIGURATION)?;
+    let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
     let mut create = CreateSessionService::new(
         UuidV7SessionIdGenerator,
@@ -558,7 +562,7 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let runtime = ScriptedModel::following([goal_completion_script(), goal_refusal_script()]);
     let provider =
-        RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog());
+        RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog(), None);
     let credential_reference = ModelCallCredentialReference::new("scripted-goal-test");
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
@@ -569,8 +573,14 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         )
-        .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor),
+        .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor)
+        .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+            pool.clone(),
+            None,
+            Vec::new(),
+        )),
     );
     let activated_pass = ActivatedTurnPass::new(
         StartEligibleTurnService::new(
@@ -581,7 +591,12 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
     );
     let pass = GoalAwareEligibilityPass::new(
         activated_pass,
-        PostgresGoalPassDisposition::new(pool.clone(), configuration, nudge),
+        PostgresGoalPassDisposition::new(
+            pool.clone(),
+            configuration,
+            nudge,
+            GoalModeNumericBounds::new(None, None, None, None),
+        ),
     );
     let mut scheduler = SchedulerLoop::new(work_source, pass);
     let observation_pool = pool.clone();

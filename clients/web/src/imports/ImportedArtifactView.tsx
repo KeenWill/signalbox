@@ -1,3 +1,4 @@
+import type { CommandContext } from '../commands'
 import { ArtifactRenderer } from '../features/artifacts/ArtifactRenderer'
 import type { ArtifactItem } from '../features/artifacts/artifactTypes'
 import type { WebImportedEntry } from '../generated/web-contract.mjs'
@@ -8,7 +9,7 @@ const contentKindLabel = (kind: WebImportedEntry['content_kind']): string =>
 export const projectImportedEntryArtifact = (entry: WebImportedEntry): ArtifactItem => {
   const identity = {
     id: entry.frontier.imported_entry_id,
-    displayName: `Imported entry ${BigInt(entry.frontier.position).toLocaleString()}`,
+    displayName: `Imported entry ${entry.frontier.position.toLocaleString()}`,
   }
   if (entry.content_kind !== 'text') {
     if (entry.text !== null && entry.text !== undefined) {
@@ -61,7 +62,7 @@ export function ImportedArtifactView({
   commandContext,
 }: {
   entry: WebImportedEntry | null
-  commandContext: import('../commands').CommandContext
+  commandContext: CommandContext
 }) {
   return (
     <section className="import-artifact-view" aria-labelledby="import-artifact-heading">

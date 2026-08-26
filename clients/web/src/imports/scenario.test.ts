@@ -38,13 +38,13 @@ describe('ScenarioImportApi', () => {
     const api = new ScenarioImportApi()
     const window = await api.entries(firstImportId, {
       anchor: 'position',
-      position: '125000',
+      position: 125_000,
       before: 50,
       after: 50,
     })
 
     expect(window.items).toHaveLength(SCENARIO_IMPORT_WINDOW_ITEMS)
-    expect(window.anchor_position).toBe('125000')
+    expect(window.anchor_position).toBe(125_000)
     expect(window.has_before).toBe(true)
     expect(window.has_after).toBe(true)
   })
@@ -53,8 +53,8 @@ describe('ScenarioImportApi', () => {
     const api = new ScenarioImportApi()
     const descriptor = await api.descriptor(firstImportId)
 
-    expect(descriptor.entry_count).toBe(String(SCENARIO_ENTRY_TOTAL))
-    expect(descriptor.timeline.first.position).toBe('1')
+    expect(descriptor.entry_count).toBe(SCENARIO_ENTRY_TOTAL)
+    expect(descriptor.timeline.first.position).toBe(1)
     expect(descriptor.timeline.latest.position).toBe(descriptor.entry_count)
     expect(descriptor.source.source_session_id?.leading_text).toBe('source-session-0')
   })
@@ -64,5 +64,35 @@ describe('ScenarioImportApi', () => {
     const page = await api.list({ source_session_id: null, limit: 2 })
 
     expect(page.items).toHaveLength(2)
+  })
+
+  it('replays one command identity while assigning distinct sessions to distinct commands', async () => {
+    const api = new ScenarioImportApi()
+    const frontier = {
+      imported_conversation_id: firstImportId,
+      imported_entry_id: '00000000-0000-7000-8000-000000000002',
+      position: 1,
+    }
+    const firstRequest = {
+      command_id: '00000000-0000-7000-8000-000000000003',
+      frontier,
+      relationship: 'resume' as const,
+      initial_model_selection: {
+        kind: 'direct' as const,
+        selection_id: '00000000-0000-7000-8000-000000000004',
+      },
+    }
+    const secondRequest = {
+      ...firstRequest,
+      command_id: '00000000-0000-7000-8000-000000000005',
+      relationship: 'fork' as const,
+    }
+
+    const first = await api.continueImport(firstImportId, firstRequest)
+    const replay = await api.continueImport(firstImportId, firstRequest)
+    const second = await api.continueImport(firstImportId, secondRequest)
+
+    expect(replay.session_id).toBe(first.session_id)
+    expect(second.session_id).not.toBe(first.session_id)
   })
 })

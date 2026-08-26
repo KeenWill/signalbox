@@ -12,11 +12,25 @@ import {
 } from '../generated/web-contract.mjs'
 
 export const MAX_RETAINED_SESSION_ITEMS = 768
+const MAX_CONTRACT_TIMELINE_WINDOW_ITEMS = 256
+const MAX_CONTRACT_TIMELINE_WINDOW_BYTES = 64 * 1024
+const PROJECTED_ITEM_ENVELOPE_BYTES = 64
+// Hard safety ceiling preventing a regressed endpoint from materializing an
+// unbounded JSON response before the generated decoder can reject its shape.
+export const MAX_TIMELINE_HTTP_RESPONSE_BYTES = 256 * 1024
 
 type TimelineContractLimits = Pick<
   WebContractBootstrap['limits'],
   'max_timeline_window_items' | 'max_timeline_window_bytes'
 >
+
+export const hasValidSessionTimelineContract = (bootstrap: WebContractBootstrap): boolean =>
+  bootstrap.capabilities.bounded_json &&
+  bootstrap.capabilities.bounded_session_timeline &&
+  bootstrap.limits.max_timeline_window_items >= 1 &&
+  bootstrap.limits.max_timeline_window_items <= MAX_CONTRACT_TIMELINE_WINDOW_ITEMS &&
+  bootstrap.limits.max_timeline_window_bytes >= 256 &&
+  bootstrap.limits.max_timeline_window_bytes <= MAX_CONTRACT_TIMELINE_WINDOW_BYTES
 
 export type SessionWindowAnchor =
   | { kind: 'first' | 'latest' }
@@ -39,62 +53,9 @@ export interface SessionTimelineSource {
 }
 
 const MAX_U64 = (1n << 64n) - 1n
-const MAX_TIMELINE_RESPONSE_BYTES = 1024 * 1024
-export const MAX_BOOTSTRAP_RESPONSE_BYTES = 64 * 1024
-const MAX_ERROR_RESPONSE_BYTES = MAX_BOOTSTRAP_RESPONSE_BYTES
-
-// The wire contract fixes these bounds (docs/spec/sessions-and-transcript.md): every timeline
-// request carries max_items 1..256 and max_bytes 256..65,536, and each item's projected charge
-// is a fixed 64-byte envelope plus its UTF-8 event-kind spelling.
-const MAX_TIMELINE_WINDOW_ITEMS_CEILING = 256
-const MIN_TIMELINE_WINDOW_BYTES = 256
-const MAX_TIMELINE_WINDOW_BYTES_CEILING = 64 * 1024
-const PROJECTED_ITEM_ENVELOPE_BYTES = 64
-const FUTURE_ITEM_MESSAGE = 'timeline window contains an item above the described latest address'
-
-const utf8 = new TextEncoder()
-
-export const readBoundedJson = async (
-  response: Response,
-  maximumBytes: number,
-): Promise<unknown> => {
-  const declaredLength = response.headers.get('content-length')
-  if (declaredLength !== null) {
-    const parsedLength = Number(declaredLength)
-    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0 || parsedLength > maximumBytes) {
-      throw new TypeError('timeline response exceeds the browser byte ceiling')
-    }
-  }
-  if (response.body === null) {
-    const bytes = new Uint8Array(await response.arrayBuffer())
-    if (bytes.byteLength > maximumBytes) {
-      throw new TypeError('timeline response exceeds the browser byte ceiling')
-    }
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
-  }
-  const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
-  let total = 0
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    total += value.byteLength
-    if (total > maximumBytes) {
-      await reader.cancel()
-      throw new TypeError('timeline response exceeds the browser byte ceiling')
-    }
-    chunks.push(value)
-  }
-  const bytes = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
-}
 
 const decimalU64 = (value: string): bigint => {
+  if (value.length > 20) throw new TypeError('timeline fact exceeds 64 bits')
   if (!/^(0|[1-9]\d*)$/.test(value)) throw new TypeError('timeline fact must be unsigned decimal')
   const parsed = BigInt(value)
   if (parsed > MAX_U64) throw new TypeError('timeline fact exceeds 64 bits')
@@ -107,22 +68,91 @@ const decimalAddress = (value: string): bigint => {
   return parsed
 }
 
+const projectedItemBytes = (kind: string): number =>
+  PROJECTED_ITEM_ENVELOPE_BYTES + new TextEncoder().encode(kind).byteLength
+
+// Shortest and longest spellings in the generated closed event-kind union.
+const MIN_PROJECTED_ITEM_BYTES = projectedItemBytes('turn_failed')
+const MAX_PROJECTED_ITEM_BYTES = projectedItemBytes('session_model_settings_changed')
+
 const boundedLimit = (value: number, minimum: number, maximum: number): number =>
   Number.isFinite(value) ? Math.min(Math.max(Math.trunc(value), minimum), maximum) : minimum
+
+const boundedSourceLimit = (value: number, minimum: number, maximum: number): number =>
+  Number.isFinite(value) ? Math.min(Math.max(Math.trunc(value), minimum), maximum) : maximum
 
 const boundedLimits = (
   limits: SessionWindowLimits,
   contract: TimelineContractLimits,
 ): SessionWindowLimits => ({
-  maxItems: boundedLimit(limits.maxItems, 1, contract.max_timeline_window_items),
-  maxBytes: boundedLimit(limits.maxBytes, 256, contract.max_timeline_window_bytes),
+  maxItems: boundedLimit(
+    limits.maxItems,
+    1,
+    boundedSourceLimit(contract.max_timeline_window_items, 1, MAX_CONTRACT_TIMELINE_WINDOW_ITEMS),
+  ),
+  maxBytes: boundedLimit(
+    limits.maxBytes,
+    256,
+    boundedSourceLimit(contract.max_timeline_window_bytes, 256, MAX_CONTRACT_TIMELINE_WINDOW_BYTES),
+  ),
 })
 
 const canonicalSessionId = (value: string): string => {
-  const compact = value.replaceAll('-', '').toLowerCase()
+  const simple = /^[0-9a-f]{32}$/i
+  const hyphenated = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  const unwrapped =
+    value.startsWith('urn:uuid:') && hyphenated.test(value.slice('urn:uuid:'.length))
+      ? value.slice('urn:uuid:'.length)
+      : value.startsWith('{') && value.endsWith('}') && hyphenated.test(value.slice(1, -1))
+        ? value.slice(1, -1)
+        : simple.test(value) || hyphenated.test(value)
+          ? value
+          : ''
+  const compact = unwrapped.toLowerCase().replaceAll('-', '')
   if (!/^[0-9a-f]{32}$/.test(compact)) throw new TypeError('session id must be a UUID')
   return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`
 }
+
+const readBoundedJson = async (response: Response): Promise<unknown> => {
+  const reader = response.body?.getReader()
+  if (!reader) throw new TypeError('HTTP response has no body')
+  const chunks: Uint8Array[] = []
+  let byteCount = 0
+  while (true) {
+    const next = await reader.read()
+    if (next.done) break
+    byteCount += next.value.byteLength
+    if (byteCount > MAX_TIMELINE_HTTP_RESPONSE_BYTES) {
+      await reader.cancel()
+      throw new TypeError('timeline HTTP response exceeds its encoded byte ceiling')
+    }
+    chunks.push(next.value)
+  }
+  const encoded = new Uint8Array(byteCount)
+  let offset = 0
+  for (const chunk of chunks) {
+    encoded.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(encoded)) as unknown
+}
+
+const cloneTimelineItem = (
+  item: WebSessionTimelineWindow['items'][number],
+): WebSessionTimelineWindow['items'][number] => ({
+  ...item,
+  address: { ...item.address },
+})
+
+const cloneTimelineDescriptor = (
+  descriptor: WebSessionTimelineDescriptor,
+): WebSessionTimelineDescriptor => ({
+  ...descriptor,
+  sizes: { ...descriptor.sizes },
+  first_address: { ...descriptor.first_address },
+  latest_address: { ...descriptor.latest_address },
+  work: { ...descriptor.work },
+})
 
 export class SessionTimelineClientError extends Error {
   constructor(readonly response: WebApiErrorResponse) {
@@ -132,9 +162,7 @@ export class SessionTimelineClientError extends Error {
 }
 
 const throwApiError = async (response: Response): Promise<never> => {
-  throw new SessionTimelineClientError(
-    decodeWebApiErrorResponse(await readBoundedJson(response, MAX_ERROR_RESPONSE_BYTES)),
-  )
+  throw new SessionTimelineClientError(decodeWebApiErrorResponse(await readBoundedJson(response)))
 }
 
 export class HttpSessionTimelineSource implements SessionTimelineSource {
@@ -149,20 +177,12 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
   ): Promise<HttpSessionTimelineSource> {
     const response = await request('/api/bootstrap', { signal })
     if (!response.ok) return throwApiError(response)
-    const bootstrap = decodeWebContractBootstrap(
-      await readBoundedJson(response, MAX_ERROR_RESPONSE_BYTES),
-    )
-    if (!bootstrap.capabilities.bounded_session_timeline) {
-      throw new TypeError('bounded session timeline capability is unavailable')
+    const bootstrap = decodeWebContractBootstrap(await readBoundedJson(response))
+    if (!bootstrap.capabilities.bounded_json || !bootstrap.capabilities.bounded_session_timeline) {
+      throw new TypeError('bounded JSON session timeline capability is unavailable')
     }
-    const advertised = bootstrap.limits
-    if (
-      advertised.max_timeline_window_items < 1 ||
-      advertised.max_timeline_window_items > MAX_TIMELINE_WINDOW_ITEMS_CEILING ||
-      advertised.max_timeline_window_bytes < MIN_TIMELINE_WINDOW_BYTES ||
-      advertised.max_timeline_window_bytes > MAX_TIMELINE_WINDOW_BYTES_CEILING
-    ) {
-      throw new TypeError('bootstrap advertises unusable timeline limits')
+    if (!hasValidSessionTimelineContract(bootstrap)) {
+      throw new TypeError('bounded session timeline limits are invalid')
     }
     return new HttpSessionTimelineSource(bootstrap.limits, request)
   }
@@ -171,13 +191,16 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     sessionId: string,
     signal?: AbortSignal,
   ): Promise<WebSessionTimelineDescriptor> {
-    const response = await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
+    const requestedSessionId = canonicalSessionId(sessionId)
+    const response = await this.request(`/api/sessions/${encodeURIComponent(requestedSessionId)}`, {
       signal,
     })
     if (!response.ok) return throwApiError(response)
-    return decodeWebSessionTimelineDescriptor(
-      await readBoundedJson(response, MAX_TIMELINE_RESPONSE_BYTES),
-    )
+    const descriptor = decodeWebSessionTimelineDescriptor(await readBoundedJson(response))
+    if (canonicalSessionId(descriptor.session_id) !== requestedSessionId) {
+      throw new TypeError('descriptor session mismatch')
+    }
+    return descriptor
   }
 
   async readWindow(
@@ -186,6 +209,7 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     limits: SessionWindowLimits,
     signal?: AbortSignal,
   ): Promise<WebSessionTimelineWindow> {
+    const requestedSessionId = canonicalSessionId(sessionId)
     const bounded = boundedLimits(limits, this.limits)
     const query = new URLSearchParams({
       anchor: anchor.kind,
@@ -194,13 +218,43 @@ export class HttpSessionTimelineSource implements SessionTimelineSource {
     })
     if ('eventSequence' in anchor) query.set('address', anchor.eventSequence)
     const response = await this.request(
-      `/api/sessions/${encodeURIComponent(sessionId)}/timeline?${query}`,
+      `/api/sessions/${encodeURIComponent(requestedSessionId)}/timeline?${query}`,
       { signal },
     )
     if (!response.ok) return throwApiError(response)
-    return decodeWebSessionTimelineWindow(
-      await readBoundedJson(response, MAX_TIMELINE_RESPONSE_BYTES),
+    const rawWindow = await readBoundedJson(response)
+    const rawItems = (rawWindow as { items?: unknown } | null)?.items
+    if (Array.isArray(rawItems) && rawItems.length > bounded.maxItems) {
+      throw new TypeError('timeline window exceeds the requested item ceiling')
+    }
+    const window = decodeWebSessionTimelineWindow(rawWindow)
+    const projectedStructuredBytes = window.items.reduce(
+      (total, item) => total + item.projected_structured_bytes,
+      0,
     )
+    if (
+      window.projected_structured_bytes > bounded.maxBytes ||
+      projectedStructuredBytes > bounded.maxBytes
+    ) {
+      throw new TypeError('timeline window exceeds the requested byte ceiling')
+    }
+    if (projectedStructuredBytes !== window.projected_structured_bytes) {
+      throw new TypeError('timeline window has contradictory byte accounting')
+    }
+    const addressed = 'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : undefined
+    for (const item of window.items) {
+      const address = decimalAddress(item.address.event_sequence)
+      if (anchor.kind === 'before' && addressed !== undefined && address >= addressed) {
+        throw new TypeError('timeline HTTP item is not strictly before its anchor')
+      }
+      if (anchor.kind === 'after' && addressed !== undefined && address <= addressed) {
+        throw new TypeError('timeline HTTP item is not strictly after its anchor')
+      }
+    }
+    if (canonicalSessionId(window.session_id) !== requestedSessionId) {
+      throw new TypeError('timeline window session mismatch')
+    }
+    return window
   }
 }
 
@@ -217,43 +271,121 @@ export class BoundedSessionHistory {
   }
 
   get descriptor(): WebSessionTimelineDescriptor | undefined {
-    return this.descriptorValue
+    return this.descriptorValue && cloneTimelineDescriptor(this.descriptorValue)
   }
 
   get retained(): WebSessionTimelineWindow['items'] {
-    return this.retainedValue
+    return this.retainedValue.map(cloneTimelineItem)
   }
 
   async describe(signal?: AbortSignal): Promise<WebSessionTimelineDescriptor> {
-    const descriptor = await this.source.readDescriptor(this.sessionId, signal)
+    const descriptor = decodeWebSessionTimelineDescriptor(
+      await this.source.readDescriptor(this.sessionId, signal),
+    )
     if (canonicalSessionId(descriptor.session_id) !== this.sessionId) {
       throw new TypeError('descriptor session mismatch')
     }
     const firstAddress = decimalAddress(descriptor.first_address.event_sequence)
     const latestAddress = decimalAddress(descriptor.latest_address.event_sequence)
     const observedThrough = decimalU64(descriptor.observed_through)
-    if (firstAddress > latestAddress || latestAddress > observedThrough) {
-      throw new TypeError('timeline descriptor carries contradictory bounds')
-    }
-    // Distinct bounds prove at least the two boundary events, and a session's durable events are
-    // a subset of the inclusive global address span between them.
     const itemCount = decimalU64(descriptor.sizes.item_count)
     const addressSpan = latestAddress - firstAddress + 1n
     if (
       itemCount === 0n ||
-      itemCount > addressSpan ||
-      (firstAddress !== latestAddress && itemCount < 2n)
+      firstAddress > latestAddress ||
+      (itemCount === 1n && firstAddress !== latestAddress) ||
+      latestAddress > observedThrough ||
+      itemCount > addressSpan
     ) {
-      throw new TypeError('timeline descriptor item count contradicts its durable bounds')
+      throw new TypeError('descriptor timeline boundaries are contradictory')
     }
     decimalU64(descriptor.sizes.projected_text_bytes)
-    decimalU64(descriptor.sizes.projected_structured_bytes)
+    const projectedStructuredBytes = decimalU64(descriptor.sizes.projected_structured_bytes)
+    if (
+      projectedStructuredBytes < itemCount * BigInt(MIN_PROJECTED_ITEM_BYTES) ||
+      projectedStructuredBytes > itemCount * BigInt(MAX_PROJECTED_ITEM_BYTES)
+    ) {
+      throw new TypeError('descriptor structured byte total is contradictory')
+    }
     decimalU64(descriptor.sizes.referenced_blob_count)
     decimalU64(descriptor.sizes.referenced_blob_bytes)
-    decimalU64(descriptor.work.active_turn_count)
-    decimalU64(descriptor.work.queued_turn_count)
-    this.descriptorValue = descriptor
-    return descriptor
+    const activeTurnCount = decimalU64(descriptor.work.active_turn_count)
+    const queuedTurnCount = decimalU64(descriptor.work.queued_turn_count)
+    if (activeTurnCount > 1n) {
+      throw new TypeError('descriptor active work is contradictory')
+    }
+    const cached = this.descriptorValue
+    if (cached) {
+      const cachedObservedThrough = decimalU64(cached.observed_through)
+      if (observedThrough < cachedObservedThrough) {
+        return cloneTimelineDescriptor(cached)
+      }
+      const cachedFirstAddress = decimalAddress(cached.first_address.event_sequence)
+      const cachedLatestAddress = decimalAddress(cached.latest_address.event_sequence)
+      const cachedItemCount = decimalU64(cached.sizes.item_count)
+      const cachedProjectedTextBytes = decimalU64(cached.sizes.projected_text_bytes)
+      const cachedProjectedStructuredBytes = decimalU64(cached.sizes.projected_structured_bytes)
+      const cachedReferencedBlobCount = decimalU64(cached.sizes.referenced_blob_count)
+      const cachedReferencedBlobBytes = decimalU64(cached.sizes.referenced_blob_bytes)
+      const projectedTextBytes = decimalU64(descriptor.sizes.projected_text_bytes)
+      const referencedBlobCount = decimalU64(descriptor.sizes.referenced_blob_count)
+      const referencedBlobBytes = decimalU64(descriptor.sizes.referenced_blob_bytes)
+      const cachedActiveTurnCount = decimalU64(cached.work.active_turn_count)
+      const cachedQueuedTurnCount = decimalU64(cached.work.queued_turn_count)
+      const durableFactsRegressed =
+        firstAddress !== cachedFirstAddress ||
+        latestAddress < cachedLatestAddress ||
+        itemCount < cachedItemCount ||
+        projectedTextBytes < cachedProjectedTextBytes ||
+        projectedStructuredBytes < cachedProjectedStructuredBytes ||
+        referencedBlobCount < cachedReferencedBlobCount ||
+        referencedBlobBytes < cachedReferencedBlobBytes
+      const latestAddressAdvanced = latestAddress > cachedLatestAddress
+      const itemCountAdvanced = itemCount > cachedItemCount
+      const appendGrowthContradiction =
+        latestAddressAdvanced !== itemCountAdvanced ||
+        (itemCountAdvanced && projectedStructuredBytes <= cachedProjectedStructuredBytes)
+      const retainedAppendItems = this.retainedValue.filter(
+        (item) => decimalAddress(item.address.event_sequence) > cachedLatestAddress,
+      )
+      const minimumRetainedItemGrowth = BigInt(retainedAppendItems.length)
+      const minimumRetainedStructuredByteGrowth = retainedAppendItems.reduce(
+        (total, item) => total + BigInt(item.projected_structured_bytes),
+        0n,
+      )
+      const retainedAppendContradiction =
+        itemCount - cachedItemCount < minimumRetainedItemGrowth ||
+        projectedStructuredBytes - cachedProjectedStructuredBytes <
+          minimumRetainedStructuredByteGrowth
+      const appendedItemCount = itemCount - cachedItemCount
+      const advancedAddressSpan = latestAddress - cachedLatestAddress
+      const appendedStructuredBytes = projectedStructuredBytes - cachedProjectedStructuredBytes
+      const appendDeltaContradiction =
+        appendedItemCount > advancedAddressSpan ||
+        appendedStructuredBytes < appendedItemCount * BigInt(MIN_PROJECTED_ITEM_BYTES) ||
+        appendedStructuredBytes > appendedItemCount * BigInt(MAX_PROJECTED_ITEM_BYTES)
+      const equalCursorFactsChanged =
+        observedThrough === cachedObservedThrough &&
+        (latestAddress !== cachedLatestAddress ||
+          itemCount !== cachedItemCount ||
+          projectedTextBytes !== cachedProjectedTextBytes ||
+          projectedStructuredBytes !== cachedProjectedStructuredBytes ||
+          referencedBlobCount !== cachedReferencedBlobCount ||
+          referencedBlobBytes !== cachedReferencedBlobBytes ||
+          activeTurnCount !== cachedActiveTurnCount ||
+          queuedTurnCount !== cachedQueuedTurnCount)
+      if (
+        durableFactsRegressed ||
+        appendGrowthContradiction ||
+        retainedAppendContradiction ||
+        appendDeltaContradiction ||
+        equalCursorFactsChanged
+      ) {
+        throw new TypeError('descriptor append-only facts are contradictory')
+      }
+    }
+    this.descriptorValue = cloneTimelineDescriptor(descriptor)
+    return cloneTimelineDescriptor(descriptor)
   }
 
   async load(
@@ -261,123 +393,133 @@ export class BoundedSessionHistory {
     limits: SessionWindowLimits,
     signal?: AbortSignal,
   ): Promise<WebSessionTimelineWindow> {
-    if ('eventSequence' in anchor) decimalAddress(anchor.eventSequence)
+    const anchorKind = anchor.kind
+    const sourceAnchor = { ...anchor }
+    const anchorAddress =
+      'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : undefined
     const bounded = boundedLimits(limits, this.source.limits)
-    try {
-      return await this.loadWindow(anchor, bounded, signal)
-    } catch (error) {
-      // An active session may durably append between the descriptor snapshot and the window
-      // read; the HTTP API shares no snapshot between them, so refresh the descriptor and
-      // re-read once before treating a future address as fabrication.
-      const staleDescriptor =
-        error instanceof TypeError &&
-        error.message === FUTURE_ITEM_MESSAGE &&
-        this.descriptorValue !== undefined
-      if (!staleDescriptor) throw error
-      await this.describe(signal)
-      return await this.loadWindow(anchor, bounded, signal)
-    }
-  }
-
-  private async loadWindow(
-    anchor: SessionWindowAnchor,
-    bounded: SessionWindowLimits,
-    signal?: AbortSignal,
-  ): Promise<WebSessionTimelineWindow> {
-    const window = await this.source.readWindow(this.sessionId, anchor, bounded, signal)
-    if (canonicalSessionId(window.session_id) !== this.sessionId)
-      throw new TypeError('timeline window session mismatch')
-    if (window.items.length > bounded.maxItems) {
+    const maxItems = bounded.maxItems
+    const maxBytes = bounded.maxBytes
+    const rawWindow = await this.source.readWindow(
+      this.sessionId,
+      sourceAnchor,
+      { maxItems, maxBytes },
+      signal,
+    )
+    const rawItems = (rawWindow as unknown as { items?: unknown }).items
+    if (Array.isArray(rawItems) && rawItems.length > maxItems) {
       throw new TypeError('timeline window exceeds the requested item ceiling')
     }
-    let verifiedStructuredBytes = 0
-    for (const item of window.items) {
-      verifiedStructuredBytes += item.projected_structured_bytes
-      if (!Number.isSafeInteger(verifiedStructuredBytes)) {
-        throw new TypeError('timeline window byte total overflows a safe integer')
-      }
+    const window = decodeWebSessionTimelineWindow(rawWindow)
+    if (canonicalSessionId(window.session_id) !== this.sessionId)
+      throw new TypeError('timeline window session mismatch')
+    if (window.items.length > maxItems) {
+      throw new TypeError('timeline window exceeds the requested item ceiling')
     }
-    if (verifiedStructuredBytes !== window.projected_structured_bytes) {
-      throw new TypeError('timeline window byte total does not match its items')
-    }
-    if (verifiedStructuredBytes > bounded.maxBytes) {
-      throw new TypeError('timeline window exceeds the requested byte ceiling')
+    if (
+      window.items.length === 0 &&
+      (anchorKind === 'first' || anchorKind === 'latest' || anchorKind === 'around')
+    ) {
+      throw new TypeError('timeline anchor requires a nonempty window')
     }
     const incoming = new Map<string, (typeof window.items)[number]>()
-    const requestedAddress = 'eventSequence' in anchor ? decimalAddress(anchor.eventSequence) : null
-    const knownFirstAddress = this.descriptorValue
-      ? decimalAddress(this.descriptorValue.first_address.event_sequence)
-      : null
-    const knownLatestAddress = this.descriptorValue
-      ? decimalAddress(this.descriptorValue.latest_address.event_sequence)
-      : null
+    const retainedByAddress = new Map(
+      this.retainedValue.map((item) => [item.address.event_sequence, item]),
+    )
     let previousAddress: bigint | undefined
+    let projectedStructuredBytes = 0
     for (const item of window.items) {
       const address = item.address.event_sequence
       const parsedAddress = decimalAddress(address)
-      const expectedCharge = PROJECTED_ITEM_ENVELOPE_BYTES + utf8.encode(item.kind).byteLength
-      if (item.projected_structured_bytes !== expectedCharge) {
-        throw new TypeError('timeline item byte charge contradicts the projection contract')
+      if (anchorKind === 'after' && anchorAddress !== undefined && parsedAddress <= anchorAddress) {
+        throw new TypeError('timeline window item is not strictly after its anchor')
       }
-      if (knownFirstAddress !== null && parsedAddress < knownFirstAddress) {
-        throw new TypeError('timeline window contains an item below the immutable first address')
-      }
-      if (knownLatestAddress !== null && parsedAddress > knownLatestAddress) {
-        throw new TypeError(FUTURE_ITEM_MESSAGE)
+      if (
+        anchorKind === 'before' &&
+        anchorAddress !== undefined &&
+        parsedAddress >= anchorAddress
+      ) {
+        throw new TypeError('timeline window item is not strictly before its anchor')
       }
       if (previousAddress !== undefined && parsedAddress <= previousAddress) {
-        throw new TypeError('timeline window items are not strictly ordered')
-      }
-      previousAddress = parsedAddress
-      if (
-        anchor.kind === 'before' &&
-        requestedAddress !== null &&
-        parsedAddress >= requestedAddress
-      ) {
-        throw new TypeError('timeline before window contains an item at or after its anchor')
-      }
-      if (
-        anchor.kind === 'after' &&
-        requestedAddress !== null &&
-        parsedAddress <= requestedAddress
-      ) {
-        throw new TypeError('timeline after window contains an item at or before its anchor')
+        throw new TypeError('timeline window addresses must be strictly increasing')
       }
       if (incoming.has(address)) throw new TypeError('timeline window repeats an address')
-      incoming.set(address, item)
+      if (item.projected_structured_bytes !== projectedItemBytes(item.kind)) {
+        throw new TypeError('timeline item byte charge does not match its event kind')
+      }
+      const retained = retainedByAddress.get(address)
+      if (
+        retained &&
+        (retained.kind !== item.kind ||
+          retained.projected_structured_bytes !== item.projected_structured_bytes)
+      ) {
+        throw new TypeError('timeline source returned conflicting data for a retained address')
+      }
+      incoming.set(address, cloneTimelineItem(item))
+      previousAddress = parsedAddress
+      projectedStructuredBytes += item.projected_structured_bytes
+      if (!Number.isSafeInteger(projectedStructuredBytes)) {
+        throw new TypeError('timeline window byte total is not a safe integer')
+      }
     }
-    const firstAddress = window.items[0]?.address.event_sequence
-    const lastAddress = window.items.at(-1)?.address.event_sequence
-    if (
-      this.descriptorValue &&
-      window.items.length === 0 &&
-      (anchor.kind === 'first' || anchor.kind === 'latest' || anchor.kind === 'around')
-    ) {
-      throw new TypeError('timeline window is impossibly empty for its requested anchor')
+    if (projectedStructuredBytes !== window.projected_structured_bytes) {
+      throw new TypeError('timeline window byte total does not match its items')
+    }
+    if (projectedStructuredBytes > maxBytes) {
+      throw new TypeError('timeline window exceeds the requested byte ceiling')
+    }
+    const firstItemAddress = window.items[0]?.address.event_sequence
+    const lastItemAddress = window.items.at(-1)?.address.event_sequence
+    if (anchorKind === 'first' && window.continuation_before) {
+      throw new TypeError('first timeline window cannot continue before its anchor')
+    }
+    if (anchorKind === 'latest' && window.continuation_after) {
+      throw new TypeError('latest timeline window cannot continue after its anchor')
     }
     if (window.continuation_before) {
       decimalAddress(window.continuation_before.event_sequence)
-      if (window.continuation_before.event_sequence !== firstAddress) {
-        throw new TypeError('timeline continuation before does not match the first item')
+      if (window.continuation_before.event_sequence !== firstItemAddress) {
+        throw new TypeError('timeline continuation does not match its returned boundary')
       }
     }
     if (window.continuation_after) {
       decimalAddress(window.continuation_after.event_sequence)
-      if (window.continuation_after.event_sequence !== lastAddress) {
-        throw new TypeError('timeline continuation after does not match the last item')
+      if (window.continuation_after.event_sequence !== lastItemAddress) {
+        throw new TypeError('timeline continuation does not match its returned boundary')
       }
     }
-    if (this.descriptorValue && firstAddress !== undefined && lastAddress !== undefined) {
-      const descriptorFirst = decimalAddress(this.descriptorValue.first_address.event_sequence)
-      const descriptorLatest = decimalAddress(this.descriptorValue.latest_address.event_sequence)
-      if (anchor.kind === 'first' && decimalAddress(firstAddress) !== descriptorFirst) {
-        throw new TypeError('timeline first window does not start at the immutable first address')
+    const cachedDescriptor = this.descriptorValue
+    if (cachedDescriptor && window.items.length === 0 && anchorAddress !== undefined) {
+      const cachedFirstAddress = decimalAddress(cachedDescriptor.first_address.event_sequence)
+      const cachedLatestAddress = decimalAddress(cachedDescriptor.latest_address.event_sequence)
+      if (
+        (anchorKind === 'before' && anchorAddress > cachedFirstAddress) ||
+        (anchorKind === 'after' && anchorAddress < cachedLatestAddress)
+      ) {
+        throw new TypeError('cached descriptor requires a nonempty addressed window')
       }
-      if (decimalAddress(firstAddress) > descriptorFirst && !window.continuation_before) {
-        throw new TypeError('timeline window omits a required continuation before')
+    }
+    if (cachedDescriptor && firstItemAddress && lastItemAddress) {
+      const cachedFirstAddress = decimalAddress(cachedDescriptor.first_address.event_sequence)
+      if (
+        window.continuation_before &&
+        decimalAddress(window.continuation_before.event_sequence) < cachedFirstAddress
+      ) {
+        throw new TypeError('timeline continuation precedes the immutable first address')
       }
-      if (decimalAddress(lastAddress) < descriptorLatest && !window.continuation_after) {
-        throw new TypeError('timeline window omits a required continuation after')
+      if (decimalAddress(firstItemAddress) < cachedFirstAddress) {
+        throw new TypeError('timeline window precedes the cached first address')
+      }
+      if (decimalAddress(firstItemAddress) > cachedFirstAddress && !window.continuation_before) {
+        throw new TypeError('cached descriptor requires a continuation before this window')
+      }
+      if (
+        decimalAddress(lastItemAddress) <
+          decimalAddress(cachedDescriptor.latest_address.event_sequence) &&
+        !window.continuation_after
+      ) {
+        throw new TypeError('cached descriptor requires a continuation after this window')
       }
     }
     const candidates = [
@@ -403,13 +545,36 @@ const SCENARIO_EVENT_KINDS = [
   'tool_batch_transition',
   'turn_completed',
 ] as const
-const scenarioItemCharge = (kind: (typeof SCENARIO_EVENT_KINDS)[number]): number =>
-  PROJECTED_ITEM_ENVELOPE_BYTES + utf8.encode(kind).byteLength
-const SCENARIO_MAX_ITEM_BYTES = Math.max(...SCENARIO_EVENT_KINDS.map(scenarioItemCharge))
-// Exact per-cycle charge over the five scenario kinds, applied to the whole million-event span.
-const SCENARIO_TOTAL_STRUCTURED_BYTES =
-  (SESSION_FOUNDATION_TOTAL / SCENARIO_EVENT_KINDS.length) *
-  SCENARIO_EVENT_KINDS.map(scenarioItemCharge).reduce((total, charge) => total + charge, 0)
+
+const scenarioEventKind = (sequence: number): (typeof SCENARIO_EVENT_KINDS)[number] => {
+  const kind = SCENARIO_EVENT_KINDS[sequence % SCENARIO_EVENT_KINDS.length]
+  if (kind === undefined) throw new TypeError('timeline event kind is unavailable')
+  return kind
+}
+
+const scenarioProjectedBytesThrough = (sequence: number): number => {
+  const cycleBytes = SCENARIO_EVENT_KINDS.reduce(
+    (total, kind) => total + projectedItemBytes(kind),
+    0,
+  )
+  const completeCycles = Math.floor(sequence / SCENARIO_EVENT_KINDS.length)
+  const remainder = sequence % SCENARIO_EVENT_KINDS.length
+  let total = completeCycles * cycleBytes
+  for (let offset = 1; offset <= remainder; offset += 1) {
+    total += projectedItemBytes(scenarioEventKind(offset))
+  }
+  return total
+}
+
+const scenarioItem = (sequence: number) => {
+  const kind = scenarioEventKind(sequence)
+  return {
+    address: { event_sequence: String(sequence) },
+    kind,
+    projected_structured_bytes: projectedItemBytes(kind),
+  }
+}
+
 const SCENARIO_TIMELINE_LIMITS: TimelineContractLimits = {
   max_timeline_window_items: 256,
   max_timeline_window_bytes: 64 * 1024,
@@ -424,9 +589,9 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
       sizes: {
         item_count: String(SESSION_FOUNDATION_TOTAL),
         projected_text_bytes: '48000000',
-        projected_structured_bytes: String(SCENARIO_TOTAL_STRUCTURED_BYTES),
-        referenced_blob_count: '24000',
-        referenced_blob_bytes: '96000000000',
+        projected_structured_bytes: String(scenarioProjectedBytesThrough(SESSION_FOUNDATION_TOTAL)),
+        referenced_blob_count: '0',
+        referenced_blob_bytes: '0',
       },
       first_address: { event_sequence: '1' },
       latest_address: { event_sequence: String(SESSION_FOUNDATION_TOTAL) },
@@ -441,53 +606,61 @@ export class EnormousSessionScenarioSource implements SessionTimelineSource {
     limits: SessionWindowLimits,
   ): Promise<WebSessionTimelineWindow> {
     const bounded = boundedLimits(limits, this.limits)
-    const count = Math.min(bounded.maxItems, Math.floor(bounded.maxBytes / SCENARIO_MAX_ITEM_BYTES))
     const addressed = 'eventSequence' in anchor ? Number(decimalAddress(anchor.eventSequence)) : 0
-    const initialStart = (() => {
+    const candidateSequences = (() => {
       switch (anchor.kind) {
         case 'first':
-          return 1
+          return Array.from({ length: bounded.maxItems }, (_, offset) => offset + 1)
         case 'latest':
-          return Math.max(SESSION_FOUNDATION_TOTAL - count + 1, 1)
+          return Array.from(
+            { length: bounded.maxItems },
+            (_, offset) => SESSION_FOUNDATION_TOTAL - offset,
+          )
         case 'after':
-          return Math.min(addressed + 1, SESSION_FOUNDATION_TOTAL + 1)
+          return Array.from({ length: bounded.maxItems }, (_, offset) => addressed + offset + 1)
         case 'before':
-          return 1
-        case 'around':
-          return Math.max(Math.min(addressed - Math.floor(count / 2), SESSION_FOUNDATION_TOTAL), 1)
+          return Array.from(
+            { length: bounded.maxItems },
+            (_, offset) => Math.min(addressed, SESSION_FOUNDATION_TOTAL + 1) - offset - 1,
+          )
+        case 'around': {
+          const aroundAddress = Math.min(addressed, SESSION_FOUNDATION_TOTAL)
+          const candidates = Array.from(
+            { length: bounded.maxItems * 2 },
+            (_, offset) => Math.max(aroundAddress - bounded.maxItems + 1, 1) + offset,
+          ).filter((sequence) => sequence <= SESSION_FOUNDATION_TOTAL)
+          candidates.sort(
+            (left, right) =>
+              Math.abs(left - aroundAddress) - Math.abs(right - aroundAddress) || left - right,
+          )
+          return candidates.slice(0, bounded.maxItems)
+        }
       }
     })()
-    const end =
-      anchor.kind === 'before'
-        ? Math.min(addressed - 1, SESSION_FOUNDATION_TOTAL)
-        : Math.min(initialStart + count - 1, SESSION_FOUNDATION_TOTAL)
-    const start = anchor.kind === 'before' ? Math.max(end - count + 1, 1) : initialStart
-    const items =
-      start > end
-        ? []
-        : Array.from({ length: end - start + 1 }, (_, offset) => {
-            const sequence = start + offset
-            const kind =
-              SCENARIO_EVENT_KINDS[sequence % SCENARIO_EVENT_KINDS.length] ?? 'input_accepted'
-            return {
-              address: { event_sequence: String(sequence) },
-              kind,
-              projected_structured_bytes: scenarioItemCharge(kind),
-            }
-          })
+    const items = [] as ReturnType<typeof scenarioItem>[]
+    let projectedBytes = 0
+    for (const sequence of candidateSequences) {
+      if (sequence < 1 || sequence > SESSION_FOUNDATION_TOTAL) continue
+      const item = scenarioItem(sequence)
+      if (projectedBytes + item.projected_structured_bytes > bounded.maxBytes) break
+      projectedBytes += item.projected_structured_bytes
+      items.push(item)
+    }
+    items.sort(
+      (left, right) => Number(left.address.event_sequence) - Number(right.address.event_sequence),
+    )
     const firstItem = items[0]
     const lastItem = items.at(-1)
     return decodeWebSessionTimelineWindow({
       session_id: sessionId,
       items,
-      projected_structured_bytes: items.reduce(
-        (total, item) => total + item.projected_structured_bytes,
-        0,
-      ),
+      projected_structured_bytes: projectedBytes,
       continuation_before:
-        firstItem && start > 1 ? { event_sequence: firstItem.address.event_sequence } : null,
+        firstItem && Number(firstItem.address.event_sequence) > 1
+          ? { event_sequence: firstItem.address.event_sequence }
+          : null,
       continuation_after:
-        lastItem && end < SESSION_FOUNDATION_TOTAL
+        lastItem && Number(lastItem.address.event_sequence) < SESSION_FOUNDATION_TOTAL
           ? { event_sequence: lastItem.address.event_sequence }
           : null,
     })
@@ -503,7 +676,10 @@ export const sessionFoundationScenario = async (after: string | undefined, limit
   const eventSequence = after?.match(/^timeline:([1-9]\d*)$/)?.[1]
   const window = await history.load(
     eventSequence ? { kind: 'after', eventSequence } : { kind: 'latest' },
-    { maxItems: limit, maxBytes: SCENARIO_TIMELINE_LIMITS.max_timeline_window_bytes },
+    {
+      maxItems: limit,
+      maxBytes: SCENARIO_TIMELINE_LIMITS.max_timeline_window_bytes,
+    },
   )
   return { descriptor, window, retained: history.retained.length }
 }

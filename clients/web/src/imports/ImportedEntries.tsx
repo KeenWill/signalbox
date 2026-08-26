@@ -1,4 +1,4 @@
-import { useVirtualizer } from '@tanstack/react-virtual'
+import { defaultRangeExtractor, useVirtualizer } from '@tanstack/react-virtual'
 import { useEffect, useRef } from 'react'
 import { type CommandContext, invokeCommand } from '../commands'
 import type {
@@ -8,11 +8,6 @@ import type {
 
 // Tunable effective ceiling: imported evidence rows keep a small viewport-adjacent overscan.
 const IMPORT_ENTRY_OVERSCAN_ROWS = 6
-
-const safeAriaInteger = (value: string): number | undefined => {
-  const parsed = BigInt(value)
-  return parsed <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(parsed) : undefined
-}
 
 const sourceLabel = (entry: WebImportedEntry): string => {
   switch (entry.source_speaker) {
@@ -28,13 +23,7 @@ const sourceLabel = (entry: WebImportedEntry): string => {
 }
 
 const entryText = (entry: WebImportedEntry): string => {
-  if (entry.content_kind !== 'text') {
-    if (entry.text !== null && entry.text !== undefined) {
-      throw new TypeError('non-text imported entry carries text evidence')
-    }
-    return entry.content_kind.replaceAll('_', ' ')
-  }
-  if (!entry.text) throw new TypeError('imported text entry is missing typed text evidence')
+  if (!entry.text) return entry.content_kind.replaceAll('_', ' ')
   switch (entry.text.kind) {
     case 'not_attested':
       return 'Text not attested by source'
@@ -52,21 +41,26 @@ export function ImportedEntries({
   commandContext,
 }: {
   entries: readonly WebImportedEntry[]
-  logicalEntryCount?: string
+  logicalEntryCount: number
   selected: WebImportContinuationReference | null
   commandContext: CommandContext
 }) {
   const scrollRef = useRef<HTMLDivElement>(null)
+  const selectedIndex = entries.findIndex(
+    (entry) => entry.frontier.imported_entry_id === selected?.imported_entry_id,
+  )
   const virtualizer = useVirtualizer({
     count: entries.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => 58,
     overscan: IMPORT_ENTRY_OVERSCAN_ROWS,
     getItemKey: (index) => entries[index]?.frontier.imported_entry_id ?? index,
+    rangeExtractor: (range) => {
+      const indexes = defaultRangeExtractor(range)
+      if (selectedIndex < 0 || indexes.includes(selectedIndex)) return indexes
+      return [...indexes, selectedIndex].sort((left, right) => left - right)
+    },
   })
-  const selectedIndex = entries.findIndex(
-    (entry) => entry.frontier.imported_entry_id === selected?.imported_entry_id,
-  )
   const virtualRows = virtualizer.getVirtualItems()
   useEffect(() => {
     if (selectedIndex >= 0) virtualizer.scrollToIndex(selectedIndex, { align: 'auto' })
@@ -110,10 +104,8 @@ export function ImportedEntries({
               id={`import-entry-${entry.frontier.imported_entry_id}`}
               role="option"
               aria-selected={isSelected}
-              aria-posinset={safeAriaInteger(entry.frontier.position)}
-              aria-setsize={
-                logicalEntryCount === undefined ? undefined : safeAriaInteger(logicalEntryCount)
-              }
+              aria-posinset={entry.frontier.position}
+              aria-setsize={logicalEntryCount}
               className="import-entry-row"
               data-testid={`import-entry-${entry.frontier.position}`}
               key={entry.frontier.imported_entry_id}
@@ -128,9 +120,7 @@ export function ImportedEntries({
                 })
               }
             >
-              <span className="import-position">
-                {BigInt(entry.frontier.position).toLocaleString()}
-              </span>
+              <span className="import-position">{entry.frontier.position.toLocaleString()}</span>
               <div>
                 <strong>{sourceLabel(entry)}</strong>
                 <p>{entryText(entry)}</p>

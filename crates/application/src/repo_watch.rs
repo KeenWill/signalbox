@@ -53,9 +53,10 @@ const REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1: &[u8] =
 /// A stream is created by the first occurrence of a recurring event on a
 /// distinct subject: a pull request's own transitions, each of its labels, each
 /// review thread, each base branch it advances onto, and each distinct
-/// reaction. Every entry costs a 32-byte stream identity and an 8-byte
-/// sequence, so this ceiling bounds one repository's frontier at roughly 40 MB
-/// of resident state and a durable frontier of the same order. That is the
+/// reaction. Every entry costs a 32-byte stream identity, an 8-byte sequence,
+/// and an 8-byte owning pull-request number, so this ceiling bounds one
+/// repository's frontier at roughly 48 MB of resident entry fields before map
+/// overhead, and a durable frontier of the same order. That is the
 /// point at which a single watched repository's identity state, rather than its
 /// event history, becomes the dominant cost of watching it, and it is far above
 /// what any real repository reaches: GitHub's largest public repositories have
@@ -66,7 +67,7 @@ const REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1: &[u8] =
 /// an occurrence number, which mints a content identity that collides with an
 /// already-durable one, so the differ stops rather than emit an identity that
 /// does not identify its occurrence.
-// numeric-bound: ceiling - caps one repository's resident and durable occurrence frontier
+// numeric-bound: guard - prevents hostile identity fan-out from exhausting resident memory
 const MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS: usize = 1_000_000;
 
 /// A source-independent SHA-256 identity for one normalized event occurrence.
@@ -94,6 +95,7 @@ impl RepoWatchEventContentIdentityV1 {
 pub struct RepoWatchEventIdentityFrontierEntryV1 {
     stream_identity: [u8; 32],
     sequence: NonZeroU64,
+    pull_request_number: Option<PullRequestNumber>,
 }
 
 impl RepoWatchEventIdentityFrontierEntryV1 {
@@ -106,6 +108,23 @@ impl RepoWatchEventIdentityFrontierEntryV1 {
         Self {
             stream_identity,
             sequence,
+            pull_request_number: None,
+        }
+    }
+
+    /// Pairs one stream with its last sequence and the pull request owning it.
+    ///
+    /// A repository-global stream, such as a branch workflow run, belongs to no
+    /// pull request and carries none.
+    pub const fn for_pull_request(
+        stream_identity: [u8; 32],
+        sequence: NonZeroU64,
+        pull_request_number: PullRequestNumber,
+    ) -> Self {
+        Self {
+            stream_identity,
+            sequence,
+            pull_request_number: Some(pull_request_number),
         }
     }
 
@@ -121,12 +140,24 @@ impl RepoWatchEventIdentityFrontierEntryV1 {
     pub const fn sequence(&self) -> NonZeroU64 {
         self.sequence
     }
+
+    /// The pull request owning this recurring stream, when one does.
+    pub const fn pull_request_number(&self) -> Option<PullRequestNumber> {
+        self.pull_request_number
+    }
+}
+
+/// One stream's counter and the subject whose retirement releases it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RepoWatchEventIdentityFrontierSequenceV1 {
+    sequence: NonZeroU64,
+    pull_request_number: Option<PullRequestNumber>,
 }
 
 /// Canonical per-repository occurrence counters carried by the durable cursor.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RepoWatchEventIdentityFrontierV1 {
-    sequences: BTreeMap<[u8; 32], NonZeroU64>,
+    sequences: BTreeMap<[u8; 32], RepoWatchEventIdentityFrontierSequenceV1>,
 }
 
 impl RepoWatchEventIdentityFrontierV1 {
@@ -144,7 +175,13 @@ impl RepoWatchEventIdentityFrontierV1 {
         let mut sequences = BTreeMap::new();
         for entry in entries {
             if sequences
-                .insert(entry.stream_identity, entry.sequence)
+                .insert(
+                    entry.stream_identity,
+                    RepoWatchEventIdentityFrontierSequenceV1 {
+                        sequence: entry.sequence,
+                        pull_request_number: entry.pull_request_number,
+                    },
+                )
                 .is_some()
             {
                 return Err(RepoWatchEventIdentityFrontierError::DuplicateStream);
@@ -160,17 +197,26 @@ impl RepoWatchEventIdentityFrontierV1 {
     pub fn entries(
         &self,
     ) -> impl ExactSizeIterator<Item = RepoWatchEventIdentityFrontierEntryV1> + '_ {
-        self.sequences.iter().map(|(stream, sequence)| {
-            RepoWatchEventIdentityFrontierEntryV1::new(*stream, *sequence)
-        })
+        self.sequences
+            .iter()
+            .map(|(stream, entry)| match entry.pull_request_number {
+                Some(number) => RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                    *stream,
+                    entry.sequence,
+                    number,
+                ),
+                None => RepoWatchEventIdentityFrontierEntryV1::new(*stream, entry.sequence),
+            })
     }
 
     fn advance(
         &mut self,
         stream_identity: [u8; 32],
+        pull_request_number: Option<PullRequestNumber>,
     ) -> Result<NonZeroU64, RepoWatchEventIdentityFrontierError> {
         let next = match self.sequences.get(&stream_identity) {
-            Some(sequence) => sequence
+            Some(entry) => entry
+                .sequence
                 .get()
                 .checked_add(1)
                 .and_then(NonZeroU64::new)
@@ -182,7 +228,13 @@ impl RepoWatchEventIdentityFrontierV1 {
                 NonZeroU64::MIN
             }
         };
-        self.sequences.insert(stream_identity, next);
+        self.sequences.insert(
+            stream_identity,
+            RepoWatchEventIdentityFrontierSequenceV1 {
+                sequence: next,
+                pull_request_number,
+            },
+        );
         Ok(next)
     }
 }
@@ -270,7 +322,7 @@ pub enum RepoWatchPullRequestLifecycle {
     Merged,
 }
 
-// numeric-bound: tunable - admits the provider check-generation text this accepts
+// numeric-bound: guard - preserves the advertised provider check-generation wire grammar
 const MAX_CHECK_COMPLETION_GENERATION_BYTES: usize = 64;
 
 /// Opaque provider generation for one completed check execution.
@@ -430,6 +482,257 @@ pub enum RepoWatchThreadState {
     Open,
     Resolved,
 }
+
+/// GitHub's aggregate review decision for one pull-request head.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchReviewDecision {
+    None,
+    Approved,
+    ReviewRequired,
+    ChangesRequested,
+}
+
+/// Durable repository-watch convergence classification for one exact head.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchConvergenceVerdict {
+    NotConverged,
+    InternallyConverged,
+    MergeReady,
+}
+
+const MERGE_READY_BASE_BRANCH: &str = "main";
+
+/// Field-labeled construction input for one exact-head convergence assessment.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchConvergenceAssessmentInput {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub base_branch: BranchName,
+    pub base_revision: CommitSha,
+    pub mergeable_state: MergeableState,
+    pub settled: bool,
+    pub review_decision: RepoWatchReviewDecision,
+    pub unresolved_threads: Vec<ReviewThreadId>,
+    pub gating_check_count: u64,
+    pub non_green_gating_checks: Vec<CheckRunName>,
+}
+
+/// Complete evidence and derived judgement for one exact pull-request head.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchConvergenceAssessment {
+    number: PullRequestNumber,
+    head_sha: CommitSha,
+    base_branch: BranchName,
+    base_revision: CommitSha,
+    mergeable_state: MergeableState,
+    settled: bool,
+    review_decision: RepoWatchReviewDecision,
+    unresolved_threads: Box<[ReviewThreadId]>,
+    gating_check_count: u64,
+    non_green_gating_checks: Box<[CheckRunName]>,
+    verdict: RepoWatchConvergenceVerdict,
+}
+
+impl RepoWatchConvergenceAssessment {
+    /// Validates complete evidence and derives the reference convergence rule.
+    pub fn try_new(
+        mut input: RepoWatchConvergenceAssessmentInput,
+    ) -> Result<Self, RepoWatchConvergenceAssessmentError> {
+        input.unresolved_threads.sort();
+        input.unresolved_threads.dedup();
+        input
+            .non_green_gating_checks
+            .sort_by(|left, right| left.as_str().cmp(right.as_str()));
+        if input.non_green_gating_checks.len() as u64 > input.gating_check_count {
+            return Err(RepoWatchConvergenceAssessmentError);
+        }
+        let blocked = !input.unresolved_threads.is_empty()
+            || !input.non_green_gating_checks.is_empty()
+            // Unknown is GitHub's pending state, not affirmative evidence that
+            // the exact head is mergeable. An unsettled head likewise has not
+            // finished registering and completing its exact-head checks.
+            || input.mergeable_state != MergeableState::Mergeable
+            || !input.settled
+            || input.gating_check_count == 0
+            || input.review_decision == RepoWatchReviewDecision::ChangesRequested;
+        let verdict = if blocked {
+            RepoWatchConvergenceVerdict::NotConverged
+        } else if input.base_branch.as_str() == MERGE_READY_BASE_BRANCH {
+            RepoWatchConvergenceVerdict::MergeReady
+        } else {
+            RepoWatchConvergenceVerdict::InternallyConverged
+        };
+        Ok(Self {
+            number: input.number,
+            head_sha: input.head_sha,
+            base_branch: input.base_branch,
+            base_revision: input.base_revision,
+            mergeable_state: input.mergeable_state,
+            settled: input.settled,
+            review_decision: input.review_decision,
+            unresolved_threads: input.unresolved_threads.into_boxed_slice(),
+            gating_check_count: input.gating_check_count,
+            non_green_gating_checks: input.non_green_gating_checks.into_boxed_slice(),
+            verdict,
+        })
+    }
+
+    pub const fn number(&self) -> PullRequestNumber {
+        self.number
+    }
+
+    pub const fn head_sha(&self) -> &CommitSha {
+        &self.head_sha
+    }
+
+    pub const fn base_branch(&self) -> &BranchName {
+        &self.base_branch
+    }
+
+    pub const fn base_revision(&self) -> &CommitSha {
+        &self.base_revision
+    }
+
+    pub const fn mergeable_state(&self) -> MergeableState {
+        self.mergeable_state
+    }
+
+    pub const fn settled(&self) -> bool {
+        self.settled
+    }
+
+    pub const fn review_decision(&self) -> RepoWatchReviewDecision {
+        self.review_decision
+    }
+
+    pub fn unresolved_threads(&self) -> &[ReviewThreadId] {
+        &self.unresolved_threads
+    }
+
+    pub const fn gating_check_count(&self) -> u64 {
+        self.gating_check_count
+    }
+
+    pub fn non_green_gating_checks(&self) -> &[CheckRunName] {
+        &self.non_green_gating_checks
+    }
+
+    pub const fn verdict(&self) -> RepoWatchConvergenceVerdict {
+        self.verdict
+    }
+}
+
+/// Incoherent convergence evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepoWatchConvergenceAssessmentError;
+
+impl fmt::Display for RepoWatchConvergenceAssessmentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "repository-watch convergence evidence is incoherent"
+        )
+    }
+}
+
+impl Error for RepoWatchConvergenceAssessmentError {}
+
+/// One stale blocking review eligible for conservative automatic dismissal.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchStaleReviewClearanceCandidate {
+    number: PullRequestNumber,
+    current_head_sha: CommitSha,
+    review_node_id: Box<str>,
+    reviewer: RepoWatchAuthorLogin,
+    reviewed_head_sha: CommitSha,
+}
+
+impl RepoWatchStaleReviewClearanceCandidate {
+    /// Returns whether one opaque provider review-node identity is admissible.
+    pub fn review_node_id_is_valid(value: &str) -> bool {
+        !value.is_empty() && value.len() <= 256 && !value.contains('\0')
+    }
+
+    /// Requires the aggregate review decision to be the exact head's only
+    /// remaining convergence blocker and the review to target an older head.
+    pub fn try_new(
+        assessment: &RepoWatchConvergenceAssessment,
+        review_node_id: String,
+        reviewer: RepoWatchAuthorLogin,
+        reviewed_head_sha: CommitSha,
+    ) -> Result<Self, RepoWatchStaleReviewClearanceCandidateError> {
+        if assessment.review_decision() != RepoWatchReviewDecision::ChangesRequested
+            || !assessment.unresolved_threads().is_empty()
+            || !assessment.non_green_gating_checks().is_empty()
+            // An unsettled head has not finished registering and completing its
+            // exact-head checks, so an empty non-green list is the absence of
+            // evidence rather than evidence of a green head. Dismissing a
+            // blocking review then races the checks that have yet to report.
+            || !assessment.settled()
+            // A head carrying no gating check at all presents the same empty
+            // non-green list as a fully green one, which is why the reference
+            // convergence rule counts it as blocked. Clearance must read that
+            // evidence the same way: without this gate, the "only remaining
+            // blocker" the dismissal claims to clear would be the sole gate the
+            // head ever had, and the review would be dismissed off zero checks.
+            || assessment.gating_check_count() == 0
+            // Affirmative mergeability, not merely the absence of a known
+            // conflict. `Unknown` is GitHub still computing the merge, so it is
+            // the absence of evidence rather than evidence of a mergeable head,
+            // and the durable planner's predicate requires
+            // `mergeable_state = 'mergeable'` outright. Refusing only
+            // `Conflicting` here would let this public constructor mint a
+            // candidate the durable planner refuses, leaving the in-memory rule
+            // looser than the SQL it is meant to mirror.
+            || assessment.mergeable_state() != MergeableState::Mergeable
+            || &reviewed_head_sha == assessment.head_sha()
+            || !Self::review_node_id_is_valid(&review_node_id)
+        {
+            return Err(RepoWatchStaleReviewClearanceCandidateError);
+        }
+        Ok(Self {
+            number: assessment.number(),
+            current_head_sha: assessment.head_sha().clone(),
+            review_node_id: review_node_id.into_boxed_str(),
+            reviewer,
+            reviewed_head_sha,
+        })
+    }
+
+    pub const fn number(&self) -> PullRequestNumber {
+        self.number
+    }
+
+    pub const fn current_head_sha(&self) -> &CommitSha {
+        &self.current_head_sha
+    }
+
+    pub const fn review_node_id(&self) -> &str {
+        &self.review_node_id
+    }
+
+    pub const fn reviewer(&self) -> &RepoWatchAuthorLogin {
+        &self.reviewer
+    }
+
+    pub const fn reviewed_head_sha(&self) -> &CommitSha {
+        &self.reviewed_head_sha
+    }
+}
+
+/// A review is not stale, or another exact-head convergence blocker remains.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepoWatchStaleReviewClearanceCandidateError;
+
+impl fmt::Display for RepoWatchStaleReviewClearanceCandidateError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(
+            "repository-watch stale review clearance requires an older-head review and no blocker except changes requested",
+        )
+    }
+}
+
+impl Error for RepoWatchStaleReviewClearanceCandidateError {}
 
 /// One current review-thread projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -870,6 +1173,24 @@ enum RepoWatchEventStreamKeyV1<'value> {
 }
 
 impl RepoWatchEventStreamKeyV1<'_> {
+    /// The pull request owning this stream, or none for a repository-global one.
+    ///
+    /// A workflow run belongs to a branch rather than to any pull request, so
+    /// its stream has no subject whose terminal state could retire it.
+    const fn pull_request_number(&self) -> Option<PullRequestNumber> {
+        match self {
+            Self::PullRequestKind { number, .. }
+            | Self::Label { number, .. }
+            | Self::CheckSuite { number, .. }
+            | Self::CheckRun { number, .. }
+            | Self::Review { number, .. }
+            | Self::Thread { number, .. }
+            | Self::BaseAdvance { number, .. }
+            | Self::Reaction { number, .. } => Some(*number),
+            Self::Workflow { .. } => None,
+        }
+    }
+
     /// Whether this stream can state more than one fact.
     ///
     /// A stream is non-recurring only when the differ suppresses re-emission on
@@ -1605,9 +1926,10 @@ fn push_identified_event(
     events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
     let is_recurring = stream_key.is_recurring();
+    let pull_request_number = stream_key.pull_request_number();
     let stream_identity = repo_watch_event_stream_identity_v1(stream_key);
     let sequence = if is_recurring {
-        identity_frontier.advance(stream_identity)?
+        identity_frontier.advance(stream_identity, pull_request_number)?
     } else {
         NonZeroU64::MIN
     };
@@ -2184,6 +2506,7 @@ pub enum RepoWatchRuleEvaluationOutcome {
     Inactive,
     NotMatched,
     TargetClosed,
+    TargetConverged,
     Occupied,
     Cooldown,
     Dispatched {
@@ -2581,11 +2904,355 @@ mod tests {
     const CHECK_SUITE_ID: u64 = 101;
     const CHECK_RUN_ID: u64 = 102;
     const REVIEW_ID: u64 = 103;
+    const REVIEW_NODE_ID: &str = "review-node-103";
     const WORKFLOW_RUN_ID: u64 = 104;
     const NEXT_WORKFLOW_RUN_ID: u64 = 105;
     const WORKFLOW_ID: u64 = 106;
     const OTHER_WORKFLOW_ID: u64 = 107;
     const WORKFLOW_IDENTITIES: [u64; 2] = [WORKFLOW_ID, OTHER_WORKFLOW_ID];
+
+    struct ConvergenceFacts {
+        base_branch: &'static str,
+        mergeable_state: MergeableState,
+        settled: bool,
+        review_decision: RepoWatchReviewDecision,
+        unresolved_threads: Vec<ReviewThreadId>,
+        gating_check_count: u64,
+        non_green_gating_checks: Vec<CheckRunName>,
+    }
+
+    fn convergence_assessment(
+        facts: ConvergenceFacts,
+    ) -> Result<RepoWatchConvergenceAssessment, Box<dyn Error>> {
+        Ok(RepoWatchConvergenceAssessment::try_new(
+            RepoWatchConvergenceAssessmentInput {
+                number: pull_request_number(PULL_REQUEST_NUMBER),
+                head_sha: CommitSha::try_new(String::from(INITIAL_HEAD))?,
+                base_branch: BranchName::try_new(String::from(facts.base_branch))?,
+                base_revision: CommitSha::try_new(String::from(CHANGED_HEAD))?,
+                mergeable_state: facts.mergeable_state,
+                settled: facts.settled,
+                review_decision: facts.review_decision,
+                unresolved_threads: facts.unresolved_threads,
+                gating_check_count: facts.gating_check_count,
+                non_green_gating_checks: facts.non_green_gating_checks,
+            },
+        )?)
+    }
+
+    #[test]
+    fn exact_green_main_head_is_merge_ready_without_an_approval() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::None,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::MergeReady
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exact_green_stacked_head_is_only_internally_converged() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: FIRST_STACK_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::Approved,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::InternallyConverged
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_thread_blocks_an_otherwise_green_head() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::Approved,
+            unresolved_threads: vec![ReviewThreadId::try_new(String::from(THREAD_ID))?],
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::NotConverged
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn stale_blocking_review_blocks_an_otherwise_green_head() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::NotConverged
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pending_mergeability_blocks_an_otherwise_green_head() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Unknown,
+            settled: false,
+            review_decision: RepoWatchReviewDecision::Approved,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::NotConverged
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn missing_gating_checks_block_an_otherwise_green_head() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::Approved,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        assert_eq!(
+            assessment.verdict(),
+            RepoWatchConvergenceVerdict::NotConverged
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn older_head_review_is_clearable_when_it_is_the_only_blocker() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let candidate = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        )?;
+
+        assert_eq!(candidate.number(), assessment.number());
+        assert_eq!(candidate.current_head_sha(), assessment.head_sha());
+        assert_eq!(candidate.review_node_id(), REVIEW_NODE_ID);
+        assert_eq!(candidate.reviewer().as_str(), REVIEWER);
+        assert_eq!(candidate.reviewed_head_sha().as_str(), REVIEW_COMMIT);
+        Ok(())
+    }
+
+    #[test]
+    fn inv072_current_head_blocking_review_is_not_clearable() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            assessment.head_sha().clone(),
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    #[test]
+    fn unresolved_thread_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: vec![ReviewThreadId::try_new(String::from(THREAD_ID))?],
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    #[test]
+    fn non_green_check_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: vec![CheckRunName::try_new(String::from(CHECK_NAME))?],
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    #[test]
+    fn unsettled_head_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: false,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    /// A head with no gating check presents the same empty non-green list as a
+    /// fully green one. The convergence rule already calls that head blocked,
+    /// and clearance must agree: a settled head whose only stated blocker is
+    /// the review, but which never ran a check, has no green evidence to
+    /// dismiss the review against.
+    #[test]
+    fn zero_gating_checks_prevent_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Mergeable,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 0,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    #[test]
+    fn merge_conflict_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Conflicting,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
+
+    /// The durable planner admits a clearance only against an assessment row
+    /// carrying `mergeable_state = 'mergeable'`, so the in-memory rule must
+    /// refuse `Unknown` too and not merely `Conflicting`. A settled head whose
+    /// mergeability GitHub is still computing is the absence of evidence, and
+    /// admitting it here would mint a candidate the durable planner refuses.
+    #[test]
+    fn unknown_mergeability_prevents_stale_review_clearance() -> Result<(), Box<dyn Error>> {
+        let assessment = convergence_assessment(ConvergenceFacts {
+            base_branch: BASE_BRANCH,
+            mergeable_state: MergeableState::Unknown,
+            settled: true,
+            review_decision: RepoWatchReviewDecision::ChangesRequested,
+            unresolved_threads: Vec::new(),
+            gating_check_count: 1,
+            non_green_gating_checks: Vec::new(),
+        })?;
+        assert_eq!(assessment.mergeable_state(), MergeableState::Unknown);
+        assert!(assessment.settled());
+
+        let result = RepoWatchStaleReviewClearanceCandidate::try_new(
+            &assessment,
+            REVIEW_NODE_ID.to_owned(),
+            RepoWatchAuthorLogin::try_new(String::from(REVIEWER))?,
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+
+        assert_eq!(result, Err(RepoWatchStaleReviewClearanceCandidateError));
+        Ok(())
+    }
 
     /// Deterministic event identities; their values are arbitrary and only their order matters.
     struct FixedEventIds {
@@ -4377,7 +5044,7 @@ mod tests {
             frontier.entries().len(),
             MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS
         );
-        assert_eq!(frontier.advance(stream_identity_for(0))?.get(), 2);
+        assert_eq!(frontier.advance(stream_identity_for(0), None)?.get(), 2);
         Ok(())
     }
 
@@ -4398,9 +5065,32 @@ mod tests {
         )?;
 
         assert_eq!(
-            frontier.advance(stream_identity_for(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS)),
+            frontier.advance(
+                stream_identity_for(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS),
+                None
+            ),
             Err(RepoWatchEventIdentityFrontierError::StreamLimit)
         );
+        Ok(())
+    }
+
+    /// Ownership is the durable member a later retirement mechanism reads, so
+    /// it has to survive the round trip the cursor performs on every commit.
+    #[test]
+    fn identity_frontier_entries_carry_their_owning_pull_request() -> Result<(), Box<dyn Error>> {
+        let owning = pull_request_number(PULL_REQUEST_NUMBER);
+        let frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                stream_identity_for(0),
+                NonZeroU64::MIN,
+                owning,
+            ),
+            RepoWatchEventIdentityFrontierEntryV1::new(stream_identity_for(1), NonZeroU64::MIN),
+        ])?;
+
+        let entries = frontier.entries().collect::<Vec<_>>();
+        assert_eq!(entries[0].pull_request_number(), Some(owning));
+        assert_eq!(entries[1].pull_request_number(), None);
         Ok(())
     }
 }

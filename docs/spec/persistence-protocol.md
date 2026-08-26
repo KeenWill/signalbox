@@ -1,14 +1,38 @@
 # Persistence protocol
 
+The workspace-instruction discovery, registration, empty turn-start manifest,
+and model-call correlation were verified against PR #810
+(`agent/agent-docs-skills-model-call-followup`).
+
+The durable automatic model-call reconciliation state, attempt history, and
+final-state authority were verified against this PR
+(`agent/turn-lifecycle-hardening`). Their generalization to exact model-call or
+tool-attempt operations is verified against this PR
+(`agent/daemon-live-tool-recovery-reconcile`). The server-enforced
+automatic-reconciliation transaction deadline is verified against this PR
+(`agent/daemon-live-server-bounded-reconciliation`). Recursive-frontier prefix
+validation is verified against this PR
+(`agent/daemon-live-frontier-validation-materialization`). Context-compaction
+evidence validation is verified against this PR
+(`agent/daemon-live-context-compaction-validation`). Compaction-leaf selection
+before recursive turn-start validation is verified against this PR
+(`agent/daemon-live-compaction-leaf-validation-scope`). Deferred immutable
+tool-round validation scope is verified against this PR
+(`agent/daemon-live-deferred-round-validation-scope`). Immutable frontier-header
+ancestry before exact prefix-member fallback is verified against this PR
+(`agent/daemon-live-frontier-ancestry-fast-path`). Successor compaction
+validation from its immutable predecessor and bounded current suffix is verified
+against this PR (`agent/daemon-live-current-compaction-validation-scope`).
+
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
 
 The immutable blob-derivation family and migration inventory are verified
 against this PR (`agent/web-blob-delivery`).
 
-The restore-safety search-path pin on check-reachable functions, and the
+The restore-safety search-path pin on check-reachable functions, and the lexical
 catalogue test holding it, were verified against this PR
-(`agent/restore-safe-check-functions`).
+(`agent/daemon-live-restore-call-lexing`).
 
 The delegate denial-reason storage — the superseded decision-shape constraint
 and its byte-precise checks — was verified against this PR
@@ -161,11 +185,11 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — ninety-four files, `202607180001` through
-`202608210200` — embedded by `sqlx::migrate!` as the static `MIGRATOR` and
-applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations` ledger
-records applied files with checksums (the integration tests read the ledger
-directly); serialization of concurrent migration runs is SQLx dependency
+`crates/persistence/migrations/` — one hundred fourty files, `202607180001`
+through `202608251300` — embedded by `sqlx::migrate!` as the static `MIGRATOR`
+and applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations`
+ledger records applied files with checksums (the integration tests read the
+ledger directly); serialization of concurrent migration runs is SQLx dependency
 behavior, relied on but not demonstrated in this repo. `.gitattributes` pins
 migration files to LF so checksums do not vary by platform, and a build script
 re-embeds the set whenever a file changes. The production binary holds the
@@ -200,10 +224,13 @@ operation and fails only during restore; `202608200001` retrofits the pin onto
 the check-reachable set the earlier migrations create, and the
 `search_path_postgres` catalogue test (INV-070) derives the reachable set from
 the dependency catalogue — including functions reached only through a
-user-defined operator — and fails on any unpinned member or on empty discovery,
-so a future migration cannot reintroduce the gap. Why: a backup that cannot
-restore is a silent failure that surfaces only during recovery, so restorability
-is part of the schema's contract rather than an operational afterthought.
+user-defined operator — then closes transitively over lexically call-shaped body
+references. Quoted identifiers and comments between a function name and its
+opening parenthesis remain calls; names inside comments or strings and bare
+aliases do not. The test fails on any unpinned member or on empty discovery, so
+a future migration cannot reintroduce the gap. Why: a backup that cannot restore
+is a silent failure that surfaces only during recovery, so restorability is part
+of the schema's contract rather than an operational afterthought.
 
 Prefix reservation across concurrent stacks: the bottom pull request of any
 stack that will add migrations declares a reserved prefix block — a date plus a
@@ -223,6 +250,32 @@ prefix and churn-renumber each time a sibling merges.
 Container-backed integration tests (`postgres-integration` feature, ignored by
 default, failing loudly when Docker is absent) exercise the real constraints,
 triggers, locks, and races described below against a pinned Postgres image.
+
+Migration `202608210400_convergence_sweep.sql` uses the reserved `2026082104xx`
+block to add the mutable `convergence_sweep_target` scheduler projection, the
+append-only `convergence_sweep_event` audit, and the
+`convergence_sweep_parked_target` operator view. Closed checks bind retry and
+park shapes to the five-attempt `convergence_sweep_retry_budget()` ceiling, bind
+each provider, commission, template, or state-access failure outcome to its
+typed cause and operator need, and prevent partial command-fence or
+commissioned-dispatch identities. Observation projections are decoded as
+complete pairs by the persistence adapter. The function pins the restore-safe
+schema search path. The cross-component behavior using these records is owned by
+[pull-request convergence reconciliation](convergence-reconciliation.md). The
+pull-request target and model-activity advisory fences described in the lock
+inventory below are verified against this PR (`agent/daemon-convergence-sweep`).
+Migration `202608210402_repo_watch_pull_request_target_indexes.sql` indexes the
+repository-watch event-to-action path used to census sessions by pull-request
+target. Migration `202608210403_convergence_sweep_parked_session.sql` projects
+the exact inactive census dispatch and session through the parked-target
+operator view, including repository-watch sessions not dispatched by the sweep.
+Migration `202608210404_convergence_sweep_immutable_parked_session.sql` persists
+that selected identity and timestamp in the guarded parking transition, so later
+censuses cannot change the operator-visible parked session. Its two check
+constraints are validated rather than declared `NOT VALID`: the whole
+`202608210400`–`202608210404` block lands together, so no database has held an
+inactivity park without those columns, and the schema asserts unconditionally
+that every such park carries an operator-visible dispatch identity.
 
 ## Relational representation
 
@@ -270,6 +323,17 @@ Implemented table families (across the forward-only migrations):
 - `blob_derivation` and its ordered input and output satellites, whose complete
   immutable provenance and deterministic-key convergence are owned by
   [blob storage](blob-storage.md#browser-delivery-views-and-derivations);
+- `instruction_discovery`, including its limit version, consumed counts, and
+  completeness bit, plus its ordered roots, candidates, and findings;
+  `registered_instruction_bundle`; and `turn_instruction_manifest`, whose
+  append-only discovery, registration, and exact turn-start provenance are owned
+  by [workspace-instructions](workspace-instructions.md) (INV-061). Migration
+  `202608140001` backfills the empty manifest for each existing turn that
+  already has a model call and makes every `model_call` name the manifest for
+  its own session and turn. Queued turns and callless active turns remain
+  unbound for ordinary discovery before their first call. The synthetic
+  discovery has no roots, candidates, or findings and is complete evidence for
+  the empty instruction projection those historical calls used;
 - `model_call` (execution state owned by
   [model-call-execution](model-call-execution.md), its turn-level
   provider-target pin on `turn_lifecycle`, and its pinned
@@ -369,8 +433,14 @@ Representation rules, all enforced in the schema:
   equal-content identities) without changing any frontier identity or resolved
   sequence. Deferred completeness checks reject missing prefixes, cycles,
   inherited duplicates, gaps, and a resolved count different from the header.
-  Why: append-derived histories store and load each immutable suffix once while
-  preserving the complete-snapshot contract.
+  High-frequency model-call, continuation, turn-start, and terminal-frontier
+  prefix-preservation checks first walk the checked frontier's immutable header
+  ancestry. Reaching the named prefix proves the common append-derived case
+  without expanding complete memberships; an independently constructed frontier
+  falls back to materializing each compared recursive membership once before
+  matching its ordered members. Why: append-derived histories store and load
+  each immutable suffix once while the fallback preserves the exact
+  complete-snapshot contract.
 - Closed variant sets are `text` discriminators under `CHECK` constraints, with
   variant payload columns constrained present exactly when the discriminator
   requires them (for example `turn_lifecycle_state_payload_shape`). The
@@ -383,6 +453,22 @@ Representation rules, all enforced in the schema:
   `without_stop` and `after_cancellation`, and model-call state
   `prepared`/`in_flight`/`cancellation_requested`/`terminal` with terminal
   dispositions `completed`/`known_failed`/`refused`/`cancelled`/`ambiguous`.
+- Migration `202608210500` adds one current
+  `automatic_model_call_reconciliation` row per discovered model-call recovery
+  wait and typed attempt-history rows keyed by one-based ordinal. Current state
+  is `scheduled`, `attempting`, `reconciled`, `superseded`, or `exhausted`;
+  attempt outcome is `attempting`, `reconciled`, `superseded`,
+  `infrastructure_failure`, or `integrity_failure`. Checks close the
+  five-attempt budget, require a completion timestamp exactly for terminal
+  attempt outcomes, and require an exhaustion timestamp exactly for exhausted
+  current state. The same migration widens the reconciliation-required
+  final-state assertion only for an exact `reconciled` row binding that terminal
+  turn, session, and ambiguous model call; every frontier, attempt, call, and
+  outbox proof remains required.
+- Migration `202608210601` renames that ledger to `automatic_reconciliation` and
+  makes its operation identity exactly one of model call or tool attempt. Its
+  final-state authority matches both nullable operation columns exactly; tool
+  reconciliation retains the same five-attempt state and history algebra.
 - Migration `202608080100` closes runner placement history over
   `runner_lost_before_pin`, `pre_pin_replaced`, sourced `runner_lost`, and
   `abandoned` records. Each event retains the complete facts required by its
@@ -624,7 +710,10 @@ Representation rules, all enforced in the schema:
   `imported_session_seed` naming its exact seed frontier, and
   turn/attempt/semantic-entry writes re-assert the complete turn final state
   (origin entry, frontier prefix relationships, live-attempt cardinality,
-  failure-entry correlation). Every invalid-interrupt rejection additionally
+  failure-entry correlation). Tool-round construction and every correlated
+  evidence write queue that immutable round's own complete validator; later
+  turn-state checks validate the mutable lifecycle shape without rescanning
+  historical round frontiers. Every invalid-interrupt rejection additionally
   correlates the active phase its receipt claims: the stopping rejections
   through the prior applied interrupt's stopped attempt, and the parked-approval
   rejection directly against its named turn's recorded `awaiting_tool_approval`
@@ -821,37 +910,86 @@ Locks per transaction, in acquisition order:
   `turn_lifecycle` row `FOR UPDATE` at commit time, inside the deferred
   source-turn trigger.
 
-- **Goal commands and transitions**: an unseen user command first claims the
-  user-global registry, then every user, model, scheduler, and continuation
-  transaction locks the session row `FOR NO KEY UPDATE` before reading the event
-  stream. An applied user transition next locks `session_scheduler` `FOR UPDATE`
-  before recording its receipt or event, so stop and queued-turn activation
-  share one serialization point. Deferred provenance correlation first
-  reacquires the session-row lock before checking the current goal turn and, for
-  scheduler failure, holds the named lifecycle row `FOR SHARE` while checking
-  its unsuccessful terminal disposition. The continuity trigger reacquires the
-  session-row lock before validating the predecessor. Pursuing user transitions
-  then read current defaults and insert their queued goal turn; rejected
-  commands commit without firing the trigger, and exact user-command replay
-  takes no row lock.
+- **Goal commands and transitions**: a pursuit-starting command for a
+  pull-request-commissioned session first takes the transaction-scoped
+  pull-request target advisory lock and checks for a competing live session. An
+  unseen command then claims the user-global registry, and every user, model,
+  scheduler, and continuation transaction locks the session row
+  `FOR NO KEY UPDATE` before reading the event stream. An applied user
+  transition next locks `session_scheduler` `FOR UPDATE` before recording its
+  receipt or event, so stop and queued-turn activation share one serialization
+  point. Deferred provenance correlation first reacquires the session-row lock
+  before checking the current goal turn and, for scheduler failure, holds the
+  named lifecycle row `FOR SHARE` while checking its unsuccessful terminal
+  disposition. The continuity trigger reacquires the session-row lock before
+  validating the predecessor. Pursuing user transitions then read current
+  defaults and insert their queued goal turn; rejected commands commit without
+  firing the trigger, and exact user-command replay takes no row lock.
+
+- **Empty turn-instruction manifest recording**: the `session_scheduler` row
+  `FOR UPDATE` is the only explicit lock. An ordinary activation records after
+  activation and before model work, rechecking the exact active `turn_lifecycle`
+  row under that lock. A counted activation retains its complete scan in memory
+  after the fitting exact count. Its activation-and-first-call transaction then
+  takes the scheduler lock, revalidates the exact queued row, activates it,
+  records discovery, registrations, and the manifest, and checkpoints the exact
+  Prepared call atomically; a stale preview commits none of them. In either
+  path, discovery, registrations, and the empty manifest commit atomically for a
+  complete scan. An incomplete discovery may commit as diagnostic evidence but
+  binds no manifest, leaving the turn eligible for a new scan on retry. These
+  temporary boundaries are sound only while eligibility is the one immutable
+  empty value. The committed nonempty eligibility surface moves every manifest
+  into activation under this same scheduler lock, as
+  [the activation transaction](turn-lifecycle-and-scheduling.md#the-activation-transaction)
+  requires.
 
 - **StartEligibleTurn** and nonterminal **model-call execution transactions**
-  (prepare and authorize): the `session_scheduler` row `FOR UPDATE` is the only
-  explicit lock (session existence is checked with a bare `EXISTS`). The session
-  row is locked only `KEY SHARE`, implicitly, by the inserts' foreign keys, and
-  the candidate `turn_lifecycle` row is locked by the guarded `UPDATE` itself.
-  Terminal observation commit and reread, restart recovery, startup recovery,
-  and submit-input interruption first discover whether the target is a delegated
+  (prepare and authorize): first model-call insertion first takes the
+  transaction-scoped model-activity advisory lock keyed by session; inactivity
+  parking takes the pull-request target advisory lock and then that same
+  model-activity lock before rechecking activity. The `session_scheduler` row
+  `FOR UPDATE` remains the execution transaction's explicit row lock (session
+  existence is checked with a bare `EXISTS`). The session row is locked only
+  `KEY SHARE`, implicitly, by the inserts' foreign keys, and the candidate
+  `turn_lifecycle` row is locked by the guarded `UPDATE` itself. Terminal
+  observation commit and reread, restart recovery, startup recovery, and
+  submit-input interruption first discover whether the target is a delegated
   child. When it is, they lock the immutable parent/child session pair
   `FOR NO KEY UPDATE` in canonical session-ID order before taking the child
   scheduler lock. This is the shared prefix for any path that can record a child
-  result. **Committed unimplemented functionality.** No present migration or
-  repository operation stores pool state, capacity reservations, or availability
-  waits, so the credential-pool locks described in the rest of this bullet are
-  the protocol its implementing child must follow, not a guarantee this build
-  provides. This bullet is the whole of that protocol: which objects each
-  credential-pool transaction takes, in what order, and in which mode is stated
-  here and nowhere else.
+  result. **Committed unimplemented functionality — instruction admitted-set
+  head.** No present migration or repository operation stores an admitted set,
+  so the admitted-set locks stated here, in the tool-loop bullet below, and in
+  the `ReplaceSessionDefaults` bullet below are the protocol their implementing
+  child must follow. This inventory, not the contract pages that name the
+  transactions, is where their order and mode are fixed. The instruction
+  eligibility freeze that
+  [turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md#the-activation-transaction)
+  adds to `StartEligibleTurn`, and the session-eligibility replacement command,
+  take the session's admitted-set head immediately after the `session_scheduler`
+  row, before the `session_current_defaults` pointer row, and before any
+  credential-pool action-head, capacity-, or cursor-row lock. The mode follows
+  what the transaction does to the head, and neither of these writes it:
+  `FOR SHARE` for the activation freeze, which only snapshots the head and its
+  retained rendered rows into the turn-start manifest, and `FOR SHARE` for the
+  eligibility replacement, which reads the admitted identities to reject a
+  forbidden removal and then affects only later eligibility snapshots. An
+  eligibility replacement is neither an unload nor an admission transition, so
+  it must not advance the head: advancing it would mint an admitted-set hash
+  with no admission behind it and change the provenance later manifests
+  authenticate. `FOR UPDATE` on the head belongs to the admission that appends
+  an `InstructionAdmission`, and to nothing else in this build. The
+  repository-wide order is therefore scheduler row, then admitted-set head, then
+  the `session_current_defaults` pointer row, then the credential-pool objects
+  below; no path may take a scheduler lock while holding an admitted-set head,
+  or take an admitted-set head while holding a pointer row, an action-head, a
+  capacity row, or a cursor row. **Committed unimplemented functionality.** No
+  present migration or repository operation stores pool state, capacity
+  reservations, or availability waits, so the credential-pool locks described in
+  the rest of this bullet are the protocol its implementing child must follow,
+  not a guarantee this build provides. This bullet is the whole of that
+  protocol: which objects each credential-pool transaction takes, in what order,
+  and in which mode is stated here and nowhere else.
   [The credential-availability machine](credential-availability.md#the-credential-availability-machine)
   names the transaction that commits each selection ending, which is how a
   reader arrives at the right sentence below; it states no locks of its own and
@@ -895,19 +1033,84 @@ Locks per transaction, in acquisition order:
   capacity-row or cursor-row lock; or take a capacity-row lock while holding a
   cursor-row lock.
 
+- **Automatic operation reconciliation**: discovery locks the singleton
+  discovery-cursor row `FOR UPDATE` and retains it through discovery,
+  abandoned-attempt normalization, supersession maintenance, and claiming.
+  Discovery may insert recovery rows after that cursor lock. Each discovery lap
+  fixes its highest eligible turn identity before paging, then wraps after
+  reaching that bound, so a turn that becomes eligible behind the cursor is
+  reached on the next lap. Runtime-terminal delegated turns are excluded and
+  superseded. Abandoned-attempt settlement examines and updates one bounded due
+  recovery/attempt pair from one materialized page. Supersession maintenance
+  later locks its own singleton cursor row `FOR UPDATE`, then examines and
+  updates at most 64 recovery rows from one materialized keyset page. Each
+  supersession lap likewise fixes its highest pending recovery identity before
+  paging and wraps after reaching that bound. The bound carries weight here that
+  it does not for discovery: a recovery becomes superseded by a `turn_lifecycle`
+  change rather than by anything this statement writes, so a row the cursor has
+  already passed can acquire that disposition afterwards and must be reinspected
+  — and a lap whose pages a steady arrival rate keeps full would never wrap to
+  reach it. A recovery below the lap's bound is paged on the state it holds when
+  that page is read, so a disposition acquired mid-lap is still seen. Exhaustion
+  parks at most 64 `scheduled` recoveries that spent the whole attempt budget
+  and whose turn still holds the exact matching recovery wait; a recovery whose
+  turn no longer holds that wait is left for supersession rather than parked,
+  because an exhaustion park raises an operator alert that cannot be retracted.
+  Rows over the window are reached by the next scan, since every row this
+  statement selects is also written. `attempting` recoveries are never exhausted
+  directly: settlement returns them to `scheduled` first, which is what closes
+  their attempt-history row. Claiming finally locks one due recovery row
+  `FOR UPDATE SKIP LOCKED`, increments its durable attempt ordinal, sets the
+  exact backoff deadline, and inserts the attempt rows in the same transaction.
+  The attempt budget and the retry ladder claiming applies are bound from the
+  deployment's configured policy, not written into the statement. No
+  reconciliation path may acquire either cursor row while holding a recovery-row
+  lock in the reverse of this order. Applying a claim first performs the
+  immutable delegated-parent lookup. When the claimed session is a delegated
+  child, it locks the parent/child endpoint session rows `FOR NO KEY UPDATE` in
+  ascending session-identity order; it then takes the child's
+  `session_scheduler` row `FOR UPDATE`, reconstitutes the complete scheduling
+  projection, and uses the existing reconciliation-required write transaction. A
+  nondelegated claim takes only the scheduler lock. Every daemon-owned claim,
+  application, and failure-record transaction installs PostgreSQL's local
+  `lock_timeout` before it reads or writes anything, so the only statement that
+  budget can interrupt is one waiting for a row and never the commit; opening
+  the transaction and installing that budget run beyond client cancellation, and
+  the caller's configured deadline sits above both as the last resort, floored
+  so it cannot expire before the database-side budgets report. Operator
+  reconciliation uses the same endpoint-before-scheduler prefix, so automatic
+  reconciliation never introduces the reverse child-scheduler-to-parent-session
+  order.
+
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
   projection plus continuation preparation, and their authoritative rereads):
-  the `session_scheduler` row `FOR UPDATE` is the first and only Rust-issued
-  explicit lock. An unseen decision command first claims the user-global
-  registry; after resolving the request's owning session it takes that scheduler
-  lock before reading or mutating the active tool batch. A replay resolves
-  entirely from the command registry and receipt and takes no lifecycle lock.
-  Guarded `turn_lifecycle`, `turn_attempt`, `tool_attempt`, and model-call
-  updates then serialize under the scheduler lock; their foreign keys may take
-  implicit `KEY SHARE` locks on parent rows. At decision commit, the deferred
-  authority trigger takes the `tool_request` row `FOR UPDATE` after the
-  scheduler lock and before checking that no nonterminal judge remains.
+  the `session_scheduler` row `FOR UPDATE` is the first and, for every presently
+  implemented path, the only Rust-issued explicit lock. An unseen decision
+  command first claims the user-global registry; after resolving the request's
+  owning session it takes that scheduler lock before reading or mutating the
+  active tool batch. A replay resolves entirely from the command registry and
+  receipt and takes no lifecycle lock. Guarded `turn_lifecycle`, `turn_attempt`,
+  `tool_attempt`, and model-call updates then serialize under the scheduler
+  lock; their foreign keys may take implicit `KEY SHARE` locks on parent rows.
+  At decision commit, the deferred authority trigger takes the `tool_request`
+  row `FOR UPDATE` after the scheduler lock and before checking that no
+  nonterminal judge remains. **Committed unimplemented functionality —
+  instruction admission effect.** The instruction-admission effect that
+  [tool loop](tool-loop.md#serialized-staged-execution) adds to the
+  result-commit transaction takes the session's admitted-set head `FOR UPDATE`,
+  because that transaction appends an `InstructionAdmission`. It takes it at the
+  position fixed in the `StartEligibleTurn` bullet above: immediately after the
+  `session_scheduler` row and before any credential-pool object. That same
+  transaction then takes the `session_current_defaults` pointer row `FOR SHARE`,
+  at the pointer row's own position after the head, because admission validates
+  the retained region against the currently installed defaults epoch and not
+  only against the turn's pin; `FOR SHARE` excludes the `FOR UPDATE` a
+  replacement takes, so an admission and a replacement cannot interleave between
+  that check and either commit. The result-commit transaction is therefore the
+  only tool-loop transaction that takes explicit locks beyond the scheduler row;
+  no other tool-loop transaction in this bullet takes the head or the pointer
+  row, and none of them may take the scheduler row while already holding either.
 
 - **Approval-judge transactions** (prepare, authorize, complete, and fail):
   preparation, authorization, and failure take the `session_scheduler` row
@@ -997,7 +1200,21 @@ Locks per transaction, in acquisition order:
   the same lock: a current expected version rolls back the command claim and
   applies nothing, while a mismatch records the typed rejection. The
   `session_defaults_version` insert takes `FOR KEY SHARE` on the session row
-  through the non-deferrable session foreign key.
+  through the non-deferrable session foreign key. **Committed unimplemented
+  functionality — instruction-aware replacement.** The retained-region check
+  that
+  [sessions-and-transcript](sessions-and-transcript.md#session-defaults-and-replacement)
+  adds to this command needs two further locks, and they precede the pointer row
+  rather than following it, because the established order everywhere else is
+  scheduler row before `session_current_defaults` pointer row. The complete
+  sequence is the `session_scheduler` row `FOR UPDATE`, then the session's
+  admitted-set head `FOR SHARE` — the replacement only reads the retained
+  region, and `FOR SHARE` already excludes the `FOR UPDATE` an admission takes —
+  then the `session_current_defaults` pointer row `FOR UPDATE` as above. All
+  three are held until the successor epoch commits, so an admission or an
+  activation falls wholly before or after the replacement and cannot invalidate
+  the evidence it checked. This is the same head-lock position the
+  `StartEligibleTurn` bullet fixes: immediately after the scheduler row.
 
 - **ReplaceSessionMetadata**: the target session row is locked
   `FOR NO KEY UPDATE` before the complete satellite snapshot is replaced. This
@@ -1274,6 +1491,19 @@ equal-content frontier and typed outbox record. The reconciliation marker and
 accepted successor carry the exact interrupt proof. The attempt trigger rejects
 every update to an ended attempt.
 
+The periodic daemon also discovers an unstopped model-call or tool-attempt wait
+without an interrupt into the automatic reconciliation tables. A claimed attempt
+records its ordinal before the terminal transaction. Under the scheduler lock,
+the adapter reconstitutes the exact ambiguous operation and ended turn attempt,
+derives fresh frontier and pending-steering reclassification identities, and
+persists the existing model-call or proposal-ordered tool
+`reconciliation_required` lifecycle and outbox shapes. The `reconciled` recovery
+row is the typed authority admitted by the deferred final-state assertion when
+no applied interrupt exists. It asserts nothing about the physical outcome; the
+model call or tool attempt remains `ambiguous`. A lost daemon leaves
+`attempting` durable, which a later claim pass classifies as
+`infrastructure_failure` after its deadline before retrying.
+
 ## Corruption taxonomy
 
 Each adapter has a purpose-specific corruption enum with a shared vocabulary:
@@ -1449,7 +1679,16 @@ unchanged proposal-order and single-result checks admit it as the
 `await_session` result without admitting a second result for the same request.
 Tool-batch outbox decoding and context-compaction evidence count that foreground
 correlation as one tool result; a background result has no tool-result
-correlation and counts as neither one.
+correlation and counts as neither one. Each immutable compaction validates its
+summary's tool balance exactly when it commits. A root compaction replays
+summary structure so imported and independently rooted frontiers retain their
+exact model-visible order. A successor trusts its immutable predecessor's
+validated boundary, excludes the consumed local summary chain, and validates
+only the retained/current suffix through typed source-session and entry keys. A
+later turn first isolates the one immutable compaction leaf, rejects it from
+frontier header counts when it is shorter than the turn's terminal predecessor,
+and performs recursive prefix validation only for that one remaining candidate;
+historical compaction results are never expanded by a turn-start commit.
 
 An accepted background wait reserves one future recipient delivery position
 until its child result exists. Message and later-wait admission under the same

@@ -402,6 +402,15 @@ impl RepoWatchWebhookProjection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchWebhookDisposition {
     Projected,
+    /// This delivery took ownership of a primary-mode cursor commit.
+    ///
+    /// Recorded before the cursor write the two-step handoff performs, so it
+    /// names no resulting generation — the generation a delivery reached is
+    /// carried by `repo_watch_event.cursor_generation` on the rows it wrote.
+    /// It is the repository's durable evidence of primary intake even when the
+    /// applied observation derived no event at all, which is why the parity
+    /// view reads it rather than the first webhook-produced row.
+    Committed,
     DuplicateState,
     Superseded,
     Ignored,
@@ -617,17 +626,16 @@ impl PostgresRepoWatchWebhookStore {
                     delivery.receipt_sequence,
                     delivery.received_at,
                     octet_length(payload.body)::bigint AS body_bytes
-               FROM repo_watch_webhook_delivery AS delivery
+               FROM repo_watch_webhook_pending AS pending
+               JOIN repo_watch_webhook_delivery AS delivery
+                 ON delivery.hook_id = pending.hook_id
+                AND delivery.delivery_id = pending.delivery_id
                JOIN repo_watch_webhook_payload AS payload
                  ON payload.hook_id = delivery.hook_id
                 AND payload.delivery_id = delivery.delivery_id
-               LEFT JOIN repo_watch_webhook_disposition AS disposition
-                 ON disposition.hook_id = delivery.hook_id
-                AND disposition.delivery_id = delivery.delivery_id
-              WHERE delivery.repository = $1
-                AND disposition.delivery_id IS NULL
-                AND ($3::bigint IS NULL OR delivery.receipt_sequence > $3)
-              ORDER BY delivery.receipt_sequence
+              WHERE pending.repository = $1
+                AND ($3::bigint IS NULL OR pending.receipt_sequence > $3)
+              ORDER BY pending.receipt_sequence
               LIMIT $2",
         )
         .bind(repository.as_str())
@@ -677,14 +685,14 @@ impl PostgresRepoWatchWebhookStore {
         Ok(deliveries)
     }
 
-    /// The oldest undispositioned delivery's identity and receipt, without its
-    /// payload.
+    /// The oldest pending delivery's identity and receipt, without its payload.
     ///
     /// The drain monitor runs on a fixed cadence for every webhook repository
     /// and reports only identity and pending age, so it must not transfer the
-    /// admitted bodies a pending page carries. This query therefore never joins
-    /// `repo_watch_webhook_payload`, and it answers for a delivery whose body
-    /// has already been purged.
+    /// admitted bodies a pending page carries or re-scan append-only disposition
+    /// history. This query therefore reads the transactional pending inventory,
+    /// never joins `repo_watch_webhook_payload`, and answers for a delivery whose
+    /// body has already been purged.
     pub async fn load_oldest_pending_receipt(
         &self,
         repository: &RepositorySlug,
@@ -695,13 +703,12 @@ impl PostgresRepoWatchWebhookStore {
                     delivery.receipt_sequence,
                     delivery.received_at,
                     transaction_timestamp() AS observed_at
-               FROM repo_watch_webhook_delivery AS delivery
-               LEFT JOIN repo_watch_webhook_disposition AS disposition
-                 ON disposition.hook_id = delivery.hook_id
-                AND disposition.delivery_id = delivery.delivery_id
-              WHERE delivery.repository = $1
-                AND disposition.delivery_id IS NULL
-              ORDER BY delivery.receipt_sequence
+               FROM repo_watch_webhook_pending AS pending
+               JOIN repo_watch_webhook_delivery AS delivery
+                 ON delivery.hook_id = pending.hook_id
+                AND delivery.delivery_id = pending.delivery_id
+              WHERE pending.repository = $1
+              ORDER BY pending.receipt_sequence
               LIMIT 1",
         )
         .bind(repository.as_str())
@@ -861,6 +868,29 @@ impl PostgresRepoWatchWebhookStore {
         )
         .fetch_one(&self.pool)
         .await?)
+    }
+
+    /// How many event projections one delivery recorded.
+    ///
+    /// Primary mode records none, because its own commit is the durable row a
+    /// parity projection would otherwise stand in for. A test asserting that
+    /// reads the count through this repository rather than naming the table.
+    #[cfg(feature = "test-support")]
+    pub async fn recorded_event_projection_count(
+        &self,
+        key: RepoWatchWebhookDeliveryKey,
+    ) -> Result<u64, RepoWatchWebhookStoreError> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+               FROM repo_watch_webhook_projection
+              WHERE hook_id = $1 AND delivery_id = $2 AND projection_kind = 'event'",
+        )
+        .bind(Decimal::from(key.hook_id.get()))
+        .bind(key.delivery_id)
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(count)
+            .map_err(|_| RepoWatchWebhookStorageCorruption::InvalidReceiptSequence.into())
     }
 
     pub async fn record_terminal(

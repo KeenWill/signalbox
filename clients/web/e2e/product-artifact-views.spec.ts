@@ -1,26 +1,6 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { useDeterministicImportApi } from './import-api-fixture'
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '2' },
-  capabilities: {
-    blob_derivations: true,
-    bounded_json: true,
-    bounded_session_timeline: true,
-    image_derivatives: true,
-    immutable_blob_content: true,
-    import_discovery: true,
-    imported_continuations: true,
-    ndjson_streaming: true,
-    same_origin_json_mutations: true,
-  },
-  limits: {
-    max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 65_536,
-    max_timeline_window_bytes: 65_536,
-    max_timeline_window_items: 256,
-  },
-} as const
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }

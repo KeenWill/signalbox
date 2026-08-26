@@ -35,17 +35,27 @@ use tokio::{
     time::Instant,
 };
 
-use crate::{BlobStorageClass, BlobStoreRegistry};
+use crate::{
+    BlobStorageClass, BlobStoreRegistry,
+    blob_read_runtime::{BlobReadError, open_recorded_blob_verified},
+};
 
 const WORKER_ARGUMENT: &str = "--web-image-derivative-worker-v1";
 const THUMBNAIL_EDGE_PX: u32 = 256;
 const PREVIEW_EDGE_PX: u32 = 1600;
+// numeric-bound: guard - prevents one declared image dimension from driving an unbounded decoder allocation
 const MAX_IMAGE_AXIS: u32 = 16_384;
+// numeric-bound: guard - prevents a decompression-bomb pixel count from exhausting worker memory
 const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
+// numeric-bound: guard - prevents image decoding from exhausting worker memory
 const MAX_DECODER_ALLOCATION_BYTES: u64 = 320 * 1024 * 1024;
+// numeric-bound: guard - prevents an encoded derivative from exhausting process memory when it is read back
 const MAX_DERIVATIVE_BYTES: u64 = 16 * 1024 * 1024;
+// numeric-bound: guard - prevents an oversized source blob from being copied into the worker's input
 const MAX_IMAGE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
+// numeric-bound: guard - prevents concurrent derivations from exhausting host memory and processes
 const MAX_ACTIVE_IMAGE_DERIVATIONS: usize = 2;
+// numeric-bound: guard - prevents a wedged derivative worker from holding its derivation slot forever
 const WORKER_TIMEOUT_SECONDS: u64 = 120;
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
@@ -228,6 +238,31 @@ impl DeterministicBlobProducer for ImageProducer {
         publish_output(&self.catalog, &self.registry, output, expected).await?;
         Ok(Box::new([expected.digest()]))
     }
+
+    async fn outputs_retrievable(&mut self, outputs: &[BlobDigest]) -> Result<bool, Self::Error> {
+        for &output in outputs {
+            let Some(entry) = self
+                .catalog
+                .find(output)
+                .await
+                .map_err(|_| WebBlobRuntimeError::Unavailable)?
+            else {
+                return Ok(false);
+            };
+            match open_recorded_blob_verified(&self.registry, &entry).await {
+                Ok(_) => {}
+                Err(BlobReadError::Unavailable) => return Err(WebBlobRuntimeError::Unavailable),
+                Err(
+                    BlobReadError::Missing
+                    | BlobReadError::Corrupt
+                    | BlobReadError::Integrity
+                    | BlobReadError::NotFound
+                    | BlobReadError::RangeOutOfBounds { .. },
+                ) => return Ok(false),
+            }
+        }
+        Ok(true)
+    }
 }
 
 fn transformation_edge(transformation: &BlobTransformation) -> Result<u32, WebBlobRuntimeError> {
@@ -370,9 +405,15 @@ async fn run_isolated_worker(
 async fn expected_output(
     path: &Path,
 ) -> Result<(ExpectedBlob, tokio::fs::File), WebBlobRuntimeError> {
+    // NONBLOCK keeps the open itself from waiting on a writer when the worker leaves a FIFO or
+    // other special file at the output path; the regular-file check below then rejects it. Linux
+    // ignores the flag for the regular files this path admits.
     let descriptor = rustix::fs::open(
         path,
-        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NOFOLLOW,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::CLOEXEC
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::NONBLOCK,
         rustix::fs::Mode::empty(),
     )
     .map_err(|_| WebBlobRuntimeError::ProducerFailed)?;
@@ -412,6 +453,9 @@ async fn publish_output(
     file: tokio::fs::File,
     expected: ExpectedBlob,
 ) -> Result<(), WebBlobRuntimeError> {
+    if expected.byte_length() > registry.max_blob_bytes() {
+        return Err(WebBlobRuntimeError::ProducerFailed);
+    }
     let (store_name, store) = registry.routed_store(BlobStorageClass::GeneratedArtifact);
     let publication = store
         .put(expected, Box::new(file))
@@ -567,7 +611,7 @@ mod tests {
     use tokio::io::{AsyncRead, ReadBuf};
 
     use super::{
-        CandidateCopyError, MAX_DERIVATIVE_BYTES, copy_input_candidate, expected_output,
+        CandidateCopyError, Duration, MAX_DERIVATIVE_BYTES, copy_input_candidate, expected_output,
         validate_encoded_dimensions, worker_transform,
     };
 
@@ -644,6 +688,27 @@ mod tests {
         symlink(&target, &output).expect("fixture output symlink exists");
 
         assert!(expected_output(&output).await.is_err());
+    }
+
+    /// Pinning the worker output must not wait on a writer for a named pipe.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn derivative_output_fifos_are_rejected_without_waiting_for_a_writer() {
+        let workspace = tempfile::tempdir().expect("fixture workspace exists");
+        let output = workspace.path().join("output.png");
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &output,
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+            0,
+        )
+        .expect("fixture output FIFO exists");
+
+        let result = tokio::time::timeout(Duration::from_secs(10), expected_output(&output))
+            .await
+            .expect("the pinned open completes without a FIFO writer");
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]

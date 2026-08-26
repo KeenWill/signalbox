@@ -45,6 +45,7 @@ mod turn_eligibility;
 mod turn_lifecycle;
 mod user_content;
 mod workspace;
+mod workspace_instruction;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
@@ -116,11 +117,13 @@ pub use imported_session::{
     CreateSessionFromImportedFrontierPreparationFailure,
     CreateSessionFromImportedFrontierReconstitutionError,
     CreateSessionFromImportedFrontierReconstitutionFailure,
-    CreateSessionFromImportedFrontierReconstitutionInput, ImportedSessionReconstitutionError,
-    ImportedSessionReconstitutionFailure, ImportedSessionReconstitutionInput,
-    ImportedSessionSeedHeaderReconstitutionInput, ImportedSessionSeedReconstitutionFailure,
-    ImportedSessionSeedReconstitutionInput, PreparedCreateSessionFromImportedFrontier,
-    ReconstitutedImportedSession, ReconstitutedSessionCreationFromImportedFrontier,
+    CreateSessionFromImportedFrontierReconstitutionInput,
+    ImportedSessionNormalizedReconstitutionError, ImportedSessionNormalizedReconstitutionInput,
+    ImportedSessionReconstitutionError, ImportedSessionReconstitutionFailure,
+    ImportedSessionReconstitutionInput, ImportedSessionSeedHeaderReconstitutionInput,
+    ImportedSessionSeedReconstitutionFailure, ImportedSessionSeedReconstitutionInput,
+    PreparedCreateSessionFromImportedFrontier, ReconstitutedImportedSession,
+    ReconstitutedSessionCreationFromImportedFrontier,
 };
 pub use model_call::{
     CurrentModelCall, CurrentModelCallState, EndedModelCall, ModelCallDisposition,
@@ -132,10 +135,10 @@ pub use model_execution::{
     AmbiguousModelCallTurn, AmbiguousModelCallTurnIdentities, AuthorizedModelCall,
     AvailabilitySuccessorModelCallTurn, CancelledModelCallTurn, CancelledModelCallTurnIdentities,
     CancelledToolRoundModelCallTurn, CompletedModelCallIdentities, CompletedModelCallTurn,
-    CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
-    FailedModelCallTurn, FailedModelCallTurnIdentities, IssuedModelCallCorrelation,
-    ModelCallAuthorizationError, ModelCallAuthorizationFailure, ModelCallClosureError,
-    ModelCallExecution, ModelCallExecutionReconstitutionError,
+    ContextHeadroomExhaustedModelCallTurn, CorrelatedModelCallTerminalObservation,
+    CredentialPoolExhaustedModelCallTurn, FailedModelCallTurn, FailedModelCallTurnIdentities,
+    IssuedModelCallCorrelation, ModelCallAuthorizationError, ModelCallAuthorizationFailure,
+    ModelCallClosureError, ModelCallExecution, ModelCallExecutionReconstitutionError,
     ModelCallExecutionReconstitutionFailure, ModelCallExecutionReconstitutionInput,
     ModelCallInterruptOutcome, ModelCallOriginContent, ModelCallPreparationError,
     ModelCallPreparationFailure, ModelCallResumeFailure, ModelCallTerminalIdentities,
@@ -302,7 +305,9 @@ pub use submit_input::{
     GoalTurnOriginConstructionInput, NonAcceptedTurnPredecessorReconstitutionInput,
     PreparedSubmitInput, ReconstitutedSubmitInput, SubmitInput,
     SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
-    SubmitInputAppliedTurnOriginReconstitutionInput, SubmitInputDirectTurnOriginConstructionInput,
+    SubmitInputAppliedTurnOriginReconstitutionInput,
+    SubmitInputAutomaticReconciliationConstructionInput,
+    SubmitInputDirectTurnOriginConstructionInput,
     SubmitInputInterruptedModelCallReconciliationConstructionInput,
     SubmitInputInterruptedToolReconciliationConstructionInput,
     SubmitInputPendingSteeringAppliedResult, SubmitInputPreparationError,
@@ -312,6 +317,8 @@ pub use submit_input::{
     SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput,
     SubmitInputRejectedActiveTurnMismatchReconstitutionInput,
     SubmitInputRejectedActiveTurnPresentReconstitutionInput,
+    SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput,
+    SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
     SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput,
     SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
     SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
@@ -377,9 +384,10 @@ pub use turn_eligibility::{
     AcceptedInputTurnSchedulingProjection, AcceptedInputTurnSchedulingRecord,
     AcceptedInputTurnSchedulingRecordState, AcceptedInputTurnSchedulingStatus,
     ActivatedAcceptedInputTurn, ActivatedDelegatedTurn, ActivatedTurn,
-    ActiveTurnSchedulingReconstitutionInput, CancelledTurnExecutionReconstitutionInput,
-    ConsumedSteeringInput, ConsumedSteeringReconstitutionInput,
-    ContinuationRoundReconstitutionInput, DelegatedTurnActivationInput,
+    ActiveTurnSchedulingReconstitutionInput, AutomaticReconciliationAuthority,
+    CancelledTurnExecutionReconstitutionInput, ConsumedSteeringInput,
+    ConsumedSteeringReconstitutionInput, ContinuationRoundReconstitutionInput,
+    DelegatedModelCallRecoveryReconstitutionInput, DelegatedTurnActivationInput,
     DelegatedTurnSchedulingFact, DelegatedTurnSchedulingState, DelegatedWakeTurnActivationInput,
     FailedAcceptedInputTurn, FailedTurnExecutionReconstitutionInput, PendingSteeringInput,
     PreparedAcceptedInputTurnActivation, PreparedAcceptedInputTurnFailure,
@@ -393,9 +401,20 @@ pub use turn_lifecycle::{
     NonEmptyIssuedOperationRefsError, ReconciliationMarker, ReconciliationReason, TurnDisposition,
 };
 pub use user_content::{
-    NonEmptyUnicodeText, NonEmptyUnicodeTextError, NonEmptyUnicodeTextFailure, UserContent,
+    AttachmentBlobFact, AttachmentDisplayFilename, AttachmentDisplayFilenameError,
+    AttachmentDisplayFilenameFailure, AttachmentKind, DeclaredMediaType, DeclaredMediaTypeError,
+    DeclaredMediaTypeFailure, NonEmptyUnicodeText, NonEmptyUnicodeTextError,
+    NonEmptyUnicodeTextFailure, UserContent, UserContentError, UserContentFailure, UserContentPart,
 };
 pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
+pub use workspace_instruction::{
+    EmptyTurnInstructionManifestEvidence, InstructionBundleId, InstructionBundleKind,
+    InstructionBundleRegistration, InstructionBundleRegistrationInput, InstructionDigest,
+    InstructionDiscoveryId, InstructionDiscoveryRootKind, InstructionPath, InstructionPathError,
+    InstructionSkillMetadata, InstructionSkillMetadataError, InstructionSkillMetadataInput,
+    InstructionSourcePath, InstructionSourcePathInterner, InstructionSourcePathPrefix,
+    TurnInstructionManifest, TurnInstructionManifestId,
+};
 
 macro_rules! define_identity {
     ($(#[$documentation:meta])* $name:ident) => {

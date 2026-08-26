@@ -97,6 +97,38 @@ export const fetchVerifiedSingleFrameJpeg = async (
   return new Blob([bytes], { type: view.media_type })
 }
 
+// One derivation record has to carry both proofs at once. The generated decoder checks them
+// separately — the exact deterministic transformation for the advertised view kind against
+// `derivations[0]`, the descriptor-input-to-content-output digest correlation against *any*
+// derivation of the view — so a schema-valid descriptor can satisfy each with a different record.
+// Admitting that union would let an arbitrary transformation's output render as the view and be
+// reported as its proven provenance, so callers admit only a record proving the whole pair.
+export const provesViewDerivation = (
+  descriptor: WebBlobDescriptor,
+  view: BlobView,
+  derivation: BlobView['derivations'][number],
+): boolean => {
+  if (view.kind !== 'preview' && view.kind !== 'thumbnail') return false
+  const expected = expectedTransformation(view.kind)
+  const outputDigest = viewOutputDigest(view)
+  return (
+    BOUNDED_IMAGE_TRANSFORMATIONS.has(derivation.transformation_name) &&
+    derivation.transformation_name === expected.name &&
+    derivation.transformation_version === 1 &&
+    derivation.parameters_json === expected.parameters &&
+    derivation.producer.class === 'deterministic' &&
+    derivation.input_digests.includes(descriptor.digest) &&
+    outputDigest !== undefined &&
+    derivation.output_digests.includes(outputDigest)
+  )
+}
+
+export const selectProvenViewDerivation = (
+  descriptor: WebBlobDescriptor,
+  view: BlobView,
+): BlobView['derivations'][number] | undefined =>
+  view.derivations.find((derivation) => provesViewDerivation(descriptor, view, derivation))
+
 export const selectBoundedOriginalView = (descriptor: WebBlobDescriptor): BlobView | undefined => {
   const original = descriptor.available_views.find((view) => view.kind === 'browser_native')
   if (
@@ -107,24 +139,9 @@ export const selectBoundedOriginalView = (descriptor: WebBlobDescriptor): BlobVi
     return undefined
   }
 
-  const boundedDecodeProven = descriptor.available_views
-    .filter((view) => view.kind === 'preview' || view.kind === 'thumbnail')
-    .some((view) => {
-      const derivation = view.derivations[0]
-      const expected = expectedTransformation(view.kind as 'preview' | 'thumbnail')
-      const outputDigest = viewOutputDigest(view)
-      return (
-        derivation !== undefined &&
-        BOUNDED_IMAGE_TRANSFORMATIONS.has(derivation.transformation_name) &&
-        derivation.transformation_name === expected.name &&
-        derivation.transformation_version === 1 &&
-        derivation.parameters_json === expected.parameters &&
-        derivation.producer.class === 'deterministic' &&
-        derivation.input_digests.includes(descriptor.digest) &&
-        outputDigest !== undefined &&
-        derivation.output_digests.includes(outputDigest)
-      )
-    })
+  const boundedDecodeProven = descriptor.available_views.some(
+    (view) => selectProvenViewDerivation(descriptor, view) !== undefined,
+  )
 
   return boundedDecodeProven ? original : undefined
 }

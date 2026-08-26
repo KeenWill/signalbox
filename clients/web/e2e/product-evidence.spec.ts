@@ -1,4 +1,7 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+// The shared fixture is the single copy kept aligned with WebContractBootstrap::current();
+// readBootstrap now rejects any bootstrap whose limits contradict it.
+import { webContractBootstrapFixture } from '../src/product.fixture'
 import { useDeterministicImportApi } from './import-api-fixture'
 
 interface RouteEvidence {
@@ -6,27 +9,6 @@ interface RouteEvidence {
   title: string
   snapshot: string
 }
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '2' },
-  capabilities: {
-    bounded_json: true,
-    bounded_session_timeline: true,
-    blob_derivations: true,
-    image_derivatives: true,
-    immutable_blob_content: true,
-    import_discovery: true,
-    imported_continuations: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: {
-    max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 65_536,
-    max_timeline_window_items: 256,
-    max_timeline_window_bytes: 65_536,
-  },
-} as const
 
 const sessionEvidenceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
@@ -50,8 +32,24 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
   )
 }
 
-const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+const emptyAttentionFixture = {
+  continuation_after_session_id: null,
+  cursor: '0',
+  summaries: [],
+} as const
+
+const useDeterministicBootstrap = async (page: Page) => {
+  await page.route('**/api/bootstrap', (route) =>
+    route.fulfill({ json: webContractBootstrapFixture }),
+  )
+  await page.route('**/api/attention/follow', (route) =>
+    route.fulfill({
+      body: `${JSON.stringify({ kind: 'snapshot', snapshot: emptyAttentionFixture })}\n`,
+      contentType: 'application/x-ndjson',
+    }),
+  )
+  await page.route('**/api/attention', (route) => route.fulfill({ json: emptyAttentionFixture }))
+}
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -99,7 +97,7 @@ const useDeterministicSession = (page: Page) =>
         sizes: {
           item_count: sessionEvidenceFixture.itemCount,
           projected_text_bytes: '48000000',
-          projected_structured_bytes: '96000000',
+          projected_structured_bytes: '78000000',
           referenced_blob_count: '24000',
           referenced_blob_bytes: '96000000000',
         },
@@ -114,6 +112,7 @@ const useDeterministicSession = (page: Page) =>
 const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
+  // Only the Imports route reads this adapter; every other route ignores it.
   await useDeterministicImportApi(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(evidence.path)
@@ -129,9 +128,6 @@ const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
 
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('button', { name: 'Open navigation' })).toBeVisible()
-  await page.locator('.product-main').evaluate((element) => {
-    element.scrollTop = 0
-  })
   await expect(page).toHaveScreenshot(`${evidence.snapshot}-mobile-light.png`, {
     animations: 'disabled',
   })

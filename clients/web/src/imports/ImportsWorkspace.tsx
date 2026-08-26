@@ -1,7 +1,8 @@
 import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate } from '@tanstack/react-router'
 import { Menu } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   type CommandContext,
   importHotkeyBindings,
@@ -10,33 +11,29 @@ import {
   surfaceHotkeyBindings,
   surfaceHotkeySequenceBindings,
 } from '../commands'
-import {
-  decodeWebImportContinuationRequest,
-  type WebImportContinuationReference,
-  type WebImportContinuationRequest,
-  type WebImportEntryWindowRequest,
-  type WebImportedSessionRelationship,
-  type WebImportFormat,
+import type {
+  WebImportContinuationReference,
+  WebImportContinuationRequest,
+  WebImportEntryWindowRequest,
+  WebImportedSessionRelationship,
+  WebImportFormat,
 } from '../generated/web-contract.mjs'
 import { ScenarioNavigation } from '../ScenarioNavigation'
 import { type DiagnosticSnapshot, IconCommand, OverlaySurfaces } from '../Surfaces'
-import { store } from '../state'
-import {
-  correlateEntryWindowWithDescriptor,
-  type ImportApi,
-  ImportApiError,
-  ImportReceiptCorrelationError,
-} from './api'
+import { selectApp, store, useAppSelector } from '../state'
+import { type ImportApi, ImportApiError, ImportReceiptCorrelationError } from './api'
 import { ImportedArtifactView } from './ImportedArtifactView'
 import { ImportedEntries } from './ImportedEntries'
 import { ImportsTable } from './ImportsTable'
+import { loadRetainedCommand, storeRetainedCommand } from './retainedCommand'
 import { SCENARIO_IMPORT_TOTAL } from './scenario'
 
 const IMPORT_PAGE_ITEMS = 100
 const IMPORT_WINDOW_RADIUS = 50
 const EMPTY_FILTER = ''
 const SCENARIO_MODEL_SELECTION = '00000000-0000-7000-8000-000000000777'
-const CANONICAL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const NIL_UUID = '00000000-0000-0000-0000-000000000000'
 
 type FormatFilter = WebImportFormat | typeof EMPTY_FILTER
 type ModelKind = 'direct' | 'alias'
@@ -48,102 +45,48 @@ const formatOptions: ReadonlyArray<{ value: FormatFilter; label: string }> = [
   { value: 'codex_rollout_jsonl_v1', label: 'Codex rollout · converter 1' },
 ]
 
-// continuation_corrupt is retained and ambiguous: the daemon can raise it while loading a
-// command that did commit, so it never proves the absence of a durable commit.
+const DEFINITIVE_CONTINUATION_ERRORS = new Set([
+  'conflicting_command_reuse',
+  'import_frontier_not_found',
+  'import_not_found',
+  'invalid_import_request',
+  'model_not_configured',
+])
+
 const isRetryableContinuationError = (error: unknown): boolean =>
   error instanceof ImportReceiptCorrelationError ||
   !(error instanceof ImportApiError) ||
-  ['continuation_commit_ambiguous', 'continuation_unavailable', 'continuation_corrupt'].includes(
-    error.detail.error.code,
-  )
+  !DEFINITIVE_CONTINUATION_ERRORS.has(error.detail.error.code)
 
-const isAmbiguousContinuationError = (error: unknown): boolean =>
-  error instanceof ImportReceiptCorrelationError ||
-  !(error instanceof ImportApiError) ||
-  ['continuation_commit_ambiguous', 'continuation_corrupt'].includes(error.detail.error.code)
-
-// The exact command must outlive this tab: once its POST leaves the browser, the daemon may
-// have committed it, so the only safe replacement source after a reload is a durable copy of
-// the same payload retained until a correlated outcome is decoded. Each command owns its own
-// slot keyed by its durable identity, so concurrent tabs in the same scope can neither
-// overwrite each other's unresolved command nor delete it when their own command settles.
-const retainedCommandStoragePrefix = (scope: string): string =>
-  `signalbox.imports.retained-continuation.${scope}.`
-
-const retainedCommandStorageKey = (scope: string, commandId: string): string =>
-  `${retainedCommandStoragePrefix(scope)}${commandId}`
-
-const readRetainedCommand = (scope: string): WebImportContinuationRequest | null => {
-  try {
-    const prefix = retainedCommandStoragePrefix(scope)
-    const keys: string[] = []
-    for (let index = 0; index < window.localStorage.length; index += 1) {
-      const key = window.localStorage.key(index)
-      if (key?.startsWith(prefix)) keys.push(key)
-    }
-    for (const key of keys.sort()) {
-      const stored = window.localStorage.getItem(key)
-      if (stored === null) continue
-      try {
-        return decodeWebImportContinuationRequest(JSON.parse(stored))
-      } catch {
-        // An undecodable slot is not a retryable exact command; leave it for inspection.
-      }
-    }
-    return null
-  } catch {
-    return null
-  }
-}
-
-// Returns whether the exact payload is durably retained; the caller must not send a
-// continuation whose only copy is component state that a reload would destroy.
-const persistRetainedCommand = (scope: string, command: WebImportContinuationRequest): boolean => {
-  const encoded = JSON.stringify(command)
-  const key = retainedCommandStorageKey(scope, command.command_id)
-  try {
-    window.localStorage.setItem(key, encoded)
-    return window.localStorage.getItem(key) === encoded
-  } catch {
-    return false
-  }
-}
-
-const clearRetainedCommand = (scope: string, commandId: string): void => {
-  try {
-    window.localStorage.removeItem(retainedCommandStorageKey(scope, commandId))
-  } catch {
-    // A failed removal only re-offers an already-settled exact command later.
-  }
-}
-
-const decimalLabel = (value: string): string => BigInt(value).toLocaleString()
-
-const byteLabel = (value: string): string => {
-  const bytes = BigInt(value)
-  if (bytes < 1024n) return `${bytes.toLocaleString()} B`
-  const unit = bytes < 1024n * 1024n ? 1024n : 1024n * 1024n
-  const label = unit === 1024n ? 'KiB' : 'MiB'
-  const tenths = (bytes * 10n) / unit
-  return `${tenths / 10n}.${tenths % 10n} ${label}`
+const byteLabel = (bytes: number): string => {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`
 }
 
 export function ImportsWorkspace({
   api,
   scenario,
-  continuationAvailable = true,
-  active = true,
   presentation = 'standalone',
   onCommandContext,
+  onNavigationDisabledChange,
 }: {
   api: ImportApi
   scenario: boolean
-  continuationAvailable?: boolean
-  active?: boolean
+  // `standalone` renders this surface's own navigation, header, and overlays. `product` mounts the
+  // same surface inside the product shell, which already owns that chrome and the command registry.
   presentation?: 'standalone' | 'product'
   onCommandContext?: (context: CommandContext | null) => void
+  onNavigationDisabledChange?: (disabled: boolean) => void
 }) {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
+  const app = useAppSelector(selectApp)
+  const queryScope = scenario ? 'scenario' : 'production'
+  useEffect(() => {
+    document.documentElement.dataset.theme = app.theme
+    document.documentElement.dataset.density = app.density
+  }, [app.density, app.theme])
   const [format, setFormat] = useState<FormatFilter>(EMPTY_FILTER)
   const [sourceSession, setSourceSession] = useState('')
   const [sourceSessionFilterEnabled, setSourceSessionFilterEnabled] = useState(false)
@@ -158,59 +101,25 @@ export function ImportsWorkspace({
   const [selectedFrontier, setSelectedFrontier] = useState<WebImportContinuationReference | null>(
     null,
   )
-  const [modelKind, setModelKind] = useState<ModelKind>('direct')
-  const [modelSelectionId, setModelSelectionId] = useState(scenario ? SCENARIO_MODEL_SELECTION : '')
-  const queryScope = scenario ? 'scenario' : 'production'
   const [pendingCommand, setPendingCommand] = useState<WebImportContinuationRequest | null>(() =>
-    readRetainedCommand(queryScope),
+    loadRetainedCommand(queryScope),
   )
-  // A command restored from browser persistence has an unknown durable outcome, which is
-  // exactly the ambiguous posture: retry the exact payload until an outcome correlates.
-  const [continuationAmbiguous, setContinuationAmbiguous] = useState(pendingCommand !== null)
-  const [retentionFailed, setRetentionFailed] = useState(false)
+  const [modelKind, setModelKind] = useState<ModelKind>(
+    () => pendingCommand?.initial_model_selection.kind ?? 'direct',
+  )
+  const [modelSelectionId, setModelSelectionId] = useState(() => {
+    const retainedModel = pendingCommand?.initial_model_selection
+    if (retainedModel?.kind === 'direct') return retainedModel.selection_id
+    if (retainedModel?.kind === 'alias') return retainedModel.alias_id
+    return scenario ? SCENARIO_MODEL_SELECTION : ''
+  })
+  const [retainedStorageFailed, setRetainedStorageFailed] = useState(false)
   const hasRetainedCommand = pendingCommand !== null
-  const retainCommand = useCallback(
-    (command: WebImportContinuationRequest): boolean => {
-      if (!persistRetainedCommand(queryScope, command)) return false
-      setPendingCommand(command)
-      return true
-    },
-    [queryScope],
-  )
-  // Settling one command drains the next unresolved slot instead of unlocking new
-  // continuations: a browser restart may have left several tabs' ambiguous commands in
-  // storage, and each hidden one may already have committed a session.
-  const releaseRetainedCommand = useCallback(
-    (settled: WebImportContinuationRequest) => {
-      clearRetainedCommand(queryScope, settled.command_id)
-      const remaining = readRetainedCommand(queryScope)
-      setPendingCommand(remaining)
-      setContinuationAmbiguous(remaining !== null)
-    },
-    [queryScope],
-  )
-  const pendingCommandRef = useRef(pendingCommand)
+
   useEffect(() => {
-    pendingCommandRef.current = pendingCommand
-  }, [pendingCommand])
-  // Retention is coordinated across tabs, not snapshotted once: another tab's write lands
-  // here through the storage event, and admission rechecks storage so a command persisted
-  // between the last snapshot and this tab's next action still locks new continuations.
-  useEffect(() => {
-    const observeRetention = (event: StorageEvent) => {
-      if (event.key !== null && !event.key.startsWith(retainedCommandStoragePrefix(queryScope))) {
-        return
-      }
-      if (pendingCommandRef.current !== null) return
-      const restored = readRetainedCommand(queryScope)
-      if (restored !== null) {
-        setPendingCommand(restored)
-        setContinuationAmbiguous(true)
-      }
-    }
-    window.addEventListener('storage', observeRetention)
-    return () => window.removeEventListener('storage', observeRetention)
-  }, [queryScope])
+    onNavigationDisabledChange?.(hasRetainedCommand)
+    return () => onNavigationDisabledChange?.(false)
+  }, [hasRetainedCommand, onNavigationDisabledChange])
 
   const listRequest = useMemo(
     () => ({
@@ -224,14 +133,14 @@ export function ImportsWorkspace({
   const importsQuery = useQuery({
     queryKey: ['imports', queryScope, 'catalog', listRequest],
     queryFn: ({ signal }) => api.list(listRequest, signal),
-    enabled: active,
     gcTime: 0,
   })
-  const imports = importsQuery.data
+  const imports = importsQuery.isError ? undefined : importsQuery.data
   const firstImport = imports?.items[0]?.imported_conversation_id ?? null
 
   useEffect(() => {
     if (
+      imports !== undefined &&
       !hasRetainedCommand &&
       (!selectedImport ||
         !imports?.items.some((item) => item.imported_conversation_id === selectedImport))
@@ -241,28 +150,32 @@ export function ImportsWorkspace({
       setSelectedFrontier(null)
       setPositionInput('')
     }
-  }, [firstImport, hasRetainedCommand, imports?.items, selectedImport])
+  }, [firstImport, hasRetainedCommand, imports, selectedImport])
 
   const descriptorQuery = useQuery({
     queryKey: ['imports', queryScope, selectedImport, 'descriptor'],
     queryFn: ({ signal }) => api.descriptor(selectedImport ?? '', signal),
-    enabled: active && selectedImport !== null,
+    enabled: selectedImport !== null,
     gcTime: 0,
   })
+  const descriptor =
+    importsQuery.isError || descriptorQuery.isError ? undefined : descriptorQuery.data
   const windowQuery = useQuery({
     queryKey: ['imports', queryScope, selectedImport, 'entries', windowRequest],
-    queryFn: async ({ signal }) => {
-      const importedConversationId = selectedImport ?? ''
-      const [descriptor, window] = await Promise.all([
-        api.descriptor(importedConversationId, signal),
-        api.entries(importedConversationId, windowRequest, signal),
-      ])
-      return correlateEntryWindowWithDescriptor(windowRequest, window, descriptor)
-    },
-    enabled: active && selectedImport !== null,
+    queryFn: ({ signal }) =>
+      api.entries(
+        selectedImport ?? '',
+        windowRequest,
+        signal,
+        descriptor?.timeline.latest.position,
+      ),
     gcTime: 0,
+    enabled: selectedImport !== null && descriptor !== undefined,
   })
-  const entryWindow = windowQuery.data
+  const entryWindow =
+    importsQuery.isError || descriptorQuery.isError || windowQuery.isError
+      ? undefined
+      : windowQuery.data
   const selectedEntry =
     entryWindow?.items.find(
       (entry) => entry.frontier.imported_entry_id === selectedFrontier?.imported_entry_id,
@@ -275,36 +188,38 @@ export function ImportsWorkspace({
     [entryWindow?.items],
   )
 
+  // A refetch rebuilds `anchorFrontier` identity without changing the window, so only fall back to
+  // the anchor when the operator's selection is absent from the returned window.
   useEffect(() => {
-    if (!hasRetainedCommand) setSelectedFrontier(anchorFrontier)
-  }, [anchorFrontier, hasRetainedCommand])
+    if (hasRetainedCommand) return
+    setSelectedFrontier((current) =>
+      current !== null &&
+      entryWindow?.items.some(
+        (entry) => entry.frontier.imported_entry_id === current.imported_entry_id,
+      )
+        ? current
+        : anchorFrontier,
+    )
+  }, [anchorFrontier, entryWindow?.items, hasRetainedCommand])
 
   const continuation = useMutation({
     mutationFn: (request: WebImportContinuationRequest) =>
       api.continueImport(request.frontier.imported_conversation_id, request),
-    onSuccess: (_receipt, request) => {
-      releaseRetainedCommand(request)
+    onSuccess: () => {
+      storeRetainedCommand(queryScope, null)
+      setPendingCommand(null)
     },
-    onError: (error, request) => {
+    onError: (error) => {
       if (!isRetryableContinuationError(error)) {
-        // A definitive application rejection proves this command never committed: the
-        // daemon replays a recorded command before validating anything else, so a
-        // validation rejection cannot have found a recorded commit. Release the slot even
-        // if the command was previously ambiguous.
-        releaseRetainedCommand(request)
-        return
-      }
-      // Retryable failures (commit ambiguity, unavailability, transport loss) leave the
-      // durable outcome unknown, so ambiguity stays sticky until an outcome correlates.
-      if (continuationAmbiguous || isAmbiguousContinuationError(error)) {
-        setContinuationAmbiguous(true)
+        storeRetainedCommand(queryScope, null)
+        setPendingCommand(null)
       }
     },
   })
   const resetContinuation = continuation.reset
   const selectImportEntry = useCallback(
     (id: string) => {
-      if (hasRetainedCommand) return
+      if (hasRetainedCommand || store.getState().app.overlay !== null) return
       resetContinuation()
       setSelectedFrontier(
         entryWindow?.items.find((entry) => entry.frontier.imported_entry_id === id)?.frontier ??
@@ -313,56 +228,123 @@ export function ImportsWorkspace({
     },
     [entryWindow?.items, hasRetainedCommand, resetContinuation],
   )
+  const normalizedModelSelectionId = modelSelectionId.trim()
+  const modelSelectionInvalid =
+    !CANONICAL_UUID.test(normalizedModelSelectionId) || normalizedModelSelectionId === NIL_UUID
+  const canContinueImport =
+    selectedFrontier !== null &&
+    !modelSelectionInvalid &&
+    !importsQuery.isError &&
+    !descriptorQuery.isError &&
+    !windowQuery.isError &&
+    !continuation.isPending &&
+    !hasRetainedCommand
+  const continueAt = useCallback(
+    (relationship: WebImportedSessionRelationship) => {
+      if (!canContinueImport || !selectedFrontier || store.getState().app.overlay !== null) return
+      const request: WebImportContinuationRequest = {
+        command_id: crypto.randomUUID(),
+        frontier: selectedFrontier,
+        relationship,
+        initial_model_selection:
+          modelKind === 'direct'
+            ? { kind: 'direct', selection_id: normalizedModelSelectionId }
+            : { kind: 'alias', alias_id: normalizedModelSelectionId },
+      }
+      if (!storeRetainedCommand(queryScope, request)) {
+        setRetainedStorageFailed(true)
+        return
+      }
+      setRetainedStorageFailed(false)
+      setPendingCommand(request)
+      continuation.mutate(request)
+    },
+    [
+      canContinueImport,
+      continuation,
+      modelKind,
+      normalizedModelSelectionId,
+      queryScope,
+      selectedFrontier,
+    ],
+  )
+  const retryExactCommand = useCallback(() => {
+    if (!pendingCommand || continuation.isPending) return
+    continuation.mutate(pendingCommand)
+  }, [continuation, pendingCommand])
+  const abandonExactCommand = useCallback(() => {
+    if (!pendingCommand || continuation.isPending) return
+    storeRetainedCommand(queryScope, null)
+    setPendingCommand(null)
+    continuation.reset()
+  }, [continuation, pendingCommand, queryScope])
+  const canRecoverRetainedCommand = pendingCommand !== null && !continuation.isPending
   const commandContext = useMemo<CommandContext>(
     () => ({
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
-      artifactPreviewIds:
-        selectedEntry?.content_kind === 'text' ? [selectedEntry.frontier.imported_entry_id] : [],
+      artifactPreviewIds: [],
       artifactOriginalIds: [],
       focusTimeline: () =>
         document.querySelector<HTMLElement>('[aria-label="Imported source entries"]')?.focus(),
       importEntryIds,
       selectedImportEntry: selectedFrontier?.imported_entry_id ?? null,
+      // Keep navigation commands discoverable while the command palette is open.
+      // Execution still checks the live overlay state in selectImportEntry.
+      canSelectImportEntry: !hasRetainedCommand,
       selectImportEntry,
+      canContinueImport,
+      continueImport: continueAt,
+      canRetryImport: canRecoverRetainedCommand,
+      retryImport: retryExactCommand,
+      canAbandonImport: canRecoverRetainedCommand,
+      abandonImport: abandonExactCommand,
+      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
     }),
-    [importEntryIds, selectImportEntry, selectedEntry, selectedFrontier?.imported_entry_id],
+    [
+      abandonExactCommand,
+      canContinueImport,
+      canRecoverRetainedCommand,
+      continueAt,
+      hasRetainedCommand,
+      importEntryIds,
+      navigate,
+      retryExactCommand,
+      selectImportEntry,
+      selectedFrontier?.imported_entry_id,
+    ],
   )
   useEffect(() => {
     onCommandContext?.(commandContext)
     return () => onCommandContext?.(null)
   }, [commandContext, onCommandContext])
+  // The product shell registers every product command itself, so publishing the surface context is
+  // the whole seam there. Registering these bindings again would advance the selection twice.
   useHotkeys(
-    [...(presentation === 'standalone' ? surfaceHotkeyBindings : []), ...importHotkeyBindings].map(
+    (presentation === 'standalone' ? [...surfaceHotkeyBindings, ...importHotkeyBindings] : []).map(
       (binding) => ({
         hotkey: binding.hotkey,
-        callback: () => {
-          if (active && store.getState().app.overlay === null) {
-            invokeCommand(binding.commandId, commandContext)
-          }
-        },
+        callback: () => invokeCommand(binding.commandId, commandContext),
       }),
     ),
   )
   useHotkeySequences(
-    [
-      ...(presentation === 'standalone' ? surfaceHotkeySequenceBindings : []),
-      ...importHotkeySequenceBindings,
-    ].map((binding) => ({
+    (presentation === 'standalone'
+      ? [...surfaceHotkeySequenceBindings, ...importHotkeySequenceBindings]
+      : []
+    ).map((binding) => ({
       sequence: binding.sequence,
-      callback: () => {
-        if (active && store.getState().app.overlay === null) {
-          invokeCommand(binding.commandId, commandContext)
-        }
-      },
+      callback: () => invokeCommand(binding.commandId, commandContext),
     })),
   )
 
   useEffect(() => {
+    if (!scenario) return
     const snapshot: DiagnosticSnapshot = {
-      scenario: scenario ? 'imports' : 'production-imports',
-      connection: importsQuery.isError || windowQuery.isError ? 'failed' : 'ready',
+      scenario: 'imports',
+      connection:
+        importsQuery.isError || descriptorQuery.isError || windowQuery.isError ? 'failed' : 'ready',
       loadedTimeline: 0,
       logicalTimeline: 0,
       loadedFleet: 0,
@@ -388,6 +370,7 @@ export function ImportsWorkspace({
     }
   }, [
     descriptorQuery.fetchStatus,
+    descriptorQuery.isError,
     descriptorQuery.status,
     imports?.items.length,
     importsQuery.fetchStatus,
@@ -418,19 +401,36 @@ export function ImportsWorkspace({
 
   const showWindow = (request: WebImportEntryWindowRequest) => {
     if (hasRetainedCommand) return
+    if (
+      request.anchor === windowRequest.anchor &&
+      request.position === windowRequest.position &&
+      request.before === windowRequest.before &&
+      request.after === windowRequest.after
+    )
+      return
     resetContinuation()
     setWindowRequest(request)
     setSelectedFrontier(null)
   }
 
+  const requestedPosition = Number(positionInput)
+  const requestedPositionInRange =
+    positionInput.trim() !== '' &&
+    Number.isSafeInteger(requestedPosition) &&
+    requestedPosition > 0 &&
+    requestedPosition <= (descriptor?.entry_count ?? 0)
+
   const showPosition = () => {
-    if (!/^[1-9]\d{0,19}$/.test(positionInput)) return
-    const position = BigInt(positionInput)
-    const entryCount = descriptorQuery.data?.entry_count
-    if (entryCount === undefined || position > BigInt(entryCount)) return
+    const position = Number(positionInput)
+    if (
+      !Number.isSafeInteger(position) ||
+      position <= 0 ||
+      position > (descriptor?.entry_count ?? 0)
+    )
+      return
     showWindow({
       anchor: 'position',
-      position: positionInput,
+      position,
       before: Math.floor(IMPORT_WINDOW_RADIUS / 2),
       after: Math.floor(IMPORT_WINDOW_RADIUS / 2),
     })
@@ -447,77 +447,17 @@ export function ImportsWorkspace({
 
   const retryableContinuationFailure =
     continuation.isError && isRetryableContinuationError(continuation.error)
-  // Mutation error state belongs to the command that produced it: after slot rotation the
-  // retained command is a different one, so its retry offer follows the ambiguous posture
-  // rather than the settled command's definitive rejection.
-  const errorNamesRetainedCommand =
-    continuation.isError && continuation.variables?.command_id === pendingCommand?.command_id
-  // A retained command is offered for exact retry after a retryable failure and after a
-  // reload restored it from browser persistence with its durable outcome still unknown.
-  const commandRetainedForRetry =
-    pendingCommand !== null &&
-    !continuation.isPending &&
-    (errorNamesRetainedCommand ? retryableContinuationFailure : continuationAmbiguous)
-  const ambiguousContinuationFailure = commandRetainedForRetry && continuationAmbiguous
-  // The retained-command decoder and the generated contract require canonical lowercase
-  // UUIDs, so the model selection is canonicalized before it is retained or sent: a raw
-  // noncanonical spelling would persist a slot that restoration silently skips.
-  const canonicalModelSelectionId = modelSelectionId.trim().toLowerCase()
-  const modelSelectionCanonical = CANONICAL_UUID_PATTERN.test(canonicalModelSelectionId)
-
-  const continueAt = async (relationship: WebImportedSessionRelationship) => {
-    if (
-      !continuationAvailable ||
-      !selectedFrontier ||
-      !modelSelectionCanonical ||
-      hasRetainedCommand
-    ) {
-      return
-    }
-    const admit = () => {
-      // Recheck storage at admission: another tab may have retained a command after this
-      // tab's last snapshot, and its outcome may still be ambiguous.
-      const concurrentlyRetained = readRetainedCommand(queryScope)
-      if (concurrentlyRetained !== null) {
-        setPendingCommand(concurrentlyRetained)
-        setContinuationAmbiguous(true)
-        return
-      }
-      const request: WebImportContinuationRequest = {
-        command_id: crypto.randomUUID(),
-        frontier: selectedFrontier,
-        relationship,
-        initial_model_selection:
-          modelKind === 'direct'
-            ? { kind: 'direct', selection_id: canonicalModelSelectionId }
-            : { kind: 'alias', alias_id: canonicalModelSelectionId },
-      }
-      // The POST leaves the browser only after the exact payload is durably retained:
-      // sending first would let a reload destroy the sole copy of a command the daemon
-      // may commit.
-      if (!retainCommand(request)) {
-        setRetentionFailed(true)
-        return
-      }
-      setRetentionFailed(false)
-      setContinuationAmbiguous(false)
-      continuation.mutate(request)
-    }
-    // The recheck and retention write are one atomic admission: a cross-tab lock keeps a
-    // second tab from passing the recheck before the first tab's retained slot is visible.
-    if (navigator.locks) {
-      await navigator.locks.request(retainedCommandStoragePrefix(queryScope), async () => admit())
-    } else {
-      admit()
-    }
-  }
+  const retainedCommandNeedsAction = pendingCommand !== null && !continuation.isPending
 
   return (
     <>
       <div className={`imports-shell imports-shell-${presentation}`}>
         {presentation === 'standalone' && (
           <aside className="navigation-pane imports-navigation">
-            <ScenarioNavigation activeId="imports" />
+            <ScenarioNavigation
+              activeId={scenario ? 'imports' : 'production-imports'}
+              disabled={hasRetainedCommand}
+            />
           </aside>
         )}
         <div
@@ -555,6 +495,7 @@ export function ImportsWorkspace({
                     value={format}
                     disabled={hasRetainedCommand}
                     onChange={(event) => {
+                      if (hasRetainedCommand) return
                       setFormat(event.target.value as FormatFilter)
                       resetCatalog()
                     }}
@@ -571,9 +512,10 @@ export function ImportsWorkspace({
                   <input
                     aria-label="Filter imports by exact source session evidence"
                     value={sourceSession}
-                    disabled={hasRetainedCommand}
                     placeholder="Exact attested identifier"
+                    disabled={hasRetainedCommand}
                     onChange={(event) => {
+                      if (hasRetainedCommand) return
                       setSourceSession(event.target.value)
                       resetCatalog()
                     }}
@@ -587,6 +529,7 @@ export function ImportsWorkspace({
                     checked={sourceSessionFilterEnabled}
                     disabled={hasRetainedCommand}
                     onChange={(event) => {
+                      if (hasRetainedCommand) return
                       setSourceSessionFilterEnabled(event.target.checked)
                       resetCatalog()
                     }}
@@ -618,6 +561,7 @@ export function ImportsWorkspace({
               <ImportsTable
                 rows={imports.items}
                 selectedId={selectedImport}
+                selectionDisabled={hasRetainedCommand}
                 onSelect={selectImport}
               />
             )}
@@ -627,12 +571,13 @@ export function ImportsWorkspace({
               <div>
                 <span className="eyebrow">Descriptor and selected source frontier</span>
                 <h2 id="import-inspector-heading">
-                  {descriptorQuery.data?.display_title ?? 'Import inspector'}
+                  {descriptor?.display_title ?? 'Import inspector'}
                 </h2>
               </div>
               <div className="window-controls">
                 <button
                   type="button"
+                  disabled={hasRetainedCommand}
                   onClick={() =>
                     showWindow({ anchor: 'first', before: 0, after: IMPORT_WINDOW_RADIUS })
                   }
@@ -641,6 +586,7 @@ export function ImportsWorkspace({
                 </button>
                 <button
                   type="button"
+                  disabled={hasRetainedCommand}
                   onClick={() =>
                     showWindow({ anchor: 'latest', before: IMPORT_WINDOW_RADIUS, after: 0 })
                   }
@@ -653,70 +599,80 @@ export function ImportsWorkspace({
                     aria-label="Imported entry position"
                     inputMode="numeric"
                     value={positionInput}
-                    onChange={(event) => setPositionInput(event.target.value)}
+                    disabled={hasRetainedCommand}
+                    onChange={(event) => {
+                      if (hasRetainedCommand) return
+                      setPositionInput(event.target.value)
+                    }}
                   />
                 </label>
-                <button type="button" onClick={showPosition}>
+                <button
+                  type="button"
+                  disabled={hasRetainedCommand || !requestedPositionInRange}
+                  onClick={showPosition}
+                >
                   Go
                 </button>
               </div>
             </header>
             <div className="import-inspector-body">
               <div className="import-evidence">
-                {descriptorQuery.data && (
+                {descriptor && (
                   <dl>
                     <div>
                       <dt>Import identity</dt>
-                      <dd>{descriptorQuery.data.imported_conversation_id}</dd>
+                      <dd>{descriptor.imported_conversation_id}</dd>
                     </div>
                     <div>
                       <dt>Format</dt>
-                      <dd>{descriptorQuery.data.source.format}</dd>
+                      <dd>{descriptor.source.format}</dd>
                     </div>
                     <div>
                       <dt>Source session</dt>
                       <dd>
-                        {descriptorQuery.data.source.source_session_id
-                          ? `${descriptorQuery.data.source.source_session_id.leading_text}${
-                              descriptorQuery.data.source.source_session_id.completeness ===
-                              'truncated'
+                        {descriptor.source.source_session_id
+                          ? `${descriptor.source.source_session_id.leading_text}${
+                              descriptor.source.source_session_id.completeness === 'truncated'
                                 ? '…'
                                 : ''
                             }`
-                          : 'Unknown or inconsistent source-session evidence'}
+                          : 'Not attested'}
                       </dd>
                     </div>
                     <div>
                       <dt>Source digest</dt>
-                      <dd>{descriptorQuery.data.source.source_digest_sha256}</dd>
+                      <dd>{descriptor.source.source_digest_sha256}</dd>
                     </div>
                     <div>
                       <dt>Raw records</dt>
-                      <dd>{decimalLabel(descriptorQuery.data.raw_record_count)}</dd>
+                      <dd>{descriptor.raw_record_count.toLocaleString()}</dd>
                     </div>
                     <div>
                       <dt>Entries</dt>
-                      <dd>{decimalLabel(descriptorQuery.data.entry_count)}</dd>
+                      <dd>{descriptor.entry_count.toLocaleString()}</dd>
                     </div>
                     <div>
                       <dt>Raw source size</dt>
-                      <dd>{byteLabel(descriptorQuery.data.sizes.raw_source_bytes)}</dd>
+                      <dd>{byteLabel(descriptor.sizes.raw_source_bytes)}</dd>
                     </div>
                     <div>
                       <dt>Normalized records</dt>
-                      <dd>
-                        {byteLabel(descriptorQuery.data.sizes.normalized_source_record_bytes)}
-                      </dd>
+                      <dd>{byteLabel(descriptor.sizes.normalized_source_record_bytes)}</dd>
                     </div>
                     <div>
                       <dt>Normalized entries</dt>
-                      <dd>{byteLabel(descriptorQuery.data.sizes.normalized_entry_bytes)}</dd>
+                      <dd>{byteLabel(descriptor.sizes.normalized_entry_bytes)}</dd>
                     </div>
                     <div>
                       <dt>Timeline</dt>
-                      <dd>1–{decimalLabel(descriptorQuery.data.timeline.latest.position)}</dd>
+                      <dd>1–{descriptor.timeline.latest.position.toLocaleString()}</dd>
                     </div>
                   </dl>
+                )}
+                {descriptorQuery.isError && (
+                  <p className="imports-state" role="alert">
+                    The selected import descriptor could not be loaded.
+                  </p>
                 )}
                 <div className="continuation-form">
                   <span className="eyebrow">Create native session from selected frontier</span>
@@ -725,7 +681,9 @@ export function ImportsWorkspace({
                       aria-label="Initial model selection kind"
                       value={modelKind}
                       disabled={hasRetainedCommand}
-                      onChange={(event) => setModelKind(event.target.value as ModelKind)}
+                      onChange={(event) => {
+                        if (!hasRetainedCommand) setModelKind(event.target.value as ModelKind)
+                      }}
                     >
                       <option value="direct">Direct model</option>
                       <option value="alias">Model alias</option>
@@ -735,87 +693,76 @@ export function ImportsWorkspace({
                       placeholder="Model selection UUID"
                       value={modelSelectionId}
                       disabled={hasRetainedCommand}
-                      onChange={(event) => setModelSelectionId(event.target.value)}
+                      onChange={(event) => {
+                        if (!hasRetainedCommand) setModelSelectionId(event.target.value)
+                      }}
                     />
                   </div>
                   <p>
-                    Frontier {selectedFrontier ? decimalLabel(selectedFrontier.position) : '—'} ·
-                    provider defaults
+                    Frontier {selectedFrontier?.position.toLocaleString() ?? '—'} · provider
+                    defaults
                   </p>
                   <div className="continuation-actions">
                     <button
                       type="button"
-                      onClick={() => void continueAt('resume')}
-                      disabled={
-                        !continuationAvailable ||
-                        !selectedFrontier ||
-                        !modelSelectionCanonical ||
-                        continuation.isPending ||
-                        hasRetainedCommand
-                      }
+                      onClick={() => invokeCommand('imports.continue.resume', commandContext)}
+                      disabled={!canContinueImport}
                     >
                       Resume
                     </button>
                     <button
                       type="button"
-                      onClick={() => void continueAt('fork')}
-                      disabled={
-                        !continuationAvailable ||
-                        !selectedFrontier ||
-                        !modelSelectionCanonical ||
-                        continuation.isPending ||
-                        hasRetainedCommand
-                      }
+                      onClick={() => invokeCommand('imports.continue.fork', commandContext)}
+                      disabled={!canContinueImport}
                     >
                       Fork
                     </button>
-                    {commandRetainedForRetry && pendingCommand && (
+                    {retainedCommandNeedsAction && pendingCommand && (
                       <>
-                        <button type="button" onClick={() => continuation.mutate(pendingCommand)}>
+                        <button
+                          type="button"
+                          onClick={() => invokeCommand('imports.continue.retry', commandContext)}
+                        >
                           Retry exact command
                         </button>
-                        {!ambiguousContinuationFailure && (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              releaseRetainedCommand(pendingCommand)
-                              continuation.reset()
-                            }}
-                          >
-                            Abandon exact retry
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => invokeCommand('imports.continue.abandon', commandContext)}
+                        >
+                          Abandon exact retry
+                        </button>
                       </>
                     )}
                   </div>
-                  {!continuationAvailable && (
-                    <p role="status">Imported continuation is not advertised by this daemon.</p>
-                  )}
-                  {retentionFailed && (
+                  {retainedStorageFailed && (
                     <p role="alert">
-                      The exact command could not be durably retained in this browser, so no
-                      continuation was sent. Enable browser storage for this site and retry.
+                      The exact continuation command could not be retained in session storage. No
+                      request was sent.
                     </p>
                   )}
-                  {commandRetainedForRetry && pendingCommand && (
+                  {retainedCommandNeedsAction && pendingCommand && (
                     <p role="alert">
                       The exact command for import{' '}
                       {pendingCommand.frontier.imported_conversation_id}, position{' '}
-                      {decimalLabel(pendingCommand.frontier.position)}, is retained for retry.
-                      {ambiguousContinuationFailure
-                        ? ' Retry this exact command until its durable outcome is known.'
-                        : ' Abandon it before selecting another import or frontier.'}
+                      {pendingCommand.frontier.position.toLocaleString()}, is retained for retry.
+                      Abandon it before selecting another import or frontier.
                     </p>
                   )}
-                  {continuation.isError && !retryableContinuationFailure && !hasRetainedCommand && (
+                  {continuation.isError && !retryableContinuationFailure && !pendingCommand && (
                     <p role="alert">
                       The continuation request was rejected and cannot be retried unchanged.
                     </p>
                   )}
                   {continuation.data && (
-                    <p className="continuation-result">
-                      Session created: {continuation.data.session_id}
-                    </p>
+                    <>
+                      <p className="continuation-result">
+                        Session created: {continuation.data.session_id}
+                      </p>
+                      <p className="continuation-result">
+                        Receipt source: import {continuation.data.frontier.imported_conversation_id}
+                        , position {continuation.data.frontier.position.toLocaleString()}
+                      </p>
+                    </>
                   )}
                 </div>
               </div>
@@ -826,7 +773,7 @@ export function ImportsWorkspace({
                     {windowQuery.isError
                       ? 'Entry window unavailable'
                       : entryWindow
-                        ? `${decimalLabel(entryWindow.first_position)}–${decimalLabel(entryWindow.last_position)} · ${entryWindow.items.length} loaded`
+                        ? `${entryWindow.first_position.toLocaleString()}–${entryWindow.last_position.toLocaleString()} · ${entryWindow.items.length} loaded`
                         : selectedImport === null
                           ? 'No import selected'
                           : 'Loading window…'}
@@ -843,7 +790,7 @@ export function ImportsWorkspace({
                 {entryWindow && (
                   <ImportedEntries
                     entries={entryWindow.items}
-                    logicalEntryCount={descriptorQuery.data?.entry_count}
+                    logicalEntryCount={descriptor?.entry_count ?? entryWindow.last_position}
                     selected={selectedFrontier}
                     commandContext={commandContext}
                   />
@@ -855,7 +802,12 @@ export function ImportsWorkspace({
         </div>
       </div>
       {presentation === 'standalone' && (
-        <OverlaySurfaces context={commandContext} activeId="imports" />
+        <OverlaySurfaces
+          context={commandContext}
+          activeId={scenario ? 'imports' : 'production-imports'}
+          importsSurface
+          navigationDisabled={hasRetainedCommand}
+        />
       )}
     </>
   )

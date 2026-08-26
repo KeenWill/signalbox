@@ -59,6 +59,457 @@ const schemas = {
     "title": "WebApiErrorResponse",
     "type": "object"
   },
+  "WebAttentionSnapshot": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unix_milliseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebAttentionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_turn_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebAttentionActivity"
+          },
+          "session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          }
+        },
+        "required": [
+          "session_id",
+          "state",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "continuation_after_session_id": {
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "cursor": {
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      },
+      "summaries": {
+        "items": {
+          "$ref": "#/$defs/WebAttentionSummary"
+        },
+        "maxItems": 32,
+        "type": "array"
+      }
+    },
+    "required": [
+      "cursor",
+      "summaries"
+    ],
+    "title": "WebAttentionSnapshot",
+    "type": "object"
+  },
+  "WebAttentionStreamEvent": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unix_milliseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionSnapshot": {
+        "additionalProperties": false,
+        "properties": {
+          "continuation_after_session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "summaries": {
+            "items": {
+              "$ref": "#/$defs/WebAttentionSummary"
+            },
+            "maxItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "cursor",
+          "summaries"
+        ],
+        "type": "object"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebAttentionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_turn_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebAttentionActivity"
+          },
+          "session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          }
+        },
+        "required": [
+          "session_id",
+          "state",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "const": "snapshot",
+            "type": "string"
+          },
+          "snapshot": {
+            "$ref": "#/$defs/WebAttentionSnapshot"
+          }
+        },
+        "required": [
+          "kind",
+          "snapshot"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "kind": {
+            "const": "update",
+            "type": "string"
+          },
+          "summaries": {
+            "items": {
+              "$ref": "#/$defs/WebAttentionSummary"
+            },
+            "maxItems": 32,
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor",
+          "summaries"
+        ],
+        "type": "object"
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "kind": {
+            "const": "resync_required",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "cursor"
+        ],
+        "type": "object"
+      }
+    ],
+    "title": "WebAttentionStreamEvent"
+  },
   "WebBlobDescriptor": {
     "$defs": {
       "WebBlobAvailableView": {
@@ -275,8 +726,16 @@ const schemas = {
             "description": "Ordinary bounded JSON responses are available under `/api/`.",
             "type": "boolean"
           },
+          "bounded_lexical_search": {
+            "description": "Bounded lexical search with stable history reveal addresses is available.",
+            "type": "boolean"
+          },
           "bounded_session_timeline": {
             "description": "Stable bounded session descriptors and historical windows are available.",
+            "type": "boolean"
+          },
+          "bounded_usage_cost": {
+            "description": "Dedicated bounded aggregate and per-call usage/cost reads are available.",
             "type": "boolean"
           },
           "image_derivatives": {
@@ -311,9 +770,11 @@ const schemas = {
           "immutable_blob_content",
           "blob_derivations",
           "image_derivatives",
-          "bounded_session_timeline",
           "import_discovery",
-          "imported_continuations"
+          "imported_continuations",
+          "bounded_session_timeline",
+          "bounded_lexical_search",
+          "bounded_usage_cost"
         ],
         "type": "object"
       },
@@ -352,6 +813,24 @@ const schemas = {
             "minimum": 0,
             "type": "integer"
           },
+          "max_search_page_items": {
+            "description": "Maximum results in one search page.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_search_query_bytes": {
+            "description": "Maximum UTF-8 bytes in one product search expression.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_search_snippet_bytes": {
+            "description": "Maximum UTF-8 bytes in one search result snippet.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
           "max_timeline_window_bytes": {
             "description": "Maximum projected structured item bytes in one timeline window.",
             "format": "uint32",
@@ -363,13 +842,30 @@ const schemas = {
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "max_usage_aggregate_groups": {
+            "description": "Maximum compatibility-preserving groups in one usage summary.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_usage_call_page_items": {
+            "description": "Maximum individual calls in one usage detail page.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
           "max_json_body_bytes",
           "max_ndjson_item_bytes",
           "max_timeline_window_items",
-          "max_timeline_window_bytes"
+          "max_timeline_window_bytes",
+          "max_search_query_bytes",
+          "max_search_page_items",
+          "max_search_snippet_bytes",
+          "max_usage_aggregate_groups",
+          "max_usage_call_page_items"
         ],
         "type": "object"
       }
@@ -435,8 +931,10 @@ const schemas = {
             "type": "string"
           },
           "position": {
-            "description": "One-based immutable imported position encoded losslessly for JavaScript.",
-            "type": "string"
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -550,8 +1048,10 @@ const schemas = {
             "type": "string"
           },
           "position": {
-            "description": "One-based immutable imported position encoded losslessly for JavaScript.",
-            "type": "string"
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -622,8 +1122,10 @@ const schemas = {
             "type": "string"
           },
           "position": {
-            "description": "One-based immutable imported position encoded losslessly for JavaScript.",
-            "type": "string"
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -658,16 +1160,22 @@ const schemas = {
         "description": "Byte facts projected from immutable stored import members.",
         "properties": {
           "normalized_entry_bytes": {
-            "description": "Sum of normalized entry and source-metadata encoding bytes, encoded losslessly for JavaScript.",
-            "type": "string"
+            "description": "Sum of normalized entry and source-metadata encoding bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "normalized_source_record_bytes": {
-            "description": "Sum of normalized source-record encoding bytes, encoded losslessly for JavaScript.",
-            "type": "string"
+            "description": "Sum of normalized source-record encoding bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "raw_source_bytes": {
-            "description": "Sum of exact raw source-record occurrence bytes, encoded losslessly for JavaScript.",
-            "type": "string"
+            "description": "Sum of exact raw source-record occurrence bytes.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -773,16 +1281,20 @@ const schemas = {
         ]
       },
       "entry_count": {
-        "description": "Number of normalized imported entries encoded losslessly for JavaScript.",
-        "type": "string"
+        "description": "Number of normalized imported entries.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "imported_conversation_id": {
         "description": "Immutable imported-conversation UUID.",
         "type": "string"
       },
       "raw_record_count": {
-        "description": "Number of exact raw source records encoded losslessly for JavaScript.",
-        "type": "string"
+        "description": "Number of exact raw source records.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "sizes": {
         "$ref": "#/$defs/WebImportSizeFacts",
@@ -823,8 +1335,10 @@ const schemas = {
             "type": "string"
           },
           "position": {
-            "description": "One-based immutable imported position encoded losslessly for JavaScript.",
-            "type": "string"
+            "description": "One-based immutable imported position.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -969,12 +1483,16 @@ const schemas = {
             "description": "Exact immutable continuation frontier."
           },
           "raw_record_position": {
-            "description": "One-based physical source-record occurrence encoded losslessly for JavaScript.",
-            "type": "string"
+            "description": "One-based physical source-record occurrence.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "record_entry_position": {
-            "description": "One-based normalized entry position within that source record, encoded losslessly for JavaScript.",
-            "type": "string"
+            "description": "One-based normalized entry position within that source record.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "source_speaker": {
             "$ref": "#/$defs/WebImportedSpeakerEvidence",
@@ -1032,12 +1550,16 @@ const schemas = {
     "description": "One bounded imported-entry window.",
     "properties": {
       "anchor_position": {
-        "description": "Resolved immutable anchor position encoded losslessly for JavaScript.",
-        "type": "string"
+        "description": "Resolved immutable anchor position.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "first_position": {
-        "description": "First position returned, encoded losslessly for JavaScript.",
-        "type": "string"
+        "description": "First position returned.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       },
       "has_after": {
         "description": "Whether later entries exist.",
@@ -1052,12 +1574,13 @@ const schemas = {
         "items": {
           "$ref": "#/$defs/WebImportedEntry"
         },
-        "maxItems": 101,
         "type": "array"
       },
       "last_position": {
-        "description": "Last position returned, encoded losslessly for JavaScript.",
-        "type": "string"
+        "description": "Last position returned.",
+        "format": "uint64",
+        "minimum": 0,
+        "type": "integer"
       }
     },
     "required": [
@@ -1128,9 +1651,11 @@ const schemas = {
         ]
       },
       "position": {
-        "description": "Required only for the `position` anchor; encoded losslessly for JavaScript.",
+        "description": "Required only for the `position` anchor.",
+        "format": "uint64",
+        "minimum": 0,
         "type": [
-          "string",
+          "integer",
           "null"
         ]
       }
@@ -1191,8 +1716,10 @@ const schemas = {
             ]
           },
           "entry_count": {
-            "description": "Number of normalized imported entries encoded losslessly for JavaScript.",
-            "type": "string"
+            "description": "Number of normalized imported entries.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
           },
           "format": {
             "$ref": "#/$defs/WebImportFormat",
@@ -1212,6 +1739,13 @@ const schemas = {
               }
             ],
             "description": "Bounded converter-attested source-session evidence, when consistent."
+          },
+          "source_session_id_sha256": {
+            "description": "SHA-256 of the complete source-session identifier, when present.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -1241,16 +1775,29 @@ const schemas = {
     "additionalProperties": false,
     "description": "One keyset page of imports.",
     "properties": {
+      "exact_source_session_id_sha256": {
+        "description": "SHA-256 of the complete exact-search value, absent for ordinary catalog reads.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "items": {
         "description": "Rows in stable UUID order.",
         "items": {
           "$ref": "#/$defs/WebImportSummary"
         },
-        "maxItems": 100,
         "type": "array"
       },
       "next_cursor": {
         "description": "Exclusive cursor for the next page, absent at the end.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "search_correlation": {
+        "description": "Client-selected exact-search correlation UUID, absent for ordinary catalog reads.",
         "type": [
           "string",
           "null"
@@ -1288,7 +1835,7 @@ const schemas = {
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
-    "description": "Bounded imports catalog request carried as query parameters.",
+    "description": "Bounded imports catalog request carried as query parameters. An exact\nsource-session filter is carried separately as the bounded raw UTF-8 body of\n`POST /api/imports/searches`; empty text and edge whitespace are preserved.",
     "properties": {
       "after": {
         "description": "Exclusive imported-conversation UUID cursor.",
@@ -1317,6 +1864,13 @@ const schemas = {
           "null"
         ]
       },
+      "search_correlation": {
+        "description": "Client-selected UUID echoed by an exact-search response.",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
       "source_session_id": {
         "description": "Optional exact converter-attested source-session identifier.",
         "type": [
@@ -1328,26 +1882,1888 @@ const schemas = {
     "title": "WebImportListRequest",
     "type": "object"
   },
+  "WebRepoWatchActivityPage": {
+    "$defs": {
+      "WebRepoWatchEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor_generation": {
+            "type": "string"
+          },
+          "event_ordinal": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebRepoWatchEventKind"
+          },
+          "observed_at_unix_milliseconds": {
+            "type": "string"
+          },
+          "pull_request": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "cursor_generation",
+          "event_ordinal",
+          "kind",
+          "observed_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchEventCursor": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor_generation": {
+            "type": "string"
+          },
+          "event_ordinal": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cursor_generation",
+          "event_ordinal"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchEventKind": {
+        "enum": [
+          "pull_request_opened",
+          "pull_request_closed",
+          "pull_request_merged",
+          "head_changed",
+          "mergeable_state_changed",
+          "checks_completed",
+          "check_run_completed",
+          "branch_workflow_run_completed",
+          "review_submitted",
+          "thread_opened",
+          "thread_resolved",
+          "labeled",
+          "unlabeled",
+          "base_advanced",
+          "reaction_changed"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchWebhookActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "action_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "disposition": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchWebhookDisposition"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "event_name": {
+            "type": "string"
+          },
+          "latest_projected_at_unix_milliseconds": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "projection_count": {
+            "type": "string"
+          },
+          "receipt_sequence": {
+            "type": "string"
+          },
+          "received_at_unix_milliseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_sequence",
+          "event_name",
+          "received_at_unix_milliseconds",
+          "projection_count"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchWebhookDisposition": {
+        "enum": [
+          "projected",
+          "committed",
+          "duplicate_state",
+          "superseded",
+          "ignored",
+          "quarantined"
+        ],
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "event_continuation_before": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebRepoWatchEventCursor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "events": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchEvent"
+        },
+        "maxItems": 100,
+        "type": "array"
+      },
+      "webhook_continuation_before_receipt_sequence": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "webhooks": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchWebhookActivity"
+        },
+        "maxItems": 100,
+        "type": "array"
+      }
+    },
+    "required": [
+      "events",
+      "webhooks"
+    ],
+    "title": "WebRepoWatchActivityPage",
+    "type": "object"
+  },
+  "WebRepoWatchPullRequestPage": {
+    "$defs": {
+      "WebRepoWatchAutomationStatus": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "unattempted",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "held",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "queued",
+                "type": "string"
+              },
+              "latest_event_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "latest_event_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "non_converged",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "stale_seal",
+                "type": "string"
+              },
+              "sealed_event_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id",
+              "sealed_event_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "current_head_sealed",
+                "type": "string"
+              },
+              "sealed_event_id": {
+                "type": "string"
+              },
+              "settled_at_unix_milliseconds": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id",
+              "sealed_event_id",
+              "settled_at_unix_milliseconds"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebRepoWatchChecksStatus": {
+        "enum": [
+          "no_completed_suites",
+          "passing",
+          "failing"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchDispatch": {
+        "additionalProperties": false,
+        "properties": {
+          "attempted_at_unix_milliseconds": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "event_id",
+          "rule",
+          "attempted_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchDraftStatus": {
+        "enum": [
+          "draft",
+          "ready_for_review"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor_generation": {
+            "type": "string"
+          },
+          "event_ordinal": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebRepoWatchEventKind"
+          },
+          "observed_at_unix_milliseconds": {
+            "type": "string"
+          },
+          "pull_request": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "cursor_generation",
+          "event_ordinal",
+          "kind",
+          "observed_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchEventKind": {
+        "enum": [
+          "pull_request_opened",
+          "pull_request_closed",
+          "pull_request_merged",
+          "head_changed",
+          "mergeable_state_changed",
+          "checks_completed",
+          "check_run_completed",
+          "branch_workflow_run_completed",
+          "review_submitted",
+          "thread_opened",
+          "thread_resolved",
+          "labeled",
+          "unlabeled",
+          "base_advanced",
+          "reaction_changed"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchLifecycle": {
+        "enum": [
+          "open",
+          "closed",
+          "merged"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchMergeable": {
+        "enum": [
+          "mergeable",
+          "conflicting",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchPullRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "automation": {
+            "$ref": "#/$defs/WebRepoWatchAutomationStatus"
+          },
+          "base_branch": {
+            "type": "string"
+          },
+          "checks": {
+            "$ref": "#/$defs/WebRepoWatchChecksStatus"
+          },
+          "commissioned_session_count": {
+            "type": "string"
+          },
+          "draft": {
+            "$ref": "#/$defs/WebRepoWatchDraftStatus"
+          },
+          "head": {
+            "type": "string"
+          },
+          "head_branch": {
+            "type": "string"
+          },
+          "head_repository": {
+            "type": "string"
+          },
+          "held_slot_count": {
+            "type": "string"
+          },
+          "last_actionable_event": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_automation_settlement": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchSettlement"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_dispatch_attempt": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchDispatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_observed_event": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "lifecycle": {
+            "$ref": "#/$defs/WebRepoWatchLifecycle"
+          },
+          "mergeable": {
+            "$ref": "#/$defs/WebRepoWatchMergeable"
+          },
+          "number": {
+            "type": "string"
+          },
+          "open_child_count": {
+            "type": "string"
+          },
+          "open_parent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "queued_obligation_count": {
+            "type": "string"
+          },
+          "review_decision": {
+            "$ref": "#/$defs/WebRepoWatchReviewDecision"
+          },
+          "stale_review_count": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "unresolved_thread_count": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "title",
+          "head",
+          "head_repository",
+          "head_branch",
+          "base_branch",
+          "lifecycle",
+          "mergeable",
+          "draft",
+          "checks",
+          "review_decision",
+          "stale_review_count",
+          "unresolved_thread_count",
+          "open_child_count",
+          "automation",
+          "held_slot_count",
+          "queued_obligation_count",
+          "commissioned_session_count"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchReviewDecision": {
+        "enum": [
+          "none",
+          "commented",
+          "approved",
+          "changes_requested"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchSettlement": {
+        "additionalProperties": false,
+        "properties": {
+          "dispatch_id": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "settled_at_unix_milliseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "dispatch_id",
+          "event_id",
+          "settled_at_unix_milliseconds"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "continuation_after_pull_request": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "pull_requests": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchPullRequest"
+        },
+        "maxItems": 64,
+        "type": "array"
+      },
+      "repository": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "repository",
+      "pull_requests"
+    ],
+    "title": "WebRepoWatchPullRequestPage",
+    "type": "object"
+  },
+  "WebRepoWatchPullRequestSessionPage": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "unix_milliseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebAttentionSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "current_turn_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebAttentionActivity"
+          },
+          "session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          }
+        },
+        "required": [
+          "session_id",
+          "state",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchPullRequestSession": {
+        "additionalProperties": false,
+        "properties": {
+          "attention": {
+            "$ref": "#/$defs/WebAttentionSummary"
+          },
+          "commissioned_at_unix_microseconds": {
+            "type": "string"
+          },
+          "purpose": {
+            "$ref": "#/$defs/WebRepoWatchSessionPurpose"
+          }
+        },
+        "required": [
+          "commissioned_at_unix_microseconds",
+          "purpose",
+          "attention"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchSessionCursor": {
+        "additionalProperties": false,
+        "properties": {
+          "commissioned_at_unix_microseconds": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "commissioned_at_unix_microseconds",
+          "session_id"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchSessionPurpose": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "event_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "rule_dispatch",
+                "type": "string"
+              },
+              "rule": {
+                "type": "string"
+              },
+              "template": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id",
+              "event_id",
+              "rule",
+              "template"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "operator_commission",
+                "type": "string"
+              },
+              "template": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id",
+              "template"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "continuation_before": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebRepoWatchSessionCursor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "sessions": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchPullRequestSession"
+        },
+        "maxItems": 64,
+        "type": "array"
+      }
+    },
+    "required": [
+      "sessions"
+    ],
+    "title": "WebRepoWatchPullRequestSessionPage",
+    "type": "object"
+  },
+  "WebRepoWatchRepositoryStatusPage": {
+    "$defs": {
+      "WebRepoWatchDispatch": {
+        "additionalProperties": false,
+        "properties": {
+          "attempted_at_unix_milliseconds": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "event_id",
+          "rule",
+          "attempted_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchEvent": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor_generation": {
+            "type": "string"
+          },
+          "event_ordinal": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebRepoWatchEventKind"
+          },
+          "observed_at_unix_milliseconds": {
+            "type": "string"
+          },
+          "pull_request": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "cursor_generation",
+          "event_ordinal",
+          "kind",
+          "observed_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchEventKind": {
+        "enum": [
+          "pull_request_opened",
+          "pull_request_closed",
+          "pull_request_merged",
+          "head_changed",
+          "mergeable_state_changed",
+          "checks_completed",
+          "check_run_completed",
+          "branch_workflow_run_completed",
+          "review_submitted",
+          "thread_opened",
+          "thread_resolved",
+          "labeled",
+          "unlabeled",
+          "base_advanced",
+          "reaction_changed"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchEventKindCount": {
+        "additionalProperties": false,
+        "properties": {
+          "count": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/$defs/WebRepoWatchEventKind"
+          }
+        },
+        "required": [
+          "kind",
+          "count"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchLatestWebhook": {
+        "additionalProperties": false,
+        "properties": {
+          "action_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_name": {
+            "type": "string"
+          },
+          "receipt_sequence": {
+            "type": "string"
+          },
+          "received_at_unix_milliseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "receipt_sequence",
+          "event_name",
+          "received_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchRepositoryStatus": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor_generation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "event_kind_counts_previous_hour": {
+            "items": {
+              "$ref": "#/$defs/WebRepoWatchEventKindCount"
+            },
+            "type": "array"
+          },
+          "held_slot_count": {
+            "type": "string"
+          },
+          "last_actionable_event": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_automation_settlement": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchSettlement"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_dispatch_attempt": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchDispatch"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_observed_event": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchEvent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "latest_projection_latency_milliseconds": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latest_webhook": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebRepoWatchLatestWebhook"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "maximum_projection_latency_milliseconds_previous_hour": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observed_at_unix_milliseconds": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previous_five_minutes": {
+            "$ref": "#/$defs/WebRepoWatchWebhookWindow"
+          },
+          "previous_hour": {
+            "$ref": "#/$defs/WebRepoWatchWebhookWindow"
+          },
+          "queued_obligation_count": {
+            "type": "string"
+          },
+          "repository": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "repository",
+          "previous_five_minutes",
+          "previous_hour",
+          "event_kind_counts_previous_hour",
+          "held_slot_count",
+          "queued_obligation_count"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchSettlement": {
+        "additionalProperties": false,
+        "properties": {
+          "dispatch_id": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "settled_at_unix_milliseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "dispatch_id",
+          "event_id",
+          "settled_at_unix_milliseconds"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchWebhookWindow": {
+        "additionalProperties": false,
+        "properties": {
+          "projected": {
+            "type": "string"
+          },
+          "quarantined": {
+            "type": "string"
+          },
+          "received": {
+            "type": "string"
+          },
+          "seconds": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "terminal": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "seconds",
+          "received",
+          "projected",
+          "terminal",
+          "quarantined"
+        ],
+        "type": "object"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "continuation_after_repository": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "repositories": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchRepositoryStatus"
+        },
+        "maxItems": 64,
+        "type": "array"
+      }
+    },
+    "required": [
+      "repositories"
+    ],
+    "title": "WebRepoWatchRepositoryStatusPage",
+    "type": "object"
+  },
+  "WebRepoWatchWorkPage": {
+    "$defs": {
+      "WebRepoWatchHeldCursor": {
+        "additionalProperties": false,
+        "properties": {
+          "dispatch_id": {
+            "type": "string"
+          },
+          "held_since_unix_microseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "held_since_unix_microseconds",
+          "dispatch_id"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchHeldSlot": {
+        "additionalProperties": false,
+        "properties": {
+          "blockers": {
+            "items": {
+              "$ref": "#/$defs/WebRepoWatchHeldSlotBlocker"
+            },
+            "type": "array"
+          },
+          "dispatch_id": {
+            "type": "string"
+          },
+          "held_since_unix_microseconds": {
+            "type": "string"
+          },
+          "rule": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/$defs/WebRepoWatchSingletonScope"
+          },
+          "session_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "dispatch_id",
+          "scope",
+          "rule",
+          "held_since_unix_microseconds",
+          "session_ids",
+          "blockers"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchHeldSlotBlocker": {
+        "enum": [
+          "undelivered_action",
+          "delivery_turn_runtime_relevant",
+          "live_runtime_turn",
+          "pursuing_goal"
+        ],
+        "type": "string"
+      },
+      "WebRepoWatchObligationCursor": {
+        "additionalProperties": false,
+        "properties": {
+          "obligation_id": {
+            "type": "string"
+          },
+          "owed_since_unix_microseconds": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "owed_since_unix_microseconds",
+          "obligation_id"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchObligationReadiness": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "ready",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "dispatch_id": {
+                "type": "string"
+              },
+              "kind": {
+                "const": "occupied",
+                "type": "string"
+              },
+              "session_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "dispatch_id",
+              "session_ids"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "description": "Held by a live independently commissioned session, which owns no\nrepository-watch dispatch identity to report alongside it.",
+            "properties": {
+              "kind": {
+                "const": "externally_blocked",
+                "type": "string"
+              },
+              "session_ids": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "kind",
+              "session_ids"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "eligible_at_unix_milliseconds": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "kind": {
+                "const": "cooldown",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "parked",
+                "type": "string"
+              },
+              "parked_at_unix_milliseconds": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "parked_at_unix_milliseconds"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebRepoWatchQueuedObligation": {
+        "additionalProperties": false,
+        "properties": {
+          "failed_attempts": {
+            "type": "string"
+          },
+          "first_event_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "latest_event_id": {
+            "type": "string"
+          },
+          "latest_match_at_unix_milliseconds": {
+            "type": "string"
+          },
+          "matched_event_count": {
+            "type": "string"
+          },
+          "owed_since_unix_microseconds": {
+            "type": "string"
+          },
+          "readiness": {
+            "$ref": "#/$defs/WebRepoWatchObligationReadiness"
+          },
+          "rule": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/$defs/WebRepoWatchSingletonScope"
+          }
+        },
+        "required": [
+          "id",
+          "scope",
+          "rule",
+          "first_event_id",
+          "latest_event_id",
+          "matched_event_count",
+          "owed_since_unix_microseconds",
+          "latest_match_at_unix_milliseconds",
+          "failed_attempts",
+          "readiness"
+        ],
+        "type": "object"
+      },
+      "WebRepoWatchSingletonScope": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "pull_request",
+                "type": "string"
+              },
+              "number": {
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "repository",
+              "number"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "stack",
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              },
+              "root_pull_request": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "repository",
+              "root_pull_request"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "rule",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "repository",
+                "type": "string"
+              },
+              "repository": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "repository"
+            ],
+            "type": "object"
+          }
+        ]
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "held_continuation_after": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebRepoWatchHeldCursor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "held_slots": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchHeldSlot"
+        },
+        "maxItems": 64,
+        "type": "array"
+      },
+      "obligation_continuation_after": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebRepoWatchObligationCursor"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "queued_obligations": {
+        "items": {
+          "$ref": "#/$defs/WebRepoWatchQueuedObligation"
+        },
+        "maxItems": 64,
+        "type": "array"
+      }
+    },
+    "required": [
+      "held_slots",
+      "queued_obligations"
+    ],
+    "title": "WebRepoWatchWorkPage",
+    "type": "object"
+  },
+  "WebSearchPage": {
+    "$defs": {
+      "WebSearchContentClass": {
+        "description": "Closed browser-visible class of matched indexed content.",
+        "enum": [
+          "user_transcript",
+          "assistant_transcript",
+          "tool_arguments",
+          "tool_result",
+          "session_metadata",
+          "attachment_filename",
+          "attachment_media_metadata",
+          "derived_text_artifact"
+        ],
+        "type": "string"
+      },
+      "WebSearchHighlight": {
+        "additionalProperties": false,
+        "description": "One half-open UTF-8 byte range within a bounded snippet.",
+        "properties": {
+          "end_byte": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "start_byte": {
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "start_byte",
+          "end_byte"
+        ],
+        "type": "object"
+      },
+      "WebSearchProjectionId": {
+        "description": "Checked positive PostgreSQL projection identity encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]{0,18}$",
+        "type": "string"
+      },
+      "WebSearchResult": {
+        "additionalProperties": false,
+        "description": "One bounded lexical match with enough identity to reveal unloaded history.",
+        "properties": {
+          "address": {
+            "$ref": "#/$defs/WebTimelineAddress"
+          },
+          "content_class": {
+            "$ref": "#/$defs/WebSearchContentClass"
+          },
+          "highlights": {
+            "items": {
+              "$ref": "#/$defs/WebSearchHighlight"
+            },
+            "maxItems": 512,
+            "type": "array"
+          },
+          "projection_id": {
+            "$ref": "#/$defs/WebSearchProjectionId"
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "snippet": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "source": {
+            "$ref": "#/$defs/WebSearchResultSource"
+          }
+        },
+        "required": [
+          "session_id",
+          "address",
+          "projection_id",
+          "source",
+          "content_class",
+          "snippet",
+          "highlights"
+        ],
+        "type": "object"
+      },
+      "WebSearchResultSource": {
+        "description": "Typed durable source of one browser search result.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "session",
+                "type": "string"
+              },
+              "session_id": {
+                "$ref": "#/$defs/WebSessionId"
+              }
+            },
+            "required": [
+              "kind",
+              "session_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "accepted_input_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "accepted_input",
+                "type": "string"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "accepted_input_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "accepted_input_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "steering_input",
+                "type": "string"
+              },
+              "source_turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "accepted_input_id",
+              "source_turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "turn_transcript_entry",
+                "type": "string"
+              },
+              "semantic_entry_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "semantic_entry_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "session_transcript_entry",
+                "type": "string"
+              },
+              "semantic_entry_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "semantic_entry_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "tool_request",
+                "type": "string"
+              },
+              "tool_request_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_request_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "tool_attempt",
+                "type": "string"
+              },
+              "tool_attempt_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "turn_id": {
+                "$ref": "#/$defs/WebUuid"
+              }
+            },
+            "required": [
+              "kind",
+              "tool_attempt_id",
+              "turn_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "attachment_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "attachment",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "attachment_id"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "artifact_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "kind": {
+                "const": "derived_artifact",
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "artifact_id"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebTimelineAddress": {
+        "additionalProperties": false,
+        "description": "Stable browser-visible location of one durable session event.",
+        "properties": {
+          "event_sequence": {
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+          }
+        },
+        "required": [
+          "event_sequence"
+        ],
+        "type": "object"
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded, stable page of lexical matches.",
+    "properties": {
+      "continuation": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "description": "Stable opaque descending search keyset boundary.",
+            "properties": {
+              "address": {
+                "$ref": "#/$defs/WebTimelineAddress"
+              },
+              "projection_id": {
+                "$ref": "#/$defs/WebSearchProjectionId"
+              }
+            },
+            "required": [
+              "address",
+              "projection_id"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "results": {
+        "items": {
+          "$ref": "#/$defs/WebSearchResult"
+        },
+        "maxItems": 100,
+        "type": "array"
+      }
+    },
+    "required": [
+      "results",
+      "continuation"
+    ],
+    "title": "WebSearchPage",
+    "type": "object"
+  },
   "WebSessionTimelineDescriptor": {
     "$defs": {
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebSessionTimelineSizeFacts": {
         "additionalProperties": false,
         "description": "Explicit lifetime size facts used only for browser loading policy.",
         "properties": {
           "item_count": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "projected_structured_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "projected_text_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "referenced_blob_bytes": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "referenced_blob_count": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           }
         },
         "required": [
@@ -1364,10 +3780,10 @@ const schemas = {
         "description": "Current work facts carried by the lightweight session descriptor.",
         "properties": {
           "active_turn_count": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           },
           "queued_turn_count": {
-            "type": "string"
+            "$ref": "#/$defs/WebU64"
           }
         },
         "required": [
@@ -1381,14 +3797,24 @@ const schemas = {
         "description": "Stable browser-visible location of one durable session event.",
         "properties": {
           "event_sequence": {
-            "description": "Positive global durable event sequence encoded losslessly for JavaScript.",
-            "type": "string"
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
           }
         },
         "required": [
           "event_sequence"
         ],
         "type": "object"
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1402,10 +3828,10 @@ const schemas = {
         "$ref": "#/$defs/WebTimelineAddress"
       },
       "observed_through": {
-        "type": "string"
+        "$ref": "#/$defs/WebU64"
       },
       "session_id": {
-        "type": "string"
+        "$ref": "#/$defs/WebSessionId"
       },
       "sizes": {
         "$ref": "#/$defs/WebSessionTimelineSizeFacts"
@@ -1427,6 +3853,11 @@ const schemas = {
   },
   "WebSessionTimelineWindow": {
     "$defs": {
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
       "WebSessionTimelineEventKind": {
         "description": "Closed durable event categories in the browser timeline foundation.",
         "enum": [
@@ -1479,14 +3910,19 @@ const schemas = {
         "description": "Stable browser-visible location of one durable session event.",
         "properties": {
           "event_sequence": {
-            "description": "Positive global durable event sequence encoded losslessly for JavaScript.",
-            "type": "string"
+            "$ref": "#/$defs/WebTimelineEventSequence",
+            "description": "Positive global durable event sequence encoded losslessly for JavaScript."
           }
         },
         "required": [
           "event_sequence"
         ],
         "type": "object"
+      },
+      "WebTimelineEventSequence": {
+        "description": "Checked positive durable-event sequence encoded losslessly for JavaScript.",
+        "pattern": "^[1-9][0-9]*$",
+        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1496,7 +3932,18 @@ const schemas = {
       "continuation_after": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebTimelineAddress"
+            "additionalProperties": false,
+            "description": "Stable browser-visible location of one durable session event.",
+            "properties": {
+              "event_sequence": {
+                "$ref": "#/$defs/WebTimelineEventSequence",
+                "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+              }
+            },
+            "required": [
+              "event_sequence"
+            ],
+            "type": "object"
           },
           {
             "type": "null"
@@ -1506,7 +3953,18 @@ const schemas = {
       "continuation_before": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebTimelineAddress"
+            "additionalProperties": false,
+            "description": "Stable browser-visible location of one durable session event.",
+            "properties": {
+              "event_sequence": {
+                "$ref": "#/$defs/WebTimelineEventSequence",
+                "description": "Positive global durable event sequence encoded losslessly for JavaScript."
+              }
+            },
+            "required": [
+              "event_sequence"
+            ],
+            "type": "object"
           },
           {
             "type": "null"
@@ -1525,21 +3983,567 @@ const schemas = {
         "type": "integer"
       },
       "session_id": {
-        "type": "string"
+        "$ref": "#/$defs/WebSessionId"
       }
     },
     "required": [
       "session_id",
       "items",
-      "projected_structured_bytes"
+      "projected_structured_bytes",
+      "continuation_before",
+      "continuation_after"
     ],
     "title": "WebSessionTimelineWindow",
+    "type": "object"
+  },
+  "WebUsageCallPage": {
+    "$defs": {
+      "WebDollarAmount": {
+        "description": "Canonical nonnegative fixed-point USD amount derived by the daemon.",
+        "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$",
+        "type": "string"
+      },
+      "WebNullableU64": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebU64"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Independently nullable token axes; null is never interpreted as zero."
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      },
+      "WebUsageCall": {
+        "additionalProperties": false,
+        "description": "One terminal call with exact token, provenance, rate, and billing evidence.",
+        "properties": {
+          "call_id": {
+            "$ref": "#/$defs/WebUuid"
+          },
+          "call_kind": {
+            "$ref": "#/$defs/WebUsageCallKind"
+          },
+          "cost": {
+            "$ref": "#/$defs/WebUsageCost"
+          },
+          "input_semantics": {
+            "$ref": "#/$defs/WebUsageInputSemantics"
+          },
+          "model_id": {
+            "$ref": "#/$defs/WebUuid"
+          },
+          "profile_id": {
+            "$ref": "#/$defs/WebUsageProfileId"
+          },
+          "provenance": {
+            "$ref": "#/$defs/WebUsageProvenance"
+          },
+          "recorded_at_micros": {
+            "$ref": "#/$defs/WebUsageTimestampMicros"
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "tokens": {
+            "$ref": "#/$defs/WebUsageTokenAxes"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "description": "Owning turn, present-but-null exactly for context compaction.",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "call_kind",
+          "call_id",
+          "session_id",
+          "turn_id",
+          "model_id",
+          "profile_id",
+          "provenance",
+          "input_semantics",
+          "tokens",
+          "recorded_at_micros",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "WebUsageCallKind": {
+        "description": "Closed physical class of one terminal usage record.",
+        "enum": [
+          "model_call",
+          "approval_judge",
+          "context_compaction"
+        ],
+        "type": "string"
+      },
+      "WebUsageCost": {
+        "description": "Labeled configured cost, or an explicit reason it cannot be derived.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "amount_usd": {
+                "$ref": "#/$defs/WebDollarAmount"
+              },
+              "label": {
+                "$ref": "#/$defs/WebUsageCostLabel"
+              },
+              "rate_version": {
+                "$ref": "#/$defs/WebUsageRateVersion"
+              },
+              "status": {
+                "const": "derived",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "amount_usd",
+              "rate_version",
+              "label"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WebUsageCostUnavailableReason"
+              },
+              "status": {
+                "const": "unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebUsageCostLabel": {
+        "description": "Browser-visible billing label derived from the serving credential profile.",
+        "enum": [
+          "real",
+          "metered_equivalent"
+        ],
+        "type": "string"
+      },
+      "WebUsageCostUnavailableReason": {
+        "description": "Why no configured dollar derivation is available for exact token evidence.",
+        "enum": [
+          "no_token_evidence",
+          "unknown_input_semantics",
+          "incomplete_cache_axes",
+          "invalid_cache_breakdown",
+          "configuration_unavailable"
+        ],
+        "type": "string"
+      },
+      "WebUsageInputSemantics": {
+        "description": "Meaning of one provider target's input-token axis.",
+        "enum": [
+          "unknown",
+          "cache_exclusive",
+          "cache_inclusive"
+        ],
+        "type": "string"
+      },
+      "WebUsageProfileId": {
+        "description": "Non-secret bounded profile identity retained by usage summaries.",
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageProvenance": {
+        "description": "Closed provenance of one token-evidence projection.",
+        "enum": [
+          "reported",
+          "estimated"
+        ],
+        "type": "string"
+      },
+      "WebUsageRateVersion": {
+        "description": "Checked nonempty configured rate version exposed to browser clients.",
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageTimestampMicros": {
+        "description": "Checked application-range usage timestamp encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]{0,17})$",
+        "type": "string"
+      },
+      "WebUsageTokenAxes": {
+        "additionalProperties": false,
+        "description": "Independently nullable token axes; null is never interpreted as zero.",
+        "properties": {
+          "cache_creation_input": {
+            "$ref": "#/$defs/WebNullableU64"
+          },
+          "cache_read_input": {
+            "$ref": "#/$defs/WebNullableU64"
+          },
+          "input": {
+            "$ref": "#/$defs/WebNullableU64"
+          },
+          "output": {
+            "$ref": "#/$defs/WebNullableU64"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "cache_creation_input",
+          "cache_read_input"
+        ],
+        "type": "object"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded page of exact call evidence.",
+    "properties": {
+      "calls": {
+        "items": {
+          "$ref": "#/$defs/WebUsageCall"
+        },
+        "maxItems": 100,
+        "type": "array"
+      },
+      "continuation": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "description": "Present-but-null when the page exhausts the matching evidence, so an\nomitted member is an incompatibility rather than a silent exhaustion.",
+            "properties": {
+              "call_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "recorded_at_micros": {
+                "$ref": "#/$defs/WebUsageTimestampMicros"
+              }
+            },
+            "required": [
+              "recorded_at_micros",
+              "call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "calls",
+      "continuation"
+    ],
+    "title": "WebUsageCallPage",
+    "type": "object"
+  },
+  "WebUsageSummary": {
+    "$defs": {
+      "WebDollarAmount": {
+        "description": "Canonical nonnegative fixed-point USD amount derived by the daemon.",
+        "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$",
+        "type": "string"
+      },
+      "WebNullableU128": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebU128"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Independently nullable aggregate token axis widened beyond one call."
+      },
+      "WebU128": {
+        "description": "Checked unsigned 128-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]{0,38})$",
+        "type": "string"
+      },
+      "WebUsageAggregateGroup": {
+        "additionalProperties": false,
+        "description": "One compatibility-preserving usage and configured-cost summary row.",
+        "properties": {
+          "call_count": {
+            "$ref": "#/$defs/WebUsageCallCount"
+          },
+          "call_kind": {
+            "$ref": "#/$defs/WebUsageCallKind"
+          },
+          "cost": {
+            "$ref": "#/$defs/WebUsageCost"
+          },
+          "coverage": {
+            "$ref": "#/$defs/WebUsageTokenCoverage"
+          },
+          "input_semantics": {
+            "$ref": "#/$defs/WebUsageInputSemantics"
+          },
+          "model_id": {
+            "$ref": "#/$defs/WebUuid"
+          },
+          "profile_id": {
+            "$ref": "#/$defs/WebUsageProfileId"
+          },
+          "provenance": {
+            "$ref": "#/$defs/WebUsageProvenance"
+          },
+          "tokens": {
+            "$ref": "#/$defs/WebUsageAggregateTokenAxes"
+          }
+        },
+        "required": [
+          "call_kind",
+          "model_id",
+          "profile_id",
+          "provenance",
+          "input_semantics",
+          "coverage",
+          "call_count",
+          "tokens",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "WebUsageAggregateTokenAxes": {
+        "additionalProperties": false,
+        "description": "Aggregate token axes widened beyond one physical call.",
+        "properties": {
+          "cache_creation_input": {
+            "$ref": "#/$defs/WebNullableU128"
+          },
+          "cache_read_input": {
+            "$ref": "#/$defs/WebNullableU128"
+          },
+          "input": {
+            "$ref": "#/$defs/WebNullableU128"
+          },
+          "output": {
+            "$ref": "#/$defs/WebNullableU128"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "cache_creation_input",
+          "cache_read_input"
+        ],
+        "type": "object"
+      },
+      "WebUsageCallCount": {
+        "description": "Checked positive summary call count encoded losslessly for JavaScript.",
+        "pattern": "^([1-9][0-9]{0,3}|10000)$",
+        "type": "string"
+      },
+      "WebUsageCallKind": {
+        "description": "Closed physical class of one terminal usage record.",
+        "enum": [
+          "model_call",
+          "approval_judge",
+          "context_compaction"
+        ],
+        "type": "string"
+      },
+      "WebUsageCost": {
+        "description": "Labeled configured cost, or an explicit reason it cannot be derived.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "amount_usd": {
+                "$ref": "#/$defs/WebDollarAmount"
+              },
+              "label": {
+                "$ref": "#/$defs/WebUsageCostLabel"
+              },
+              "rate_version": {
+                "$ref": "#/$defs/WebUsageRateVersion"
+              },
+              "status": {
+                "const": "derived",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "amount_usd",
+              "rate_version",
+              "label"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WebUsageCostUnavailableReason"
+              },
+              "status": {
+                "const": "unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebUsageCostLabel": {
+        "description": "Browser-visible billing label derived from the serving credential profile.",
+        "enum": [
+          "real",
+          "metered_equivalent"
+        ],
+        "type": "string"
+      },
+      "WebUsageCostUnavailableReason": {
+        "description": "Why no configured dollar derivation is available for exact token evidence.",
+        "enum": [
+          "no_token_evidence",
+          "unknown_input_semantics",
+          "incomplete_cache_axes",
+          "invalid_cache_breakdown",
+          "configuration_unavailable"
+        ],
+        "type": "string"
+      },
+      "WebUsageInputSemantics": {
+        "description": "Meaning of one provider target's input-token axis.",
+        "enum": [
+          "unknown",
+          "cache_exclusive",
+          "cache_inclusive"
+        ],
+        "type": "string"
+      },
+      "WebUsageProfileId": {
+        "description": "Non-secret bounded profile identity retained by usage summaries.",
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageProvenance": {
+        "description": "Closed provenance of one token-evidence projection.",
+        "enum": [
+          "reported",
+          "estimated"
+        ],
+        "type": "string"
+      },
+      "WebUsageRateVersion": {
+        "description": "Checked nonempty configured rate version exposed to browser clients.",
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageTokenCoverage": {
+        "additionalProperties": false,
+        "description": "Explicit presence shape retained by compatibility-preserving aggregates.",
+        "properties": {
+          "cache_creation_input": {
+            "type": "boolean"
+          },
+          "cache_read_input": {
+            "type": "boolean"
+          },
+          "input": {
+            "type": "boolean"
+          },
+          "output": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "cache_creation_input",
+          "cache_read_input"
+        ],
+        "type": "object"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Bounded aggregate response; truncation is never implicit.",
+    "properties": {
+      "groups": {
+        "items": {
+          "$ref": "#/$defs/WebUsageAggregateGroup"
+        },
+        "maxItems": 256,
+        "type": "array"
+      },
+      "truncated": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "groups",
+      "truncated"
+    ],
+    "title": "WebUsageSummary",
     "type": "object"
   }
 };
 
 function fail(path, expected) {
   throw new TypeError(`${path} must be ${expected}`);
+}
+
+function isWellFormedUnicode(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {
+        return false;
+      }
+      index += 1;
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function resolveReference(root, reference) {
@@ -1666,14 +4670,53 @@ function assertSchema(root, schema, value, path) {
     if (typeof value !== "string") {
       fail(path, "string");
     }
-    if (schema.minLength !== undefined && value.length < schema.minLength) {
-      fail(path, `at least ${schema.minLength} characters`);
+    if (!isWellFormedUnicode(value)) {
+      fail(path, "well-formed Unicode scalar values");
     }
-    if (schema.maxLength !== undefined && value.length > schema.maxLength) {
-      fail(path, `at most ${schema.maxLength} characters`);
+    if (
+      (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+      value.length > 20
+    ) {
+      fail(path, "an unsigned 64-bit integer");
+    }
+    if (schema.minLength !== undefined && Array.from(value).length < schema.minLength) {
+      fail(path, `at least ${schema.minLength} Unicode scalar values`);
     }
     if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {
       fail(path, `matching ${schema.pattern}`);
+    }
+    if (
+      (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+      BigInt(value) > 18446744073709551615n
+    ) {
+      fail(path, "an unsigned 64-bit integer");
+    }
+    if (
+      schema.pattern === "^[1-9][0-9]{0,18}$" &&
+      BigInt(value) > 9223372036854775807n
+    ) {
+      fail(path, "a positive signed 64-bit integer");
+    }
+    if (
+      schema.pattern === "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$" &&
+      BigInt(value.replace(".", "")) > 79228162514264337593543950335n
+    ) {
+      fail(path, "a rust_decimal coefficient");
+    }
+    if (
+      schema.pattern === "^(0|[1-9][0-9]{0,17})$" &&
+      BigInt(value) > 253402300799999999n
+    ) {
+      fail(path, "an application-range usage timestamp");
+    }
+    if (
+      schema.pattern === "^(0|[1-9][0-9]{0,38})$" &&
+      BigInt(value) > 340282366920938463463374607431768211455n
+    ) {
+      fail(path, "an unsigned 128-bit integer");
+    }
+    if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {
+      fail(path, `at most ${schema.maxLength} Unicode scalar values`);
     }
     return;
   }
@@ -1682,98 +4725,62 @@ function assertSchema(root, schema, value, path) {
   }
 }
 
+function assertAttentionSummary(summary, path) {
+  const action = summary.action ?? null;
+  const goalBlock = summary.goal_block ?? null;
+  const valid =
+    (summary.state === "blocked" &&
+      (action === "provide_goal_need" ||
+        (action === null && goalBlock?.reason === "execution_failure"))) ||
+    (summary.state === "awaiting_approval" &&
+      (action === null || action === "decide_approval")) ||
+    (summary.state === "ambiguous" && action === "reconcile_turn") ||
+    ([
+      "active",
+      "queued",
+      "awaiting_tool_recovery",
+      "awaiting_reconciliation",
+      "runner_lost",
+      "idle",
+    ].includes(summary.state) && action === null);
+  if (!valid) {
+    fail(`${path}.action`, `consistent with attention state ${JSON.stringify(summary.state)}`);
+  }
+  const validGoalBlock =
+    (summary.state === "blocked" && goalBlock !== null) ||
+    summary.state === "runner_lost" ||
+    (summary.state !== "blocked" && goalBlock === null);
+  if (!validGoalBlock) {
+    fail(
+      `${path}.goal_block`,
+      `consistent with attention state ${JSON.stringify(summary.state)}`,
+    );
+  }
+}
+
+function assertAttentionSummaries(summaries, path) {
+  summaries.forEach((summary, index) =>
+    assertAttentionSummary(summary, `${path}[${index}]`),
+  );
+}
+
+function assertAttentionSnapshot(snapshot, path) {
+  assertAttentionSummaries(snapshot.summaries, `${path}.summaries`);
+  const continuation = snapshot.continuation_after_session_id ?? null;
+  if (continuation !== null) {
+    const last = snapshot.summaries.at(-1);
+    if (last === undefined || continuation !== last.session_id) {
+      fail(
+        `${path}.continuation_after_session_id`,
+        "the last returned session identity",
+      );
+    }
+  }
+}
+
 function assertCanonicalU64(value, path) {
   if (!/^[1-9][0-9]{0,19}$/.test(value) || BigInt(value) > 18446744073709551615n) {
     fail(path, "a positive canonical decimal u64 string");
-  }
-}
-
-function assertCanonicalNonnegativeU64(value, path) {
-  if (!/^(?:0|[1-9][0-9]{0,19})$/.test(value) || BigInt(value) > 18446744073709551615n) {
-    fail(path, "a nonnegative canonical decimal u64 string");
-  }
-}
-
-function assertSha256(value, path) {
-  if (!/^[0-9a-f]{64}$/.test(value)) {
-    fail(path, "a lowercase hexadecimal SHA-256 digest");
-  }
-}
-
-function assertImportEvidenceBytes(value, path) {
-  if (utf8.encode(value).byteLength > 512) {
-    fail(path, "at most 512 UTF-8 bytes");
-  }
-}
-
-function validateWebImportFrontier(value, path) {
-  assertUuid(value.imported_conversation_id, `${path}.imported_conversation_id`);
-  assertUuid(value.imported_entry_id, `${path}.imported_entry_id`);
-  assertCanonicalU64(value.position, `${path}.position`);
-}
-
-function validateWebImportListPage(value) {
-  value.items.forEach((item, index) => {
-    const path = `import_list_page.items[${index}]`;
-    assertCanonicalU64(item.entry_count, `${path}.entry_count`);
-    if (item.source_session_id !== undefined && item.source_session_id !== null) {
-      assertImportEvidenceBytes(item.source_session_id.leading_text, `${path}.source_session_id.leading_text`);
-    }
-  });
-}
-
-function validateWebImportDescriptor(value) {
-  assertSha256(value.source.source_digest_sha256, "import_descriptor.source.source_digest_sha256");
-  assertCanonicalU64(value.raw_record_count, "import_descriptor.raw_record_count");
-  assertCanonicalNonnegativeU64(value.entry_count, "import_descriptor.entry_count");
-  assertCanonicalU64(value.sizes.raw_source_bytes, "import_descriptor.sizes.raw_source_bytes");
-  assertCanonicalU64(value.sizes.normalized_source_record_bytes, "import_descriptor.sizes.normalized_source_record_bytes");
-  assertCanonicalU64(value.sizes.normalized_entry_bytes, "import_descriptor.sizes.normalized_entry_bytes");
-  validateWebImportFrontier(value.timeline.first, "import_descriptor.timeline.first");
-  validateWebImportFrontier(value.timeline.latest, "import_descriptor.timeline.latest");
-  if (value.source.source_session_id !== undefined && value.source.source_session_id !== null) {
-    assertImportEvidenceBytes(value.source.source_session_id.leading_text, "import_descriptor.source.source_session_id.leading_text");
-  }
-}
-
-function validateWebImportEntryWindowRequest(value) {
-  if (value.position !== undefined && value.position !== null) {
-    assertCanonicalU64(value.position, "import_entry_window_request.position");
-  }
-}
-
-function validateWebImportEntryWindow(value) {
-  assertCanonicalU64(value.anchor_position, "import_entry_window.anchor_position");
-  assertCanonicalU64(value.first_position, "import_entry_window.first_position");
-  assertCanonicalU64(value.last_position, "import_entry_window.last_position");
-  value.items.forEach((item, index) => {
-    const path = `import_entry_window.items[${index}]`;
-    validateWebImportFrontier(item.frontier, `${path}.frontier`);
-    assertCanonicalU64(item.raw_record_position, `${path}.raw_record_position`);
-    assertCanonicalU64(item.record_entry_position, `${path}.record_entry_position`);
-    const hasText = item.text !== undefined && item.text !== null;
-    if ((item.content_kind === "text") !== hasText) {
-      throw new TypeError(`${path}.text must be present exactly for text content`);
-    }
-    if (item.text?.kind === "attested") {
-      assertImportEvidenceBytes(item.text.leading_text, `${path}.text.leading_text`);
-    }
-  });
-}
-
-function validateWebImportContinuation(value, path) {
-  assertUuid(value.command_id, `${path}.command_id`);
-  validateWebImportFrontier(value.frontier, `${path}.frontier`);
-  if (path === "import_continuation_request") {
-    const selection = value.initial_model_selection;
-    if (selection.kind === "direct") {
-      assertUuid(selection.selection_id, `${path}.initial_model_selection.selection_id`);
-    } else {
-      assertUuid(selection.alias_id, `${path}.initial_model_selection.alias_id`);
-    }
-  }
-  if (path === "import_continuation_response") {
-    assertUuid(value.session_id, `${path}.session_id`);
   }
 }
 
@@ -2034,7 +5041,8 @@ function deterministicCacheKey(derivation) {
   return `sha256:${sha256(framed)}`;
 }
 
-function validateWebBlobDescriptor(value) {
+export function decodeWebBlobDescriptor(value) {
+  assertSchema(schemas.WebBlobDescriptor, schemas.WebBlobDescriptor, value, "blob_descriptor");
   assertBlobDigest(value.digest, "blob_descriptor.digest");
   assertCanonicalU64(value.byte_length, "blob_descriptor.byte_length");
   assertMediaType(value.declared_media_type, "blob_descriptor.declared_media_type");
@@ -2139,9 +5147,283 @@ function validateWebBlobDescriptor(value) {
   return value;
 }
 
+export function decodeWebAttentionSnapshot(value) {
+  assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  assertAttentionSnapshot(value, "attention_snapshot");
+  return value;
+}
+
+export function decodeWebAttentionStreamEvent(value) {
+  assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  if (value.kind === "snapshot") {
+    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+  } else if (value.kind === "update") {
+    assertAttentionSummaries(value.summaries, "attention_event.summaries");
+  }
+  return value;
+}
+
+function validSearchSourceCorrelation(result) {
+  switch (result.source.kind) {
+    case "session":
+      return result.source.session_id === result.session_id && result.content_class === "session_metadata";
+    case "accepted_input":
+    case "steering_input":
+      return result.content_class === "user_transcript";
+    case "turn_transcript_entry":
+      return result.content_class === "assistant_transcript";
+    case "session_transcript_entry":
+      return result.content_class === "derived_text_artifact";
+    case "tool_request":
+      return result.content_class === "tool_arguments";
+    case "tool_attempt":
+      return result.content_class === "tool_result";
+    case "attachment":
+      return result.content_class === "attachment_filename" ||
+        result.content_class === "attachment_media_metadata";
+    case "derived_artifact":
+      return result.content_class === "derived_text_artifact";
+    default:
+      return false;
+  }
+}
+
+export function decodeWebSearchPage(value) {
+  assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
+  if (value.continuation !== null) {
+    const lastResult = value.results.at(-1);
+    if (
+      lastResult === undefined ||
+      value.continuation.address.event_sequence !== lastResult.address.event_sequence ||
+      value.continuation.projection_id !== lastResult.projection_id
+    ) {
+      fail(
+        "search_page.continuation",
+        "a cursor anchored to the final search result",
+      );
+    }
+  }
+  const encoder = new TextEncoder();
+  let previousKey = null;
+  value.results.forEach((result, resultIndex) => {
+    const address = BigInt(result.address.event_sequence);
+    const projection = BigInt(result.projection_id);
+    if (
+      previousKey !== null &&
+      (address > previousKey.address ||
+        (address === previousKey.address && projection >= previousKey.projection))
+    ) {
+      fail(
+        `search_page.results[${resultIndex}]`,
+        "a strictly descending search result key",
+      );
+    }
+    previousKey = { address, projection };
+    if (!validSearchSourceCorrelation(result)) {
+      fail(
+        `search_page.results[${resultIndex}].source`,
+        "a source consistent with the result session and content class",
+      );
+    }
+    const bytes = encoder.encode(result.snippet);
+    if (bytes.length > 512) {
+      fail(
+        `search_page.results[${resultIndex}].snippet`,
+        `at most 512 UTF-8 bytes`,
+      );
+    }
+    let previousEnd = 0;
+    result.highlights.forEach((highlight, highlightIndex) => {
+      const rangePath = `search_page.results[${resultIndex}].highlights[${highlightIndex}]`;
+      if (
+        highlight.start_byte < previousEnd ||
+        highlight.start_byte >= highlight.end_byte ||
+        highlight.end_byte > bytes.length
+      ) {
+        fail(rangePath, "an ordered non-overlapping in-bounds UTF-8 byte range");
+      }
+      if (
+        (highlight.start_byte > 0 && (bytes[highlight.start_byte] & 0xc0) === 0x80) ||
+        (highlight.end_byte < bytes.length && (bytes[highlight.end_byte] & 0xc0) === 0x80)
+      ) {
+        fail(rangePath, "a range on UTF-8 boundaries");
+      }
+      previousEnd = highlight.end_byte;
+    });
+  });
+  return value;
+}
+
+export function decodeWebUsageSummary(value) {
+  assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
+  const encoder = new TextEncoder();
+  const compatibilityKeys = new Set();
+  let totalCallCount = 0n;
+  value.groups.forEach((group, index) => {
+    const callCount = BigInt(group.call_count);
+    totalCallCount += callCount;
+    if (totalCallCount > 10000n) {
+      fail("usage_summary.groups", "at most 10000 represented calls");
+    }
+    assertUsageEvidence(
+      group.input_semantics,
+      group.tokens,
+      group.cost,
+      `usage_summary.groups[${index}]`,
+      group.input_semantics === "cache_inclusive" &&
+        callCount > 1n &&
+        group.tokens.input !== null &&
+        group.tokens.cache_creation_input !== null &&
+        group.tokens.cache_read_input !== null,
+    );
+    const compatibilityKey = JSON.stringify([
+      group.call_kind,
+      group.model_id,
+      group.profile_id,
+      group.provenance,
+      group.input_semantics,
+      group.coverage.input,
+      group.coverage.output,
+      group.coverage.cache_creation_input,
+      group.coverage.cache_read_input,
+    ]);
+    if (compatibilityKeys.has(compatibilityKey)) {
+      fail(`usage_summary.groups[${index}]`, "a unique compatibility key");
+    }
+    compatibilityKeys.add(compatibilityKey);
+    const profileBytes = encoder.encode(group.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {
+      fail(`usage_summary.groups[${index}].profile_id`, "1 through 256 UTF-8 bytes");
+    }
+    for (const axis of ["input", "output", "cache_creation_input", "cache_read_input"]) {
+      if (group.coverage[axis] !== (group.tokens[axis] !== null)) {
+        fail(`usage_summary.groups[${index}].coverage.${axis}`, "consistent with token evidence");
+      }
+      if (
+        group.tokens[axis] !== null &&
+        BigInt(group.tokens[axis]) > callCount * 18446744073709551615n
+      ) {
+        fail(`usage_summary.groups[${index}].tokens.${axis}`, "bounded by call_count times u64::MAX");
+      }
+    }
+  });
+  return value;
+}
+
+export function decodeWebUsageCallPage(value, order) {
+  assertSchema(schemas.WebUsageCallPage, schemas.WebUsageCallPage, value, "usage_call_page");
+  if (order !== "newest") {
+    fail("usage_call_page.order", "newest");
+  }
+  const encoder = new TextEncoder();
+  let previousKey = null;
+  const callIds = new Set();
+  value.calls.forEach((call, index) => {
+    assertUsageEvidence(
+      call.input_semantics,
+      call.tokens,
+      call.cost,
+      `usage_call_page.calls[${index}]`,
+      false,
+    );
+    const profileBytes = encoder.encode(call.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {
+      fail(`usage_call_page.calls[${index}].profile_id`, "1 through 256 UTF-8 bytes");
+    }
+    const isCompaction = call.call_kind === "context_compaction";
+    if (!Object.hasOwn(call, "turn_id") || isCompaction !== (call.turn_id === null)) {
+      fail(
+        `usage_call_page.calls[${index}].turn_id`,
+        "null exactly for context compaction calls",
+      );
+    }
+    const key = { recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id };
+    if (callIds.has(call.call_id)) {
+      fail(`usage_call_page.calls[${index}].call_id`, "unique within the page");
+    }
+    callIds.add(call.call_id);
+    if (previousKey !== null) {
+      const comparison = key.recordedAt === previousKey.recordedAt
+        ? key.callId < previousKey.callId ? -1 : key.callId > previousKey.callId ? 1 : 0
+        : key.recordedAt < previousKey.recordedAt ? -1 : 1;
+      if (comparison >= 0) {
+        fail(
+          `usage_call_page.calls[${index}]`,
+          "strictly descending by call key",
+        );
+      }
+    }
+    previousKey = key;
+  });
+  if (value.continuation != null) {
+    const lastCall = value.calls.at(-1);
+    if (
+      lastCall === undefined ||
+      value.continuation.recorded_at_micros !== lastCall.recorded_at_micros ||
+      value.continuation.call_id !== lastCall.call_id
+    ) {
+      fail("usage_call_page.continuation", "a cursor anchored to the final usage call");
+    }
+  }
+  return value;
+}
+
+function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInvalidBreakdown) {
+  if (cost.status === "derived") {
+    const rateVersionBytes = new TextEncoder().encode(cost.rate_version).length;
+    if (rateVersionBytes === 0 || rateVersionBytes > 128) {
+      fail(`${path}.cost.rate_version`, "1 through 128 UTF-8 bytes");
+    }
+  }
+  const hasTokenEvidence = Object.values(tokens).some((value) => value !== null);
+  const incompleteCacheAxes =
+    inputSemantics === "cache_inclusive" &&
+    tokens.input !== null &&
+    tokens.output === null &&
+    tokens.cache_creation_input === null &&
+    tokens.cache_read_input === null;
+  const invalidCacheBreakdown =
+    inputSemantics === "cache_inclusive" &&
+    tokens.input !== null &&
+    tokens.cache_creation_input !== null &&
+    tokens.cache_read_input !== null &&
+    BigInt(tokens.input) <
+      BigInt(tokens.cache_creation_input) + BigInt(tokens.cache_read_input);
+  const requiredReason = !hasTokenEvidence
+    ? "no_token_evidence"
+    : inputSemantics === "unknown"
+      ? "unknown_input_semantics"
+      : incompleteCacheAxes
+        ? "incomplete_cache_axes"
+        : invalidCacheBreakdown
+          ? "invalid_cache_breakdown"
+          : null;
+  if (requiredReason !== null) {
+    if (cost.status !== "unavailable" || cost.reason !== requiredReason) {
+      fail(`${path}.cost`, `unavailable with reason ${requiredReason}`);
+    }
+    return;
+  }
+  if (
+    cost.status === "unavailable" &&
+    (cost.reason === "no_token_evidence" ||
+      cost.reason === "unknown_input_semantics" ||
+      cost.reason === "incomplete_cache_axes" ||
+      (cost.reason === "invalid_cache_breakdown" && !allowHiddenInvalidBreakdown))
+  ) {
+    fail(`${path}.cost.reason`, "consistent with token evidence and input semantics");
+  }
+}
 export function decodeWebContractBootstrap(value) {
   assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "webcontractbootstrap");
-  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "2") {
+  if (value.contract.name !== "signalbox.web-http" || value.contract.version !== "2" ||
+      value.capabilities.bounded_json !== true ||
+      value.capabilities.same_origin_json_mutations !== true ||
+      value.capabilities.ndjson_streaming !== true ||
+      value.capabilities.import_discovery !== true ||
+      value.capabilities.imported_continuations !== true ||
+      value.limits.max_json_body_bytes !== 65536 ||
+      value.limits.max_ndjson_item_bytes !== 65536) {
     throw new TypeError("bootstrap carries an incompatible web contract");
   }
   return value;
@@ -2154,12 +5436,6 @@ export function decodeWebContractExample(value) {
 
 export function decodeWebApiErrorResponse(value) {
   assertSchema(schemas.WebApiErrorResponse, schemas.WebApiErrorResponse, value, "webapierrorresponse");
-  return value;
-}
-
-export function decodeWebBlobDescriptor(value) {
-  assertSchema(schemas.WebBlobDescriptor, schemas.WebBlobDescriptor, value, "webblobdescriptor");
-  validateWebBlobDescriptor(value);
   return value;
 }
 
@@ -2180,36 +5456,55 @@ export function decodeWebImportListRequest(value) {
 
 export function decodeWebImportListPage(value) {
   assertSchema(schemas.WebImportListPage, schemas.WebImportListPage, value, "webimportlistpage");
-  validateWebImportListPage(value);
   return value;
 }
 
 export function decodeWebImportDescriptor(value) {
   assertSchema(schemas.WebImportDescriptor, schemas.WebImportDescriptor, value, "webimportdescriptor");
-  validateWebImportDescriptor(value);
   return value;
 }
 
 export function decodeWebImportEntryWindowRequest(value) {
   assertSchema(schemas.WebImportEntryWindowRequest, schemas.WebImportEntryWindowRequest, value, "webimportentrywindowrequest");
-  validateWebImportEntryWindowRequest(value);
   return value;
 }
 
 export function decodeWebImportEntryWindow(value) {
   assertSchema(schemas.WebImportEntryWindow, schemas.WebImportEntryWindow, value, "webimportentrywindow");
-  validateWebImportEntryWindow(value);
   return value;
 }
 
 export function decodeWebImportContinuationRequest(value) {
   assertSchema(schemas.WebImportContinuationRequest, schemas.WebImportContinuationRequest, value, "webimportcontinuationrequest");
-  validateWebImportContinuation(value, "import_continuation_request");
   return value;
 }
 
 export function decodeWebImportContinuationResponse(value) {
   assertSchema(schemas.WebImportContinuationResponse, schemas.WebImportContinuationResponse, value, "webimportcontinuationresponse");
-  validateWebImportContinuation(value, "import_continuation_response");
+  return value;
+}
+
+export function decodeWebRepoWatchRepositoryStatusPage(value) {
+  assertSchema(schemas.WebRepoWatchRepositoryStatusPage, schemas.WebRepoWatchRepositoryStatusPage, value, "webrepowatchrepositorystatuspage");
+  return value;
+}
+
+export function decodeWebRepoWatchPullRequestPage(value) {
+  assertSchema(schemas.WebRepoWatchPullRequestPage, schemas.WebRepoWatchPullRequestPage, value, "webrepowatchpullrequestpage");
+  return value;
+}
+
+export function decodeWebRepoWatchWorkPage(value) {
+  assertSchema(schemas.WebRepoWatchWorkPage, schemas.WebRepoWatchWorkPage, value, "webrepowatchworkpage");
+  return value;
+}
+
+export function decodeWebRepoWatchPullRequestSessionPage(value) {
+  assertSchema(schemas.WebRepoWatchPullRequestSessionPage, schemas.WebRepoWatchPullRequestSessionPage, value, "webrepowatchpullrequestsessionpage");
+  return value;
+}
+
+export function decodeWebRepoWatchActivityPage(value) {
+  assertSchema(schemas.WebRepoWatchActivityPage, schemas.WebRepoWatchActivityPage, value, "webrepowatchactivitypage");
   return value;
 }

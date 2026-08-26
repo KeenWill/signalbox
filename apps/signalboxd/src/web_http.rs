@@ -5,6 +5,7 @@
 //! authentication.
 
 use std::{
+    collections::BTreeSet,
     env,
     error::Error,
     ffi::OsString,
@@ -14,7 +15,7 @@ use std::{
     path::PathBuf,
     str::FromStr as _,
     sync::Arc,
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 use axum::{
@@ -24,8 +25,8 @@ use axum::{
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{
-            ACCEPT_RANGES, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_RANGE,
-            CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH, IF_RANGE, ORIGIN, RANGE,
+            ACCEPT_RANGES, ALLOW, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH,
+            CONTENT_RANGE, CONTENT_TYPE, ETAG, HOST, IF_NONE_MATCH, IF_RANGE, ORIGIN, RANGE,
             X_CONTENT_TYPE_OPTIONS,
         },
     },
@@ -36,22 +37,48 @@ use axum::{
 use futures_util::{Stream, StreamExt, stream};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use signalbox_application::{
+    AttentionAction, AttentionActivityKind, AttentionBlockedReason, AttentionChanges,
+    AttentionSnapshot, AttentionState, AttentionSummary, SearchContentClass, SearchCursor,
+    SearchPageLimit, SearchQuery, SearchResultSource, SearchScope, SearchStrategy, SearchText,
     SessionTimelineDescriptor, SessionTimelineEventKind, SessionTimelineWindow, TimelineAddress,
-    TimelineWindowAnchor, TimelineWindowLimits,
+    TimelineContinuation, TimelineWindowAnchor, TimelineWindowLimits, UsageAggregateCompleteness,
+    UsageAggregateGroup, UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallCursor,
+    UsageCallEvidence, UsageCallKind, UsageCallOrder, UsageCallPageLimit, UsageCallQuery,
+    UsageInputTokenSemantics, UsageProvenance, UsageQuery, UsageSelection, UsageTimeFromInclusive,
+    UsageTimeRange, UsageTimeToExclusive, UsageTimestampMicros, UsageTokenAxes, UsageTokenPresence,
+    max_attention_goal_summary_characters,
 };
 use signalbox_blob_store::MAX_BLOB_RANGE_BYTES;
-use signalbox_domain::{BlobDerivation, BlobDerivationProducer, BlobDigest, SessionId};
+use signalbox_domain::{
+    BlobDerivation, BlobDerivationProducer, BlobDigest, ModelCallId, ProviderModelIdentity,
+    ResolvedProviderTarget, SessionId, TurnId,
+};
+use signalbox_persistence::attention::{AttentionRepository, AttentionRepositoryError};
+use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
+use signalbox_persistence::search::{SearchRepository, SearchRepositoryError};
 use signalbox_persistence::session_timeline::{
     SessionTimelineRepository, SessionTimelineRepositoryError,
 };
+use signalbox_persistence::usage::{
+    UsageRepository, UsageRepositoryError, usage_timestamp_is_representable,
+};
 use signalbox_web_contract::{
     MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebApiError, WebApiErrorKind, WebApiErrorResponse,
-    WebBlobAvailableView, WebBlobDerivation, WebBlobDerivationProducer, WebBlobDescriptor,
-    WebBlobViewKind, WebContractBootstrap, WebContractExample, WebSessionTimelineDescriptor,
-    WebSessionTimelineEventKind, WebSessionTimelineItem, WebSessionTimelineSizeFacts,
-    WebSessionTimelineWindow, WebSessionWorkFacts, WebTimelineAddress,
+    WebAttentionAction, WebAttentionActivity, WebAttentionActivityKind, WebAttentionBlockedReason,
+    WebAttentionGoalBlock, WebAttentionJudgeFacts, WebAttentionSnapshot, WebAttentionState,
+    WebAttentionStreamEvent, WebAttentionSummary, WebBlobAvailableView, WebBlobDerivation,
+    WebBlobDerivationProducer, WebBlobDescriptor, WebBlobViewKind, WebContractBootstrap,
+    WebContractExample, WebDollarAmount, WebNullableU64, WebNullableU128, WebSearchContentClass,
+    WebSearchCursor, WebSearchHighlight, WebSearchPage, WebSearchProjectionId, WebSearchResult,
+    WebSearchResultSource, WebSessionId, WebSessionTimelineDescriptor, WebSessionTimelineEventKind,
+    WebSessionTimelineItem, WebSessionTimelineSizeFacts, WebSessionTimelineWindow,
+    WebSessionWorkFacts, WebTimelineAddress, WebTimelineEventSequence, WebU64,
+    WebUsageAggregateGroup, WebUsageAggregateTokenAxes, WebUsageCall, WebUsageCallCount,
+    WebUsageCallCursor, WebUsageCallKind, WebUsageCallPage, WebUsageCost, WebUsageCostLabel,
+    WebUsageCostUnavailableReason, WebUsageInputSemantics, WebUsageProvenance, WebUsageRateVersion,
+    WebUsageSummary, WebUsageTimestampMicros, WebUsageTokenAxes, WebUsageTokenCoverage, WebUuid,
 };
-use sqlx::PgPool;
+use sqlx::{PgPool, types::Uuid};
 use tokio::{
     io::AsyncReadExt as _,
     net::TcpListener,
@@ -62,8 +89,9 @@ use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 
 use crate::{
-    HubModelConfiguration, WebBlobRuntime, WebImageDerivativeKind,
+    BillingKind, BlobStoreRegistry, HubModelConfiguration, WebBlobRuntime, WebImageDerivativeKind,
     blob_read_runtime::{open_recorded_blob_range, open_recorded_blob_verified},
+    configuration::ModelCallInputUsage,
     web_blob_runtime::WebBlobRuntimeError,
     web_imports,
 };
@@ -77,20 +105,22 @@ pub const DEFAULT_WEB_BIND_ADDRESS: SocketAddr =
     SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 37_231);
 
 const JSON_CONTENT_TYPE: &str = "application/json";
+const TEXT_CONTENT_TYPE: &str = "text/plain";
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
 const HTTP_DEFAULT_PORT: u16 = 80;
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+// numeric-bound: guard - prevents an unbounded caller-supplied filename from reaching a response header
 const MAX_DISPLAY_FILENAME_BYTES: usize = 1024;
 const BLOB_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+// numeric-bound: guard - prevents concurrent blob reads from exhausting process memory and store handles
 const MAX_CONCURRENT_WEB_BLOB_READS: usize = 4;
+// numeric-bound: guard - prevents a wedged blob store from holding a read permit forever
 const BLOB_RESPONSE_TIMEOUT_SECONDS: u64 = 120;
 
 #[derive(Clone, Debug)]
 struct WebHttpState {
     blobs: Option<WebBlobRuntime>,
     blob_read_budget: Arc<Semaphore>,
-    timeline: Option<SessionTimelineRepository>,
-    imports_available: bool,
 }
 
 /// Deployment-owned browser listener and production assets configuration.
@@ -166,7 +196,7 @@ fn validate_loopback_bind_address(
     if bind_address.ip().is_loopback() {
         Ok(())
     } else {
-        Err(WebHttpConfigurationError::NonLoopbackBindUnsupported)
+        Err(WebHttpConfigurationError::NonLoopbackBindAddress)
     }
 }
 
@@ -177,8 +207,8 @@ pub enum WebHttpConfigurationError {
     BindAddressNotUnicode,
     /// Explicit listener setting was not a socket address.
     InvalidBindAddress,
-    /// Explicit listener setting exposed the unauthenticated browser surface.
-    NonLoopbackBindUnsupported,
+    /// Explicit listener setting would expose unauthenticated routes off-host.
+    NonLoopbackBindAddress,
     /// Explicit production asset root was empty.
     EmptyAssetRoot,
 }
@@ -198,7 +228,7 @@ impl fmt::Display for WebHttpConfigurationError {
                     "setting {WEB_BIND_ENVIRONMENT} is not a socket address"
                 )
             }
-            Self::NonLoopbackBindUnsupported => write!(
+            Self::NonLoopbackBindAddress => write!(
                 formatter,
                 "setting {WEB_BIND_ENVIRONMENT} must use a loopback address"
             ),
@@ -235,18 +265,84 @@ impl Error for WebHttpRuntimeError {}
 pub struct WebHttpRuntime {
     listener: TcpListener,
     router: Router,
+    follow_shutdown: Option<watch::Sender<bool>>,
 }
 
 impl WebHttpRuntime {
     /// Binds the production same-origin router.
+    ///
+    /// Fails construction when the pool cannot fund the shared snapshot
+    /// reader budget, mirroring the daemon entry point's own startup
+    /// rejection (`main.rs`'s `insufficient_snapshot_reader_pool_capacity`
+    /// failure) instead of returning a runtime whose session-read routes
+    /// can never obtain a reader permit.
     pub async fn bind(
         configuration: WebHttpConfiguration,
+        pool: PgPool,
         blobs: Option<WebBlobRuntime>,
-        pool: Option<PgPool>,
-        model_configuration: Option<HubModelConfiguration>,
+        model_configuration: HubModelConfiguration,
+        blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     ) -> Result<Self, WebHttpRuntimeError> {
-        let router = production_router(configuration.asset_root, blobs, pool, model_configuration);
-        Self::bind_router(configuration.bind_address, router).await
+        let snapshot_reader_budget = super::process_runtime::shared_snapshot_reader_budget(
+            pool.options().get_max_connections(),
+            Some(&model_configuration),
+        )
+        .ok_or(WebHttpRuntimeError::Bind)?;
+        Self::bind_with_snapshot_reader_budget(
+            configuration,
+            pool,
+            blobs,
+            model_configuration,
+            blob_store_registry,
+            snapshot_reader_budget,
+        )
+        .await
+    }
+
+    /// Binds production HTTP reads to the daemon-wide snapshot-reader budget.
+    pub async fn bind_with_snapshot_reader_budget(
+        configuration: WebHttpConfiguration,
+        pool: PgPool,
+        blobs: Option<WebBlobRuntime>,
+        model_configuration: HubModelConfiguration,
+        blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+        snapshot_reader_budget: Arc<Semaphore>,
+    ) -> Result<Self, WebHttpRuntimeError> {
+        Self::bind_production(
+            configuration,
+            pool,
+            blobs,
+            model_configuration,
+            blob_store_registry,
+            Some(snapshot_reader_budget),
+        )
+        .await
+    }
+
+    async fn bind_production(
+        configuration: WebHttpConfiguration,
+        pool: PgPool,
+        blobs: Option<WebBlobRuntime>,
+        model_configuration: HubModelConfiguration,
+        blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+        snapshot_reader_budget: Option<Arc<Semaphore>>,
+    ) -> Result<Self, WebHttpRuntimeError> {
+        let (follow_shutdown, follow_shutdown_receiver) = watch::channel(false);
+        let router = production_router_with_budget(
+            configuration.asset_root,
+            Some(pool),
+            blobs,
+            Some(model_configuration),
+            blob_store_registry,
+            snapshot_reader_budget,
+            Some(follow_shutdown_receiver),
+        );
+        Self::bind_router_with_follow_shutdown(
+            configuration.bind_address,
+            router,
+            Some(follow_shutdown),
+        )
+        .await
     }
 
     /// Binds an explicit router, primarily for deterministic browser scenarios.
@@ -254,10 +350,22 @@ impl WebHttpRuntime {
         bind_address: SocketAddr,
         router: Router,
     ) -> Result<Self, WebHttpRuntimeError> {
+        Self::bind_router_with_follow_shutdown(bind_address, router, None).await
+    }
+
+    async fn bind_router_with_follow_shutdown(
+        bind_address: SocketAddr,
+        router: Router,
+        follow_shutdown: Option<watch::Sender<bool>>,
+    ) -> Result<Self, WebHttpRuntimeError> {
         let listener = TcpListener::bind(bind_address)
             .await
             .map_err(|_| WebHttpRuntimeError::Bind)?;
-        Ok(Self { listener, router })
+        Ok(Self {
+            listener,
+            router,
+            follow_shutdown,
+        })
     }
 
     /// Actual address, including an operating-system-selected test port.
@@ -269,17 +377,24 @@ impl WebHttpRuntime {
 
     /// Serves until shutdown, then cancels requests by dropping their futures.
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> Result<(), WebHttpRuntimeError> {
+        let Self {
+            listener,
+            router,
+            follow_shutdown,
+        } = self;
         let shutdown_requested = async move {
-            if *shutdown.borrow() {
-                return;
-            }
-            while shutdown.changed().await.is_ok() {
-                if *shutdown.borrow() {
-                    return;
+            if !*shutdown.borrow() {
+                while shutdown.changed().await.is_ok() {
+                    if *shutdown.borrow() {
+                        break;
+                    }
                 }
             }
+            if let Some(follow_shutdown) = follow_shutdown {
+                let _ = follow_shutdown.send(true);
+            }
         };
-        axum::serve(self.listener, self.router)
+        axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_requested)
             .await
             .map_err(|_| WebHttpRuntimeError::Serve)
@@ -289,13 +404,90 @@ impl WebHttpRuntime {
 /// Builds the production router: `/api/` remains API-only and assets share its origin.
 pub fn production_router(
     asset_root: Option<PathBuf>,
-    blobs: Option<WebBlobRuntime>,
     pool: Option<PgPool>,
+    blobs: Option<WebBlobRuntime>,
     model_configuration: Option<HubModelConfiguration>,
+    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
 ) -> Router {
-    let imports_available = pool.is_some() && model_configuration.is_some();
-    let mut api = Router::new()
-        .route("/bootstrap", get(contract_bootstrap))
+    let snapshot_reader_budget = pool.as_ref().and_then(|pool| {
+        super::process_runtime::shared_snapshot_reader_budget(
+            pool.options().get_max_connections(),
+            model_configuration.as_ref(),
+        )
+    });
+    production_router_with_budget(
+        asset_root,
+        pool,
+        blobs,
+        model_configuration,
+        blob_store_registry,
+        snapshot_reader_budget,
+        None,
+    )
+}
+
+fn production_router_with_budget(
+    asset_root: Option<PathBuf>,
+    pool: Option<PgPool>,
+    blobs: Option<WebBlobRuntime>,
+    model_configuration: Option<HubModelConfiguration>,
+    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+    snapshot_reader_budget: Option<Arc<Semaphore>>,
+    shutdown: Option<watch::Receiver<bool>>,
+) -> Router {
+    let http_state = WebHttpState {
+        blobs,
+        blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
+    };
+    let automatic_resume_attempt_budget =
+        configured_automatic_resume_attempt_budget(model_configuration.as_ref());
+    let state = WebApiState {
+        attention: pool
+            .clone()
+            .map(|pool| AttentionRepository::new(pool, automatic_resume_attempt_budget)),
+        timeline: pool.clone().map(SessionTimelineRepository::new),
+        search: pool.clone().map(SearchRepository::new),
+        usage: pool.clone().map(UsageRepository::new),
+        model_configuration: model_configuration.clone().map(Arc::new),
+        snapshot_reader_budget: snapshot_reader_budget.clone(),
+        shutdown,
+    };
+    // Every route that reads session data sits behind the loopback authority
+    // gate. The attention projection returns session identities, goal-need
+    // summaries, and operator state, so it belongs here for the same reason the
+    // descriptor and timeline reads do: the listener is unauthenticated, and a
+    // rebound origin must not reach session data with an attacker's authority.
+    // `same_origin_router` additionally gates the whole listener, `/bootstrap`
+    // and the static assets included, so this route layer is the inner of two.
+    let session_reads = Router::new()
+        .route("/sessions/{session_id}", get(session_descriptor))
+        .route(
+            "/sessions/{session_id}/timeline",
+            get(session_timeline_window),
+        )
+        .route("/search", get(search))
+        .route("/usage/summary", get(usage_summary))
+        .route("/usage/calls", get(usage_calls))
+        .route("/attention", get(attention_snapshot))
+        .route("/attention/follow", get(attention_follow))
+        .route_layer(middleware::from_fn(validate_loopback_host))
+        .with_state(state);
+    // Repository-watch operator projections carry session identities, dispatch
+    // state, and webhook activity, so they sit behind the same inner gate for
+    // the same reason the session reads do.
+    let repository_watch_reads = crate::web_repo_watch::router(
+        pool.clone(),
+        snapshot_reader_budget,
+        automatic_resume_attempt_budget,
+    )
+    .route_layer(middleware::from_fn(validate_loopback_host));
+    // Every route that reads session-attached content sits behind the
+    // loopback authority gate. Blob descriptors and bytes are reachable by
+    // digest alone and a descriptor read can start isolated derivation work,
+    // so they belong here for the same reason the session reads do: the
+    // listener is unauthenticated, and a rebound origin must not reach blob
+    // content or trigger derivations with an attacker's authority.
+    let blob_reads = Router::new()
         .route(
             "/blobs/{digest}/descriptor",
             get(blob_descriptor).head(blob_descriptor_head),
@@ -308,30 +500,45 @@ pub fn production_router(
             "/blobs/{digest}/download",
             get(blob_download).head(blob_download),
         )
-        .route("/sessions/{session_id}", get(session_descriptor))
-        .route(
-            "/sessions/{session_id}/timeline",
-            get(session_timeline_window),
-        )
-        .fallback(api_not_found)
-        .with_state(WebHttpState {
-            blobs,
-            blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
-            timeline: pool.clone().map(SessionTimelineRepository::new),
-            imports_available,
-        });
-    if let (Some(pool), Some(model_configuration)) = (pool, model_configuration) {
-        api = api.nest("/imports", web_imports::router(pool, model_configuration));
-    }
+        .route_layer(middleware::from_fn(validate_loopback_host))
+        .with_state(http_state.clone());
+    let api = Router::new()
+        .route("/bootstrap", get(contract_bootstrap))
+        .with_state(http_state)
+        .merge(session_reads)
+        .merge(blob_reads)
+        .merge(repository_watch_reads);
+    // Imported-conversation reads need both a pool and hub model settings; the
+    // bootstrap and session surfaces stay routable without either.
+    let api = match (pool, model_configuration) {
+        (Some(pool), Some(model_configuration)) => api.nest(
+            "/imports",
+            web_imports::router(pool, model_configuration, blob_store_registry),
+        ),
+        _ => api,
+    };
+    let api = api.fallback(api_not_found);
     same_origin_router(asset_root, api)
 }
 
-#[cfg(test)]
-fn bootstrap_only_router(asset_root: Option<PathBuf>) -> Router {
-    let api = Router::new()
-        .route("/bootstrap", get(deterministic_contract_bootstrap))
-        .fallback(api_not_found);
-    same_origin_router(asset_root, api)
+/// Reads the deployment's automatic-resume attempt budget for the attention
+/// projection.
+///
+/// The projection reports a blocked goal as still owed automatic resumption
+/// until this budget is spent, so it must read the same configured number the
+/// daemon's resume planner reads (`goal_mode::GoalModeNumericBounds`). An
+/// absent or unbounded setting leaves the budget unbounded there as well.
+fn configured_automatic_resume_attempt_budget(
+    model_configuration: Option<&HubModelConfiguration>,
+) -> Option<u32> {
+    model_configuration
+        .and_then(|configuration| {
+            configuration
+                .numeric_bounds()
+                .integer("automatic_resume_attempt_budget")
+                .flatten()
+        })
+        .and_then(|budget| u32::try_from(budget).ok())
 }
 
 fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
@@ -347,6 +554,413 @@ fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
     router.layer(middleware::from_fn(validate_loopback_host))
 }
 
+#[derive(Clone, Debug)]
+struct WebApiState {
+    attention: Option<AttentionRepository>,
+    timeline: Option<SessionTimelineRepository>,
+    search: Option<SearchRepository>,
+    usage: Option<UsageRepository>,
+    model_configuration: Option<Arc<HubModelConfiguration>>,
+    snapshot_reader_budget: Option<Arc<Semaphore>>,
+    shutdown: Option<watch::Receiver<bool>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AttentionSnapshotQuery {
+    after_session_id: Option<String>,
+}
+
+async fn attention_snapshot(
+    State(state): State<WebApiState>,
+    query: Result<Query<AttentionSnapshotQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => {
+            return transport_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_query_parameters",
+                "attention query parameters are invalid",
+            );
+        }
+    };
+    let Some(repository) = state.attention else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "attention_projection_unavailable",
+            "attention projection is not configured",
+        );
+    };
+    let after = match query.after_session_id {
+        Some(value) => match value.parse::<Uuid>() {
+            Ok(value) => Some(SessionId::from_uuid(value)),
+            Err(_) => {
+                return application_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_session_id",
+                    "attention continuation is not a UUID",
+                );
+            }
+        },
+        None => None,
+    };
+    let Some(budget) = state.snapshot_reader_budget else {
+        return attention_projection_error(None);
+    };
+    let Ok(_permit) = budget.acquire().await else {
+        return attention_projection_error(None);
+    };
+    match repository.snapshot(after).await {
+        Ok(snapshot) => match attention_snapshot_dto(snapshot) {
+            Ok(snapshot) => Json(snapshot).into_response(),
+            Err(()) => attention_projection_error(None),
+        },
+        Err(error) => attention_projection_error(Some(error)),
+    }
+}
+
+async fn attention_follow(State(state): State<WebApiState>) -> Response {
+    let mut shutdown = state.shutdown;
+    let Some(repository) = state.attention else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "attention_projection_unavailable",
+            "attention projection is not configured",
+        );
+    };
+    let Some(budget) = state.snapshot_reader_budget else {
+        return attention_projection_error(None);
+    };
+    let snapshot_permit = tokio::select! {
+        () = wait_for_web_shutdown(&mut shutdown) => return empty_ndjson_response(),
+        permit = Arc::clone(&budget).acquire_owned() => permit,
+    };
+    let Ok(snapshot_permit) = snapshot_permit else {
+        return attention_projection_error(None);
+    };
+    let snapshot = match tokio::select! {
+        () = wait_for_web_shutdown(&mut shutdown) => return empty_ndjson_response(),
+        snapshot = repository.snapshot(None) => snapshot,
+    } {
+        Ok(snapshot) => snapshot,
+        Err(error) => return attention_projection_error(Some(error)),
+    };
+    drop(snapshot_permit);
+    let cursor = snapshot.cursor;
+    let live_page_has_capacity = snapshot.continuation_after.is_none();
+    let visible_sessions = snapshot
+        .summaries
+        .iter()
+        .map(|summary| summary.session)
+        .collect::<BTreeSet<_>>();
+    let snapshot = match attention_snapshot_dto(snapshot) {
+        Ok(snapshot) => snapshot,
+        Err(()) => return attention_projection_error(None),
+    };
+    let source = stream::unfold(
+        (
+            repository,
+            Some(WebAttentionStreamEvent::Snapshot { snapshot }),
+            cursor,
+            visible_sessions,
+            live_page_has_capacity,
+            budget,
+            shutdown,
+            AttentionFollowDisposition::Continue,
+        ),
+        |(
+            repository,
+            pending,
+            cursor,
+            visible_sessions,
+            live_page_has_capacity,
+            budget,
+            mut shutdown,
+            disposition,
+        )| async move {
+            if shutdown.as_ref().is_some_and(|shutdown| *shutdown.borrow()) {
+                return None;
+            }
+            if let Some(event) = pending {
+                return Some((
+                    event,
+                    (
+                        repository,
+                        None,
+                        cursor,
+                        visible_sessions,
+                        live_page_has_capacity,
+                        budget,
+                        shutdown,
+                        AttentionFollowDisposition::Continue,
+                    ),
+                ));
+            }
+            if disposition == AttentionFollowDisposition::End {
+                return None;
+            }
+            let mut cursor = cursor;
+            let mut delay = Duration::from_millis(250);
+            loop {
+                tokio::select! {
+                    () = wait_for_web_shutdown(&mut shutdown) => return None,
+                    () = tokio::time::sleep(delay) => {}
+                }
+                let permit = tokio::select! {
+                    () = wait_for_web_shutdown(&mut shutdown) => return None,
+                    permit = Arc::clone(&budget).acquire_owned() => permit,
+                };
+                let Ok(_permit) = permit else {
+                    return None;
+                };
+                let changes = tokio::select! {
+                    () = wait_for_web_shutdown(&mut shutdown) => return None,
+                    changes = repository.changes_after(cursor) => changes,
+                };
+                match changes {
+                    Ok(AttentionChanges::Updated {
+                        cursor: next,
+                        summaries,
+                    }) if summaries.is_empty() => {
+                        cursor = next;
+                        delay = delay.saturating_mul(2).min(Duration::from_secs(4));
+                    }
+                    Ok(AttentionChanges::Updated {
+                        cursor: next,
+                        summaries,
+                    }) => {
+                        if attention_changes_require_resync(
+                            &summaries,
+                            &visible_sessions,
+                            live_page_has_capacity,
+                        ) {
+                            return Some((
+                                WebAttentionStreamEvent::ResyncRequired {
+                                    cursor: next.value().to_string(),
+                                },
+                                (
+                                    repository,
+                                    None,
+                                    next,
+                                    visible_sessions,
+                                    live_page_has_capacity,
+                                    budget,
+                                    shutdown,
+                                    AttentionFollowDisposition::End,
+                                ),
+                            ));
+                        }
+                        let summaries =
+                            page_scoped_attention_summaries(summaries, &visible_sessions)
+                                .into_iter()
+                                .map(attention_summary_dto)
+                                .collect::<Result<Vec<_>, _>>()
+                                .ok()?;
+                        if summaries.is_empty() {
+                            cursor = next;
+                            continue;
+                        }
+                        return Some((
+                            WebAttentionStreamEvent::Update {
+                                cursor: next.value().to_string(),
+                                summaries,
+                            },
+                            (
+                                repository,
+                                None,
+                                next,
+                                visible_sessions,
+                                live_page_has_capacity,
+                                budget,
+                                shutdown,
+                                AttentionFollowDisposition::Continue,
+                            ),
+                        ));
+                    }
+                    Ok(AttentionChanges::ResyncRequired { cursor: next }) => {
+                        return Some((
+                            WebAttentionStreamEvent::ResyncRequired {
+                                cursor: next.value().to_string(),
+                            },
+                            (
+                                repository,
+                                None,
+                                next,
+                                visible_sessions,
+                                live_page_has_capacity,
+                                budget,
+                                shutdown,
+                                AttentionFollowDisposition::End,
+                            ),
+                        ));
+                    }
+                    Err(error) => {
+                        log_attention_projection_error(&error);
+                        return None;
+                    }
+                }
+            }
+        },
+    );
+    ndjson_response(source)
+}
+
+fn page_scoped_attention_summaries(
+    summaries: Vec<AttentionSummary>,
+    visible_sessions: &BTreeSet<SessionId>,
+) -> Vec<AttentionSummary> {
+    summaries
+        .into_iter()
+        .filter(|summary| visible_sessions.contains(&summary.session))
+        .collect()
+}
+
+fn attention_changes_require_resync(
+    summaries: &[AttentionSummary],
+    visible_sessions: &BTreeSet<SessionId>,
+    live_page_has_capacity: bool,
+) -> bool {
+    let page_boundary = visible_sessions.last();
+    summaries.iter().any(|summary| {
+        !visible_sessions.contains(&summary.session)
+            && (live_page_has_capacity
+                || page_boundary.is_some_and(|boundary| summary.session < *boundary))
+    })
+}
+
+fn empty_ndjson_response() -> Response {
+    ndjson_response(stream::empty::<WebAttentionStreamEvent>())
+}
+
+async fn wait_for_web_shutdown(shutdown: &mut Option<watch::Receiver<bool>>) {
+    let Some(shutdown) = shutdown else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    while !*shutdown.borrow() {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AttentionFollowDisposition {
+    Continue,
+    End,
+}
+
+fn attention_snapshot_dto(snapshot: AttentionSnapshot) -> Result<WebAttentionSnapshot, ()> {
+    Ok(WebAttentionSnapshot {
+        cursor: snapshot.cursor.value().to_string(),
+        summaries: snapshot
+            .summaries
+            .into_iter()
+            .map(attention_summary_dto)
+            .collect::<Result<Vec<_>, _>>()?,
+        continuation_after_session_id: snapshot
+            .continuation_after
+            .map(|session| session.into_uuid().to_string()),
+    })
+}
+
+pub(crate) fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummary, ()> {
+    let unix_milliseconds = summary
+        .last_activity
+        .recorded_at
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ())?
+        .as_millis()
+        .to_string();
+    let goal_block = summary
+        .goal_block
+        .map(|goal| {
+            if goal.need_summary.chars().count()
+                > usize::from(max_attention_goal_summary_characters())
+            {
+                return Err(());
+            }
+            Ok(WebAttentionGoalBlock {
+                generation: goal.generation.to_string(),
+                reason: match goal.reason {
+                    AttentionBlockedReason::UserInputRequired => {
+                        WebAttentionBlockedReason::UserInputRequired
+                    }
+                    AttentionBlockedReason::ExternalChangeRequired => {
+                        WebAttentionBlockedReason::ExternalChangeRequired
+                    }
+                    AttentionBlockedReason::AuthorizationRequired => {
+                        WebAttentionBlockedReason::AuthorizationRequired
+                    }
+                    AttentionBlockedReason::ExecutionFailure => {
+                        WebAttentionBlockedReason::ExecutionFailure
+                    }
+                },
+                need_summary: goal.need_summary,
+            })
+        })
+        .transpose()?;
+    Ok(WebAttentionSummary {
+        session_id: summary.session.into_uuid().to_string(),
+        current_turn_id: summary
+            .current_turn
+            .map(|turn| turn.into_uuid().to_string()),
+        state: match summary.state {
+            AttentionState::Active => WebAttentionState::Active,
+            AttentionState::Queued => WebAttentionState::Queued,
+            AttentionState::Blocked => WebAttentionState::Blocked,
+            AttentionState::AwaitingApproval => WebAttentionState::AwaitingApproval,
+            AttentionState::Ambiguous => WebAttentionState::Ambiguous,
+            AttentionState::AwaitingToolRecovery => WebAttentionState::AwaitingToolRecovery,
+            AttentionState::AwaitingReconciliation => WebAttentionState::AwaitingReconciliation,
+            AttentionState::RunnerLost => WebAttentionState::RunnerLost,
+            AttentionState::Idle => WebAttentionState::Idle,
+        },
+        action: summary.action.map(|action| match action {
+            AttentionAction::ProvideGoalNeed => WebAttentionAction::ProvideGoalNeed,
+            AttentionAction::DecideApproval => WebAttentionAction::DecideApproval,
+            AttentionAction::ReconcileTurn => WebAttentionAction::ReconcileTurn,
+        }),
+        goal_block,
+        judge: WebAttentionJudgeFacts {
+            actionable: summary.judge.actionable.to_string(),
+            completed: summary.judge.completed.to_string(),
+            escalated: summary.judge.escalated.to_string(),
+            failed: summary.judge.failed.to_string(),
+        },
+        last_activity: WebAttentionActivity {
+            unix_milliseconds,
+            kind: match summary.last_activity.kind {
+                AttentionActivityKind::Session => WebAttentionActivityKind::Session,
+                AttentionActivityKind::Turn => WebAttentionActivityKind::Turn,
+                AttentionActivityKind::Goal => WebAttentionActivityKind::Goal,
+                AttentionActivityKind::ApprovalJudge => WebAttentionActivityKind::ApprovalJudge,
+                AttentionActivityKind::Runner => WebAttentionActivityKind::Runner,
+            },
+        },
+    })
+}
+
+fn attention_projection_error(error: Option<AttentionRepositoryError>) -> Response {
+    if let Some(error) = error.as_ref() {
+        log_attention_projection_error(error);
+    }
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "attention_projection_failed",
+        "the attention projection could not be read",
+    )
+}
+
+fn log_attention_projection_error(error: &AttentionRepositoryError) {
+    let failure_class = match error {
+        AttentionRepositoryError::Database(_) => "infrastructure",
+        AttentionRepositoryError::Corruption(_) => "fail_closed_corruption",
+    };
+    tracing::error!(failure_class, cause = %error, "attention projection read failed");
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TimelineWindowQuery {
@@ -354,6 +968,728 @@ struct TimelineWindowQuery {
     address: Option<String>,
     max_items: Option<String>,
     max_bytes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SearchHttpQuery {
+    strategy: String,
+    q: String,
+    session_id: Option<String>,
+    max_items: String,
+    after_address: Option<String>,
+    after_projection: Option<String>,
+}
+
+async fn search(
+    State(state): State<WebApiState>,
+    query: Result<Query<SearchHttpQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_search_query(),
+    };
+    let Some(request) = parse_search_query(query) else {
+        return invalid_search_query();
+    };
+    let Some(repository) = state.search else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "search_projection_unavailable",
+            "search projection is not configured",
+        );
+    };
+    // The lexical read holds one pooled connection across `SET TRANSACTION`,
+    // the term probe, and the page query, so it is a snapshot reader on the
+    // same footing as the attention snapshot: it draws its permit from the
+    // daemon-wide budget that reserves pool connections for mutations and
+    // outbox work. Admitting it after the query and repository checks keeps a
+    // malformed or unconfigured request from spending a permit.
+    let Some(budget) = state.snapshot_reader_budget else {
+        return search_projection_failed();
+    };
+    let Ok(_permit) = budget.acquire().await else {
+        return search_projection_failed();
+    };
+    match repository.search(request).await {
+        Ok(page) => Json(search_page_dto(page)).into_response(),
+        Err(error) => search_repository_error(error),
+    }
+}
+
+fn parse_search_query(query: SearchHttpQuery) -> Option<SearchQuery> {
+    if query.strategy != "lexical" {
+        return None;
+    }
+    let text = SearchText::try_new(query.q).ok()?;
+    let limit = query
+        .max_items
+        .parse::<u16>()
+        .ok()
+        .and_then(|value| SearchPageLimit::new(value).ok())?;
+    let scope = match query.session_id {
+        Some(value) => SearchScope::Session(parse_session_id(&value).ok()?),
+        None => SearchScope::Global,
+    };
+    let after = match (query.after_address, query.after_projection) {
+        (None, None) => None,
+        (Some(address), Some(projection)) => Some(SearchCursor::new(
+            TimelineAddress::new(parse_positive_u64(&address)?),
+            parse_positive_i64(&projection)?,
+        )),
+        _ => return None,
+    };
+    Some(SearchQuery {
+        strategy: SearchStrategy::Lexical,
+        scope,
+        text,
+        limit,
+        after,
+    })
+}
+
+fn parse_positive_u64(value: &str) -> Option<std::num::NonZeroU64> {
+    if value.is_empty()
+        || value.starts_with('0')
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .and_then(std::num::NonZeroU64::new)
+}
+
+fn parse_positive_i64(value: &str) -> Option<std::num::NonZeroU64> {
+    let value = parse_positive_u64(value)?;
+    i64::try_from(value.get()).ok()?;
+    Some(value)
+}
+
+fn invalid_search_query() -> Response {
+    application_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_search_query",
+        "search parameters are malformed or outside the contract bounds",
+    )
+}
+
+fn search_repository_error(error: SearchRepositoryError) -> Response {
+    let failure_class = match &error {
+        SearchRepositoryError::Database(_) => "infrastructure",
+        SearchRepositoryError::Corruption(_) => "fail_closed_corruption",
+    };
+    tracing::error!(failure_class, cause = %error, "lexical search projection read failed");
+    search_projection_failed()
+}
+
+fn search_projection_failed() -> Response {
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "search_projection_failed",
+        "the durable search projection could not be read",
+    )
+}
+
+fn search_page_dto(page: signalbox_application::SearchPage) -> WebSearchPage {
+    WebSearchPage {
+        results: page.results.into_iter().map(search_result_dto).collect(),
+        continuation: page.next.map(|cursor| WebSearchCursor {
+            address: address_dto(cursor.address()),
+            projection_id: WebSearchProjectionId::from_nonzero(cursor.projection()),
+        }),
+    }
+}
+
+fn search_result_dto(result: signalbox_application::SearchResult) -> WebSearchResult {
+    WebSearchResult {
+        session_id: WebSessionId::from_validated_uuid(result.session.into_uuid().to_string()),
+        address: address_dto(result.address),
+        projection_id: WebSearchProjectionId::from_nonzero(result.projection),
+        source: search_source_dto(result.source),
+        content_class: search_content_class_dto(result.content_class),
+        snippet: result.snippet,
+        highlights: result
+            .highlights
+            .into_iter()
+            .map(|highlight| WebSearchHighlight {
+                start_byte: u32::from(highlight.start_byte),
+                end_byte: u32::from(highlight.end_byte),
+            })
+            .collect(),
+    }
+}
+
+fn search_source_dto(source: SearchResultSource) -> WebSearchResultSource {
+    match source {
+        SearchResultSource::Session(session) => WebSearchResultSource::Session {
+            session_id: WebSessionId::from_validated_uuid(session.into_uuid().to_string()),
+        },
+        SearchResultSource::AcceptedInput { input, turn } => WebSearchResultSource::AcceptedInput {
+            accepted_input_id: web_uuid(input.into_uuid()),
+            turn_id: web_uuid(turn.into_uuid()),
+        },
+        SearchResultSource::SteeringInput { input, source_turn } => {
+            WebSearchResultSource::SteeringInput {
+                accepted_input_id: web_uuid(input.into_uuid()),
+                source_turn_id: web_uuid(source_turn.into_uuid()),
+            }
+        }
+        SearchResultSource::TurnTranscriptEntry { entry, turn } => {
+            WebSearchResultSource::TurnTranscriptEntry {
+                semantic_entry_id: web_uuid(entry.into_uuid()),
+                turn_id: web_uuid(turn.into_uuid()),
+            }
+        }
+        SearchResultSource::SessionTranscriptEntry { entry } => {
+            WebSearchResultSource::SessionTranscriptEntry {
+                semantic_entry_id: web_uuid(entry.into_uuid()),
+            }
+        }
+        SearchResultSource::ToolRequest { request, turn } => WebSearchResultSource::ToolRequest {
+            tool_request_id: web_uuid(request.into_uuid()),
+            turn_id: web_uuid(turn.into_uuid()),
+        },
+        SearchResultSource::ToolAttempt { attempt, turn } => WebSearchResultSource::ToolAttempt {
+            tool_attempt_id: web_uuid(attempt.into_uuid()),
+            turn_id: web_uuid(turn.into_uuid()),
+        },
+        SearchResultSource::Attachment { attachment } => WebSearchResultSource::Attachment {
+            attachment_id: web_uuid(attachment.into_uuid()),
+        },
+        SearchResultSource::DerivedArtifact { artifact } => {
+            WebSearchResultSource::DerivedArtifact {
+                artifact_id: web_uuid(artifact.into_uuid()),
+            }
+        }
+    }
+}
+
+fn web_uuid(value: uuid::Uuid) -> WebUuid {
+    WebUuid::from_validated_uuid(value.to_string())
+}
+
+fn search_content_class_dto(content: SearchContentClass) -> WebSearchContentClass {
+    match content {
+        SearchContentClass::UserTranscript => WebSearchContentClass::UserTranscript,
+        SearchContentClass::AssistantTranscript => WebSearchContentClass::AssistantTranscript,
+        SearchContentClass::ToolArguments => WebSearchContentClass::ToolArguments,
+        SearchContentClass::ToolResult => WebSearchContentClass::ToolResult,
+        SearchContentClass::SessionMetadata => WebSearchContentClass::SessionMetadata,
+        SearchContentClass::AttachmentFilename => WebSearchContentClass::AttachmentFilename,
+        SearchContentClass::AttachmentMediaMetadata => {
+            WebSearchContentClass::AttachmentMediaMetadata
+        }
+        SearchContentClass::DerivedTextArtifact => WebSearchContentClass::DerivedTextArtifact,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UsageSummaryHttpQuery {
+    from_micros: Option<String>,
+    to_micros: Option<String>,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    model_id: Option<String>,
+    provenance: Option<String>,
+    call_kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UsageCallsHttpQuery {
+    from_micros: Option<String>,
+    to_micros: Option<String>,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    model_id: Option<String>,
+    provenance: Option<String>,
+    call_kind: Option<String>,
+    order: String,
+    max_items: String,
+    after_recorded_at_micros: Option<String>,
+    after_call_id: Option<String>,
+}
+
+async fn usage_summary(
+    State(state): State<WebApiState>,
+    query: Result<Query<UsageSummaryHttpQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_usage_query(),
+    };
+    let Some(query) = parse_usage_query(
+        query.from_micros,
+        query.to_micros,
+        query.session_id,
+        query.turn_id,
+        query.model_id,
+        query.provenance,
+        query.call_kind,
+    ) else {
+        return invalid_usage_query();
+    };
+    let (Some(repository), Some(configuration)) = (state.usage, state.model_configuration) else {
+        return usage_unavailable();
+    };
+    // The aggregate read holds one pooled connection for its grouped scan, so
+    // it is a snapshot reader on the same footing as the attention snapshot
+    // and the lexical page: it draws its permit from the daemon-wide budget
+    // that reserves pool connections for mutations and outbox work. Admitting
+    // it after the query and repository checks keeps a malformed or
+    // unconfigured request from spending a permit.
+    let Some(budget) = state.snapshot_reader_budget else {
+        return usage_projection_failed();
+    };
+    let Ok(_permit) = budget.acquire().await else {
+        return usage_projection_failed();
+    };
+    match repository.aggregate(query).await {
+        Ok(report) => Json(WebUsageSummary {
+            groups: report
+                .groups()
+                .iter()
+                .map(|group| usage_aggregate_dto(group, &configuration))
+                .collect(),
+            truncated: report.completeness() == UsageAggregateCompleteness::Truncated,
+        })
+        .into_response(),
+        Err(error) => usage_repository_error(error),
+    }
+}
+
+async fn usage_calls(
+    State(state): State<WebApiState>,
+    query: Result<Query<UsageCallsHttpQuery>, QueryRejection>,
+) -> Response {
+    let Query(query) = match query {
+        Ok(query) => query,
+        Err(_) => return invalid_usage_query(),
+    };
+    let scope = parse_usage_query(
+        query.from_micros,
+        query.to_micros,
+        query.session_id,
+        query.turn_id,
+        query.model_id,
+        query.provenance,
+        query.call_kind,
+    );
+    let order = match query.order.as_str() {
+        "newest" => Some(UsageCallOrder::NewestFirst),
+        _ => None,
+    };
+    let limit = query
+        .max_items
+        .parse::<u16>()
+        .ok()
+        .and_then(|value| UsageCallPageLimit::new(value).ok());
+    let after = match (query.after_recorded_at_micros, query.after_call_id) {
+        (None, None) => Some(None),
+        (Some(recorded_at), Some(call)) => parse_usage_timestamp(&recorded_at)
+            .zip(parse_model_call_id(&call))
+            .map(|(recorded_at, call)| Some(UsageCallCursor { recorded_at, call })),
+        _ => None,
+    };
+    let (Some(scope), Some(order), Some(limit), Some(after)) = (scope, order, limit, after) else {
+        return invalid_usage_query();
+    };
+    let (Some(repository), Some(configuration)) = (state.usage, state.model_configuration) else {
+        return usage_unavailable();
+    };
+    // Same footing as the aggregate read above: one pooled connection for the
+    // keyset page, drawn from the shared snapshot-reader budget after the
+    // request and repository checks.
+    let Some(budget) = state.snapshot_reader_budget else {
+        return usage_projection_failed();
+    };
+    let Ok(_permit) = budget.acquire().await else {
+        return usage_projection_failed();
+    };
+    match repository
+        .calls(UsageCallQuery {
+            scope,
+            order,
+            limit,
+            after,
+        })
+        .await
+    {
+        Ok(page) => Json(WebUsageCallPage {
+            calls: page
+                .calls()
+                .iter()
+                .map(|call| usage_call_dto(call, &configuration))
+                .collect(),
+            continuation: page.next().map(|cursor| WebUsageCallCursor {
+                recorded_at_micros: WebUsageTimestampMicros::from_application(
+                    cursor.recorded_at.get(),
+                ),
+                call_id: web_uuid(cursor.call.into_uuid()),
+            }),
+        })
+        .into_response(),
+        Err(error) => usage_repository_error(error),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn parse_usage_query(
+    from_micros: Option<String>,
+    to_micros: Option<String>,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    model_id: Option<String>,
+    provenance: Option<String>,
+    call_kind: Option<String>,
+) -> Option<UsageQuery> {
+    let from_inclusive = parse_optional(from_micros, parse_usage_timestamp)?;
+    let to_exclusive = parse_optional(to_micros, parse_usage_timestamp)?;
+    let time = UsageTimeRange::new(
+        from_inclusive.map(UsageTimeFromInclusive),
+        to_exclusive.map(UsageTimeToExclusive),
+    )
+    .ok()?;
+    let selection = UsageSelection {
+        session: parse_optional(session_id, |value| {
+            uuid::Uuid::parse_str(value).ok().map(SessionId::from_uuid)
+        })?,
+        turn: parse_optional(turn_id, |value| {
+            uuid::Uuid::parse_str(value).ok().map(TurnId::from_uuid)
+        })?,
+        model: parse_optional(model_id, |value| {
+            uuid::Uuid::parse_str(value).ok().map(|identity| {
+                ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(identity))
+            })
+        })?,
+        provenance: parse_optional(provenance, parse_usage_provenance)?,
+        call_kind: parse_optional(call_kind, parse_usage_call_kind)?,
+    };
+    Some(UsageQuery { time, selection })
+}
+
+fn parse_optional<T>(
+    value: Option<String>,
+    parser: impl FnOnce(&str) -> Option<T>,
+) -> Option<Option<T>> {
+    match value {
+        None => Some(None),
+        Some(value) => parser(&value).map(Some),
+    }
+}
+
+fn parse_usage_timestamp(value: &str) -> Option<UsageTimestampMicros> {
+    if value.is_empty()
+        || (value.starts_with('0') && value != "0")
+        || !value.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    let timestamp = UsageTimestampMicros::new(value.parse().ok()?).ok()?;
+    usage_timestamp_is_representable(timestamp).then_some(timestamp)
+}
+
+fn parse_model_call_id(value: &str) -> Option<ModelCallId> {
+    uuid::Uuid::parse_str(value)
+        .ok()
+        .map(ModelCallId::from_uuid)
+}
+
+fn parse_usage_provenance(value: &str) -> Option<UsageProvenance> {
+    match value {
+        "reported" => Some(UsageProvenance::Reported),
+        "estimated" => Some(UsageProvenance::Estimated),
+        _ => None,
+    }
+}
+
+fn parse_usage_call_kind(value: &str) -> Option<UsageCallKind> {
+    match value {
+        "model_call" => Some(UsageCallKind::ModelCall),
+        "approval_judge" => Some(UsageCallKind::ApprovalJudge),
+        "context_compaction" => Some(UsageCallKind::ContextCompaction),
+        _ => None,
+    }
+}
+
+fn invalid_usage_query() -> Response {
+    application_error(
+        StatusCode::BAD_REQUEST,
+        "invalid_usage_query",
+        "usage parameters are malformed or outside the contract bounds",
+    )
+}
+
+fn usage_unavailable() -> Response {
+    application_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "usage_projection_unavailable",
+        "usage projection or configured rates are not available",
+    )
+}
+
+fn usage_projection_failed() -> Response {
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "usage_projection_failed",
+        "the durable usage projection could not be read",
+    )
+}
+
+fn usage_repository_error(error: UsageRepositoryError) -> Response {
+    let failure_class = match &error {
+        UsageRepositoryError::Database(_) => "infrastructure",
+        UsageRepositoryError::Corruption(_) => "fail_closed_corruption",
+    };
+    tracing::error!(failure_class, cause = %error, "usage projection read failed");
+    usage_projection_failed()
+}
+
+fn usage_aggregate_dto(
+    group: &UsageAggregateGroup,
+    configuration: &HubModelConfiguration,
+) -> WebUsageAggregateGroup {
+    WebUsageAggregateGroup {
+        call_kind: usage_call_kind_dto(group.key().call_kind),
+        model_id: web_uuid(group.key().model.identity().into_uuid()),
+        profile_id: signalbox_web_contract::WebUsageProfileId::from_bounded(
+            group.key().credential_profile.as_str().to_owned(),
+        ),
+        provenance: usage_provenance_dto(group.key().provenance),
+        input_semantics: usage_input_semantics_dto(group.key().input_semantics),
+        coverage: WebUsageTokenCoverage {
+            input: group.key().coverage.input == UsageTokenPresence::Present,
+            output: group.key().coverage.output == UsageTokenPresence::Present,
+            cache_creation_input: group.key().coverage.cache_creation_input
+                == UsageTokenPresence::Present,
+            cache_read_input: group.key().coverage.cache_read_input == UsageTokenPresence::Present,
+        },
+        call_count: WebUsageCallCount::from_positive(group.call_count()),
+        tokens: usage_aggregate_tokens_dto(group.tokens()),
+        cost: usage_aggregate_cost_dto(configuration, group),
+    }
+}
+
+fn usage_call_dto(call: &UsageCallEvidence, configuration: &HubModelConfiguration) -> WebUsageCall {
+    WebUsageCall {
+        call_kind: usage_call_kind_dto(call.scope.call_kind()),
+        call_id: web_uuid(call.call.into_uuid()),
+        session_id: WebSessionId::from_uuid_bytes(*call.session.into_uuid().as_bytes()),
+        turn_id: call.scope.turn().map(|turn| web_uuid(turn.into_uuid())),
+        model_id: web_uuid(call.model.identity().into_uuid()),
+        profile_id: signalbox_web_contract::WebUsageProfileId::from_bounded(
+            call.credential_profile.as_str().to_owned(),
+        ),
+        provenance: usage_provenance_dto(call.provenance),
+        input_semantics: usage_input_semantics_dto(call.input_semantics),
+        tokens: usage_tokens_dto(call.tokens),
+        recorded_at_micros: WebUsageTimestampMicros::from_application(call.recorded_at.get()),
+        cost: usage_cost_dto(
+            configuration,
+            call.model,
+            call.credential_reference.as_deref(),
+            call.input_semantics,
+            call.tokens,
+            true,
+        ),
+    }
+}
+
+fn usage_cost_dto(
+    configuration: &HubModelConfiguration,
+    model: ResolvedProviderTarget,
+    credential_profile: Option<&str>,
+    input_semantics: UsageInputTokenSemantics,
+    tokens: UsageTokenAxes,
+    cost_derivation_safe: bool,
+) -> WebUsageCost {
+    let unavailable = |reason| WebUsageCost::Unavailable { reason };
+    if tokens.coverage()
+        == (signalbox_application::UsageTokenCoverage {
+            input: UsageTokenPresence::Absent,
+            output: UsageTokenPresence::Absent,
+            cache_creation_input: UsageTokenPresence::Absent,
+            cache_read_input: UsageTokenPresence::Absent,
+        })
+    {
+        return unavailable(WebUsageCostUnavailableReason::NoTokenEvidence);
+    }
+    let semantics = match input_semantics {
+        UsageInputTokenSemantics::Unknown => {
+            return unavailable(WebUsageCostUnavailableReason::UnknownInputSemantics);
+        }
+        UsageInputTokenSemantics::CacheExclusive => {
+            ProcessModelCallInputTokenSemantics::CacheExclusive
+        }
+        UsageInputTokenSemantics::CacheInclusive => {
+            if tokens.output.is_none()
+                && tokens.cache_creation_input.is_none()
+                && tokens.cache_read_input.is_none()
+            {
+                return unavailable(WebUsageCostUnavailableReason::IncompleteCacheAxes);
+            }
+            if tokens.input.is_some_and(|input| {
+                tokens
+                    .cache_creation_input
+                    .zip(tokens.cache_read_input)
+                    .is_some_and(|(creation, read)| {
+                        creation.checked_add(read).is_none_or(|cache| input < cache)
+                    })
+            }) {
+                return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
+            }
+            ProcessModelCallInputTokenSemantics::CacheInclusive
+        }
+    };
+    if !cost_derivation_safe {
+        return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
+    }
+    let Some(credential_profile) = credential_profile else {
+        return unavailable(WebUsageCostUnavailableReason::ConfigurationUnavailable);
+    };
+    let Some(cost) = configuration.derive_model_call_cost(
+        model,
+        credential_profile,
+        ModelCallInputUsage::from_persisted(tokens.input, Some(semantics)),
+        tokens.output,
+        tokens.cache_creation_input,
+        tokens.cache_read_input,
+    ) else {
+        return unavailable(WebUsageCostUnavailableReason::ConfigurationUnavailable);
+    };
+    WebUsageCost::Derived {
+        amount_usd: WebDollarAmount::from_derived(cost.amount_usd().normalize().to_string()),
+        rate_version: WebUsageRateVersion::from_configured(cost.rate_version().to_owned()),
+        label: match cost.billing_kind() {
+            BillingKind::ApiMetered => WebUsageCostLabel::Real,
+            BillingKind::Subscription => WebUsageCostLabel::MeteredEquivalent,
+        },
+    }
+}
+
+fn usage_aggregate_cost_dto(
+    configuration: &HubModelConfiguration,
+    group: &UsageAggregateGroup,
+) -> WebUsageCost {
+    let unavailable = |reason| WebUsageCost::Unavailable { reason };
+    let tokens = group.tokens();
+    if tokens.input.is_none()
+        && tokens.output.is_none()
+        && tokens.cache_creation_input.is_none()
+        && tokens.cache_read_input.is_none()
+    {
+        return unavailable(WebUsageCostUnavailableReason::NoTokenEvidence);
+    }
+    let semantics = match group.key().input_semantics {
+        UsageInputTokenSemantics::Unknown => {
+            return unavailable(WebUsageCostUnavailableReason::UnknownInputSemantics);
+        }
+        UsageInputTokenSemantics::CacheExclusive => {
+            ProcessModelCallInputTokenSemantics::CacheExclusive
+        }
+        UsageInputTokenSemantics::CacheInclusive => {
+            if tokens.output.is_none()
+                && tokens.cache_creation_input.is_none()
+                && tokens.cache_read_input.is_none()
+            {
+                return unavailable(WebUsageCostUnavailableReason::IncompleteCacheAxes);
+            }
+            if tokens
+                .cache_creation_input
+                .zip(tokens.cache_read_input)
+                .is_some_and(|(creation, read)| {
+                    creation
+                        .checked_add(read)
+                        .is_none_or(|cache| tokens.input.is_some_and(|input| input < cache))
+                })
+            {
+                return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
+            }
+            ProcessModelCallInputTokenSemantics::CacheInclusive
+        }
+    };
+    // `Unsafe` conflates two distinct states: a constituent call whose cache
+    // breakdown contradicts its input total, and a group that never reported
+    // the cache axes normalization would need. Only the first contradicts the
+    // evidence. When the group's coverage lacks an axis, normalization is
+    // merely incomplete, and the independently reported axes stay priceable
+    // exactly as they do on the individual-call path.
+    if group.key().input_semantics == UsageInputTokenSemantics::CacheInclusive
+        && group.cache_normalization() == UsageCacheNormalization::Unsafe
+        && tokens.input.is_some()
+        && tokens.cache_creation_input.is_some()
+        && tokens.cache_read_input.is_some()
+    {
+        return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
+    }
+    let Some(credential_reference) = group.key().credential_reference.as_deref() else {
+        return unavailable(WebUsageCostUnavailableReason::ConfigurationUnavailable);
+    };
+    let Some(cost) = configuration.derive_usage_aggregate_cost(
+        group.key().model,
+        credential_reference,
+        semantics,
+        [
+            tokens.input,
+            tokens.output,
+            tokens.cache_creation_input,
+            tokens.cache_read_input,
+        ],
+    ) else {
+        return unavailable(WebUsageCostUnavailableReason::ConfigurationUnavailable);
+    };
+    WebUsageCost::Derived {
+        amount_usd: WebDollarAmount::from_derived(cost.amount_usd().normalize().to_string()),
+        rate_version: WebUsageRateVersion::from_configured(cost.rate_version().to_owned()),
+        label: match cost.billing_kind() {
+            BillingKind::ApiMetered => WebUsageCostLabel::Real,
+            BillingKind::Subscription => WebUsageCostLabel::MeteredEquivalent,
+        },
+    }
+}
+
+const fn usage_call_kind_dto(kind: UsageCallKind) -> WebUsageCallKind {
+    match kind {
+        UsageCallKind::ModelCall => WebUsageCallKind::ModelCall,
+        UsageCallKind::ApprovalJudge => WebUsageCallKind::ApprovalJudge,
+        UsageCallKind::ContextCompaction => WebUsageCallKind::ContextCompaction,
+    }
+}
+
+const fn usage_provenance_dto(provenance: UsageProvenance) -> WebUsageProvenance {
+    match provenance {
+        UsageProvenance::Reported => WebUsageProvenance::Reported,
+        UsageProvenance::Estimated => WebUsageProvenance::Estimated,
+    }
+}
+
+const fn usage_input_semantics_dto(semantics: UsageInputTokenSemantics) -> WebUsageInputSemantics {
+    match semantics {
+        UsageInputTokenSemantics::Unknown => WebUsageInputSemantics::Unknown,
+        UsageInputTokenSemantics::CacheExclusive => WebUsageInputSemantics::CacheExclusive,
+        UsageInputTokenSemantics::CacheInclusive => WebUsageInputSemantics::CacheInclusive,
+    }
+}
+
+fn usage_tokens_dto(tokens: UsageTokenAxes) -> WebUsageTokenAxes {
+    WebUsageTokenAxes {
+        input: WebNullableU64::from_option(tokens.input),
+        output: WebNullableU64::from_option(tokens.output),
+        cache_creation_input: WebNullableU64::from_option(tokens.cache_creation_input),
+        cache_read_input: WebNullableU64::from_option(tokens.cache_read_input),
+    }
+}
+
+fn usage_aggregate_tokens_dto(tokens: UsageAggregateTokenAxes) -> WebUsageAggregateTokenAxes {
+    WebUsageAggregateTokenAxes {
+        input: WebNullableU128::from_option(tokens.input),
+        output: WebNullableU128::from_option(tokens.output),
+        cache_creation_input: WebNullableU128::from_option(tokens.cache_creation_input),
+        cache_read_input: WebNullableU128::from_option(tokens.cache_read_input),
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -398,7 +1734,7 @@ impl SessionTimelineRequestError {
 }
 
 async fn session_descriptor(
-    State(state): State<WebHttpState>,
+    State(state): State<WebApiState>,
     Path(session_id): Path<String>,
 ) -> Response {
     let Some(repository) = state.timeline else {
@@ -427,7 +1763,7 @@ async fn session_descriptor(
 }
 
 async fn session_timeline_window(
-    State(state): State<WebHttpState>,
+    State(state): State<WebApiState>,
     Path(session_id): Path<String>,
     query: Result<Query<TimelineWindowQuery>, QueryRejection>,
 ) -> Response {
@@ -534,7 +1870,7 @@ fn parse_window_anchor(
 
 fn address_dto(address: TimelineAddress) -> WebTimelineAddress {
     WebTimelineAddress {
-        event_sequence: address.sequence().get().to_string(),
+        event_sequence: WebTimelineEventSequence::from_nonzero(address.sequence()),
     }
 }
 
@@ -548,35 +1884,37 @@ fn descriptor_dto(
         return Err(SessionTimelineRequestError::MissingBounds);
     };
     Ok(WebSessionTimelineDescriptor {
-        session_id: descriptor.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_uuid_bytes(*descriptor.session.into_uuid().as_bytes()),
         sizes: WebSessionTimelineSizeFacts {
-            item_count: descriptor.sizes.item_count.to_string(),
-            projected_text_bytes: descriptor.sizes.projected_text_bytes.to_string(),
-            projected_structured_bytes: descriptor.sizes.projected_structured_bytes.to_string(),
-            referenced_blob_count: descriptor.sizes.referenced_blob_count.to_string(),
-            referenced_blob_bytes: descriptor.sizes.referenced_blob_bytes.to_string(),
+            item_count: WebU64::from_u64(descriptor.sizes.item_count),
+            projected_text_bytes: WebU64::from_u64(descriptor.sizes.projected_text_bytes),
+            projected_structured_bytes: WebU64::from_u64(
+                descriptor.sizes.projected_structured_bytes,
+            ),
+            referenced_blob_count: WebU64::from_u64(descriptor.sizes.referenced_blob_count),
+            referenced_blob_bytes: WebU64::from_u64(descriptor.sizes.referenced_blob_bytes),
         },
         first_address: address_dto(first_address),
         latest_address: address_dto(latest_address),
         work: WebSessionWorkFacts {
-            active_turn_count: descriptor.work.active_turn_count.to_string(),
-            queued_turn_count: descriptor.work.queued_turn_count.to_string(),
+            active_turn_count: WebU64::from_u64(descriptor.work.active_turn_count),
+            queued_turn_count: WebU64::from_u64(descriptor.work.queued_turn_count),
         },
-        observed_through: descriptor.observed_through.to_string(),
+        observed_through: WebU64::from_u64(descriptor.observed_through),
     })
 }
 
 fn window_dto(window: SessionTimelineWindow) -> WebSessionTimelineWindow {
-    let continuation_before = window
-        .has_more_before
-        .then(|| window.items.first().map(|item| address_dto(item.address)))
-        .flatten();
-    let continuation_after = window
-        .has_more_after
-        .then(|| window.items.last().map(|item| address_dto(item.address)))
-        .flatten();
+    let continuation_before = match window.continuation_before {
+        TimelineContinuation::Exhausted => None,
+        TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
+    };
+    let continuation_after = match window.continuation_after {
+        TimelineContinuation::Exhausted => None,
+        TimelineContinuation::MoreAt(address) => Some(address_dto(address)),
+    };
     WebSessionTimelineWindow {
-        session_id: window.session.into_uuid().to_string(),
+        session_id: WebSessionId::from_uuid_bytes(*window.session.into_uuid().as_bytes()),
         items: window
             .items
             .into_iter()
@@ -658,13 +1996,13 @@ async fn contract_bootstrap(State(state): State<WebHttpState>) -> Json<WebContra
     Json(WebContractBootstrap::for_runtime(
         state.blobs.is_some(),
         image_derivatives,
-        state.timeline.is_some(),
-        state.imports_available,
     ))
 }
 
 async fn deterministic_contract_bootstrap() -> Json<WebContractBootstrap> {
-    Json(WebContractBootstrap::current())
+    let mut bootstrap = WebContractBootstrap::current();
+    bootstrap.capabilities.bounded_session_timeline = false;
+    Json(bootstrap)
 }
 
 #[derive(Debug, Deserialize)]
@@ -764,11 +2102,13 @@ async fn blob_descriptor(
 }
 
 async fn blob_descriptor_head() -> Response {
-    transport_error(
+    let mut response = transport_error(
         StatusCode::METHOD_NOT_ALLOWED,
         "descriptor_method_not_allowed",
         "blob descriptors are available through GET",
-    )
+    );
+    insert_header(response.headers_mut(), ALLOW, String::from("GET"));
+    response
 }
 
 async fn append_image_derivative_view(
@@ -973,8 +2313,8 @@ async fn serve_blob(
         return not_modified_response(&etag);
     }
     let total = entry.expected().byte_length();
-    let requested_range = match single_range_header(request.headers()) {
-        Ok(range) => range.filter(|_| if_range_matches(request.headers(), &etag)),
+    let requested_range = match applicable_range_header(request.headers(), &etag) {
+        Ok(range) => range,
         Err(()) => return range_not_satisfiable(total, &etag),
     };
     let (offset, length, partial) = match requested_range {
@@ -995,24 +2335,27 @@ async fn serve_blob(
         }
     };
     let method = request.method().clone();
+    // A head response owes the same status as the equivalent `GET`, so read
+    // admission covers both methods. The head response then releases its permit
+    // at once, because it never opens a replica or streams blob bytes.
+    let Some(streamed_length) = NonZeroU64::new(length) else {
+        return range_not_satisfiable(total, &etag);
+    };
+    let Some(permit) = try_acquire_web_blob_read_permit(Arc::clone(&state.blob_read_budget)) else {
+        return application_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "blob_read_busy",
+            "blob read capacity is busy",
+        );
+    };
     let body = if method == Method::HEAD {
+        drop(permit);
         Body::empty()
     } else {
-        let Some(length) = NonZeroU64::new(length) else {
-            return range_not_satisfiable(total, &etag);
-        };
-        let Some(permit) = try_acquire_web_blob_read_permit(Arc::clone(&state.blob_read_budget))
-        else {
-            return application_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "blob_read_busy",
-                "blob read capacity is busy",
-            );
-        };
         let deadline = Instant::now() + Duration::from_secs(BLOB_RESPONSE_TIMEOUT_SECONDS);
         let opened = timeout_at(deadline, async {
-            if length.get() <= MAX_BLOB_RANGE_BYTES {
-                open_recorded_blob_range(runtime.registry(), &entry, offset, length).await
+            if streamed_length.get() <= MAX_BLOB_RANGE_BYTES {
+                open_recorded_blob_range(runtime.registry(), &entry, offset, streamed_length).await
             } else {
                 let mut reader = open_recorded_blob_verified(runtime.registry(), &entry).await?;
                 let skipped =
@@ -1035,7 +2378,7 @@ async fn serve_blob(
                 );
             }
         };
-        reader_body_until(reader, length.get(), permit, deadline)
+        reader_body_until(reader, streamed_length.get(), permit, deadline)
     };
     let mut response = Response::new(body);
     *response.status_mut() = if partial {
@@ -1137,6 +2480,23 @@ fn parse_canonical_u64(value: &str) -> Result<u64, ()> {
         return Err(());
     }
     value.parse().map_err(|_| ())
+}
+
+/// Reports the `Range` field a blob response applies, once `If-Range` has decided.
+///
+/// A failed `If-Range` condition makes the whole `Range` field inapplicable, so
+/// the condition is evaluated before the field is validated. A field this
+/// endpoint would otherwise reject — repeated occurrences included — is then
+/// ignored and the full representation is served, rather than answered with
+/// `416`; `Err` is reserved for a rejectable field the condition admitted.
+fn applicable_range_header<'headers>(
+    headers: &'headers HeaderMap,
+    etag: &str,
+) -> Result<Option<&'headers HeaderValue>, ()> {
+    if !if_range_matches(headers, etag) {
+        return Ok(None);
+    }
+    single_range_header(headers)
 }
 
 fn single_range_header(headers: &HeaderMap) -> Result<Option<&HeaderValue>, ()> {
@@ -1399,6 +2759,37 @@ where
     })
 }
 
+/// Decodes one UTF-8 request body after enforcing a caller-owned byte ceiling.
+pub(crate) async fn decode_bounded_utf8(
+    request: Request,
+    maximum_bytes: usize,
+) -> Result<String, Response> {
+    let bytes = to_bytes(request.into_body(), maximum_bytes)
+        .await
+        .map_err(|error| {
+            if error_chain_contains_length_limit(&error) {
+                transport_error(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    "text_body_too_large",
+                    "text request body exceeds the configured import limit",
+                )
+            } else {
+                transport_error(
+                    StatusCode::BAD_REQUEST,
+                    "text_body_read_failed",
+                    "text request body could not be read",
+                )
+            }
+        })?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| {
+        transport_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_utf8",
+            "request body is not valid UTF-8",
+        )
+    })
+}
+
 fn error_chain_contains_length_limit(error: &axum::Error) -> bool {
     let mut current: Option<&(dyn Error + 'static)> = Some(error);
     while let Some(error) = current {
@@ -1504,39 +2895,77 @@ pub(crate) async fn validate_json_mutation(request: Request, next: Next) -> Resp
     next.run(request).await
 }
 
-async fn validate_loopback_host(request: Request, next: Next) -> Response {
-    if !has_literal_loopback_host(request.headers()) {
+pub(crate) async fn validate_text_mutation(request: Request, next: Next) -> Response {
+    if request.method() != Method::POST {
+        return transport_error(
+            StatusCode::METHOD_NOT_ALLOWED,
+            "mutation_method_not_allowed",
+            "browser mutations use POST",
+        );
+    }
+    if !has_content_type(request.headers(), TEXT_CONTENT_TYPE) {
+        return transport_error(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "text_content_type_required",
+            "exact import searches require text/plain",
+        );
+    }
+    if validate_supplied_origin(request.headers()).is_err() {
         return transport_error(
             StatusCode::FORBIDDEN,
-            "loopback_host_required",
-            "browser requests require a literal loopback host",
+            "cross_origin_mutation_rejected",
+            "mutation origin does not match request authority",
         );
     }
     next.run(request).await
 }
 
-fn has_literal_loopback_host(headers: &HeaderMap) -> bool {
+async fn validate_loopback_host(request: Request, next: Next) -> Response {
+    if !has_loopback_host(request.headers(), request.uri()) {
+        return transport_error(
+            StatusCode::FORBIDDEN,
+            "non_loopback_host_rejected",
+            "browser requests require a loopback request authority",
+        );
+    }
+    next.run(request).await
+}
+
+fn has_loopback_host(headers: &HeaderMap, uri: &axum::http::Uri) -> bool {
     headers
         .get(HOST)
         .and_then(|host| host.to_str().ok())
         .and_then(|host| host.parse::<axum::http::uri::Authority>().ok())
-        .and_then(|authority| {
-            authority
-                .host()
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .parse::<IpAddr>()
-                .ok()
-        })
-        .is_some_and(|address| address.is_loopback())
+        .or_else(|| uri.authority().cloned())
+        .is_some_and(|authority| is_loopback_authority(&authority))
+}
+
+fn is_loopback_authority(authority: &axum::http::uri::Authority) -> bool {
+    let host = normalized_authority_host(authority);
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn normalized_authority_host(authority: &axum::http::uri::Authority) -> &str {
+    normalized_host(authority.host())
+}
+
+fn normalized_host(host: &str) -> &str {
+    host.trim_start_matches('[').trim_end_matches(']')
 }
 
 fn has_json_content_type(headers: &HeaderMap) -> bool {
+    has_content_type(headers, JSON_CONTENT_TYPE)
+}
+
+fn has_content_type(headers: &HeaderMap, expected: &str) -> bool {
     headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.split(';').next())
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(JSON_CONTENT_TYPE))
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case(expected))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1562,10 +2991,9 @@ fn validate_supplied_origin(headers: &HeaderMap) -> Result<(), OriginValidationE
         .and_then(|host| host.parse::<axum::http::uri::Authority>().ok());
     let matching = origin.zip(authority).is_some_and(|(origin, authority)| {
         let authority_port = authority.port_u16().unwrap_or(HTTP_DEFAULT_PORT);
-        origin
-            .host_str()
-            .is_some_and(|host| host.eq_ignore_ascii_case(authority.host()))
-            && origin.port_or_known_default() == Some(authority_port)
+        origin.host_str().is_some_and(|host| {
+            normalized_host(host).eq_ignore_ascii_case(normalized_authority_host(&authority))
+        }) && origin.port_or_known_default() == Some(authority_port)
     });
     if matching {
         Ok(())
@@ -1621,12 +3049,13 @@ async fn static_assets_not_configured() -> Response {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         ffi::OsString,
         io::{self, Write as _},
         net::SocketAddr,
         path::PathBuf,
         sync::Arc,
-        time::Duration,
+        time::{Duration, UNIX_EPOCH},
     };
 
     use axum::{
@@ -1634,20 +3063,51 @@ mod tests {
         http::{Request, StatusCode, header},
     };
     use http_body_util::BodyExt as _;
-    use signalbox_web_contract::{
-        MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebContractBootstrap, WebContractExample,
+    use signalbox_application::{
+        AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
+        AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts, AttentionSnapshot,
+        AttentionState, AttentionSummary, UsageAggregateGroup, UsageAggregateKey,
+        UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallKind,
+        UsageCredentialProfileLabel, UsageInputTokenSemantics, UsageProvenance, UsageTokenAxes,
+        UsageTokenCoverage, UsageTokenPresence, max_attention_change_items,
+        max_attention_goal_summary_characters, max_attention_snapshot_items,
     };
+    use signalbox_domain::{ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId};
+    use signalbox_web_contract::{
+        MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebAttentionStreamEvent, WebContractBootstrap,
+        WebContractExample, WebUsageCost, WebUsageCostUnavailableReason,
+    };
+    use sqlx::types::Uuid;
     use tokio::sync::{Semaphore, mpsc, watch};
     use tower::ServiceExt as _;
     use url::Url;
 
     use super::{
         DEFAULT_WEB_BIND_ADDRESS, MAX_CONCURRENT_WEB_BLOB_READS, WebHttpConfiguration,
-        WebHttpConfigurationError, WebHttpRuntime, bootstrap_only_router, content_disposition,
-        deterministic_test_router, if_none_match, ndjson_response, parse_byte_range,
-        production_router, reader_body_until, single_range_header,
-        try_acquire_web_blob_read_permit,
+        WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError, attention_snapshot_dto,
+        blob_descriptor_head, content_disposition, deterministic_test_router, if_none_match,
+        ndjson_response, parse_byte_range, production_router, reader_body_until,
+        single_range_header, try_acquire_web_blob_read_permit, usage_aggregate_cost_dto,
+        usage_cost_dto,
     };
+    use crate::HubModelConfiguration;
+
+    /// A descriptor method rejection must name the method clients can use.
+    #[tokio::test]
+    async fn descriptor_method_rejection_advertises_get() {
+        let response = blob_descriptor_head().await;
+        let status = response.status();
+        let allow = response
+            .headers()
+            .get(header::ALLOW)
+            .expect("the rejection advertises an allowed method")
+            .to_str()
+            .expect("the allowed method is ASCII")
+            .to_owned();
+
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(allow, "GET");
+    }
 
     fn loopback_ephemeral() -> SocketAddr {
         "127.0.0.1:0"
@@ -1759,6 +3219,69 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_if_range_condition_ignores_repeated_range_fields() {
+        // Repeated `Range` fields are rejectable on their own, but a failed
+        // `If-Range` makes the field inapplicable before that rejection can
+        // apply, so the response owes the full representation rather than
+        // `416`.
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"other\""),
+        );
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=2-3"));
+
+        assert_eq!(
+            super::applicable_range_header(&headers, "\"matching\""),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn a_matching_if_range_condition_still_rejects_repeated_range_fields() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"matching\""),
+        );
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=2-3"));
+
+        assert_eq!(
+            super::applicable_range_header(&headers, "\"matching\""),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn an_absent_if_range_condition_still_rejects_repeated_range_fields() {
+        let mut headers = header::HeaderMap::new();
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+        headers.append(header::RANGE, header::HeaderValue::from_static("bytes=2-3"));
+
+        assert_eq!(
+            super::applicable_range_header(&headers, "\"matching\""),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn a_matching_if_range_condition_applies_its_single_range_field() {
+        let mut headers = header::HeaderMap::new();
+        headers.insert(
+            header::IF_RANGE,
+            header::HeaderValue::from_static("\"matching\""),
+        );
+        headers.insert(header::RANGE, header::HeaderValue::from_static("bytes=0-1"));
+
+        assert_eq!(
+            super::applicable_range_header(&headers, "\"matching\""),
+            Ok(Some(&header::HeaderValue::from_static("bytes=0-1")))
+        );
+    }
+
+    #[test]
     fn web_blob_read_budget_rejects_without_waiting_and_recovers_on_drop() {
         let budget = Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS));
         let held = Arc::clone(&budget)
@@ -1815,7 +3338,19 @@ mod tests {
         }
     }
 
+    fn example_model_configuration() -> HubModelConfiguration {
+        HubModelConfiguration::parse(crate::configuration::tests::CONFIGURATION)
+            .expect("the shared model configuration fixture is valid")
+    }
+
+    fn rated_example_target() -> ResolvedProviderTarget {
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(uuid::uuid!(
+            "20000000-0000-4000-8000-000000000001"
+        )))
+    }
+
     const STATIC_INDEX: &str = "signalbox-static-build";
+    const LARGE_REPRESENTATIVE_UNIX_MILLISECONDS: u64 = 9_999_999_999_999;
 
     async fn response_body(response: axum::response::Response) -> Vec<u8> {
         axum::body::to_bytes(response.into_body(), MAX_JSON_BODY_BYTES)
@@ -1854,7 +3389,7 @@ mod tests {
         let error = WebHttpConfiguration::from_values(Some(OsString::from("0.0.0.0:8080")), None)
             .expect_err("the unauthenticated browser surface remains loopback-only");
 
-        assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindUnsupported);
+        assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindAddress);
         assert_eq!(
             error.to_string(),
             "setting SIGNALBOX_WEB_BIND must use a loopback address"
@@ -1869,7 +3404,7 @@ mod tests {
         let error = WebHttpConfiguration::new(bind_address, None)
             .expect_err("every production configuration path remains loopback-only");
 
-        assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindUnsupported);
+        assert_eq!(error, WebHttpConfigurationError::NonLoopbackBindAddress);
     }
 
     #[test]
@@ -1891,9 +3426,18 @@ mod tests {
         let assets = tempfile::tempdir().expect("the static asset directory exists");
         std::fs::write(assets.path().join("index.html"), STATIC_INDEX)
             .expect("the static index exists");
-        let runtime = WebHttpRuntime::bind_router(
-            loopback_ephemeral(),
-            bootstrap_only_router(Some(assets.path().to_path_buf())),
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://signalbox:signalbox@localhost/signalbox")
+            .expect("the unused fixture pool URL is valid");
+        let models = crate::configuration::checked_in_example_configuration()
+            .expect("the checked-in example model configuration parses");
+        let runtime = WebHttpRuntime::bind(
+            WebHttpConfiguration::new(loopback_ephemeral(), Some(assets.path().to_path_buf()))
+                .expect("the loopback fixture configuration is valid"),
+            pool,
+            None,
+            models,
+            None,
         )
         .await
         .expect("the production test server binds");
@@ -1930,20 +3474,50 @@ mod tests {
                 .expect("fixture URL is valid")
                 .origin()
         );
-        assert_eq!(
-            decoded,
-            WebContractBootstrap::for_runtime(false, false, false, false)
-        );
+        assert_eq!(decoded, WebContractBootstrap::for_runtime(false, false));
         assert_eq!(runtime_outcome, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn bind_rejects_a_pool_too_small_to_fund_the_reader_budget() {
+        // Two connections is exactly `RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS`
+        // (`process_runtime::snapshot_reader_capacity`), leaving zero for the
+        // shared snapshot reader budget. The daemon entry point in `main.rs`
+        // refuses to start in this configuration; the standalone production
+        // binder must refuse construction the same way instead of returning a
+        // runtime whose session-read routes can never obtain a reader permit.
+        let assets = tempfile::tempdir().expect("the static asset directory exists");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect_lazy("postgres://signalbox:signalbox@localhost/signalbox")
+            .expect("the unused fixture pool URL is valid");
+
+        let models = crate::configuration::checked_in_example_configuration()
+            .expect("the checked-in example model configuration parses");
+
+        let outcome = WebHttpRuntime::bind(
+            WebHttpConfiguration::new(loopback_ephemeral(), Some(assets.path().to_path_buf()))
+                .expect("the loopback fixture configuration is valid"),
+            pool,
+            None,
+            models,
+            None,
+        )
+        .await;
+        let error = outcome
+            .err()
+            .expect("a pool that cannot fund any reader permit must fail construction");
+
+        assert_eq!(error, WebHttpRuntimeError::Bind);
     }
 
     #[tokio::test]
     async fn malformed_blob_query_is_a_structured_transport_error() {
         let request = Request::get("/api/blobs/not-a-digest/descriptor")
-            .header(header::HOST, "127.0.0.1")
+            .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -1961,10 +3535,10 @@ mod tests {
         let request = Request::head(
             "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/descriptor",
         )
-        .header(header::HOST, "127.0.0.1")
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -1977,6 +3551,28 @@ mod tests {
         let request = Request::post("/api/test/mutate")
             .header(header::HOST, "signalbox.test")
             .header(header::ORIGIN, "http://signalbox.test")
+            .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
+            .body(Body::from(
+                serde_json::to_vec(&example()).expect("the fixture serializes"),
+            ))
+            .expect("the request is valid");
+        let response = deterministic_test_router()
+            .oneshot(request)
+            .await
+            .expect("the deterministic router responds");
+        let status = response.status();
+        let decoded: WebContractExample = serde_json::from_slice(&response_body(response).await)
+            .expect("the response is the example DTO");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(decoded, example());
+    }
+
+    #[tokio::test]
+    async fn mutation_with_matching_ipv6_origin_round_trips_bounded_json() {
+        let request = Request::post("/api/test/mutate")
+            .header(header::HOST, "[::1]:37231")
+            .header(header::ORIGIN, "http://[::1]:37231")
             .header(header::CONTENT_TYPE, "application/json; charset=utf-8")
             .body(Body::from(
                 serde_json::to_vec(&example()).expect("the fixture serializes"),
@@ -2152,7 +3748,7 @@ mod tests {
             .header(header::HOST, "127.0.0.1")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = bootstrap_only_router(Some(assets.path().to_path_buf()))
+        let response = production_router(Some(assets.path().to_path_buf()), None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2165,14 +3761,339 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn production_router_rejects_non_loopback_hostnames() {
+        let request = Request::get("/api/bootstrap")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value =
+            serde_json::from_slice(&response_body(response).await).expect("the rejection is JSON");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    #[test]
+    fn loopback_host_accepts_localhost_and_uri_authority() {
+        let localhost = Request::get("/api/bootstrap")
+            .header(header::HOST, "localhost:37231")
+            .body(Body::empty())
+            .expect("the localhost request is valid");
+        let authority = Request::get("http://127.0.0.1:37231/api/bootstrap")
+            .body(Body::empty())
+            .expect("the authority request is valid");
+
+        assert!(super::has_loopback_host(
+            localhost.headers(),
+            localhost.uri()
+        ));
+        assert!(super::has_loopback_host(
+            authority.headers(),
+            authority.uri()
+        ));
+    }
+
+    #[tokio::test]
+    async fn attention_snapshot_requires_projection_configuration() {
+        let request = Request::get("/api/attention")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the typed application failure is JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "attention_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn attention_snapshot_query_rejection_uses_typed_transport_error() {
+        let request = Request::get("/api/attention?unexpected=true")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the typed transport failure is JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["kind"], "transport");
+        assert_eq!(body["error"]["code"], "invalid_query_parameters");
+    }
+
+    #[tokio::test]
+    async fn attention_follow_requires_projection_configuration() {
+        let request = Request::get("/api/attention/follow")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the typed application failure is JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "attention_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn attention_follower_wait_stops_when_web_shutdown_begins() {
+        let (shutdown, shutdown_receiver) = watch::channel(false);
+        let mut shutdown_receiver = Some(shutdown_receiver);
+        let waiting = tokio::spawn(async move {
+            super::wait_for_web_shutdown(&mut shutdown_receiver).await;
+        });
+
+        shutdown
+            .send(true)
+            .expect("the follower still observes web shutdown");
+        tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .expect("the follower wait exits promptly on shutdown")
+            .expect("the follower wait task completes cleanly");
+    }
+
+    #[test]
+    fn attention_follow_filters_changes_to_the_visible_snapshot_page() {
+        let visible = SessionId::from_uuid(Uuid::from_u128(1));
+        let off_page = SessionId::from_uuid(Uuid::from_u128(2));
+        let summary = |session| AttentionSummary {
+            session,
+            current_turn: None,
+            state: AttentionState::Idle,
+            action: None,
+            goal_block: None,
+            judge: AttentionJudgeFacts {
+                actionable: 0,
+                completed: 0,
+                escalated: 0,
+                failed: 0,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH,
+                kind: AttentionActivityKind::Session,
+            },
+        };
+        let visible_sessions = BTreeSet::from([visible]);
+
+        let scoped = super::page_scoped_attention_summaries(
+            vec![summary(off_page), summary(visible)],
+            &visible_sessions,
+        );
+
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].session, visible);
+    }
+
+    #[test]
+    fn attention_follow_resyncs_for_a_new_identity_on_a_partial_live_page() {
+        let visible = SessionId::from_uuid(Uuid::from_u128(1));
+        let new_session = SessionId::from_uuid(Uuid::from_u128(2));
+        let summary = AttentionSummary {
+            session: new_session,
+            current_turn: None,
+            state: AttentionState::Idle,
+            action: None,
+            goal_block: None,
+            judge: AttentionJudgeFacts {
+                actionable: 0,
+                completed: 0,
+                escalated: 0,
+                failed: 0,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH,
+                kind: AttentionActivityKind::Session,
+            },
+        };
+        let visible_sessions = BTreeSet::from([visible]);
+
+        assert!(super::attention_changes_require_resync(
+            std::slice::from_ref(&summary),
+            &visible_sessions,
+            true,
+        ));
+        assert!(!super::attention_changes_require_resync(
+            &[summary],
+            &visible_sessions,
+            false,
+        ));
+    }
+
+    #[test]
+    fn attention_follow_resyncs_when_a_new_identity_enters_a_full_live_page() {
+        let first = SessionId::from_uuid(Uuid::from_u128(2));
+        let boundary = SessionId::from_uuid(Uuid::from_u128(3));
+        let entering = SessionId::from_uuid(Uuid::from_u128(1));
+        let off_page = SessionId::from_uuid(Uuid::from_u128(4));
+        let summary = |session| AttentionSummary {
+            session,
+            current_turn: None,
+            state: AttentionState::Idle,
+            action: None,
+            goal_block: None,
+            judge: AttentionJudgeFacts {
+                actionable: 0,
+                completed: 0,
+                escalated: 0,
+                failed: 0,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH,
+                kind: AttentionActivityKind::Session,
+            },
+        };
+        let visible_sessions = BTreeSet::from([first, boundary]);
+
+        assert!(super::attention_changes_require_resync(
+            &[summary(entering)],
+            &visible_sessions,
+            false,
+        ));
+        assert!(!super::attention_changes_require_resync(
+            &[summary(off_page)],
+            &visible_sessions,
+            false,
+        ));
+    }
+
+    /// The projection reports a blocked goal as still owed automatic
+    /// resumption until the deployment's attempt budget is spent, so it must
+    /// read the budget the daemon's resume planner spends
+    /// (`goal_mode::GoalModeNumericBounds`) rather than a compiled-in number.
+    #[test]
+    fn the_attention_projection_reads_the_configured_automatic_resume_budget() {
+        let configuration = crate::configuration::checked_in_example_configuration()
+            .expect("checked-in example parses");
+        let configured = configuration
+            .numeric_bounds()
+            .integer("automatic_resume_attempt_budget")
+            .flatten()
+            .and_then(|budget| u32::try_from(budget).ok())
+            .expect("the example configures an automatic-resume attempt budget");
+
+        assert_eq!(
+            super::configured_automatic_resume_attempt_budget(Some(&configuration)),
+            Some(configured)
+        );
+        assert_eq!(
+            super::configured_automatic_resume_attempt_budget(None),
+            None
+        );
+    }
+
+    /// The largest summary the projection can carry: every scalar at its
+    /// maximum, a blocked goal whose need summary sits exactly on the
+    /// character ceiling, and activity at a representative far-future instant.
+    fn maximum_attention_summary() -> AttentionSummary {
+        AttentionSummary {
+            session: SessionId::from_uuid(Uuid::from_u128(u128::MAX)),
+            current_turn: Some(TurnId::from_uuid(Uuid::from_u128(u128::MAX))),
+            state: AttentionState::Blocked,
+            action: Some(AttentionAction::ProvideGoalNeed),
+            goal_block: Some(AttentionGoalBlock {
+                generation: u64::MAX,
+                reason: AttentionBlockedReason::ExternalChangeRequired,
+                need_summary: String::from('\u{1}')
+                    .repeat(usize::from(max_attention_goal_summary_characters())),
+            }),
+            judge: AttentionJudgeFacts {
+                actionable: u64::MAX,
+                completed: u64::MAX,
+                escalated: u64::MAX,
+                failed: u64::MAX,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH
+                    + Duration::from_millis(LARGE_REPRESENTATIVE_UNIX_MILLISECONDS),
+                kind: AttentionActivityKind::ApprovalJudge,
+            },
+        }
+    }
+
+    #[test]
+    fn a_goal_summary_one_character_past_the_ceiling_is_rejected() {
+        let mut oversized_summary = maximum_attention_summary();
+        oversized_summary
+            .goal_block
+            .as_mut()
+            .expect("the maximum summary carries a goal block")
+            .need_summary
+            .push('x');
+
+        assert!(super::attention_summary_dto(maximum_attention_summary()).is_ok());
+        assert!(super::attention_summary_dto(oversized_summary).is_err());
+    }
+
+    #[test]
+    fn maximum_attention_snapshot_fits_one_ndjson_item() {
+        let summary = maximum_attention_summary();
+        let snapshot = attention_snapshot_dto(AttentionSnapshot {
+            cursor: AttentionCursor::new(u64::MAX),
+            continuation_after: Some(summary.session),
+            summaries: vec![summary; usize::from(max_attention_snapshot_items())],
+        })
+        .expect("the maximum snapshot timestamp is representable");
+        let mut writer = super::NdjsonItemWriter::new();
+
+        serde_json::to_writer(&mut writer, &WebAttentionStreamEvent::Snapshot { snapshot })
+            .expect("the maximum snapshot serializes within one item");
+        writer
+            .write_all(b"\n")
+            .expect("the NDJSON terminator fits the item");
+
+        assert!(writer.encoded.len() <= MAX_NDJSON_ITEM_BYTES);
+    }
+
+    #[test]
+    fn maximum_attention_update_fits_one_ndjson_item() {
+        let summaries =
+            vec![maximum_attention_summary(); usize::from(max_attention_change_items())]
+                .into_iter()
+                .map(super::attention_summary_dto)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("maximum summaries are representable");
+        let event = WebAttentionStreamEvent::Update {
+            cursor: u64::MAX.to_string(),
+            summaries,
+        };
+        let mut writer = super::NdjsonItemWriter::new();
+
+        serde_json::to_writer(&mut writer, &event)
+            .expect("the maximum update serializes within one item");
+        writer
+            .write_all(b"\n")
+            .expect("the NDJSON terminator fits the item");
+
+        assert!(writer.encoded.len() <= MAX_NDJSON_ITEM_BYTES);
+    }
+
+    #[tokio::test]
     async fn malformed_timeline_query_uses_the_structured_error_envelope() {
         let request = Request::get(
             "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?max_items=nope",
         )
-        .header(header::HOST, "127.0.0.1")
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2190,10 +4111,10 @@ mod tests {
         let request = Request::get(
             "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?anchor=first&max_items=1",
         )
-        .header(header::HOST, "127.0.0.1")
+        .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -2205,6 +4126,611 @@ mod tests {
         assert_eq!(body["error"]["code"], "invalid_timeline_limits");
     }
 
+    #[tokio::test]
+    async fn search_rejects_a_non_product_strategy() {
+        let unsupported = Request::get("/api/search?strategy=postgres&q=term&max_items=10")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let unsupported = production_router(None, None, None, None, None)
+            .oneshot(unsupported)
+            .await
+            .expect("the production router responds");
+        let unsupported_status = unsupported.status();
+        let unsupported_body: serde_json::Value =
+            serde_json::from_slice(&response_body(unsupported).await)
+                .expect("the rejection is structured JSON");
+
+        assert_eq!(unsupported_status, StatusCode::BAD_REQUEST);
+        assert_eq!(unsupported_body["error"]["code"], "invalid_search_query");
+    }
+
+    #[tokio::test]
+    async fn search_rejects_a_partial_cursor() {
+        let partial =
+            Request::get("/api/search?strategy=lexical&q=term&max_items=10&after_address=5")
+                .header(header::HOST, "localhost")
+                .body(Body::empty())
+                .expect("the request is valid");
+        let partial = production_router(None, None, None, None, None)
+            .oneshot(partial)
+            .await
+            .expect("the production router responds");
+        let partial_status = partial.status();
+        let partial_body: serde_json::Value = serde_json::from_slice(&response_body(partial).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(partial_status, StatusCode::BAD_REQUEST);
+        assert_eq!(partial_body["error"]["code"], "invalid_search_query");
+    }
+
+    #[tokio::test]
+    async fn search_rejects_an_oversized_projection_cursor() {
+        let oversized = Request::get(
+            "/api/search?strategy=lexical&q=term&max_items=10&after_address=5&after_projection=9223372036854775808",
+        )
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .expect("the request is valid");
+        let oversized = production_router(None, None, None, None, None)
+            .oneshot(oversized)
+            .await
+            .expect("the production router responds");
+        let oversized_status = oversized.status();
+
+        assert_eq!(oversized_status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn valid_search_is_parsed_before_repository_availability_is_reported() {
+        let request = Request::get(
+            "/api/search?strategy=lexical&q=natural%20terms&max_items=100&after_address=5&after_projection=7",
+        )
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the response is structured JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "search_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn representable_usage_filters_are_parsed_before_projection_availability_is_reported() {
+        let request = Request::get(
+            "/api/usage/calls?from_micros=0&to_micros=1777777777123456&provenance=estimated&call_kind=context_compaction&order=newest&max_items=100",
+        )
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the response is structured JSON");
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "usage_projection_unavailable");
+    }
+
+    #[tokio::test]
+    async fn usage_filters_reject_timestamps_outside_persistence_range() {
+        let request = Request::get(
+            "/api/usage/calls?to_micros=9223372036854775807&order=newest&max_items=100",
+        )
+        .header(header::HOST, "localhost")
+        .body(Body::empty())
+        .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_usage_query");
+    }
+
+    #[tokio::test]
+    async fn usage_detail_rejects_a_partial_keyset_cursor() {
+        let request =
+            Request::get("/api/usage/calls?order=newest&max_items=10&after_recorded_at_micros=7")
+                .header(header::HOST, "localhost")
+                .body(Body::empty())
+                .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "invalid_usage_query");
+    }
+
+    #[test]
+    fn configured_usage_cost_keeps_rate_version_and_billing_label_separate() {
+        let configuration = example_model_configuration();
+        let tokens = UsageTokenAxes {
+            input: Some(1_000_000),
+            output: None,
+            cache_creation_input: None,
+            cache_read_input: None,
+        };
+        let real = usage_cost_dto(
+            &configuration,
+            rated_example_target(),
+            Some("anthropic-primary"),
+            UsageInputTokenSemantics::CacheExclusive,
+            tokens,
+            true,
+        );
+        let metered_equivalent = usage_cost_dto(
+            &configuration,
+            rated_example_target(),
+            Some("codex-subscription-primary"),
+            UsageInputTokenSemantics::CacheExclusive,
+            tokens,
+            true,
+        );
+        let real = serde_json::to_value(real).expect("real cost serializes");
+        let metered_equivalent =
+            serde_json::to_value(metered_equivalent).expect("equivalent cost serializes");
+
+        assert_eq!(real["status"], "derived");
+        assert_eq!(real["label"], "real");
+        assert_eq!(metered_equivalent["status"], "derived");
+        assert_eq!(metered_equivalent["label"], "metered_equivalent");
+        assert_eq!(real["rate_version"], metered_equivalent["rate_version"]);
+        assert_eq!(real["amount_usd"], metered_equivalent["amount_usd"]);
+    }
+
+    #[test]
+    fn configured_usage_cost_prices_independent_axes_with_incomplete_cache_coverage() {
+        let configuration = example_model_configuration();
+        let cost = usage_cost_dto(
+            &configuration,
+            rated_example_target(),
+            Some("anthropic-primary"),
+            UsageInputTokenSemantics::CacheInclusive,
+            UsageTokenAxes {
+                input: Some(10),
+                output: Some(2),
+                cache_creation_input: None,
+                cache_read_input: Some(3),
+            },
+            true,
+        );
+        let cost = serde_json::to_value(cost).expect("cost serializes");
+
+        assert_eq!(cost["status"], "derived");
+        assert_ne!(cost["amount_usd"], "0");
+    }
+
+    #[test]
+    fn configured_usage_cost_rejects_an_overflowing_cache_total() {
+        let configuration = example_model_configuration();
+        let cost = usage_cost_dto(
+            &configuration,
+            rated_example_target(),
+            Some("anthropic-primary"),
+            UsageInputTokenSemantics::CacheInclusive,
+            UsageTokenAxes {
+                input: Some(u64::MAX),
+                output: None,
+                cache_creation_input: Some(u64::MAX),
+                cache_read_input: Some(1),
+            },
+            true,
+        );
+
+        assert_eq!(
+            cost,
+            WebUsageCost::Unavailable {
+                reason: WebUsageCostUnavailableReason::InvalidCacheBreakdown,
+            }
+        );
+    }
+
+    fn cache_inclusive_aggregate_group(
+        tokens: UsageAggregateTokenAxes,
+        coverage: UsageTokenCoverage,
+    ) -> UsageAggregateGroup {
+        UsageAggregateGroup::new(
+            UsageAggregateKey {
+                call_kind: UsageCallKind::ModelCall,
+                model: rated_example_target(),
+                credential_profile: UsageCredentialProfileLabel::new(String::from(
+                    "exact:anthropic-primary",
+                ))
+                .expect("the label is discriminated and bounded"),
+                credential_reference: Some(String::from("anthropic-primary")),
+                provenance: UsageProvenance::Reported,
+                input_semantics: UsageInputTokenSemantics::CacheInclusive,
+                coverage,
+            },
+            2,
+            tokens,
+            UsageCacheNormalization::Unsafe,
+        )
+        .expect("the group agrees with its declared coverage and normalization")
+    }
+
+    #[test]
+    fn aggregate_usage_cost_prices_independent_axes_when_cache_axes_are_absent() {
+        let configuration = example_model_configuration();
+        let group = cache_inclusive_aggregate_group(
+            UsageAggregateTokenAxes {
+                input: Some(10),
+                output: Some(2),
+                cache_creation_input: None,
+                cache_read_input: None,
+            },
+            UsageTokenCoverage {
+                input: UsageTokenPresence::Present,
+                output: UsageTokenPresence::Present,
+                cache_creation_input: UsageTokenPresence::Absent,
+                cache_read_input: UsageTokenPresence::Absent,
+            },
+        );
+
+        let cost = usage_aggregate_cost_dto(&configuration, &group);
+
+        assert!(
+            matches!(cost, WebUsageCost::Derived { .. }),
+            "incomplete normalization must keep the independently reported \
+             output axis priceable, as the individual-call path does: {cost:?}"
+        );
+    }
+
+    #[test]
+    fn aggregate_usage_cost_rejects_a_constituent_cache_breakdown_contradiction() {
+        let configuration = example_model_configuration();
+        let group = cache_inclusive_aggregate_group(
+            UsageAggregateTokenAxes {
+                input: Some(10),
+                output: Some(2),
+                cache_creation_input: Some(3),
+                cache_read_input: Some(1),
+            },
+            UsageTokenCoverage {
+                input: UsageTokenPresence::Present,
+                output: UsageTokenPresence::Present,
+                cache_creation_input: UsageTokenPresence::Present,
+                cache_read_input: UsageTokenPresence::Present,
+            },
+        );
+
+        let cost = usage_aggregate_cost_dto(&configuration, &group);
+
+        assert_eq!(
+            cost,
+            WebUsageCost::Unavailable {
+                reason: WebUsageCostUnavailableReason::InvalidCacheBreakdown,
+            }
+        );
+    }
+
+    #[test]
+    fn configured_usage_cost_prices_overflowing_cache_axes_without_total_input() {
+        let configuration = example_model_configuration();
+        let cost = usage_cost_dto(
+            &configuration,
+            rated_example_target(),
+            Some("anthropic-primary"),
+            UsageInputTokenSemantics::CacheInclusive,
+            UsageTokenAxes {
+                input: None,
+                output: None,
+                cache_creation_input: Some(u64::MAX),
+                cache_read_input: Some(1),
+            },
+            true,
+        );
+
+        assert!(matches!(cost, WebUsageCost::Derived { .. }));
+    }
+
+    #[test]
+    fn configured_usage_cost_reports_unpriceable_incomplete_cache_evidence() {
+        let configuration = example_model_configuration();
+        let cost = usage_cost_dto(
+            &configuration,
+            rated_example_target(),
+            Some("anthropic-primary"),
+            UsageInputTokenSemantics::CacheInclusive,
+            UsageTokenAxes {
+                input: Some(10),
+                output: None,
+                cache_creation_input: None,
+                cache_read_input: None,
+            },
+            true,
+        );
+
+        assert_eq!(
+            cost,
+            WebUsageCost::Unavailable {
+                reason: WebUsageCostUnavailableReason::IncompleteCacheAxes,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_non_loopback_host_authorities() {
+        let request = Request::get("/api/sessions/00000000-0000-0000-0000-000000000991")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["kind"], "transport");
+        assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    #[tokio::test]
+    async fn attention_snapshot_reads_reject_non_loopback_host_authorities() {
+        // The attention projection returns session identities, goal-need text,
+        // and operator state across the whole fleet, so a rebound origin must
+        // not reach it any more than it may reach the per-session reads beside
+        // it. This route is asserted because it was registered outside the
+        // guarded router and had to be moved into it.
+        let request = Request::get("/api/attention")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "`/api/attention` must reject a non-loopback authority",
+        );
+        assert_eq!(body["error"]["kind"], "transport");
+        assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    #[tokio::test]
+    async fn attention_follow_reads_reject_non_loopback_host_authorities() {
+        // Mirrors `attention_snapshot_reads_reject_non_loopback_host_authorities`
+        // for the follow route: it was registered outside the guarded router
+        // beside the snapshot route and had to be moved into it too.
+        let request = Request::get("/api/attention/follow")
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "`/api/attention/follow` must reject a non-loopback authority",
+        );
+        assert_eq!(body["error"]["kind"], "transport");
+        assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    /// Drives one route with a rebound origin and returns what it answered.
+    ///
+    /// Request plumbing only: the status and body it hands back are what the
+    /// calling test asserts on.
+    async fn rebound_origin_response(path: &str) -> (StatusCode, serde_json::Value) {
+        let request = Request::get(path)
+            .header(header::HOST, "attacker.example")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the rejection is structured JSON");
+        (status, body)
+    }
+
+    /// Asserts one unauthenticated read turned a rebound origin away at the
+    /// loopback gate, before any session-attached content was read.
+    ///
+    /// Two layers enforce this, and the assertion is deliberately about the
+    /// guarantee rather than either one: `same_origin_router` gates the whole
+    /// listener, and `session_reads` gates these routes again. Removing the
+    /// inner `route_layer` alone therefore does not make a caller fail — the
+    /// same is true of every sibling assertion here — so what this holds is the
+    /// promise a reader depends on, not a particular layer's presence.
+    ///
+    /// `#[track_caller]` puts a failure at the calling test, so each route
+    /// names itself.
+    #[track_caller]
+    fn assert_rebound_origin_rejected(status: StatusCode, body: &serde_json::Value) {
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["kind"], "transport");
+        assert_eq!(body["error"]["code"], "non_loopback_host_rejected");
+    }
+
+    /// The bounded usage summary carries per-session spend and resolved model
+    /// identity across the whole installation, so a rebound origin must not
+    /// reach it any more than it may reach the session reads beside it.
+    #[tokio::test]
+    async fn usage_summary_reads_reject_non_loopback_host_authorities() {
+        let (status, body) = rebound_origin_response("/api/usage/summary").await;
+
+        assert_rebound_origin_rejected(status, &body);
+    }
+
+    /// Usage-call detail carries per-call spend, resolved model identity, and
+    /// call provenance, so it is protected exactly as the summary above it is.
+    #[tokio::test]
+    async fn usage_call_reads_reject_non_loopback_host_authorities() {
+        let (status, body) = rebound_origin_response("/api/usage/calls").await;
+
+        assert_rebound_origin_rejected(status, &body);
+    }
+
+    /// Drives a session read at the loopback gate and reports only the status.
+    ///
+    /// The query is deliberately malformed, which separates the gate from
+    /// everything behind it: `FORBIDDEN` means the gate rejected the
+    /// authority, while `BAD_REQUEST` comes from the handler and is therefore
+    /// reachable only once the gate has admitted the request.
+    async fn session_read_status_for_host(host: &str) -> StatusCode {
+        let request = Request::get(
+            "/api/sessions/00000000-0000-0000-0000-000000000991/timeline?max_items=nope",
+        )
+        .header(header::HOST, host)
+        .body(Body::empty())
+        .expect("the request is valid");
+        production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn session_reads_admit_loopback_authorities_including_ip_literals() {
+        // `127.0.0.1` is the daemon's own DEFAULT_WEB_BIND_ADDRESS, so a
+        // regression that tightened this branch would 403 the default
+        // deployment. `[::1]` exercises the bracket strip that precedes the
+        // parse, and `127.5.6.7` covers the whole 127.0.0.0/8 loopback range
+        // rather than only the canonical address.
+        for host in [
+            "localhost",
+            "localhost:37231",
+            "LocalHost",
+            "127.0.0.1",
+            "127.0.0.1:37231",
+            "127.5.6.7",
+            "[::1]",
+            "[::1]:37231",
+        ] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::BAD_REQUEST,
+                "`{host}` is a loopback authority and must reach the handler",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_non_loopback_ip_literal_authorities() {
+        // Every authority here parses as an address, so `is_loopback` — not
+        // the `parse::<IpAddr>()` that already turns hostnames away — is what
+        // has to reject them. A regression that loosened the branch to accept
+        // any parseable address would expose session history to any host that
+        // can reach the port.
+        for host in [
+            "10.0.0.5",
+            "10.0.0.5:37231",
+            "192.168.1.20",
+            "[2001:db8::1]",
+            "[2001:db8::1]:37231",
+        ] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "`{host}` parses as a non-loopback address and must be rejected",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reads_reject_authorities_that_are_neither_localhost_nor_literals() {
+        for host in ["attacker.example", "localhost.attacker.example"] {
+            assert_eq!(
+                session_read_status_for_host(host).await,
+                StatusCode::FORBIDDEN,
+                "`{host}` is neither localhost nor a loopback literal",
+            );
+        }
+    }
+
+    const BLOB_READ_PATHS: [&str; 3] = [
+        "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/descriptor?media_type=image/png",
+        "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/content/image-png",
+        "/api/blobs/sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/download?media_type=image/png",
+    ];
+
+    /// Drives a blob read at the loopback gate and reports only the status.
+    ///
+    /// Each path is otherwise valid — a well-formed digest, and a
+    /// `media_type` query where the route requires one — so a `FORBIDDEN`
+    /// can only come from the gate, never from the handler behind it.
+    async fn blob_read_status_for_host(path: &str, host: &str) -> StatusCode {
+        let request = Request::get(path)
+            .header(header::HOST, host)
+            .body(Body::empty())
+            .expect("the request is valid");
+        production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds")
+            .status()
+    }
+
+    #[tokio::test]
+    async fn blob_reads_reject_non_loopback_host_authorities() {
+        // Mirrors `session_reads_reject_non_loopback_host_authorities`: the
+        // descriptor, content, and download routes were registered outside
+        // the guarded router and had to be moved into it too, since a
+        // rebound origin that knows a digest could otherwise read blob
+        // bytes, or start image derivation work, with an attacker's
+        // authority.
+        for path in BLOB_READ_PATHS {
+            assert_eq!(
+                blob_read_status_for_host(path, "attacker.example").await,
+                StatusCode::FORBIDDEN,
+                "`{path}` must reject a non-loopback authority",
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn blob_reads_admit_loopback_host_authorities() {
+        // A regression that moved the guard without preserving admission
+        // would 403 legitimate same-origin blob reads; each path here must
+        // reach its handler and fail only because no blob runtime is
+        // configured in this fixture.
+        for path in BLOB_READ_PATHS {
+            assert_eq!(
+                blob_read_status_for_host(path, "localhost").await,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "`{path}` is a loopback authority and must reach the handler",
+            );
+        }
+    }
+
     #[test]
     fn timeline_addresses_require_canonical_positive_decimal() {
         assert!(super::parse_window_anchor("after", Some("+5")).is_err());
@@ -2214,24 +4740,6 @@ mod tests {
         assert!(super::parse_window_anchor("after", Some(" 5")).is_err());
         assert!(super::parse_window_anchor("after", Some("5 ")).is_err());
         assert!(super::parse_window_anchor("after", Some("5")).is_ok());
-    }
-
-    #[tokio::test]
-    async fn production_router_rejects_non_loopback_hostnames() {
-        let request = Request::get("/api/bootstrap")
-            .header(header::HOST, "attacker.example")
-            .body(Body::empty())
-            .expect("the request is valid");
-        let response = bootstrap_only_router(None)
-            .oneshot(request)
-            .await
-            .expect("the production router responds");
-        let status = response.status();
-        let body: serde_json::Value =
-            serde_json::from_slice(&response_body(response).await).expect("the rejection is JSON");
-
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(body["error"]["code"], "loopback_host_required");
     }
 
     #[tokio::test]

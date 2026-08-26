@@ -16,8 +16,9 @@ use signalbox_domain::{
     RunnerCapabilityClass, RunnerGeneration, RunnerId, RunnerSandboxProfile, RunnerSelector,
     RunnerWorkingDirectory, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
     SessionReadScopeDecision, SessionReadScopeRefusal, ToolApprovalDecider, ToolApprovalDecision,
-    ToolAttemptId, ToolDecisionRationale, ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId,
-    TurnModelSettingsResolved, VersionedSessionPlacement, WorkspaceRepositoryKey,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptId, ToolDecisionRationale,
+    ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId, TurnModelSettingsResolved, UserContent,
+    VersionedSessionPlacement, WorkspaceRepositoryKey,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -497,12 +498,24 @@ pub enum ProcessProviderModelCallFailureCause {
     Unrecognized,
 }
 
+/// Persistence-owned closed classification of an unsent attachment-preparation failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessAttachmentPreparationFailureCause {
+    /// Distinct rendered attachment bytes exceeded the deployment ceiling.
+    TooLarge,
+    /// No recorded replica contained the required attachment.
+    Missing,
+    /// Recorded replicas failed length or digest verification.
+    Corrupt,
+}
+
 /// Optional terminal model-call evidence for a failed turn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ProcessFailedTerminalModelCall {
     call: ModelCallId,
     disposition: ProcessFailedModelCallDisposition,
     provider_failure_cause: Option<ProcessProviderModelCallFailureCause>,
+    attachment_preparation_failure_cause: Option<ProcessAttachmentPreparationFailureCause>,
 }
 
 impl ProcessFailedTerminalModelCall {
@@ -519,6 +532,13 @@ impl ProcessFailedTerminalModelCall {
     /// Returns the closed provider classification when this call retained one.
     pub const fn provider_failure_cause(&self) -> Option<ProcessProviderModelCallFailureCause> {
         self.provider_failure_cause
+    }
+
+    /// Returns the closed local attachment-preparation cause when retained.
+    pub const fn attachment_preparation_failure_cause(
+        &self,
+    ) -> Option<ProcessAttachmentPreparationFailureCause> {
+        self.attachment_preparation_failure_cause
     }
 }
 
@@ -543,8 +563,8 @@ pub enum ProcessTurnState {
     Queued {
         /// Accepted input that created the queued turn.
         accepted_input: AcceptedInputId,
-        /// Exact accepted user text.
-        content: String,
+        /// Exact accepted ordered user content.
+        content: UserContent,
     },
     /// Delegated work has not activated.
     QueuedDelegated {
@@ -590,6 +610,10 @@ pub enum ProcessTurnState {
         ended_attempt: TurnAttemptId,
         /// Ambiguous call awaiting recovery.
         recovery_call: ModelCallId,
+        /// Durable automatic attempts already claimed.
+        automatic_reconciliation_attempts: u32,
+        /// True only after the automatic attempt budget is exhausted.
+        operator_action_required: bool,
     },
     /// The yielded tool batch is parked on a user decision.
     ActiveAwaitingToolApproval {
@@ -611,6 +635,10 @@ pub enum ProcessTurnState {
         ended_attempt: TurnAttemptId,
         /// Ambiguous tool attempt awaiting recovery.
         recovery_attempt: ToolAttemptId,
+        /// Durable automatic attempts already claimed.
+        automatic_reconciliation_attempts: u32,
+        /// True only after the automatic attempt budget is exhausted.
+        operator_action_required: bool,
     },
     /// The turn is parked on replacement of one exact lost runner placement.
     ActiveAwaitingRunnerRecovery {
@@ -998,8 +1026,8 @@ pub enum ProcessTranscriptEntry {
         accepted_input: AcceptedInputId,
         /// Origin turn.
         turn: TurnId,
-        /// Exact admitted user text.
-        content: String,
+        /// Exact admitted ordered user content.
+        content: UserContent,
     },
     /// Exact committed assistant text.
     Assistant {
@@ -1290,6 +1318,7 @@ pub struct ProcessTranscriptReader {
     entry_count: Option<u64>,
     next_entry_index: u64,
     summary: Option<ProcessTranscriptSummary>,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 }
 
 impl ProcessTranscriptReader {
@@ -1327,7 +1356,8 @@ impl ProcessTranscriptReader {
             let row = load_next_transcript_turn(self.transaction_mut()?, session, next_turn_after)
                 .await?;
             if let Some(row) = row {
-                let decoded = decode_transcript_turn(&row)?;
+                let decoded =
+                    decode_transcript_turn(&row, self.automatic_reconciliation_attempt_budget)?;
                 match (decoded.start_lineage, decoded.latest_frontier) {
                     (None, None) => {}
                     (Some(_), Some(frontier)) => {
@@ -1599,12 +1629,25 @@ impl From<ProcessReadCorruption> for ProcessReadError {
 #[derive(Clone, Debug)]
 pub struct ProcessReadRepository {
     pool: PgPool,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 }
 
 impl ProcessReadRepository {
     /// Uses the supplied pool for independent repeatable-read snapshots.
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            automatic_reconciliation_attempt_budget: None,
+        }
+    }
+
+    /// Applies the deployment's optional automatic reconciliation budget.
+    pub const fn with_automatic_reconciliation_attempt_budget(
+        mut self,
+        budget: Option<u32>,
+    ) -> Self {
+        self.automatic_reconciliation_attempt_budget = Some(budget);
+        self
     }
 
     /// Reads one complete current or named immutable session-defaults epoch.
@@ -1899,7 +1942,10 @@ impl ProcessReadRepository {
                 result_event.provenance_command_id,
                 imported.source_speaker_kind AS imported_source_speaker_kind,
                 imported.content_encoding AS imported_content_encoding,
-                accepted.content_text AS origin_content,
+                CASE WHEN accepted.accepted_input_id IS NULL THEN NULL
+                     ELSE accepted_input_content_parts_json(
+                        accepted.accepted_input_id)
+                END AS origin_content,
                 accepted.origin_turn_id,
                 call.turn_id AS assistant_turn_id,
                 result_attempt.request_id AS result_attempt_request_id,
@@ -2092,7 +2138,12 @@ impl ProcessReadRepository {
         }
 
         Ok(Some(
-            open_transcript_in_transaction(transaction, requested_session).await?,
+            open_transcript_in_transaction(
+                transaction,
+                requested_session,
+                self.automatic_reconciliation_attempt_budget,
+            )
+            .await?,
         ))
     }
 
@@ -2123,7 +2174,12 @@ impl ProcessReadRepository {
             .decide_cross_session_read(target_placement.placement())
         {
             SessionReadScopeDecision::Allowed => Ok(ProcessScopedTranscriptRead::Opened(Box::new(
-                open_transcript_in_transaction(transaction, target_session).await?,
+                open_transcript_in_transaction(
+                    transaction,
+                    target_session,
+                    self.automatic_reconciliation_attempt_budget,
+                )
+                .await?,
             ))),
             SessionReadScopeDecision::Refused(refusal) => {
                 transaction.commit().await?;
@@ -2162,6 +2218,7 @@ fn map_session_placement_read_error(
 async fn open_transcript_in_transaction(
     mut transaction: Transaction<'static, Postgres>,
     requested_session: SessionId,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 ) -> Result<ProcessTranscriptReader, ProcessReadError> {
     let stored_cursor: Option<Decimal> = sqlx::query_scalar(
         "SELECT last_sequence
@@ -2206,6 +2263,7 @@ async fn open_transcript_in_transaction(
         entry_count: None,
         next_entry_index: 0,
         summary: None,
+        automatic_reconciliation_attempt_budget,
     })
 }
 
@@ -2485,7 +2543,7 @@ struct DecodedTurn {
 enum DecodedTurnOrigin {
     AcceptedInput {
         accepted_input: AcceptedInputId,
-        content: String,
+        content: UserContent,
     },
     DelegatedTask {
         spawning_request: ToolRequestId,
@@ -2808,10 +2866,15 @@ async fn load_next_transcript_turn(
                 AS terminal_model_call_disposition_kind,
             terminal_call.terminal_provider_failure_cause
                 AS terminal_model_call_provider_failure_cause,
+            terminal_call.terminal_attachment_preparation_failure_cause
+                AS terminal_model_call_attachment_preparation_failure_cause,
             accepted.accepted_input_id,
             accepted.acceptance_position AS accepted_position,
             accepted.origin_turn_id,
-            accepted.content_text AS accepted_content,
+            CASE WHEN accepted.accepted_input_id IS NULL THEN NULL
+                 ELSE accepted_input_content_parts_json(
+                    accepted.accepted_input_id)
+            END AS accepted_content,
             task.spawning_tool_request_id AS delegated_spawning_tool_request_id,
             task.task_content AS delegated_task_content,
             relation.parent_session_id AS delegated_parent_session_id,
@@ -2849,6 +2912,14 @@ async fn load_next_transcript_turn(
             current_call.state_kind AS current_model_call_state_kind,
             current_call.context_frontier_id AS current_model_call_frontier_id,
             recovery_call.context_frontier_id AS recovery_model_call_frontier_id,
+            automatic_reconciliation.state_kind
+                AS automatic_reconciliation_state_kind,
+            automatic_reconciliation.attempt_count
+                AS automatic_reconciliation_attempt_count,
+            automatic_reconciliation.model_call_id
+                AS automatic_reconciliation_model_call_id,
+            automatic_reconciliation.tool_attempt_id
+                AS automatic_reconciliation_tool_attempt_id,
             active_tool_round.boundary_frontier_id AS active_tool_round_frontier_id,
             logical_terminal.spawning_tool_request_id
                 AS logical_terminal_spawning_request_id,
@@ -2924,6 +2995,9 @@ async fn load_next_transcript_turn(
             AND recovery_call.turn_id = turn.turn_id
             AND recovery_call.session_id = turn.session_id
             AND recovery_call.state_kind = 'terminal'
+           LEFT JOIN automatic_reconciliation AS automatic_reconciliation
+             ON automatic_reconciliation.turn_id = turn.turn_id
+            AND automatic_reconciliation.session_id = turn.session_id
            LEFT JOIN model_call AS terminal_call
              ON terminal_call.model_call_id = turn.terminal_model_call_id
             AND terminal_call.turn_attempt_id = turn.terminal_attempt_id
@@ -2987,6 +3061,21 @@ fn decode_provider_failure_cause(
     }
 }
 
+fn decode_attachment_preparation_failure_cause(
+    value: &str,
+) -> Result<ProcessAttachmentPreparationFailureCause, ProcessReadError> {
+    match value {
+        "too_large" => Ok(ProcessAttachmentPreparationFailureCause::TooLarge),
+        "missing" => Ok(ProcessAttachmentPreparationFailureCause::Missing),
+        "corrupt" => Ok(ProcessAttachmentPreparationFailureCause::Corrupt),
+        value => Err(ProcessReadCorruption::Unsupported {
+            field: "model-call attachment-preparation failure cause",
+            value: value.to_owned(),
+        }
+        .into()),
+    }
+}
+
 fn decode_database_count(
     row: &PgRow,
     column: &'static str,
@@ -3003,7 +3092,7 @@ fn decode_transcript_turn_origin(
     accepted_input: Option<Uuid>,
     accepted_position: Option<Decimal>,
     accepted_origin: Option<Uuid>,
-    accepted_content: Option<String>,
+    accepted_content: Option<Value>,
     delegated_spawning_request: Option<Uuid>,
     delegated_parent_session: Option<Uuid>,
     delegated_parent_turn: Option<Uuid>,
@@ -3042,10 +3131,11 @@ fn decode_transcript_turn_origin(
             None,
         ) => {
             let accepted_position = decode_positive(accepted_position, "accepted input position")?;
+            let content = crate::user_content::decode(content)
+                .map_err(|_| ProcessReadCorruption::Inconsistent("turn accepted-input content"))?;
             if origin_accepted_input != accepted_input
                 || accepted_position != acceptance_position
                 || accepted_origin != turn.into_uuid()
-                || content.is_empty()
             {
                 return Err(
                     ProcessReadCorruption::Inconsistent("turn accepted-input correlation").into(),
@@ -3279,7 +3369,35 @@ fn decode_transcript_turn_model_settings(
     Ok(Some(event))
 }
 
-fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> {
+fn admitted_automatic_reconciliation_attempts(
+    attempts: i32,
+    exhausted: bool,
+    budget: Option<Option<u32>>,
+) -> Result<u32, ProcessReadError> {
+    let attempts = u32::try_from(attempts).map_err(|_| {
+        ProcessReadCorruption::Inconsistent("automatic reconciliation attempt count")
+    })?;
+    let admitted = if exhausted {
+        match budget {
+            Some(Some(budget)) => attempts == budget,
+            Some(None) => false,
+            None => attempts > 0,
+        }
+    } else {
+        budget.is_none_or(|budget| budget.is_none_or(|budget| attempts <= budget))
+    };
+    admitted
+        .then_some(attempts)
+        .ok_or(ProcessReadCorruption::Inconsistent(
+            "automatic reconciliation attempt budget",
+        ))
+        .map_err(Into::into)
+}
+
+fn decode_transcript_turn(
+    row: &PgRow,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
+) -> Result<DecodedTurn, ProcessReadError> {
     let turn = TurnId::from_uuid(required(row, "turn_id")?);
     let acceptance_position = decode_positive(
         required(row, "acceptance_position")?,
@@ -3367,6 +3485,8 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         row.try_get("terminal_model_call_disposition_kind")?;
     let terminal_call_provider_failure_cause: Option<String> =
         row.try_get("terminal_model_call_provider_failure_cause")?;
+    let terminal_call_attachment_preparation_failure_cause: Option<String> =
+        row.try_get("terminal_model_call_attachment_preparation_failure_cause")?;
     if active_phase.as_deref() != Some("awaiting_runner_recovery")
         && (runner_recovery_runner.is_some()
             || runner_recovery_revision.is_some()
@@ -3384,12 +3504,29 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         )
         .into());
     }
+    if terminal_call_attachment_preparation_failure_cause.is_some()
+        && (terminal_call_disposition.as_deref() != Some("known_failed")
+            || terminal_call_provider_failure_cause.is_some())
+    {
+        return Err(ProcessReadCorruption::Inconsistent(
+            "attachment-preparation failure cause without local known-failed model call",
+        )
+        .into());
+    }
     let current_model_call: Option<Uuid> = row.try_get("current_model_call_id")?;
     let current_model_call_state: Option<String> = row.try_get("current_model_call_state_kind")?;
     let current_model_call_frontier: Option<Uuid> =
         row.try_get("current_model_call_frontier_id")?;
     let recovery_model_call_frontier: Option<Uuid> =
         row.try_get("recovery_model_call_frontier_id")?;
+    let automatic_reconciliation_state: Option<String> =
+        row.try_get("automatic_reconciliation_state_kind")?;
+    let automatic_reconciliation_attempts: Option<i32> =
+        row.try_get("automatic_reconciliation_attempt_count")?;
+    let automatic_reconciliation_model_call: Option<Uuid> =
+        row.try_get("automatic_reconciliation_model_call_id")?;
+    let automatic_reconciliation_tool_attempt: Option<Uuid> =
+        row.try_get("automatic_reconciliation_tool_attempt_id")?;
     let active_tool_round_frontier: Option<Uuid> = row.try_get("active_tool_round_frontier_id")?;
 
     if !matches!(state_kind.as_str(), "queued" | "active" | "terminal") {
@@ -3415,6 +3552,53 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             value: value.to_owned(),
         }
         .into());
+    }
+    let automatic_reconciliation_present = automatic_reconciliation_state.is_some()
+        || automatic_reconciliation_attempts.is_some()
+        || automatic_reconciliation_model_call.is_some()
+        || automatic_reconciliation_tool_attempt.is_some();
+    let terminal_reconciliation = state_kind == "terminal"
+        && terminal_disposition.as_deref() == Some("reconciliation_required");
+    if automatic_reconciliation_present {
+        if !matches!(
+            active_phase.as_deref(),
+            Some("awaiting_model_call_recovery" | "awaiting_tool_recovery")
+        ) && !terminal_reconciliation
+        {
+            return Err(ProcessReadCorruption::Inconsistent(
+                "automatic model-call reconciliation outside recovery wait",
+            )
+            .into());
+        }
+        if terminal_reconciliation {
+            let valid_terminal_automatic = matches!(
+                (
+                    automatic_reconciliation_state.as_deref(),
+                    automatic_reconciliation_attempts,
+                    automatic_reconciliation_model_call,
+                    automatic_reconciliation_tool_attempt,
+                ),
+                (
+                    Some("reconciled" | "superseded"),
+                    Some(attempts),
+                    model_call,
+                    tool_attempt,
+                ) if admitted_automatic_reconciliation_attempts(
+                        attempts,
+                        false,
+                        automatic_reconciliation_attempt_budget,
+                    ).is_ok()
+                    && model_call == terminal_call
+                    && tool_attempt == terminal_tool_attempt
+                    && model_call.is_some() != tool_attempt.is_some()
+            );
+            if !valid_terminal_automatic {
+                return Err(ProcessReadCorruption::Inconsistent(
+                    "terminal automatic model-call reconciliation state",
+                )
+                .into());
+            }
+        }
     }
     if let Some(value) = terminal_disposition.as_deref()
         && !matches!(
@@ -3659,6 +3843,44 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
             return Err(ProcessReadCorruption::Inconsistent("tool recovery frontier").into());
         }
+        if automatic_reconciliation_model_call.is_some()
+            || automatic_reconciliation_tool_attempt
+                .is_some_and(|stored| stored != recovery_attempt)
+        {
+            return Err(ProcessReadCorruption::Inconsistent(
+                "automatic tool reconciliation attempt identity",
+            )
+            .into());
+        }
+        let (automatic_reconciliation_attempts, operator_action_required) = match (
+            automatic_reconciliation_state.as_deref(),
+            automatic_reconciliation_attempts,
+            automatic_reconciliation_tool_attempt,
+        ) {
+            (None, None, None) => (0, false),
+            (Some("scheduled" | "attempting"), Some(attempts), Some(_)) => (
+                admitted_automatic_reconciliation_attempts(
+                    attempts,
+                    false,
+                    automatic_reconciliation_attempt_budget,
+                )?,
+                false,
+            ),
+            (Some("exhausted"), Some(attempts), Some(_)) => (
+                admitted_automatic_reconciliation_attempts(
+                    attempts,
+                    true,
+                    automatic_reconciliation_attempt_budget,
+                )?,
+                true,
+            ),
+            _ => {
+                return Err(ProcessReadCorruption::Inconsistent(
+                    "active automatic tool reconciliation state",
+                )
+                .into());
+            }
+        };
         return project_logical_delegation_terminal(
             DecodedTurn {
                 turn: ProcessTranscriptTurn {
@@ -3668,6 +3890,8 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                     state: ProcessTurnState::ActiveAwaitingToolRecovery {
                         ended_attempt: TurnAttemptId::from_uuid(ended_attempt),
                         recovery_attempt: ToolAttemptId::from_uuid(recovery_attempt),
+                        automatic_reconciliation_attempts,
+                        operator_action_required,
                     },
                 },
                 start_lineage,
@@ -3853,13 +4077,52 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             None,
         ) => {
+            if automatic_reconciliation_tool_attempt.is_some()
+                || automatic_reconciliation_model_call.is_some_and(|stored| stored != call)
+            {
+                return Err(ProcessReadCorruption::Inconsistent(
+                    "automatic model-call reconciliation call identity",
+                )
+                .into());
+            }
             let call_frontier = recovery_model_call_frontier.ok_or(
                 ProcessReadCorruption::Inconsistent("recovery model call frontier"),
             )?;
+            let (automatic_reconciliation_attempts, operator_action_required) = match (
+                automatic_reconciliation_state.as_deref(),
+                automatic_reconciliation_attempts,
+                automatic_reconciliation_model_call,
+            ) {
+                (None, None, None) => (0, false),
+                (Some("scheduled" | "attempting"), Some(attempts), Some(_)) => (
+                    admitted_automatic_reconciliation_attempts(
+                        attempts,
+                        false,
+                        automatic_reconciliation_attempt_budget,
+                    )?,
+                    false,
+                ),
+                (Some("exhausted"), Some(attempts), Some(_)) => (
+                    admitted_automatic_reconciliation_attempts(
+                        attempts,
+                        true,
+                        automatic_reconciliation_attempt_budget,
+                    )?,
+                    true,
+                ),
+                _ => {
+                    return Err(ProcessReadCorruption::Inconsistent(
+                        "active automatic model-call reconciliation state",
+                    )
+                    .into());
+                }
+            };
             (
                 ProcessTurnState::ActiveAwaitingModelCallRecovery {
                     ended_attempt: TurnAttemptId::from_uuid(attempt),
                     recovery_call: ModelCallId::from_uuid(call),
+                    automatic_reconciliation_attempts,
+                    operator_action_required,
                 },
                 Some(call_frontier),
             )
@@ -3936,6 +4199,11 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                         .as_deref()
                         .map(decode_provider_failure_cause)
                         .transpose()?,
+                    attachment_preparation_failure_cause:
+                        terminal_call_attachment_preparation_failure_cause
+                            .as_deref()
+                            .map(decode_attachment_preparation_failure_cause)
+                            .transpose()?,
                 }),
             },
             Some(ContextFrontierId::from_uuid(frontier)),
@@ -4234,7 +4502,10 @@ async fn open_transcript_entry_cursor(
             result_event.provenance_command_id,
             imported.source_speaker_kind AS imported_source_speaker_kind,
             imported.content_encoding AS imported_content_encoding,
-            accepted.content_text AS origin_content,
+            CASE WHEN accepted.accepted_input_id IS NULL THEN NULL
+                 ELSE accepted_input_content_parts_json(
+                    accepted.accepted_input_id)
+            END AS origin_content,
             accepted.origin_turn_id,
             call.turn_id AS assistant_turn_id,
             result_attempt.request_id AS result_attempt_request_id,
@@ -4410,7 +4681,7 @@ fn decode_transcript_entry(
         row.try_get("context_summary_through_entry_id")?;
     let imported_source_speaker: Option<String> = row.try_get("imported_source_speaker_kind")?;
     let imported_content: Option<Vec<u8>> = row.try_get("imported_content_encoding")?;
-    let origin_content: Option<String> = row.try_get("origin_content")?;
+    let origin_content: Option<Value> = row.try_get("origin_content")?;
     let origin_turn: Option<Uuid> = row.try_get("origin_turn_id")?;
     let assistant_turn: Option<Uuid> = row.try_get("assistant_turn_id")?;
     let result_attempt_request: Option<Uuid> = row.try_get("result_attempt_request_id")?;
@@ -4981,13 +5252,15 @@ fn decode_transcript_entry(
             Some(content),
             Some(turn),
             None,
-        ) if !content.is_empty() => ProcessTranscriptEntry::User {
+        ) => ProcessTranscriptEntry::User {
             entry_index,
             source_session,
             entry,
             accepted_input: AcceptedInputId::from_uuid(accepted_input),
             turn: TurnId::from_uuid(turn),
-            content,
+            content: crate::user_content::decode(content).map_err(|_| {
+                ProcessReadCorruption::Inconsistent("semantic accepted-input content")
+            })?,
         },
         (
             "steering_accepted_input",
@@ -5002,13 +5275,15 @@ fn decode_transcript_entry(
             Some(content),
             None,
             None,
-        ) if !content.is_empty() => ProcessTranscriptEntry::User {
+        ) => ProcessTranscriptEntry::User {
             entry_index,
             source_session,
             entry,
             accepted_input: AcceptedInputId::from_uuid(accepted_input),
             turn: TurnId::from_uuid(turn),
-            content,
+            content: crate::user_content::decode(content).map_err(|_| {
+                ProcessReadCorruption::Inconsistent("semantic accepted-input content")
+            })?,
         },
         (
             "assistant_text",
@@ -5176,6 +5451,11 @@ fn decode_process_tool_approval(
     {
         return Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into());
     }
+    let runtime_safety_decision = ToolApprovalResolutionReconstitutionInput::runtime_safety(
+        ToolRequestId::from_uuid(Uuid::nil()),
+    )
+    .reconstitute()
+    .map_err(|_| ProcessReadCorruption::Inconsistent("runtime safety approval evidence"))?;
     match (
         source_kind,
         user_command,
@@ -5191,6 +5471,11 @@ fn decode_process_tool_approval(
             None,
             None,
         ) if decision == ToolApprovalDecision::Approve => Ok(None),
+        (ToolApprovalDecisionSourceStorageKind::RuntimeSafety, None, None, None, None)
+            if runtime_safety_decision.decision() == &decision =>
+        {
+            Ok(None)
+        }
         (ToolApprovalDecisionSourceStorageKind::UserCommand, Some(command), None, None, None) => {
             Ok(Some(ProcessToolApproval {
                 decision,
@@ -5253,6 +5538,7 @@ fn decode_process_tool_approval(
             | ToolApprovalDecisionSourceStorageKind::SessionBlanket
             | ToolApprovalDecisionSourceStorageKind::UserCommand
             | ToolApprovalDecisionSourceStorageKind::Delegate
+            | ToolApprovalDecisionSourceStorageKind::RuntimeSafety
             | ToolApprovalDecisionSourceStorageKind::UserOverride,
             ..,
         ) => Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into()),

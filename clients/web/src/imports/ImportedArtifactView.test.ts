@@ -8,10 +8,10 @@ const importedText: WebImportedEntry = {
   frontier: {
     imported_conversation_id: '00000000-0000-7000-8000-000000000001',
     imported_entry_id: '00000000-0000-7000-8000-000000000002',
-    position: '8',
+    position: 8,
   },
-  raw_record_position: '3',
-  record_entry_position: '2',
+  raw_record_position: 3,
+  record_entry_position: 2,
   source_speaker: 'assistant',
   content_kind: 'text',
   text: { kind: 'attested', leading_text: attestedText, completeness: 'complete' },

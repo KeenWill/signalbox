@@ -19,7 +19,7 @@ use signalbox_persistence::{
         BlobCatalogCorruption, BlobCatalogRepository, BlobReplicaRecord, BlobStoreBindingRecord,
     },
     blob_derivation::BlobDerivationRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
@@ -47,7 +47,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -555,10 +555,10 @@ async fn recorded_store_bindings_use_bytewise_name_order() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-071: replaying one deterministic derivation returns its immutable record.
+/// INV-078: replaying one deterministic derivation returns its immutable record.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv071_deterministic_blob_derivation_replay_returns_the_record()
+async fn inv078_deterministic_blob_derivation_replay_returns_the_record()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
     let derivation = thumbnail_derivation(input.digest(), output.digest());
@@ -585,10 +585,10 @@ async fn inv071_deterministic_blob_derivation_replay_returns_the_record()
     Ok(())
 }
 
-/// INV-071: the exact 4,096-byte canonical parameter boundary round-trips.
+/// INV-078: the exact 4,096-byte canonical parameter boundary round-trips.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv071_canonical_parameter_boundary_round_trips() -> Result<(), Box<dyn Error>> {
+async fn inv078_canonical_parameter_boundary_round_trips() -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
     let transformation = BlobTransformation::try_new(
         BlobTransformationName::try_new("image.boundary")
@@ -622,10 +622,10 @@ async fn inv071_canonical_parameter_boundary_round_trips() -> Result<(), Box<dyn
     Ok(())
 }
 
-/// INV-071: canonical JSON strings containing NUL round-trip without a jsonb cast.
+/// INV-078: canonical JSON strings containing NUL round-trip without a jsonb cast.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv071_canonical_nul_string_round_trips() -> Result<(), Box<dyn Error>> {
+async fn inv078_canonical_nul_string_round_trips() -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
     let transformation = BlobTransformation::try_new(
         BlobTransformationName::try_new("image.nul").expect("the NUL transformation name is valid"),
@@ -657,10 +657,10 @@ async fn inv071_canonical_nul_string_round_trips() -> Result<(), Box<dyn Error>>
     Ok(())
 }
 
-/// INV-071: arbitrary-precision canonical numbers round-trip without a jsonb cast.
+/// INV-078: arbitrary-precision canonical numbers round-trip without a jsonb cast.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv071_arbitrary_precision_parameter_round_trips() -> Result<(), Box<dyn Error>> {
+async fn inv078_arbitrary_precision_parameter_round_trips() -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
     let parameters: serde_json::Value = serde_json::from_str("{\"value\":1e+999}")?;
     let transformation = BlobTransformation::try_new(
@@ -694,10 +694,10 @@ async fn inv071_arbitrary_precision_parameter_round_trips() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-071: an immutable derivation row rejects updates.
+/// INV-078: an immutable derivation row rejects updates.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv071_derivation_rows_reject_updates() -> Result<(), Box<dyn Error>> {
+async fn inv078_derivation_rows_reject_updates() -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
     repository
         .record(thumbnail_derivation(input.digest(), output.digest()))
@@ -719,10 +719,10 @@ async fn inv071_derivation_rows_reject_updates() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// INV-071: immutable derivation satellites reject undeclared extra outputs.
+/// INV-078: immutable derivation satellites reject undeclared extra outputs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv071_derivation_satellites_reject_extra_outputs() -> Result<(), Box<dyn Error>> {
+async fn inv078_derivation_satellites_reject_extra_outputs() -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
     let derivation = thumbnail_derivation(input.digest(), output.digest());
     repository.record(derivation.clone()).await?;
@@ -748,10 +748,10 @@ async fn inv071_derivation_satellites_reject_extra_outputs() -> Result<(), Box<d
     Ok(())
 }
 
-/// INV-071: immutable derivation records reject truncation.
+/// INV-078: immutable derivation records reject truncation.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv071_derivation_records_reject_truncation() -> Result<(), Box<dyn Error>> {
+async fn inv078_derivation_records_reject_truncation() -> Result<(), Box<dyn Error>> {
     let (container, pool, repository, input, output) = derivation_repository_fixture().await?;
     repository
         .record(thumbnail_derivation(input.digest(), output.digest()))
@@ -773,10 +773,10 @@ async fn inv071_derivation_records_reject_truncation() -> Result<(), Box<dyn Err
     Ok(())
 }
 
-/// INV-071: deterministic provenance requires an implementation digest.
+/// INV-078: deterministic provenance requires an implementation digest.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv071_deterministic_provenance_rejects_a_null_implementation()
+async fn inv078_deterministic_provenance_rejects_a_null_implementation()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _repository, _input, _output) = derivation_repository_fixture().await?;
 
@@ -805,10 +805,10 @@ async fn inv071_deterministic_provenance_rejects_a_null_implementation()
     Ok(())
 }
 
-/// INV-071: derivation satellites require contiguous zero-based ordinals.
+/// INV-078: derivation satellites require contiguous zero-based ordinals.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv071_derivation_satellites_reject_noncontiguous_ordinals() -> Result<(), Box<dyn Error>>
+async fn inv078_derivation_satellites_reject_noncontiguous_ordinals() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _repository, input, output) = derivation_repository_fixture().await?;
     let derivation_id = Uuid::from_u128(0x5a10_0712);

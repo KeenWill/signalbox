@@ -39,6 +39,7 @@ tokio = { version = "1.53.0", default-features = false, features = [
     "net",
     "rt-multi-thread",
     "signal",
+    "time",
 ] }
 uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] }
 
@@ -46,7 +47,7 @@ uuid = { version = "1.24.0", default-features = false, features = ["std", "v7"] 
 expect-test = "1.5.1"
 signalbox-application = { path = "../../crates/application" }
 signalbox-domain = { path = "../../crates/domain" }
-signalboxd = { path = "../signalboxd" }
+signalboxd = { path = "../signalboxd", features = ["test-support"] }
 signalbox-model-provider-runtime = { path = "../../crates/model-provider-runtime" }
 signalbox-model-runtime = { path = "../../crates/model-runtime" }
 signalbox-model-runtime-anthropic = { path = "../../crates/model-runtime-anthropic" }

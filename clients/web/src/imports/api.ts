@@ -1,10 +1,12 @@
 import {
   decodeWebApiErrorResponse,
+  decodeWebContractBootstrap,
   decodeWebImportContinuationResponse,
   decodeWebImportDescriptor,
   decodeWebImportEntryWindow,
   decodeWebImportListPage,
   type WebApiErrorResponse,
+  type WebContractBootstrap,
   type WebImportContinuationRequest,
   type WebImportContinuationResponse,
   type WebImportDescriptor,
@@ -13,20 +15,6 @@ import {
   type WebImportListPage,
   type WebImportListRequest,
 } from '../generated/web-contract.mjs'
-import { readBoundedJson } from '../session-timeline/model'
-
-const MAX_IMPORT_RESPONSE_BYTES = 1024 * 1024
-const MAX_IMPORT_SOURCE_SESSION_BYTES = 512
-const DEFAULT_IMPORT_WINDOW_RADIUS = 25
-const utf8 = new TextEncoder()
-
-const boundedUtf8Prefix = (value: string, maximumBytes: number): string => {
-  const bytes = utf8.encode(value)
-  if (bytes.byteLength <= maximumBytes) return value
-  let end = maximumBytes
-  while (end > 0 && ((bytes[end] ?? 0) & 0xc0) === 0x80) end -= 1
-  return new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, end))
-}
 
 export interface ImportApi {
   list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage>
@@ -35,6 +23,7 @@ export interface ImportApi {
     importedConversationId: string,
     request: WebImportEntryWindowRequest,
     signal?: AbortSignal,
+    knownLatestPosition?: number,
   ): Promise<WebImportEntryWindow>
   continueImport(
     importedConversationId: string,
@@ -75,148 +64,164 @@ export class ImportDescriptorCorrelationError extends Error {
 
 export class ImportListCorrelationError extends Error {
   constructor() {
-    super('imports catalog page does not correlate with its request')
+    super('import catalog page does not correlate with its request')
     this.name = 'ImportListCorrelationError'
   }
 }
 
-const canonicalCatalogUuid = (value: string): string => {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)) {
-    throw new ImportListCorrelationError()
+export class ImportResponseTooLargeError extends Error {
+  constructor() {
+    super('import API response exceeds its byte ceiling')
+    this.name = 'ImportResponseTooLargeError'
   }
-  return value
 }
 
 const correlateListPage = (
   request: WebImportListRequest,
   page: WebImportListPage,
+  searchCorrelation?: string,
+  exactSourceSessionDigest?: string,
 ): WebImportListPage => {
-  const requestedLimit = request.limit
+  const requestedLimit = request.limit ?? DEFAULT_IMPORT_LIST_ITEMS
+  if ((page.search_correlation ?? undefined) !== searchCorrelation) {
+    throw new ImportListCorrelationError()
+  }
   if (
-    requestedLimit !== undefined &&
-    requestedLimit !== null &&
-    page.items.length > requestedLimit
+    searchCorrelation !== undefined &&
+    page.exact_source_session_id_sha256 !== exactSourceSessionDigest
   ) {
     throw new ImportListCorrelationError()
   }
-  const requestedAfter = request.after
-  let previousId =
-    requestedAfter === undefined || requestedAfter === null
-      ? undefined
-      : canonicalCatalogUuid(requestedAfter)
-  const requestedFormat = request.format
-  const requestedSourceSessionId = request.source_session_id
+  if (
+    page.items.length > requestedLimit ||
+    (page.next_cursor !== undefined &&
+      page.next_cursor !== null &&
+      page.items.length !== requestedLimit)
+  ) {
+    throw new ImportListCorrelationError()
+  }
+  let previous = request.after ?? undefined
   for (const item of page.items) {
-    const itemId = canonicalCatalogUuid(item.imported_conversation_id)
-    const sourceSessionCorrelates =
-      requestedSourceSessionId === undefined ||
-      requestedSourceSessionId === null ||
-      (item.source_session_id !== undefined &&
-        item.source_session_id !== null &&
-        item.source_session_id.leading_text ===
-          boundedUtf8Prefix(requestedSourceSessionId, MAX_IMPORT_SOURCE_SESSION_BYTES) &&
-        item.source_session_id.completeness ===
-          (utf8.encode(requestedSourceSessionId).byteLength > MAX_IMPORT_SOURCE_SESSION_BYTES
-            ? 'truncated'
-            : 'complete'))
+    const sourceSessionEvidence = item.source_session_id
     if (
-      (previousId !== undefined && itemId <= previousId) ||
-      (requestedFormat !== undefined &&
-        requestedFormat !== null &&
-        item.format !== requestedFormat) ||
-      !sourceSessionCorrelates
+      !isCanonicalUuid(item.imported_conversation_id) ||
+      !Number.isSafeInteger(item.entry_count) ||
+      item.entry_count <= 0 ||
+      (previous !== undefined && item.imported_conversation_id <= previous) ||
+      (request.format !== undefined && request.format !== null && item.format !== request.format) ||
+      (sourceSessionEvidence !== undefined &&
+        sourceSessionEvidence !== null &&
+        new TextEncoder().encode(sourceSessionEvidence.leading_text).byteLength >
+          MAX_IMPORT_TEXT_PREVIEW_BYTES)
     ) {
       throw new ImportListCorrelationError()
     }
-    previousId = itemId
+    if (request.source_session_id !== undefined && request.source_session_id !== null) {
+      const evidence = sourceSessionEvidence
+      if (
+        evidence === undefined ||
+        evidence === null ||
+        (evidence.completeness === 'complete'
+          ? evidence.leading_text !== request.source_session_id
+          : !request.source_session_id.startsWith(evidence.leading_text))
+      ) {
+        throw new ImportListCorrelationError()
+      }
+      if (item.source_session_id_sha256 !== page.exact_source_session_id_sha256) {
+        throw new ImportListCorrelationError()
+      }
+    }
+    previous = item.imported_conversation_id
   }
-  const nextCursor = page.next_cursor
   if (
-    nextCursor !== null &&
-    nextCursor !== undefined &&
-    (page.items.length === 0 ||
-      canonicalCatalogUuid(nextCursor) !==
-        page.items[page.items.length - 1]?.imported_conversation_id)
+    page.next_cursor !== undefined &&
+    page.next_cursor !== null &&
+    (page.items.length === 0 || page.next_cursor !== previous)
   ) {
     throw new ImportListCorrelationError()
   }
   return page
 }
 
-const decimalPosition = (value: string): bigint => {
-  if (!/^[1-9]\d{0,19}$/.test(value)) throw new ImportWindowCorrelationError()
-  const parsed = BigInt(value)
-  if (parsed > 18_446_744_073_709_551_615n) throw new ImportWindowCorrelationError()
-  return parsed
+const sha256 = async (value: string): Promise<string> => {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+const DEFAULT_IMPORT_LIST_ITEMS = 50
+const DEFAULT_IMPORT_WINDOW_RADIUS = 25
+const BOOTSTRAP_RESPONSE_BYTES = 64 * 1024
+const LIST_RESPONSE_BYTES = 1024 * 1024
+const DESCRIPTOR_RESPONSE_BYTES = 128 * 1024
+const ENTRY_WINDOW_RESPONSE_BYTES = 2 * 1024 * 1024
+const CONTINUATION_RESPONSE_BYTES = 128 * 1024
+const BOOTSTRAP_VALIDATION_TTL_MS = 30_000
+const MAX_IMPORT_TEXT_PREVIEW_BYTES = 512
+const CANONICAL_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const SHA256_HEX = /^[0-9a-f]{64}$/
+const NIL_UUID = '00000000-0000-0000-0000-000000000000'
+
+const isCanonicalUuid = (value: string): boolean => CANONICAL_UUID.test(value) && value !== NIL_UUID
+
+const textPreviewIsBounded = (entry: WebImportEntryWindow['items'][number]): boolean => {
+  if (entry.text?.kind !== 'attested') return true
+  return (
+    new TextEncoder().encode(entry.text.leading_text).byteLength <= MAX_IMPORT_TEXT_PREVIEW_BYTES
+  )
 }
 
 const correlateEntryWindow = (
   importedConversationId: string,
   request: WebImportEntryWindowRequest,
   window: WebImportEntryWindow,
+  knownLatestPosition?: number,
 ): WebImportEntryWindow => {
-  const firstPosition = decimalPosition(window.first_position)
-  const lastPosition = decimalPosition(window.last_position)
-  const anchorPosition = decimalPosition(window.anchor_position)
+  const normalizedAnchor = request.anchor ?? 'first'
+  const requestedBefore = request.before ?? DEFAULT_IMPORT_WINDOW_RADIUS
+  const requestedAfter = request.after ?? DEFAULT_IMPORT_WINDOW_RADIUS
   const expectedAnchor =
-    request.anchor === undefined || request.anchor === null || request.anchor === 'first'
-      ? 1n
-      : request.anchor === 'latest'
-        ? lastPosition
-        : request.position === undefined || request.position === null
-          ? undefined
-          : decimalPosition(request.position)
-  const entryIds = new Set<string>()
-  const positionsCorrelate = window.items.every((entry, index) => {
-    const entryId = entry.frontier.imported_entry_id
-    if (entryIds.has(entryId)) return false
-    entryIds.add(entryId)
-    return (
+    normalizedAnchor === 'first'
+      ? 1
+      : normalizedAnchor === 'latest'
+        ? knownLatestPosition
+        : request.position
+  const expectedFirstPosition =
+    expectedAnchor == null ? undefined : Math.max(1, expectedAnchor - requestedBefore)
+  const expectedLastPosition =
+    expectedAnchor == null || knownLatestPosition === undefined
+      ? undefined
+      : Math.min(knownLatestPosition, expectedAnchor + requestedAfter)
+  const entryIdentities = new Set(window.items.map((entry) => entry.frontier.imported_entry_id))
+  const positionsCorrelate = window.items.every(
+    (entry, index) =>
       entry.frontier.imported_conversation_id === importedConversationId &&
-      decimalPosition(entry.frontier.position) === firstPosition + BigInt(index)
-    )
-  })
-  const requestedBefore = BigInt(request.before ?? DEFAULT_IMPORT_WINDOW_RADIUS)
-  const requestedAfter = BigInt(request.after ?? DEFAULT_IMPORT_WINDOW_RADIUS)
-  const returnedBefore = anchorPosition - firstPosition
-  const returnedAfter = lastPosition - anchorPosition
+      isCanonicalUuid(entry.frontier.imported_entry_id) &&
+      entry.frontier.position > 0 &&
+      entry.raw_record_position > 0 &&
+      entry.record_entry_position > 0 &&
+      entry.frontier.position === window.first_position + index &&
+      (entry.content_kind === 'text') === (entry.text !== undefined && entry.text !== null) &&
+      textPreviewIsBounded(entry),
+  )
   if (
-    expectedAnchor === undefined ||
+    expectedAnchor == null ||
+    expectedFirstPosition === undefined ||
+    expectedLastPosition === undefined ||
+    knownLatestPosition === undefined ||
     window.items.length === 0 ||
-    anchorPosition !== expectedAnchor ||
-    firstPosition > anchorPosition ||
-    lastPosition < anchorPosition ||
-    lastPosition - firstPosition + 1n !== BigInt(window.items.length) ||
-    returnedBefore > requestedBefore ||
-    returnedAfter > requestedAfter ||
-    (window.has_before && returnedBefore !== requestedBefore) ||
-    (window.has_after && returnedAfter !== requestedAfter) ||
-    (anchorPosition === 1n && window.has_before) ||
-    (request.anchor === 'latest' && window.has_after) ||
+    window.first_position <= 0 ||
+    window.anchor_position !== expectedAnchor ||
+    window.first_position !== expectedFirstPosition ||
+    window.last_position !== expectedLastPosition ||
+    window.first_position > window.anchor_position ||
+    window.last_position < window.anchor_position ||
+    window.anchor_position - window.first_position > requestedBefore ||
+    window.last_position - window.anchor_position > requestedAfter ||
+    window.last_position > knownLatestPosition ||
+    window.last_position - window.first_position + 1 !== window.items.length ||
+    entryIdentities.size !== window.items.length ||
     !positionsCorrelate ||
     !window.items.some((entry) => entry.frontier.position === window.anchor_position)
-  ) {
-    throw new ImportWindowCorrelationError()
-  }
-  return window
-}
-
-export const correlateEntryWindowWithDescriptor = (
-  request: WebImportEntryWindowRequest,
-  window: WebImportEntryWindow,
-  descriptor: WebImportDescriptor,
-): WebImportEntryWindow => {
-  const entryCount = decimalPosition(descriptor.entry_count)
-  const firstPosition = decimalPosition(window.first_position)
-  const lastPosition = decimalPosition(window.last_position)
-  const anchorPosition = decimalPosition(window.anchor_position)
-  if (
-    firstPosition > entryCount ||
-    lastPosition > entryCount ||
-    anchorPosition > entryCount ||
-    (window.has_before ? firstPosition === 1n : firstPosition !== 1n) ||
-    (window.has_after ? lastPosition === entryCount : lastPosition !== entryCount) ||
-    (request.anchor === 'latest' && anchorPosition !== entryCount)
   ) {
     throw new ImportWindowCorrelationError()
   }
@@ -228,10 +233,47 @@ type Decoder<Value> = (value: unknown) => Value
 const decodeResponse = async <Value>(
   response: Response,
   decoder: Decoder<Value>,
+  maximumBytes: number,
 ): Promise<Value> => {
-  const value = await readBoundedJson(response, MAX_IMPORT_RESPONSE_BYTES)
+  const contentLength = response.headers.get('Content-Length')
+  if (contentLength !== null) {
+    const declaredLength = Number(contentLength)
+    if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+      throw new ImportResponseTooLargeError()
+    }
+  }
+  if (!response.body) throw new TypeError('import API response has no body')
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let receivedBytes = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      receivedBytes += value.byteLength
+      if (receivedBytes > maximumBytes) {
+        await reader.cancel()
+        throw new ImportResponseTooLargeError()
+      }
+      chunks.push(value)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+  const bytes = new Uint8Array(receivedBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  const value: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
   if (!response.ok) throw new ImportApiError(decodeWebApiErrorResponse(value))
   return decoder(value)
+}
+
+export const validateWebContractBootstrap = async (): Promise<void> => {
+  const response = await fetch('/api/bootstrap')
+  await decodeResponse(response, decodeWebContractBootstrap, BOOTSTRAP_RESPONSE_BYTES)
 }
 
 const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest): string => {
@@ -244,26 +286,105 @@ const queryString = (request: WebImportListRequest | WebImportEntryWindowRequest
 }
 
 export class HttpImportApi implements ImportApi {
+  private bootstrapValidationPromise: Promise<void> | undefined
+  private bootstrapValidatedAt: number | undefined
+
+  constructor(
+    private readonly bootstrapValidation = validateWebContractBootstrap,
+    private readonly now = Date.now,
+  ) {}
+
+  // The product shell already admitted this exact bootstrap through the shared transport, so the
+  // first import read reuses that admission instead of issuing a second `/api/bootstrap` request.
+  // The validation lifetime still applies: once it expires, the ordinary path revalidates.
+  static withAdmittedBootstrap(
+    _bootstrap: WebContractBootstrap,
+    bootstrapValidation = validateWebContractBootstrap,
+    now = Date.now,
+  ): HttpImportApi {
+    const api = new HttpImportApi(bootstrapValidation, now)
+    api.bootstrapValidationPromise = Promise.resolve()
+    api.bootstrapValidatedAt = now()
+    return api
+  }
+
+  private validateBootstrap(): Promise<void> {
+    if (
+      this.bootstrapValidatedAt !== undefined &&
+      this.now() - this.bootstrapValidatedAt >= BOOTSTRAP_VALIDATION_TTL_MS
+    ) {
+      this.bootstrapValidationPromise = undefined
+      this.bootstrapValidatedAt = undefined
+    }
+    this.bootstrapValidationPromise ??= this.bootstrapValidation()
+      .then(() => {
+        this.bootstrapValidatedAt = this.now()
+      })
+      .catch((error: unknown) => {
+        this.bootstrapValidationPromise = undefined
+        this.bootstrapValidatedAt = undefined
+        throw error
+      })
+    return this.bootstrapValidationPromise
+  }
+
   async list(request: WebImportListRequest, signal?: AbortSignal): Promise<WebImportListPage> {
+    await this.validateBootstrap()
+    if (request.source_session_id !== undefined && request.source_session_id !== null) {
+      const { source_session_id: sourceSessionId, ...catalogRequest } = request
+      const searchCorrelation = crypto.randomUUID()
+      const exactSourceSessionDigest = await sha256(sourceSessionId)
+      const response = await fetch(
+        `/api/imports/searches${queryString({
+          ...catalogRequest,
+          search_correlation: searchCorrelation,
+        })}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+          body: sourceSessionId,
+          signal,
+        },
+      )
+      return correlateListPage(
+        request,
+        await decodeResponse(response, decodeWebImportListPage, LIST_RESPONSE_BYTES),
+        searchCorrelation,
+        exactSourceSessionDigest,
+      )
+    }
     const response = await fetch(`/api/imports/${queryString(request)}`, { signal })
-    const page = await decodeResponse(response, decodeWebImportListPage)
-    return correlateListPage(request, page)
+    return correlateListPage(
+      request,
+      await decodeResponse(response, decodeWebImportListPage, LIST_RESPONSE_BYTES),
+    )
   }
 
   async descriptor(
     importedConversationId: string,
     signal?: AbortSignal,
   ): Promise<WebImportDescriptor> {
+    await this.validateBootstrap()
     const response = await fetch(`/api/imports/${encodeURIComponent(importedConversationId)}`, {
       signal,
     })
-    const descriptor = await decodeResponse(response, decodeWebImportDescriptor)
+    const descriptor = await decodeResponse(
+      response,
+      decodeWebImportDescriptor,
+      DESCRIPTOR_RESPONSE_BYTES,
+    )
     if (
       descriptor.imported_conversation_id !== importedConversationId ||
       descriptor.timeline.first.imported_conversation_id !== importedConversationId ||
       descriptor.timeline.latest.imported_conversation_id !== importedConversationId ||
-      descriptor.timeline.first.position !== '1' ||
-      descriptor.timeline.latest.position !== descriptor.entry_count
+      descriptor.entry_count === 0 ||
+      descriptor.timeline.first.position !== 1 ||
+      descriptor.timeline.latest.position !== descriptor.entry_count ||
+      !SHA256_HEX.test(descriptor.source.source_digest_sha256) ||
+      (descriptor.source.source_session_id !== undefined &&
+        descriptor.source.source_session_id !== null &&
+        new TextEncoder().encode(descriptor.source.source_session_id.leading_text).byteLength >
+          MAX_IMPORT_TEXT_PREVIEW_BYTES)
     ) {
       throw new ImportDescriptorCorrelationError()
     }
@@ -274,19 +395,26 @@ export class HttpImportApi implements ImportApi {
     importedConversationId: string,
     request: WebImportEntryWindowRequest,
     signal?: AbortSignal,
+    knownLatestPosition?: number,
   ): Promise<WebImportEntryWindow> {
+    await this.validateBootstrap()
     const response = await fetch(
       `/api/imports/${encodeURIComponent(importedConversationId)}/entries${queryString(request)}`,
       { signal },
     )
-    const window = await decodeResponse(response, decodeWebImportEntryWindow)
-    return correlateEntryWindow(importedConversationId, request, window)
+    const window = await decodeResponse(
+      response,
+      decodeWebImportEntryWindow,
+      ENTRY_WINDOW_RESPONSE_BYTES,
+    )
+    return correlateEntryWindow(importedConversationId, request, window, knownLatestPosition)
   }
 
   async continueImport(
     importedConversationId: string,
     request: WebImportContinuationRequest,
   ): Promise<WebImportContinuationResponse> {
+    await this.validateBootstrap()
     const response = await fetch(
       `/api/imports/${encodeURIComponent(importedConversationId)}/continuations`,
       {
@@ -295,8 +423,14 @@ export class HttpImportApi implements ImportApi {
         body: JSON.stringify(request),
       },
     )
-    const receipt = await decodeResponse(response, decodeWebImportContinuationResponse)
+    const receipt = await decodeResponse(
+      response,
+      decodeWebImportContinuationResponse,
+      CONTINUATION_RESPONSE_BYTES,
+    )
     if (
+      !CANONICAL_UUID.test(receipt.session_id) ||
+      receipt.session_id === '00000000-0000-0000-0000-000000000000' ||
       receipt.command_id !== request.command_id ||
       receipt.relationship !== request.relationship ||
       receipt.frontier.imported_conversation_id !== request.frontier.imported_conversation_id ||

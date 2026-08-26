@@ -13,9 +13,10 @@ use signalbox_domain::{
 use sqlx::{PgPool, Row, postgres::PgRow, types::Uuid};
 
 use crate::conversation_import::{
-    DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_PENDING, DISPLAY_TITLE_STATE_UNDERIVABLE,
-    decode_format, decode_source_speaker, encode_format, positive_u64,
+    DISPLAY_TITLE_STATE_DERIVED, DISPLAY_TITLE_STATE_UNDERIVABLE, decode_format,
+    decode_source_speaker, encode_format, positive_u64,
 };
+
 /// Exact filters and exclusive keyset position for one imports page.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImportedConversationPageRequest {
@@ -51,6 +52,8 @@ pub struct ImportedConversationSummary {
     pub format: ImportedConversationFormat,
     /// Byte-bounded consistent source-session evidence.
     pub source_session_id: Option<ImportedTextProjection>,
+    /// SHA-256 of the complete source-session identifier, when present.
+    pub source_session_digest: Option<[u8; 32]>,
     /// Declared normalized entry count.
     pub entry_count: u64,
 }
@@ -315,28 +318,116 @@ impl ImportedConversationDiscoveryRepository {
             .map_or((None, None), |(format, version)| {
                 (Some(format), Some(version))
             });
-        let rows = sqlx::query(
-            "SELECT imported_conversation_id, source_format, converter_version,
-                    substring(source_session_id FROM 1 FOR ($6)::integer) AS source_session_prefix,
+        let after = request.after.map(ImportedConversationId::into_uuid);
+        let limit = i64::from(request.limit.get()) + 1;
+        let source_session_maximum_bytes =
+            i64::from(request.source_session_maximum_bytes.get()) + 3;
+        let rows = if let Some(source_session_id) = request.source_session_id {
+            sqlx::query(
+                "SELECT imported_conversation_id, source_format, converter_version,
+                    substring(source_session_id FROM 1 FOR $6::integer) AS source_session_prefix,
                     octet_length(source_session_id)::bigint AS source_session_bytes,
+                    sha256(source_session_id) AS source_session_digest,
                     $6::bigint AS source_session_maximum_bytes,
                     declared_entry_count, display_title, display_title_state
                FROM imported_conversation
-              WHERE ($1::uuid IS NULL OR imported_conversation_id > $1)
-                AND ($2::text IS NULL OR source_format = $2)
-                AND ($3::smallint IS NULL OR converter_version = $3)
-                AND ($4::bytea IS NULL OR source_session_id = $4)
+              WHERE imported_conversation_id > COALESCE($1, '00000000-0000-0000-0000-000000000000'::uuid)
+                AND source_format = COALESCE($2, source_format)
+                AND converter_version = COALESCE($3, converter_version)
+                AND sha256(source_session_id) = sha256($4)
+                AND source_session_id = $4
               ORDER BY imported_conversation_id
               LIMIT $5",
-        )
-        .bind(request.after.map(ImportedConversationId::into_uuid))
-        .bind(source_format)
-        .bind(converter_version)
-        .bind(request.source_session_id)
-        .bind(i64::from(request.limit.get()) + 1)
-        .bind(i64::from(request.source_session_maximum_bytes.get()) + 3)
-        .fetch_all(&self.pool)
-        .await?;
+            )
+            .bind(after)
+            .bind(source_format)
+            .bind(converter_version)
+            .bind(source_session_id)
+            .bind(limit)
+            .bind(source_session_maximum_bytes)
+            .fetch_all(&self.pool)
+            .await?
+        } else if let (Some(source_format), Some(converter_version), Some(after)) =
+            (source_format, converter_version, after)
+        {
+            sqlx::query(
+                "SELECT imported_conversation_id, source_format, converter_version,
+                    substring(source_session_id FROM 1 FOR $5::integer) AS source_session_prefix,
+                    octet_length(source_session_id)::bigint AS source_session_bytes,
+                    NULL::bytea AS source_session_digest,
+                    $5::bigint AS source_session_maximum_bytes,
+                    declared_entry_count, display_title, display_title_state
+               FROM imported_conversation
+              WHERE imported_conversation_id > $1
+                AND source_format = $2
+                AND converter_version = $3
+              ORDER BY imported_conversation_id
+              LIMIT $4",
+            )
+            .bind(after)
+            .bind(source_format)
+            .bind(converter_version)
+            .bind(limit)
+            .bind(source_session_maximum_bytes)
+            .fetch_all(&self.pool)
+            .await?
+        } else if let (Some(source_format), Some(converter_version)) =
+            (source_format, converter_version)
+        {
+            sqlx::query(
+                "SELECT imported_conversation_id, source_format, converter_version,
+                    substring(source_session_id FROM 1 FOR $4::integer) AS source_session_prefix,
+                    octet_length(source_session_id)::bigint AS source_session_bytes,
+                    NULL::bytea AS source_session_digest,
+                    $4::bigint AS source_session_maximum_bytes,
+                    declared_entry_count, display_title, display_title_state
+               FROM imported_conversation
+              WHERE source_format = $1
+                AND converter_version = $2
+              ORDER BY imported_conversation_id
+              LIMIT $3",
+            )
+            .bind(source_format)
+            .bind(converter_version)
+            .bind(limit)
+            .bind(source_session_maximum_bytes)
+            .fetch_all(&self.pool)
+            .await?
+        } else if let Some(after) = after {
+            sqlx::query(
+                "SELECT imported_conversation_id, source_format, converter_version,
+                    substring(source_session_id FROM 1 FOR $3::integer) AS source_session_prefix,
+                    octet_length(source_session_id)::bigint AS source_session_bytes,
+                    NULL::bytea AS source_session_digest,
+                    $3::bigint AS source_session_maximum_bytes,
+                    declared_entry_count, display_title, display_title_state
+               FROM imported_conversation
+              WHERE imported_conversation_id > $1
+              ORDER BY imported_conversation_id
+              LIMIT $2",
+            )
+            .bind(after)
+            .bind(limit)
+            .bind(source_session_maximum_bytes)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT imported_conversation_id, source_format, converter_version,
+                    substring(source_session_id FROM 1 FOR $2::integer) AS source_session_prefix,
+                    octet_length(source_session_id)::bigint AS source_session_bytes,
+                    NULL::bytea AS source_session_digest,
+                    $2::bigint AS source_session_maximum_bytes,
+                    declared_entry_count, display_title, display_title_state
+               FROM imported_conversation
+              ORDER BY imported_conversation_id
+              LIMIT $1",
+            )
+            .bind(limit)
+            .bind(source_session_maximum_bytes)
+            .fetch_all(&self.pool)
+            .await?
+        };
         let mut items = rows
             .iter()
             .map(decode_summary)
@@ -362,16 +453,16 @@ impl ImportedConversationDiscoveryRepository {
         let row = sqlx::query(
             "SELECT imported.imported_conversation_id, imported.source_format,
                     imported.converter_version, imported.source_digest,
-                    substring(imported.source_session_id FROM 1 FOR ($2)::integer)
+                    substring(imported.source_session_id FROM 1 FOR $2::integer)
                         AS source_session_prefix,
                     octet_length(imported.source_session_id)::bigint AS source_session_bytes,
                     $2::bigint AS source_session_maximum_bytes,
                     imported.declared_raw_record_count,
                     imported.declared_entry_count, imported.display_title,
                     imported.display_title_state,
-                    imported.raw_source_bytes,
-                    imported.normalized_source_record_bytes,
-                    imported.normalized_entry_bytes,
+                    sizes.raw_source_bytes,
+                    sizes.normalized_source_record_bytes,
+                    sizes.normalized_entry_bytes,
                     (SELECT imported_transcript_entry_id
                        FROM imported_transcript_entry AS first_entry
                       WHERE first_entry.imported_conversation_id =
@@ -393,6 +484,8 @@ impl ImportedConversationDiscoveryRepository {
                             imported.imported_conversation_id
                       ORDER BY imported_entry_position DESC LIMIT 1) AS latest_entry_position
                FROM imported_conversation AS imported
+               JOIN imported_conversation_size_totals AS sizes
+                 ON sizes.imported_conversation_id = imported.imported_conversation_id
               WHERE imported.imported_conversation_id = $1",
         )
         .bind(conversation.into_uuid())
@@ -443,13 +536,12 @@ impl ImportedConversationDiscoveryRepository {
         let rows = sqlx::query(
             "SELECT imported_entry_position, imported_transcript_entry_id,
                     raw_record_position, record_entry_position, source_speaker_kind,
-                    content_kind,
                     substring(content_encoding FROM 1 FOR 12) AS content_header,
-                    CASE WHEN octet_length(content_encoding) >= 4
-                              AND get_byte(content_encoding, 2) = 1
+                    CASE WHEN get_byte(content_encoding, 2) = 1
                               AND get_byte(content_encoding, 3) = 2
-                         THEN substring(content_encoding FROM 13 FOR ($4)::integer) END
+                         THEN substring(content_encoding FROM 13 FOR $4::integer) END
                          AS content_text_prefix,
+                    content_kind,
                     octet_length(content_encoding)::bigint AS content_bytes,
                     $4::bigint AS content_projected_bytes
                FROM imported_transcript_entry
@@ -496,8 +588,23 @@ fn decode_summary(
         display_title: checked_display_title(row)?,
         format,
         source_session_id: checked_source_session_id(row)?,
+        source_session_digest: checked_optional_digest(row, "source_session_digest")?,
         entry_count: positive(row.try_get("declared_entry_count")?, "declared entry count")?,
     })
+}
+
+fn checked_optional_digest(
+    row: &PgRow,
+    field: &'static str,
+) -> Result<Option<[u8; 32]>, ImportedConversationDiscoveryError> {
+    let digest: Option<Vec<u8>> = row.try_get(field)?;
+    digest
+        .map(|digest| {
+            digest
+                .try_into()
+                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidDigest.into())
+        })
+        .transpose()
 }
 
 fn decode_descriptor(
@@ -578,24 +685,6 @@ fn decode_entry(
     let source_speaker = decode_source_speaker(&source_speaker_kind)
         .map_err(|_| ImportedConversationDiscoveryCorruption::Unsupported("source speaker"))?;
     let content = checked_content_projection(row)?;
-    // Mirror the speaker correlation aggregate reconstitution decides without the raw
-    // record: a source event carries no speaker evidence, and an attested-absent speaker
-    // is rejected for every message-derived kind in every reconstitution branch. A
-    // not-attested speaker can be valid for records without speaker evidence, so only the
-    // complete aggregate can judge it.
-    if matches!(content, ImportedEntryContentProjection::SourceEvent) {
-        if source_speaker != ImportedSourceAttestation::NotAttested {
-            return Err(ImportedConversationDiscoveryCorruption::Inconsistent(
-                "source-event speaker evidence",
-            )
-            .into());
-        }
-    } else if source_speaker == ImportedSourceAttestation::AttestedAbsent {
-        return Err(ImportedConversationDiscoveryCorruption::Inconsistent(
-            "message-entry speaker evidence",
-        )
-        .into());
-    }
     Ok(ImportedEntryProjection {
         frontier: ImportedContinuationReference {
             conversation,
@@ -620,122 +709,26 @@ fn checked_content_projection(
     let header: Vec<u8> = row.try_get("content_header")?;
     let total_bytes: i64 = row.try_get("content_bytes")?;
     let projected_bytes: i64 = row.try_get("content_projected_bytes")?;
-    let content_kind: Option<String> = row.try_get("content_kind")?;
     if header.len() < 3 || !matches!(header[0], 1 | 2) || header[1] != 1 || total_bytes < 3 {
         return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
     }
-    match header[2] {
-        0 if content_kind.as_deref() == Some("source_event") => {
-            checked_single_attestation_envelope(&header, total_bytes)?;
-            Ok(ImportedEntryContentProjection::SourceEvent)
-        }
+    let content_kind: i16 = row.try_get("content_kind")?;
+    if i16::from(header[2]) != content_kind {
+        return Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into());
+    }
+    match content_kind {
+        0 => Ok(ImportedEntryContentProjection::SourceEvent),
         1 => checked_text_projection(&header, row, total_bytes, projected_bytes)
             .map(ImportedEntryContentProjection::Text),
-        2 if content_kind.as_deref() == Some("tool_call") => {
-            checked_compound_envelope(&header, total_bytes, 3)?;
-            Ok(ImportedEntryContentProjection::ToolCall)
-        }
-        3 if content_kind.as_deref() == Some("tool_result") => {
-            checked_compound_envelope(&header, total_bytes, 2)?;
-            Ok(ImportedEntryContentProjection::ToolResult)
-        }
-        4 if content_kind.as_deref() == Some("thinking") => {
-            checked_compound_envelope(&header, total_bytes, 1)?;
-            Ok(ImportedEntryContentProjection::Thinking)
-        }
-        5 if content_kind.as_deref() == Some("redacted_thinking") => {
-            checked_single_attestation_envelope(&header, total_bytes)?;
-            Ok(ImportedEntryContentProjection::RedactedThinking)
-        }
-        6 if content_kind.as_deref() == Some("document") => {
-            checked_document_envelope(&header, total_bytes)?;
-            Ok(ImportedEntryContentProjection::Document)
-        }
-        7 if content_kind.as_deref() == Some("message_content_absent")
-            && header.get(3).is_some_and(|tag| *tag <= 4)
-            && total_bytes == 4 =>
-        {
+        2 => Ok(ImportedEntryContentProjection::ToolCall),
+        3 => Ok(ImportedEntryContentProjection::ToolResult),
+        4 => Ok(ImportedEntryContentProjection::Thinking),
+        5 => Ok(ImportedEntryContentProjection::RedactedThinking),
+        6 => Ok(ImportedEntryContentProjection::Document),
+        7 if total_bytes == 4 && matches!(header.get(3), Some(0..=4)) => {
             Ok(ImportedEntryContentProjection::MessageContentAbsent)
         }
-        8 if content_kind.as_deref() == Some("source_message_block") => {
-            checked_single_attestation_envelope(&header, total_bytes)?;
-            Ok(ImportedEntryContentProjection::SourceMessageBlock)
-        }
-        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
-    }
-}
-
-// The bounded projection reads only the fixed header prefix, so a kind whose payload is a
-// single trailing text attestation is accepted only after its attestation tag and declared
-// payload length are checked against the stored byte count, instead of trusting the kind
-// byte alone.
-fn checked_single_attestation_envelope(
-    header: &[u8],
-    total_bytes: i64,
-) -> Result<(), ImportedConversationDiscoveryError> {
-    match header.get(3) {
-        Some(0 | 1) if total_bytes == 4 => Ok(()),
-        Some(2) if header.len() == 12 => {
-            let declared_bytes = u64::from_be_bytes(
-                header[4..12]
-                    .try_into()
-                    .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?,
-            );
-            let declared_bytes = i64::try_from(declared_bytes)
-                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
-            if total_bytes.checked_sub(12) == Some(declared_bytes) {
-                Ok(())
-            } else {
-                Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into())
-            }
-        }
-        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
-    }
-}
-
-// Bounded structural validation for kinds whose payload opens with a text attestation
-// followed by `remaining_attestations` further attestations, each occupying at least its
-// one tag byte. The complete codec still owns full decoding; this rejects encodings whose
-// stored byte count cannot possibly hold the declared structure, such as a bare header.
-fn checked_compound_envelope(
-    header: &[u8],
-    total_bytes: i64,
-    remaining_attestations: i64,
-) -> Result<(), ImportedConversationDiscoveryError> {
-    match header.get(3) {
-        Some(0 | 1) if total_bytes >= 4 + remaining_attestations => Ok(()),
-        Some(2) if header.len() == 12 => {
-            let declared_bytes = u64::from_be_bytes(
-                header[4..12]
-                    .try_into()
-                    .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?,
-            );
-            let declared_bytes = i64::try_from(declared_bytes)
-                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
-            let minimum_total = declared_bytes
-                .checked_add(12)
-                .and_then(|bytes| bytes.checked_add(remaining_attestations))
-                .ok_or(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding)?;
-            if total_bytes >= minimum_total {
-                Ok(())
-            } else {
-                Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into())
-            }
-        }
-        _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
-    }
-}
-
-// A document payload is one attestation of a media source, which is itself three text
-// attestations, so an attested document carries the inner kind-attestation tag directly
-// after the outer tag and needs at least the three inner tag bytes.
-fn checked_document_envelope(
-    header: &[u8],
-    total_bytes: i64,
-) -> Result<(), ImportedConversationDiscoveryError> {
-    match header.get(3) {
-        Some(0 | 1) if total_bytes == 4 => Ok(()),
-        Some(2) if header.get(4).is_some_and(|tag| *tag <= 2) && total_bytes >= 7 => Ok(()),
+        8 => Ok(ImportedEntryContentProjection::SourceMessageBlock),
         _ => Err(ImportedConversationDiscoveryCorruption::InvalidEntryEncoding.into()),
     }
 }
@@ -789,9 +782,6 @@ fn checked_display_title(
                 .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidDisplayTitle.into())
         }
         (DISPLAY_TITLE_STATE_UNDERIVABLE, None) => Ok(None),
-        (DISPLAY_TITLE_STATE_PENDING, _) => Err(
-            ImportedConversationDiscoveryCorruption::Inconsistent("pending display title").into(),
-        ),
         _ => {
             Err(ImportedConversationDiscoveryCorruption::Inconsistent("display-title state").into())
         }
@@ -839,25 +829,8 @@ fn bounded_utf8_projection(
     let candidate = &prefix[..prefix.len().min(maximum_bytes)];
     let end = match std::str::from_utf8(candidate) {
         Ok(_) => candidate.len(),
-        Err(error) if error.error_len().is_none() => {
-            let scalar_start = error.valid_up_to();
-            let width = match candidate.get(scalar_start).copied() {
-                Some(0xc2..=0xdf) => 2,
-                Some(0xe0..=0xef) => 3,
-                Some(0xf0..=0xf4) => 4,
-                _ => {
-                    return Err(ImportedConversationDiscoveryCorruption::InvalidUtf8(field).into());
-                }
-            };
-            let scalar_end = scalar_start
-                .checked_add(width)
-                .ok_or(ImportedConversationDiscoveryCorruption::InvalidUtf8(field))?;
-            let scalar = prefix
-                .get(scalar_start..scalar_end)
-                .ok_or(ImportedConversationDiscoveryCorruption::InvalidUtf8(field))?;
-            std::str::from_utf8(scalar)
-                .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidUtf8(field))?;
-            scalar_start
+        Err(error) if error.error_len().is_none() && total_bytes > maximum_bytes => {
+            error.valid_up_to()
         }
         Err(_) => return Err(ImportedConversationDiscoveryCorruption::InvalidUtf8(field).into()),
     };
@@ -876,4 +849,35 @@ fn positive(
 ) -> Result<u64, ImportedConversationDiscoveryError> {
     positive_u64(value)
         .map_err(|_| ImportedConversationDiscoveryCorruption::InvalidOrdinal(field).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ImportedConversationDiscoveryCorruption, ImportedConversationDiscoveryError,
+        bounded_utf8_projection,
+    };
+
+    #[test]
+    fn complete_projection_rejects_incomplete_utf8() {
+        let error = bounded_utf8_projection(vec![b'a', 0xe2], 2, 5, "fixture")
+            .expect_err("a complete stored value must be valid UTF-8");
+
+        assert!(matches!(
+            error,
+            ImportedConversationDiscoveryError::Corruption(
+                ImportedConversationDiscoveryCorruption::InvalidUtf8("fixture")
+            )
+        ));
+    }
+
+    #[test]
+    fn truncated_projection_drops_only_an_incomplete_boundary_scalar() {
+        let projection =
+            bounded_utf8_projection(vec![b'a', 0xe2, 0x82, 0xac, b'b'], 5, 5, "fixture")
+                .expect("a shortened prefix may end inside a valid scalar");
+
+        assert_eq!(projection.leading_text, "a");
+        assert!(!projection.complete);
+    }
 }

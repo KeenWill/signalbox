@@ -5,9 +5,6 @@ import {
   defaultBrowserPreferences,
   loadBrowserPreferences,
   MAX_BROWSER_PREFERENCES_BYTES,
-  MAX_KEY_OVERRIDE_KEY_BYTES,
-  MAX_KEY_OVERRIDE_VALUE_BYTES,
-  MAX_KEY_OVERRIDES,
   MAX_LOGICAL_POSITION_KEY_BYTES,
   MAX_LOGICAL_POSITION_VALUE_BYTES,
   MAX_SAVED_LOGICAL_POSITIONS,
@@ -71,46 +68,6 @@ describe('browser preferences', () => {
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(MAX_SAVED_LOGICAL_POSITIONS)
   })
 
-  it('bounds retained key overrides', () => {
-    const keyOverrides = Object.fromEntries(
-      Array.from({ length: MAX_KEY_OVERRIDES + 2 }, (_, index) => [
-        `command-${index}`,
-        `key-${index}`,
-      ]),
-    )
-
-    const decoded = decodeBrowserPreferences({
-      ...defaultBrowserPreferences,
-      keyOverrides,
-    })
-
-    expect(Object.keys(decoded.keyOverrides)).toHaveLength(MAX_KEY_OVERRIDES)
-  })
-
-  it('drops malformed and out-of-range restored logical positions', () => {
-    const decoded = decodeBrowserPreferences({
-      ...defaultBrowserPreferences,
-      lastLogicalPositions: {
-        valid: '42',
-        zero: '0',
-        malformed: 'timeline:12',
-        overflow: '18446744073709551616',
-      },
-    })
-
-    expect(decoded.lastLogicalPositions).toEqual({ valid: '42' })
-  })
-
-  it('falls back to defaults when browser storage reads throw', () => {
-    vi.stubGlobal('localStorage', {
-      getItem: () => {
-        throw new Error('storage denied')
-      },
-    })
-
-    expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
-  })
-
   it('loads defaults atomically when the stored schema is partial', () => {
     vi.stubGlobal('localStorage', {
       getItem: (key: string) =>
@@ -118,16 +75,6 @@ describe('browser preferences', () => {
     })
 
     expect(loadBrowserPreferences()).toEqual(defaultBrowserPreferences)
-  })
-
-  it('keeps browser storage write failures non-fatal', () => {
-    vi.stubGlobal('localStorage', {
-      setItem: () => {
-        throw new Error('storage denied')
-      },
-    })
-
-    expect(() => saveBrowserPreferences(defaultBrowserPreferences)).not.toThrow()
   })
 
   it('rejects an oversized stored payload before parsing it', () => {
@@ -182,19 +129,42 @@ describe('browser preferences', () => {
     expect(() =>
       decodeBrowserPreferences({
         ...defaultBrowserPreferences,
-        lastLogicalPositions: { ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES)]: 'cursor' },
+        lastLogicalPositions: { ['é'.repeat(MAX_LOGICAL_POSITION_KEY_BYTES)]: '7' },
       }),
-    ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
 
     expect(() =>
       decodeBrowserPreferences({
         ...defaultBrowserPreferences,
         lastLogicalPositions: { session: 'é'.repeat(MAX_LOGICAL_POSITION_VALUE_BYTES) },
       }),
-    ).toThrow('preferences.lastLogicalPositions keys or values exceed their byte limits')
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
   })
 
-  it('accepts UTF-8 logical-position keys exactly at their byte ceiling', () => {
+  it('rejects malformed saved logical positions atomically', () => {
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { malformed: 'not-a-position' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { zero: '0' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+
+    expect(() =>
+      decodeBrowserPreferences({
+        ...defaultBrowserPreferences,
+        lastLogicalPositions: { overflow: '18446744073709551616' },
+      }),
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
+  })
+
+  it('accepts logical-position keys exactly at their byte ceiling', () => {
     const decoded = decodeBrowserPreferences({
       ...defaultBrowserPreferences,
       lastLogicalPositions: {
@@ -205,35 +175,19 @@ describe('browser preferences', () => {
     expect(Object.keys(decoded.lastLogicalPositions)).toHaveLength(1)
   })
 
-  it('rejects key-override keys and values above their UTF-8 byte ceilings', () => {
+  it('rejects logical-position keys with unordered plain-object key semantics', () => {
     expect(() =>
       decodeBrowserPreferences({
         ...defaultBrowserPreferences,
-        keyOverrides: { ['é'.repeat(MAX_KEY_OVERRIDE_KEY_BYTES)]: 'Shift+K' },
+        lastLogicalPositions: { 1: '7' },
       }),
-    ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
 
     expect(() =>
       decodeBrowserPreferences({
         ...defaultBrowserPreferences,
-        keyOverrides: { command: 'é'.repeat(MAX_KEY_OVERRIDE_VALUE_BYTES) },
+        lastLogicalPositions: JSON.parse('{"__proto__":"7"}'),
       }),
-    ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
-  })
-
-  it('rejects key-override IDs with unordered plain-object key semantics', () => {
-    expect(() =>
-      decodeBrowserPreferences({
-        ...defaultBrowserPreferences,
-        keyOverrides: { 1: 'Shift+K' },
-      }),
-    ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
-
-    expect(() =>
-      decodeBrowserPreferences({
-        ...defaultBrowserPreferences,
-        keyOverrides: JSON.parse('{"__proto__":"Shift+K"}'),
-      }),
-    ).toThrow('preferences.keyOverrides keys or values exceed their byte limits')
+    ).toThrow('preferences.lastLogicalPositions keys or values are out of bounds')
   })
 })

@@ -307,6 +307,11 @@ impl Error for ClientError {
 const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
     match cause {
         FailedModelCallCause::CredentialRejected => "the provider rejected the credential",
+        FailedModelCallCause::AttachmentTooLarge => {
+            "the attachment verification budget was exceeded"
+        }
+        FailedModelCallCause::AttachmentMissing => "a required attachment is missing",
+        FailedModelCallCause::AttachmentCorrupt => "a required attachment is corrupt",
         FailedModelCallCause::PermissionDenied => "the credential lacks permission",
         FailedModelCallCause::InvalidRequest => "the provider rejected the request as invalid",
         FailedModelCallCause::TargetNotFound => "the requested model or resource was not found",
@@ -396,6 +401,14 @@ impl fmt::Display for RejectionDisplay {
             RejectionDetail::SessionNotFound { session_id } => {
                 write!(formatter, "session_not_found session={session_id}")
             }
+            RejectionDetail::AttachmentBlobNotFound { digest } => {
+                write!(formatter, "attachment_blob_not_found digest={digest}")
+            }
+            RejectionDetail::AttachmentByteBudgetExceeded { maximum_bytes } => write!(
+                formatter,
+                "attachment_byte_budget_exceeded maximum_bytes={}",
+                maximum_bytes.value()
+            ),
             RejectionDetail::SessionPlacementCurrentVersionMismatch {
                 session_id,
                 expected_placement_version,
@@ -427,6 +440,10 @@ impl fmt::Display for RejectionDisplay {
             } => write!(
                 formatter,
                 "active_turn_present session={session_id} active_turn={active_turn_id}"
+            ),
+            RejectionDetail::CommissionTargetBusy { session_id } => write!(
+                formatter,
+                "commission_target_busy live_session={session_id}"
             ),
             RejectionDetail::ActiveTurnMismatch {
                 session_id,

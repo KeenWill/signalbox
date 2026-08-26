@@ -26,7 +26,11 @@ import {
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { actions, useAppDispatch, useAppSelector } from '../../state'
-import { artifactScenario, selectBoundedOriginalView } from './artifactScenario'
+import {
+  artifactScenario,
+  selectBoundedOriginalView,
+  selectProvenViewDerivation,
+} from './artifactScenario'
 import {
   ARTIFACT_PREVIEW_CHARACTERS,
   type ArtifactItem,
@@ -71,19 +75,6 @@ export const selectBlobView = (
   descriptor: WebBlobDescriptor,
   kind: WebBlobViewKind,
 ): WebBlobAvailableView | undefined => descriptor.available_views.find((view) => view.kind === kind)
-
-const digestFromContentUrl = (contentUrl: string): string | undefined =>
-  contentUrl.match(/\/api\/blobs\/(sha256:[0-9a-f]{64})\//)?.[1]
-
-export const selectViewDerivation = (descriptor: WebBlobDescriptor, view: WebBlobAvailableView) => {
-  const outputDigest = digestFromContentUrl(view.content_url)
-  if (outputDigest === undefined) return undefined
-  return view.derivations.find(
-    (derivation) =>
-      derivation.input_digests.includes(descriptor.digest) &&
-      derivation.output_digests.includes(outputDigest),
-  )
-}
 
 interface RendererProps<T extends RenderableArtifact> {
   artifact: T
@@ -139,7 +130,6 @@ function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
       />
       <BoundedFooter
         omittedCharacters={bounded.omittedCharacters}
-        sourceIncomplete={artifact.sourceComplete === false}
         canExpand={canExpand}
         expanded={expanded}
         onToggle={() =>
@@ -179,7 +169,6 @@ function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
       />
       <BoundedFooter
         omittedCharacters={bounded.omittedCharacters}
-        sourceIncomplete={false}
         canExpand={canExpand}
         expanded={expanded}
         onToggle={() =>
@@ -196,13 +185,11 @@ function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
 
 function BoundedFooter({
   omittedCharacters,
-  sourceIncomplete,
   canExpand,
   expanded,
   onToggle,
 }: {
   omittedCharacters: number
-  sourceIncomplete: boolean
   canExpand: boolean
   expanded: boolean
   onToggle: () => void
@@ -210,11 +197,9 @@ function BoundedFooter({
   return (
     <footer className="artifact-bounded-footer">
       <span>
-        {sourceIncomplete
-          ? 'Source content continues beyond this bounded projection'
-          : omittedCharacters > 0
-            ? `${omittedCharacters.toLocaleString()} characters remain outside this bounded view`
-            : 'Complete bounded content shown'}
+        {omittedCharacters > 0
+          ? `${omittedCharacters.toLocaleString()} characters remain outside this bounded view`
+          : 'Complete bounded content shown'}
       </span>
       {(canExpand || expanded) && (
         <button type="button" onClick={onToggle}>
@@ -243,7 +228,7 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
   const verifiedBlob = originalQuery.data
   const candidate =
     originalRequested && original && verifiedOriginalUrl !== null ? original : automatic
-  const derivation = candidate ? selectViewDerivation(descriptor, candidate) : undefined
+  const derivation = candidate ? selectProvenViewDerivation(descriptor, candidate) : undefined
   const rendered =
     candidate &&
     ((candidate.kind !== 'preview' && candidate.kind !== 'thumbnail') || derivation !== undefined)
@@ -472,7 +457,7 @@ function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
   const [failedContentUrl, setFailedContentUrl] = useState<string | null>(null)
   const rendered = selectBlobView(artifact.source.descriptor, artifact.viewKind)
   const derivation = rendered
-    ? selectViewDerivation(artifact.source.descriptor, rendered)
+    ? selectProvenViewDerivation(artifact.source.descriptor, rendered)
     : undefined
   const loadFailed = rendered?.content_url === failedContentUrl
 

@@ -42,7 +42,8 @@ use signalbox_persistence::{
 use signalboxd::{
     ActivatedTurnPass, FatalExecutionSignal, FatalExecutionSupervisor, FileCredentialAccess,
     HubModelConfiguration, ModelAdapter, PostgresProviderModelExecution,
-    PostgresScriptedModelExecution,
+    PostgresScriptedModelExecution, WorkspaceInstructionPreparedExecution,
+    WorkspaceInstructionRuntime,
 };
 use sqlx::postgres::PgPoolOptions;
 use tokio::{
@@ -179,7 +180,7 @@ impl DebugPassFailureSignal {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct ObservableDebugPass<Pass> {
     pass: Pass,
     failure: watch::Sender<bool>,
@@ -197,6 +198,12 @@ where
     Pass: EligibilityPass,
 {
     type Error = Pass::Error;
+
+    fn occupancy_expiry_handler(
+        &self,
+    ) -> Option<std::sync::Arc<dyn signalbox_application::SchedulerPassExpiryHandler>> {
+        self.pass.occupancy_expiry_handler()
+    }
 
     fn run(
         &mut self,
@@ -280,7 +287,7 @@ async fn poll_terminal_transcript(
     loop {
         let rows = sqlx::query_as::<_, TranscriptRow>(
             "SELECT entry.payload_kind,
-                    accepted.content_text,
+                    accepted_part.text_value,
                     entry.assistant_text_value
                FROM turn_lifecycle AS lifecycle
                JOIN context_frontier_member AS member
@@ -292,6 +299,10 @@ async fn poll_terminal_transcript(
                LEFT JOIN accepted_input AS accepted
                  ON accepted.session_id = entry.source_session_id
                 AND accepted.accepted_input_id = entry.origin_accepted_input_id
+               LEFT JOIN accepted_input_content_part AS accepted_part
+                 ON accepted_part.accepted_input_id = accepted.accepted_input_id
+                AND accepted_part.position = 0
+                AND accepted_part.part_kind = 'text'
               WHERE lifecycle.session_id = $1
                 AND lifecycle.turn_id = $2
                 AND lifecycle.state_kind = 'terminal'
@@ -338,7 +349,7 @@ async fn drive_scheduler<WorkSource, Pass>(
 where
     WorkSource: EligibilityWorkSource + Send + 'static,
     WorkSource::Error: ClassifyOperatorFailure,
-    Pass: EligibilityPass + Send + 'static,
+    Pass: EligibilityPass + Clone + Send + 'static,
     Pass::Error: ClassifyOperatorFailure + Send + 'static,
 {
     let (shutdown_sender, shutdown_receiver) = oneshot::channel();
@@ -394,74 +405,110 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         provider,
     } = arguments;
     let content = UserContent::try_text(input).map_err(|_| DebugDriverError::InvalidText)?;
-    let (selection, targets, credential_reference, credential_pin, credential_families, provider) =
-        match provider {
-            DebugProvider::Scripted { reply } => {
-                let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
-                let targets =
-                    ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
-                        selection,
-                        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
-                            Uuid::now_v7(),
-                        )),
-                    )])
-                    .map_err(|_| DebugDriverError::UnexpectedOutcome)?;
-                (
-                    selection,
-                    targets,
-                    ModelCallCredentialReference::new("scripted-test"),
-                    SessionCredentialPin::try_new(vec![SessionModelCredential::new(
-                        "scripted-debug",
-                        "scripted-test",
-                    )])
-                    .map_err(|_| DebugDriverError::Configuration)?,
-                    // The scripted provider routes no real family. It carries no
-                    // catalog at all rather than an empty one: an empty catalog
-                    // resolves no family and fails the call as corruption, while
-                    // `None` is what selects the fallback reference.
-                    None,
-                    DebugProviderRuntime::Scripted(
-                        AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
-                    ),
-                )
-            }
-            DebugProvider::Anthropic {
+    let (
+        selection,
+        targets,
+        credential_reference,
+        credential_pin,
+        credential_families,
+        automatic_tool_round_limit,
+        instruction_roots,
+        provider,
+    ) = match provider {
+        DebugProvider::Scripted { reply } => {
+            let selection = DirectModelSelection::from_uuid(Uuid::now_v7());
+            let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
                 selection,
-                model_configuration_file,
-            } => {
-                let configuration = HubModelConfiguration::read(&model_configuration_file)
-                    .map_err(|_| DebugDriverError::Configuration)?;
-                require_anthropic_selection(&configuration, selection)?;
-                let credential_profile = configuration
-                    .resolve_direct_model(selection)
-                    .ok_or(DebugDriverError::Configuration)?
-                    .credential_profile()
-                    .to_owned();
-                let credential_access = FileCredentialAccess::from_files(
-                    configuration
-                        .file_credential_profiles(ModelAdapter::Anthropic)
-                        .map(|(reference, path)| {
-                            (CredentialReference::new(reference), path.to_path_buf())
-                        }),
-                );
-                let credential_reference = ModelCallCredentialReference::new(credential_profile);
-                let mut adapter_configuration = AnthropicConfig::new();
-                adapter_configuration.model_capabilities =
-                    configuration.runtime_model_capability_catalog();
-                let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)
-                    .map_err(|_| DebugDriverError::Configuration)?;
-                let provider =
-                    RuntimeModelCallProvider::new(runtime, configuration.runtime_model_catalog());
-                (
-                    selection,
-                    configuration.target_catalog(),
-                    credential_reference,
-                    configuration.session_credential_pin(),
-                    Some(configuration.credential_family_catalog()),
-                    DebugProviderRuntime::Anthropic(provider),
-                )
-            }
-        };
+                ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::now_v7())),
+            )])
+            .map_err(|_| DebugDriverError::UnexpectedOutcome)?;
+            (
+                selection,
+                targets,
+                ModelCallCredentialReference::new("scripted-test"),
+                SessionCredentialPin::try_new(vec![SessionModelCredential::new(
+                    "scripted-debug",
+                    "scripted-test",
+                )])
+                .map_err(|_| DebugDriverError::Configuration)?,
+                // The scripted provider routes no real family. It carries no
+                // catalog at all rather than an empty one: an empty catalog
+                // resolves no family and fails the call as corruption, while
+                // `None` is what selects the fallback reference.
+                None,
+                None,
+                Vec::new(),
+                DebugProviderRuntime::Scripted(
+                    AssistantText::try_new(reply).map_err(|_| DebugDriverError::InvalidText)?,
+                ),
+            )
+        }
+        DebugProvider::Anthropic {
+            selection,
+            model_configuration_file,
+        } => {
+            let configuration = HubModelConfiguration::read(&model_configuration_file)
+                .map_err(|_| DebugDriverError::Configuration)?;
+            require_anthropic_selection(&configuration, selection)?;
+            let credential_profile = configuration
+                .resolve_direct_model(selection)
+                .ok_or(DebugDriverError::Configuration)?
+                .credential_profile()
+                .to_owned();
+            let credential_access = FileCredentialAccess::from_files(
+                configuration
+                    .file_credential_profiles(ModelAdapter::Anthropic)
+                    .map(|(reference, path)| {
+                        (CredentialReference::new(reference), path.to_path_buf())
+                    }),
+            );
+            let credential_reference = ModelCallCredentialReference::new(credential_profile);
+            let native_message_limit = configuration
+                .numeric_bounds()
+                .integer("max_native_message_bytes")
+                .ok_or(DebugDriverError::Configuration)?
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| DebugDriverError::Configuration)?;
+            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = configuration
+                .numeric_bounds()
+                .duration("model_exchange_timeout")
+                .ok_or(DebugDriverError::Configuration)?;
+            adapter_configuration.model_capabilities =
+                configuration.runtime_model_capability_catalog();
+            let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)
+                .map_err(|_| DebugDriverError::Configuration)?;
+            let diagnostic_model_identity_limit = configuration
+                .numeric_bounds()
+                .integer("diagnostic_model_identity_limit")
+                .flatten()
+                .and_then(|value| usize::try_from(value).ok());
+            let automatic_tool_round_limit = configuration
+                .numeric_bounds()
+                .integer("max_automatic_tool_rounds_per_turn")
+                .ok_or(DebugDriverError::Configuration)?
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| DebugDriverError::Configuration)?;
+            let provider = RuntimeModelCallProvider::new(
+                runtime,
+                configuration.runtime_model_catalog(),
+                diagnostic_model_identity_limit,
+            );
+            let instruction_roots = configuration.workspace_instructions().roots().to_vec();
+            (
+                selection,
+                configuration.target_catalog(),
+                credential_reference,
+                configuration.session_credential_pin(),
+                Some(configuration.credential_family_catalog()),
+                automatic_tool_round_limit,
+                instruction_roots,
+                DebugProviderRuntime::Anthropic(provider),
+            )
+        }
+    };
     let connection_options =
         local_test_connection_options(&database_url).map_err(|_| DebugDriverError::Database)?;
     let pool = PgPoolOptions::new()
@@ -537,13 +584,18 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         UuidV7StartEligibleTurnIdGenerator,
         StartEligibleTurnRepository::new(pool.clone()),
     );
+    let workspace_instructions =
+        WorkspaceInstructionRuntime::new(pool.clone(), None, instruction_roots);
     let transcript = match provider {
         DebugProviderRuntime::Scripted(reply) => {
             let (execution, fatal_execution) =
-                FatalExecutionSupervisor::new(PostgresScriptedModelExecution::new(
-                    repository,
-                    InProcessAttemptDispatchGate::default(),
-                    reply,
+                FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+                    PostgresScriptedModelExecution::new(
+                        repository,
+                        InProcessAttemptDispatchGate::default(),
+                        reply,
+                    ),
+                    workspace_instructions,
                 ));
             let (pass, pass_failure) =
                 ObservableDebugPass::new(ActivatedTurnPass::new(activation, execution));
@@ -559,10 +611,14 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         }
         DebugProviderRuntime::Anthropic(provider) => {
             let (execution, fatal_execution) =
-                FatalExecutionSupervisor::new(PostgresProviderModelExecution::new(
-                    repository,
-                    InProcessAttemptDispatchGate::default(),
-                    provider,
+                FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+                    PostgresProviderModelExecution::new(
+                        repository,
+                        InProcessAttemptDispatchGate::default(),
+                        provider,
+                        automatic_tool_round_limit,
+                    ),
+                    workspace_instructions,
                 ));
             let (pass, pass_failure) =
                 ObservableDebugPass::new(ActivatedTurnPass::new(activation, execution));
@@ -661,7 +717,7 @@ mod tests {
     fn anthropic_debug_mode_rejects_a_configured_codex_route() {
         let selection =
             DirectModelSelection::from_uuid(Uuid::from_u128(0x10000000000040008000000000000001));
-        let configuration = HubModelConfiguration::parse(
+        let configuration = parse_model_configuration(
             r#"
 version = 1
 
@@ -698,8 +754,7 @@ provider_model = "gpt-example"
 max_output_tokens = 20
 context_window_tokens = 100
 "#,
-        )
-        .expect("Codex debug fixture configuration is valid");
+        );
 
         assert_eq!(
             require_anthropic_selection(&configuration, selection),
@@ -717,5 +772,17 @@ context_window_tokens = 100
         );
         failure.wait().await;
         assert!(failure.is_triggered());
+    }
+
+    fn parse_model_configuration(content: &str) -> HubModelConfiguration {
+        let example = include_str!("../../../../config/signalboxd.example.toml");
+        let (_, numeric_bounds_and_after) = example
+            .split_once("[numeric_bounds]")
+            .expect("the example declares numeric bounds");
+        let (numeric_bounds, _) = numeric_bounds_and_after
+            .split_once("\n# Blob bytes live outside PostgreSQL.")
+            .expect("the example terminates numeric bounds");
+        HubModelConfiguration::parse(&format!("{content}\n[numeric_bounds]{numeric_bounds}\n"))
+            .expect("the model configuration fixture is valid")
     }
 }

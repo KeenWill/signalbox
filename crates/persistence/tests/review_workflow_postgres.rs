@@ -50,7 +50,7 @@ use signalbox_domain::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     review_orchestration::{
@@ -72,7 +72,7 @@ use testcontainers_modules::{
     testcontainers::{ContainerAsync, ImageExt, runners::AsyncRunner},
 };
 
-use support::blocked_backends_reached;
+use support::{blocked_backends_reached, record_empty_instruction_manifest};
 
 const POSTGRES_IMAGE_TAG: &str = "18.4-alpine3.23";
 const DATABASE_NAME: &str = "signalbox_review_workflow_integration";
@@ -101,7 +101,7 @@ async fn migrated_postgres_with_max_connections(
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -126,7 +126,7 @@ async fn migrated_postgres_in_configured_schema()
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -181,7 +181,7 @@ async fn migrated_postgres_counting_statements()
             "-c",
             "pg_stat_statements.track=all",
         ]))
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -757,6 +757,9 @@ async fn insert_active_turn_with_offset(
         .await
         .expect("fixture turn activates");
     assert!(matches!(outcome, StartEligibleTurnOutcome::Activated(_)));
+    record_empty_instruction_manifest(pool, session)
+        .await
+        .expect("fixture turn records its empty instruction manifest");
 }
 
 fn finding(

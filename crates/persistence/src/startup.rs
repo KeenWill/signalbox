@@ -3,8 +3,8 @@
 use std::{collections::BTreeSet, error::Error, fmt};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, OperatorFailureClass, StartupScanIdGenerator, StartupScanRepository,
-    StartupScanSessionOutcome, ToolCrashClosureIdentities,
+    ClassifyOperatorFailure, OperatorFailureClass, StaleTurnCandidate, StartupScanIdGenerator,
+    StartupScanRepository, StartupScanSessionOutcome, ToolCrashClosureIdentities,
 };
 use signalbox_domain::{
     AcceptedInputTurnFailureFailure, AcceptedInputTurnFailureIdentities, AttemptEnd,
@@ -203,7 +203,7 @@ impl StartupScanRepositoryError {
     }
 }
 
-enum TransactionDecision {
+pub(crate) enum TransactionDecision {
     Commit(StartupScanSessionOutcome),
     Rollback(StartupScanSessionOutcome),
 }
@@ -343,6 +343,96 @@ where
         ));
     }
 
+    let decision = recover_locked_session(
+        connection,
+        requested_session,
+        identities,
+        session_exists,
+        scheduler_session,
+        active_turn,
+        ids,
+    )
+    .await
+    .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))?;
+
+    if let (Some(turn), TransactionDecision::Commit(outcome)) = (active_turn, &decision)
+        && startup_recovery_created_ambiguous_wait(outcome)
+    {
+        sqlx::query(
+            "INSERT INTO turn_restart_recovery_origin
+                (turn_id, session_id, recorded_at)
+             VALUES ($1, $2, transaction_timestamp())
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(turn)
+        .bind(session_uuid)
+        .execute(&mut *connection)
+        .await?;
+    }
+
+    Ok(decision)
+}
+
+fn startup_recovery_created_ambiguous_wait(outcome: &StartupScanSessionOutcome) -> bool {
+    match outcome {
+        StartupScanSessionOutcome::RecoveredModelCall(outcome) => matches!(
+            outcome.as_ref(),
+            ModelCallTerminalOutcome::AwaitingRecovery(_)
+        ),
+        StartupScanSessionOutcome::RecoveredToolAttempt(outcome) => {
+            matches!(outcome.as_ref(), ToolAttemptCrashOutcome::Ambiguous(_))
+        }
+        StartupScanSessionOutcome::Recovered(_)
+        | StartupScanSessionOutcome::RecoveredContextCompaction { .. }
+        | StartupScanSessionOutcome::ResumableToolBatch { .. }
+        | StartupScanSessionOutcome::ResumablePreparedModelCall { .. }
+        | StartupScanSessionOutcome::AwaitingRecoveryDecision { .. }
+        | StartupScanSessionOutcome::NoActiveTurn => false,
+    }
+}
+
+pub(crate) async fn recover_observed_slot_held_in_transaction<Generator>(
+    connection: &mut PgConnection,
+    candidate: StaleTurnCandidate,
+    identities: AcceptedInputTurnFailureIdentities,
+    ids: &mut Generator,
+) -> Result<Option<TransactionDecision>, StartupScanRepositoryError>
+where
+    Generator: StartupScanIdGenerator + Send,
+{
+    let requested_session = candidate.session();
+    let session_uuid = session_id_to_uuid(requested_session);
+    let observed_active_turn: Option<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND state_kind = 'active'
+            AND NOT delegation_runtime_terminal",
+    )
+    .bind(session_uuid)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if observed_active_turn != Some(turn_id_to_uuid(candidate.turn())) {
+        return Ok(None);
+    }
+    lock_delegated_turn_terminal_frontier(connection, requested_session, candidate.turn())
+        .await
+        .map_err(map_model_call_error)?;
+    let (session_exists, scheduler_session, active_turn) =
+        sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
+            crate::lock_inventory::STARTUP_RECOVERY,
+        )
+        .bind(session_uuid)
+        .fetch_one(&mut *connection)
+        .await?;
+    if active_turn != Some(turn_id_to_uuid(candidate.turn())) {
+        return Ok(None);
+    }
+    let locked =
+        crate::turn_liveness::read_exact_slot_held_candidate(connection, requested_session).await?;
+    if locked != Some(candidate) {
+        return Ok(None);
+    }
     recover_locked_session(
         connection,
         requested_session,
@@ -353,6 +443,7 @@ where
         ids,
     )
     .await
+    .map(Some)
     .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))
 }
 
@@ -465,12 +556,8 @@ where
         Some(signalbox_domain::ActiveTurnPhase::Running { .. }) => {}
         // A prior process already ended this turn's physical tenure and
         // recorded the exact ambiguity set, so there is no lost live end for
-        // the scan to classify. Reporting it separately keeps the wait visible
-        // to the operator instead of indistinguishable from a healed session.
-        //
-        // The domain phase also carries a tool-attempt ambiguity wait, which
-        // has no operator surface to point at; that wait stays classified as
-        // it was, so the report never promises a decision nothing can make.
+        // the scan to classify. The independent automatic-reconciliation
+        // watchdog owns both model-call and tool-attempt waits.
         Some(signalbox_domain::ActiveTurnPhase::AwaitingRecoveryDecision {
             ambiguous_operations,
             ..
@@ -593,14 +680,18 @@ where
         .await
         .map_err(map_model_call_error)?;
     if let Some(call_state) = model_execution.current_call().map(|call| call.state()) {
+        if call_state == CurrentModelCallState::Prepared {
+            return Ok(TransactionDecision::Rollback(
+                StartupScanSessionOutcome::ResumablePreparedModelCall {
+                    turn: model_execution.turn(),
+                },
+            ));
+        }
         let mut failure_identities = FailedModelCallTurnIdentities::new(
             identities.failure_entry(),
             identities.terminal_frontier(),
         );
-        if matches!(
-            call_state,
-            CurrentModelCallState::Prepared | CurrentModelCallState::CancellationRequested
-        ) {
+        if call_state == CurrentModelCallState::CancellationRequested {
             let mut proposed_turns = BTreeSet::new();
             let mut reclassifications = Vec::new();
             for pending in model_execution.active_turn().pending_steering() {

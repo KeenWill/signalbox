@@ -1,128 +1,95 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import { type Dispatch, type FormEvent, type RefObject, type SetStateAction, useState } from 'react'
+import { type Dispatch, type FormEvent, type RefObject, type SetStateAction, useMemo } from 'react'
+import type { CommandContext } from './commands'
 import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
+import { selectBoundedOriginalView } from './features/artifacts/artifactScenario'
 import type { ArtifactItem } from './features/artifacts/artifactTypes'
 import type { WebBlobDescriptor } from './generated/web-contract.mjs'
 import {
   type BlobDescriptorInput,
+  ProductInputError,
   ProductRequestError,
   ProductTransportError,
   productTransport,
 } from './product'
-import { store } from './state'
-
-type ArtifactPresentation = 'audio' | 'blocked' | 'document' | 'image' | 'video'
 
 export interface ArtifactRequest extends BlobDescriptorInput {
-  presentation: ArtifactPresentation
   sequence: number
 }
 
 export interface ArtifactInspectorState {
   digest: string
-  setDigest: Dispatch<SetStateAction<string>>
   mediaType: string
-  setMediaType: Dispatch<SetStateAction<string>>
   displayFilename: string
-  setDisplayFilename: Dispatch<SetStateAction<string>>
-  presentation: ArtifactPresentation
-  setPresentation: Dispatch<SetStateAction<ArtifactPresentation>>
   request: ArtifactRequest | null
-  setRequest: Dispatch<SetStateAction<ArtifactRequest | null>>
 }
 
-export function useArtifactInspectorState(): ArtifactInspectorState {
-  const [digest, setDigest] = useState('')
-  const [mediaType, setMediaType] = useState('')
-  const [displayFilename, setDisplayFilename] = useState('')
-  const [presentation, setPresentation] = useState<ArtifactPresentation>('blocked')
-  const [request, setRequest] = useState<ArtifactRequest | null>(null)
-  return {
-    digest,
-    setDigest,
-    mediaType,
-    setMediaType,
-    displayFilename,
-    setDisplayFilename,
-    presentation,
-    setPresentation,
-    request,
-    setRequest,
-  }
+export const emptyArtifactInspectorState: ArtifactInspectorState = {
+  digest: '',
+  mediaType: '',
+  displayFilename: '',
+  request: null,
 }
 
 const descriptorQueryPrefix = ['production', 'blob-descriptor'] as const
 
+// Resolution identities are allocated from a module-scoped counter rather than counted within the
+// inspector: the inspector's state unmounts with its route (an operator detour through Scenario
+// studio), while the original-load projection is mounted above the router and outlives it. A
+// component-local count restarts at 1 after such a remount and recreates a previous resolution's
+// artifact ID, so the renderer would inherit that ID's settled `loaded` state and fetch original
+// bytes without the new resolution's explicit Load original. A module-scoped counter never reissues
+// an identity for the lifetime of the store that records those loads.
+let lastResolutionSequence = 0
+
+export const nextResolutionSequence = (): number => {
+  lastResolutionSequence += 1
+  return lastResolutionSequence
+}
+
+// Project an operator-resolved descriptor into the typed artifact the shared renderer registry
+// consumes. The identity carries the resolution sequence so a re-resolve mounts a fresh renderer
+// with fresh original-load state instead of inheriting the previous resolution's settled state.
+export const inspectedArtifact = (
+  descriptor: WebBlobDescriptor,
+  sequence: number,
+): ArtifactItem => {
+  const identity = {
+    id: `product-artifact:${String(sequence)}:${descriptor.digest}`,
+    displayName: descriptor.display_filename[0] ?? descriptor.digest,
+  }
+  return descriptor.declared_media_type.toLowerCase().startsWith('image/')
+    ? { ...identity, kind: 'image', source: { kind: 'signalbox_blob', descriptor } }
+    : { ...identity, kind: 'blob', descriptor }
+}
+
 const errorMessage = (error: Error): string => {
+  if (error instanceof ProductInputError) return error.message
   if (error instanceof ProductRequestError) {
     return `${error.response.error.code}: ${error.message}`
   }
-  if (error instanceof ProductTransportError) {
-    return 'The daemon transport failed before a descriptor response could be read.'
-  }
+  if (error instanceof ProductTransportError) return error.message
   return 'The descriptor response did not match the generated web contract.'
-}
-
-const artifactFromDescriptor = (
-  descriptor: WebBlobDescriptor,
-  presentation: ArtifactPresentation,
-): ArtifactItem => {
-  const identity = {
-    id: descriptor.digest,
-    displayName: descriptor.display_filename[0] ?? descriptor.digest,
-  }
-  if (presentation === 'image') {
-    return { ...identity, kind: 'image', source: { kind: 'signalbox_blob', descriptor } }
-  }
-  if (presentation === 'document') {
-    return {
-      ...identity,
-      kind: 'document',
-      documentKind: 'document',
-      source: { kind: 'signalbox_blob', descriptor },
-    }
-  }
-  if (presentation === 'audio' || presentation === 'video') {
-    return {
-      ...identity,
-      kind: 'media_placeholder',
-      mediaKind: presentation,
-      source: { kind: 'signalbox_blob', descriptor },
-    }
-  }
-  return {
-    ...identity,
-    kind: 'blob',
-    descriptor,
-  }
 }
 
 export function ArtifactInspector({
   available,
-  state,
+  commandContext,
   digestInputRef,
   onClose,
+  state,
+  onStateChange,
 }: {
   available: boolean
-  state?: ArtifactInspectorState
+  commandContext: CommandContext
   digestInputRef?: RefObject<HTMLInputElement | null>
   onClose: () => void
+  state: ArtifactInspectorState
+  onStateChange: Dispatch<SetStateAction<ArtifactInspectorState>>
 }) {
   const queryClient = useQueryClient()
-  const localState = useArtifactInspectorState()
-  const {
-    digest,
-    setDigest,
-    mediaType,
-    setMediaType,
-    displayFilename,
-    setDisplayFilename,
-    presentation,
-    setPresentation,
-    request,
-    setRequest,
-  } = state ?? localState
+  const { digest, mediaType, displayFilename, request } = state
   const descriptor = useQuery({
     queryKey: request
       ? [...descriptorQueryPrefix, request.sequence, request.digest]
@@ -135,15 +102,40 @@ export function ArtifactInspector({
     staleTime: Number.POSITIVE_INFINITY,
   })
 
+  const resolved = descriptor.data
+  const sequence = request?.sequence ?? 0
+  const artifact = useMemo(
+    () => (resolved === undefined ? null : inspectedArtifact(resolved, sequence)),
+    [resolved, sequence],
+  )
+  // The registry gates original loading on the invoking context, so the inspector admits exactly
+  // the artifact it resolved, and only when the descriptor proves a bounded original.
+  const rendererContext = useMemo<CommandContext>(
+    () => ({
+      ...commandContext,
+      artifactPreviewIds: artifact === null ? [] : [artifact.id],
+      artifactOriginalIds:
+        artifact !== null &&
+        artifact.kind === 'image' &&
+        artifact.source.kind === 'signalbox_blob' &&
+        selectBoundedOriginalView(artifact.source.descriptor) !== undefined
+          ? [artifact.id]
+          : [],
+    }),
+    [artifact, commandContext],
+  )
+
   const resolveDescriptor = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     queryClient.removeQueries({ queryKey: descriptorQueryPrefix })
-    setRequest({
-      digest,
-      mediaType,
-      displayFilename: displayFilename || undefined,
-      presentation,
-      sequence: (request?.sequence ?? 0) + 1,
+    onStateChange({
+      ...state,
+      request: {
+        digest,
+        mediaType,
+        displayFilename: displayFilename || undefined,
+        sequence: nextResolutionSequence(),
+      },
     })
   }
 
@@ -179,7 +171,7 @@ export function ArtifactInspector({
               ref={digestInputRef}
               name="digest"
               value={digest}
-              onChange={(event) => setDigest(event.target.value)}
+              onChange={(event) => onStateChange({ ...state, digest: event.target.value })}
               placeholder="sha256:…"
               pattern="sha256:[0-9a-f]{64}"
               autoComplete="off"
@@ -187,25 +179,11 @@ export function ArtifactInspector({
             />
           </label>
           <label>
-            Typed presentation
-            <select
-              name="presentation"
-              value={presentation}
-              onChange={(event) => setPresentation(event.target.value as ArtifactPresentation)}
-            >
-              <option value="blocked">Metadata only</option>
-              <option value="image">Image</option>
-              <option value="document">Document</option>
-              <option value="audio">Audio placeholder</option>
-              <option value="video">Video placeholder</option>
-            </select>
-          </label>
-          <label>
             Declared media type
             <input
               name="media-type"
               value={mediaType}
-              onChange={(event) => setMediaType(event.target.value)}
+              onChange={(event) => onStateChange({ ...state, mediaType: event.target.value })}
               placeholder="image/png"
               autoComplete="off"
               required
@@ -216,7 +194,7 @@ export function ArtifactInspector({
             <input
               name="display-filename"
               value={displayFilename}
-              onChange={(event) => setDisplayFilename(event.target.value)}
+              onChange={(event) => onStateChange({ ...state, displayFilename: event.target.value })}
               placeholder="evidence.png"
               autoComplete="off"
             />
@@ -230,26 +208,34 @@ export function ArtifactInspector({
         <div className="artifact-request-error" role="alert">
           <strong>Artifact unavailable</strong>
           <span>{errorMessage(descriptor.error)}</span>
-          <button type="button" onClick={() => void descriptor.refetch()}>
-            Retry
-          </button>
+          {!(descriptor.error instanceof ProductInputError) && (
+            <button
+              type="button"
+              onClick={(event) => {
+                const restoreFocus = document.activeElement === event.currentTarget
+                void descriptor.refetch().then((result) => {
+                  if (result.isSuccess && restoreFocus) {
+                    requestAnimationFrame(() => digestInputRef?.current?.focus())
+                  }
+                })
+              }}
+            >
+              Retry
+            </button>
+          )}
         </div>
       )}
-      {descriptor.data && request && (
-        <div className="artifact-inspector-result">
+      {artifact !== null && (
+        <>
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            Resolved artifact {artifact.displayName}
+          </span>
           <ArtifactRenderer
-            key={`${descriptor.data.digest}-${request.presentation}`}
-            artifact={artifactFromDescriptor(descriptor.data, request.presentation)}
-            commandContext={{
-              dispatch: store.dispatch,
-              getState: store.getState,
-              timelineIds: [],
-              artifactPreviewIds: [],
-              artifactOriginalIds: [descriptor.data.digest],
-              focusTimeline: () => undefined,
-            }}
+            key={artifact.id}
+            artifact={artifact}
+            commandContext={rendererContext}
           />
-        </div>
+        </>
       )}
     </div>
   )

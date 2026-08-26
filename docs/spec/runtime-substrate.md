@@ -23,18 +23,22 @@ ambient-skill catalog probe, and pinned version were verified against the
 twice-daily schedule and workflow-self-change trigger were verified through PR
 `#471` (`agent/codex-smoke-schedule`). The Codex CLI adapter's prompt
 tool-authority preamble is verified against this PR
-(`agent/phantom-prohibition`). The `signalboxd` names this page states for the
-composition root, its telemetry, and the production `FileCredentialAccess` were
-verified through PR #258 (`agent/signalboxd-rename`); the Anthropic and OpenAI
-adapter-scoped file catalogs are verified against this PR
-(`agent/credential-pools-parser`). The Anthropic adapter's server-side
-`fallback`-block recognition was verified through PR #280
-(`agent/provider-identity-normalization`). The HTTP fallback-body redaction
-ordering was verified through PR #330 (`agent/audit-verified-fixes`). The
-persistence-repository families in the operator-failure inventory were verified
-through PR #288 (`agent/audit-fix-docs-coherence`) when there were five of them,
-and the sixth, turn liveness, against this PR (`agent/turn-liveness-watchdog`).
-The streamed-delivery bridge and ephemeral text-delta projection were verified
+(`agent/phantom-prohibition`). The composition root's pinned-version startup
+probe is verified against this PR (`agent/daemon-live-codex-pin-preflight`). The
+Codex CLI adapter's preservation of malformed string-carried tool arguments is
+verified against this PR (`agent/daemon-live-codex-malformed-tool-arguments`).
+The `signalboxd` names this page states for the composition root, its telemetry,
+and the production `FileCredentialAccess` were verified through PR #258
+(`agent/signalboxd-rename`); the Anthropic and OpenAI adapter-scoped file
+catalogs are verified against this PR (`agent/credential-pools-parser`). The
+Anthropic adapter's server-side `fallback`-block recognition was verified
+through PR #280 (`agent/provider-identity-normalization`). The HTTP
+fallback-body redaction ordering was verified through PR #330
+(`agent/audit-verified-fixes`). The persistence-repository families in the
+operator-failure inventory were verified through PR #288
+(`agent/audit-fix-docs-coherence`) when there were five of them, and the sixth,
+turn liveness, against this PR (`agent/turn-liveness-watchdog`). The
+streamed-delivery bridge and ephemeral text-delta projection were verified
 through PR #300 (`agent/token-level-streaming`); the Claude 5-family
 thinking-signature stream shape was verified through PR #305
 (`agent/sonnet-streamed-tool-use`). The Codex CLI redaction contract was
@@ -61,7 +65,9 @@ authoritative transcript commit
 ([sessions-and-transcript](sessions-and-transcript.md)) are owned by those
 companion pages. This page also owns the shared
 [operator failure taxonomy](#operator-failure-taxonomy) — defined in
-`crates/application` and consumed by signalboxd telemetry.
+`crates/application` and consumed by signalboxd telemetry. The required
+model-exchange deployment policy and its unbounded spelling are verified against
+this PR (`agent/bounds-required-config-gate`).
 
 ## Boundary and crate layout
 
@@ -104,6 +110,20 @@ provider-tagged service tier), declared `ToolDefinition`s, a `ToolChoice`
 controls unless an adapter's owning section records a capability-limited
 advisory exception; an adapter never silently presents prompt instructions as
 hard transport controls.
+
+**Committed unimplemented functionality — workspace-instruction transport.** The
+instruction-admission slice adds
+`workspace_instructions: Option<WorkspaceInstructionRegion>` beside `system` and
+conversation history. The region is a validated nonempty exact UTF-8 byte value
+bounded by the selected target's declared workspace-instruction byte capacity;
+the runtime neither parses nor rewrites its daemon-authored wrappers. Validation
+rejects a present region unless the resolved target and adapter mapping both
+declare `typed_system` support and sufficient byte capacity. Each adapter maps
+the field only to its provider's instruction/system transport, after the system
+prompt and before conversation messages, and fails before send when that mapping
+cannot preserve the boundary. It may not concatenate the region into ordinary
+system text, emit a user/tool message, or enable a native project-file loader.
+No present runtime operation carries this field until that slice lands.
 
 The `RuntimeModelCallProvider` bridge sets every operation it prepares to
 `Streamed`. Both HTTP adapters honor that mode by setting the provider-native
@@ -471,9 +491,9 @@ per operation (`/v1/messages` for Anthropic with `x-api-key` and
 dependency, and typed evidence out. Construction validates configuration: the
 base URL must be absolute HTTPS, except that plain HTTP is admitted for an
 IP-literal loopback host used by deterministic tests; user information, a query,
-or a fragment is forbidden; and the SSE record limit and whole-exchange timeout
-must both be positive. Construction failure is a configuration defect, not
-operation evidence.
+or a fragment is forbidden; the SSE record limit must be positive, and a
+configured whole-exchange timeout must be positive. Construction failure is a
+configuration defect, not operation evidence.
 
 Provider traffic uses reqwest 0.13 with default features disabled and only its
 providerless rustls-platform-verifier and byte-stream features enabled. Both
@@ -496,15 +516,12 @@ request):
   opens a fresh connection. Why: this eliminates the stale-connection replay
   path and makes a connect failure provably precede any request byte, which is
   what lets `ConnectFailed` claim proven-unsent.
-- Every request has a positive whole-exchange timeout, covering connection
-  establishment through the complete buffered body or streamed terminal record.
-  The provisional default is ten minutes; callers may configure another positive
-  budget, and may additionally configure a shorter connect timeout. A connect
-  timeout is proven-unsent, while a timeout after send is boundary loss. Why: a
-  provider that stalls forever must not hold a turn attempt forever, while the
-  deliberately generous first budget accommodates long streamed generations
-  until production latency data supports a tighter provider/model-specific
-  policy.
+- A configured whole-exchange timeout covers connection establishment through
+  the complete buffered body or streamed terminal record. The daemon obtains it
+  from the required `numeric_bounds.model_exchange_timeout` deployment policy;
+  the exact value `"none"` makes the exchange unbounded. Callers may
+  additionally configure a shorter connect timeout. A connect timeout is
+  proven-unsent, while a whole-exchange timeout after send is boundary loss.
 
 Success is specifically HTTP 200; another 2xx is not recognized terminal
 success. 4xx/5xx responses are classified through each adapter's exhaustive
@@ -731,10 +748,11 @@ runs while the key is readable.
 `signalbox-model-runtime-codex-cli` wraps the locally installed Codex CLI event
 protocol captured by the offline fixture corpus at version `0.146.0`; its
 exported version constant is the contract a later composition must pin before
-wiring the adapter. The model dispatch itself performs no separate version
-probe. Preparation validates and renders the complete operation, writes the
-non-secret response-envelope schema to a private temporary file, and returns a
-one-shot capability without starting a process. Admitted schemas and replayed
+wiring the adapter. The daemon composition runs a bounded, credential-free
+version probe before opening its socket; model dispatch performs no separate
+version probe. Preparation validates and renders the complete operation, writes
+the non-secret response-envelope schema to a private temporary file, and returns
+a one-shot capability without starting a process. Admitted schemas and replayed
 tool arguments remain raw JSON through prompt serialization; a shallow raw
 member scan still requires each schema to declare an object root. Execution
 consumes the capability as exactly one `codex exec --json --ephemeral` spawn on
@@ -845,37 +863,61 @@ Exit zero without `turn.completed` is
 
 `turn.completed` is success evidence only when the last completed agent-message
 item decodes as the adapter's response envelope and satisfies the declared-tool
-constraints. A named ordinary-tool choice admits at least one proposal and
-requires every proposal to carry that selected name. For a structured-output
-contract, zero or several contract-named proposals remain definitive completion
-material for the provider-independent structured decoder above to classify. The
-decoded envelope is checked against the shared JSON nesting bound independently
-of the escaped outer event; envelope decode errors are content-silent. The
-envelope distinguishes completion from refusal. Within the envelope each tool
-call carries its argument object as JSON text inside a string: strict
-structured-output validation refuses any schema object that does not supply
-`additionalProperties: false` and require all its properties, so a free-form
-argument object is not expressible in the output schema and the live API rejects
-one as `invalid_json_schema`. The adapter parses the string, requires exactly
-one JSON object within the provider nesting bound, and passes the contained text
-onward, so tool argument JSON still reaches the caller byte-verbatim when it is
-credential-shape clean. Caller JSON remains raw through serialization,
-preserving deep admitted values and their numeric lexemes. Buffered delivery
-retains its content without deltas; streamed delivery feeds raw bounded CLI
-reasoning and final-envelope text through the stateful redactor before emitting
-ordered deltas and the same terminal evidence. A provider failure message
-consults the same held lookbehind state before it enters provider-error
-evidence: a message that extends a held credential candidate, or that arrives
-during oversized-credential suppression, is suppressed whole rather than
-statelessly re-redacted. Usage comes only from `turn.completed`. The adapter
-maps `input_tokens`, `output_tokens`, `cache_write_input_tokens`, and
-`cached_input_tokens` exactly to Signalbox input, output, cache-creation input,
-and cache-read input axes. Each decoded field is independently optional: an
-omitted field remains unreported rather than becoming zero. A partial event
-records only its present axes, and a total-only event records none because the
-adapter never distributes a total. The pinned CLI's separate
-`reasoning_output_tokens` counter and additive `total_tokens` siblings have no
-existing Signalbox usage axis; neither is folded into output or another field.
+constraints. The invocation also asks the pinned CLI to retain its final message
+in a private temporary file. When JSONL delivered no agent-message item, the
+adapter reads that independent representation after process exit under the same
+event-size bound and applies the identical envelope and redaction checks; a
+missing, oversized, non-UTF-8, or invalid retained message still fails closed.
+An agent message delivered in JSONL remains authoritative, so the second channel
+does not overwrite contradictory streamed evidence. A named ordinary-tool choice
+admits at least one proposal and requires every proposal to carry that selected
+name. For a structured-output contract, zero or several contract-named proposals
+remain definitive completion material for the provider-independent structured
+decoder above to classify. The decoded envelope is checked against the shared
+JSON nesting bound independently of the escaped outer event; envelope decode
+errors are content-silent. The envelope distinguishes completion from refusal.
+Within the envelope each tool call carries its provider-supplied argument text
+inside a string: strict structured-output validation refuses any schema object
+that does not supply `additionalProperties: false` and require all its
+properties, so a free-form argument object is not expressible in the output
+schema and the live API rejects one as `invalid_json_schema`. The adapter
+requires the contained text to stay within the shared JSON nesting bound, which
+the line-level and agent-message-level checks cannot see because string content
+does not nest the outer JSON, and reports over-depth text as boundary loss; it
+judges neither syntax nor shape, so malformed and non-object argument text
+passes onward byte-verbatim when it is credential-shape clean rather than
+becoming boundary loss. Preserved text becomes proposal material the
+provider-independent decoders classify, and those decoders impose no
+argument-size ceiling of their own: a direct runtime caller decodes the
+preserved text at any size this adapter's event limit admits. The 1 MiB
+normalized-argument ceiling [tool-loop](tool-loop.md) states is the
+`RuntimeModelCallProvider` bridge's, applied as it normalizes each runtime
+proposal while classifying a terminal report; this adapter's event limit is the
+looser of the two, so on that path argument text above the ceiling fails its
+model call as unrepresentable tool material before any tool round instead of
+reaching one as `invalid_arguments`. `decode_tool_arguments` returns exactly its
+typed `JsonSyntax` or `SchemaMismatch` failure, and `decode_structured_json`
+returns `JsonSyntax`, `SchemaMismatch`, or — where the caller supplies a domain
+validator — `DomainInvalid`. Neither performs a model call or a repair round,
+and it is the tool loop that projects an ordinary proposal's typed failure as
+its `invalid_arguments` result for the next model round. Caller JSON remains raw
+through serialization, preserving deep admitted values and their numeric
+lexemes. Buffered delivery retains its content without deltas; streamed delivery
+feeds raw bounded CLI reasoning and final-envelope text through the stateful
+redactor before emitting ordered deltas and the same terminal evidence. A
+provider failure message consults the same held lookbehind state before it
+enters provider-error evidence: a message that extends a held credential
+candidate, or that arrives during oversized-credential suppression, is
+suppressed whole rather than statelessly re-redacted. Usage comes only from
+`turn.completed`. The adapter maps `input_tokens`, `output_tokens`,
+`cache_write_input_tokens`, and `cached_input_tokens` exactly to Signalbox
+input, output, cache-creation input, and cache-read input axes. Each decoded
+field is independently optional: an omitted field remains unreported rather than
+becoming zero. A partial event records only its present axes, and a total-only
+event records none because the adapter never distributes a total. The pinned
+CLI's separate `reasoning_output_tokens` counter and additive `total_tokens`
+siblings have no existing Signalbox usage axis; neither is folded into output or
+another field.
 
 The pinned CLI exposes no argv, configuration, or subscription request controls
 for output-token ceiling, temperature, top-p, or stop sequences. This adapter is
@@ -957,8 +999,10 @@ The adapter build reads that manifest and derives its exported supported-version
 constant from the exact dependency value, so the manifest is the single source
 of truth and a Renovate change is mechanically complete. An unconditional
 offline test still rejects a range, tag, alias, prerelease, or any shape other
-than exactly three numeric components. The live smoke verifies that the
-installed executable reports the derived version.
+than exactly three numeric components. The daemon composition and the live smoke
+both verify that the installed executable reports the derived version; the
+composition refuses startup before socket admission when the bounded probe
+cannot prove equality.
 
 This mechanical binding deliberately removes the old human-attestation tripwire.
 One live exchange proves that the installed CLI still works through the adapter,
@@ -1268,14 +1312,22 @@ lifecycle record (INV-035); channels, delivery, and rotation policy are
   quote; object- or array-shaped credential values consume through their
   balanced structural close, and a container still open at the end of the
   controlled text is suppressed through that end rather than released piecewise;
-  a private-key PEM block is consumed through its matching end marker whether or
-  not an assignment introduces it; credential labels are recognized in their
-  space-separated spellings as well as their underscore, hyphenated, and
-  concatenated ones; and JSON identity/session-token members are included.
-  Envelope-decode errors are content-silent rather than embedding a rejected
-  provider value. Why: subscription authentication remains wholly inside the
-  intended CLI control surface while credential-shaped reflection still fails
-  closed.
+  a tool argument object suppressed as a whole crosses the adapter as typed
+  non-executable material retaining only its admitted tool name; the application
+  records a fixed `RuntimeSafety` denial and continues the same turn, never
+  dispatching sentinel JSON to an executor; a private-key PEM block is consumed
+  through its matching end marker whether or not an assignment introduces it;
+  credential labels are recognized in their space-separated spellings as well as
+  their underscore, hyphenated, and concatenated ones; and JSON
+  identity/session-token members are included. Envelope-decode errors are
+  content-silent rather than embedding a rejected provider value. Why:
+  subscription authentication remains wholly inside the intended CLI control
+  surface while credential-shaped reflection still fails closed.
+
+The Codex CLI whole-tool-argument closeout is verified against this PR
+(`agent/daemon-live-redacted-tool-closeout`); its same-turn runtime-safety
+recovery is verified against this PR
+(`agent/daemon-live-redacted-tool-recovery`).
 
 ### Codex CLI shape-redaction scope
 

@@ -1,16 +1,12 @@
 import type { DensityMode, DetailMode, LayoutMode, ThemeMode } from './state'
 
-export type RemoteMediaPolicy = 'ask' | 'block' | 'allow'
-
 export interface BrowserPreferences {
   layout: LayoutMode
   density: DensityMode
   detail: DetailMode
   theme: ThemeMode
   paneSizes: { navigation: number; inspector: number }
-  remoteMedia: RemoteMediaPolicy
   lastLogicalPositions: Record<string, string>
-  keyOverrides: Record<string, string>
 }
 
 export const defaultBrowserPreferences: BrowserPreferences = {
@@ -19,25 +15,19 @@ export const defaultBrowserPreferences: BrowserPreferences = {
   detail: 'condensed',
   theme: 'dark',
   paneSizes: { navigation: 218, inspector: 252 },
-  remoteMedia: 'ask',
   lastLogicalPositions: {},
-  keyOverrides: {},
 }
 
 export const createDefaultBrowserPreferences = (): BrowserPreferences => ({
   ...defaultBrowserPreferences,
   paneSizes: { ...defaultBrowserPreferences.paneSizes },
   lastLogicalPositions: {},
-  keyOverrides: {},
 })
 
 export const BROWSER_PREFERENCES_KEY = 'signalbox.web.preferences.v1'
 export const MAX_SAVED_LOGICAL_POSITIONS = 128
-export const MAX_KEY_OVERRIDES = 64
 export const MAX_LOGICAL_POSITION_KEY_BYTES = 512
 export const MAX_LOGICAL_POSITION_VALUE_BYTES = 4_096
-export const MAX_KEY_OVERRIDE_KEY_BYTES = 512
-export const MAX_KEY_OVERRIDE_VALUE_BYTES = 512
 export const MAX_BROWSER_PREFERENCES_BYTES = 1_048_576
 
 const isWithinUtf8ByteLimit = (value: string, limit: number): boolean => {
@@ -50,17 +40,15 @@ const isWithinUtf8ByteLimit = (value: string, limit: number): boolean => {
   return true
 }
 
+const isPositiveDecimalU64 = (value: string): boolean =>
+  /^[1-9]\d{0,19}$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n
+
 export const isBoundedLogicalPosition = (sessionId: string, position: string): boolean =>
   sessionId !== '__proto__' &&
   !/^(?:0|[1-9]\d*)$/.test(sessionId) &&
   isWithinUtf8ByteLimit(sessionId, MAX_LOGICAL_POSITION_KEY_BYTES) &&
-  isWithinUtf8ByteLimit(position, MAX_LOGICAL_POSITION_VALUE_BYTES)
-
-const isBoundedKeyOverride = (commandId: string, binding: string): boolean =>
-  commandId !== '__proto__' &&
-  !/^(?:0|[1-9]\d*)$/.test(commandId) &&
-  isWithinUtf8ByteLimit(commandId, MAX_KEY_OVERRIDE_KEY_BYTES) &&
-  isWithinUtf8ByteLimit(binding, MAX_KEY_OVERRIDE_VALUE_BYTES)
+  isWithinUtf8ByteLimit(position, MAX_LOGICAL_POSITION_VALUE_BYTES) &&
+  isPositiveDecimalU64(position)
 
 const exactKeys = (value: Record<string, unknown>, expected: readonly string[]) =>
   Object.keys(value).length === expected.length &&
@@ -94,24 +82,9 @@ const boundedRecord = (
     throw new TypeError(`${path} values must be strings`)
   }
   if (entries.some(([key, entry]) => !entryIsValid(key, entry as string))) {
-    throw new TypeError(`${path} keys or values exceed their byte limits`)
+    throw new TypeError(`${path} keys or values are out of bounds`)
   }
   return Object.fromEntries(entries.slice(-maximum) as [string, string][])
-}
-
-const isPositiveDecimalU64 = (value: string): boolean =>
-  /^[1-9]\d*$/.test(value) && BigInt(value) <= (1n << 64n) - 1n
-
-const boundedLogicalPositions = (value: unknown): Record<string, string> => {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {}
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(
-        (entry): entry is [string, string] =>
-          typeof entry[1] === 'string' && isPositiveDecimalU64(entry[1]),
-      )
-      .slice(-MAX_SAVED_LOGICAL_POSITIONS),
-  )
 }
 
 export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => {
@@ -126,9 +99,7 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
       'detail',
       'theme',
       'paneSizes',
-      'remoteMedia',
       'lastLogicalPositions',
-      'keyOverrides',
     ])
   ) {
     throw new TypeError('preferences must match the current exact schema')
@@ -153,20 +124,11 @@ export const decodeBrowserPreferences = (value: unknown): BrowserPreferences => 
       navigation: boundedNumber(panes.navigation, 160, 360, 'preferences.paneSizes.navigation'),
       inspector: boundedNumber(panes.inspector, 200, 480, 'preferences.paneSizes.inspector'),
     },
-    remoteMedia: oneOf(candidate.remoteMedia, ['ask', 'block', 'allow'], 'preferences.remoteMedia'),
-    lastLogicalPositions: boundedLogicalPositions(
-      boundedRecord(
-        candidate.lastLogicalPositions,
-        MAX_SAVED_LOGICAL_POSITIONS,
-        'preferences.lastLogicalPositions',
-        isBoundedLogicalPosition,
-      ),
-    ),
-    keyOverrides: boundedRecord(
-      candidate.keyOverrides,
-      MAX_KEY_OVERRIDES,
-      'preferences.keyOverrides',
-      isBoundedKeyOverride,
+    lastLogicalPositions: boundedRecord(
+      candidate.lastLogicalPositions,
+      MAX_SAVED_LOGICAL_POSITIONS,
+      'preferences.lastLogicalPositions',
+      isBoundedLogicalPosition,
     ),
   }
 }
@@ -201,4 +163,12 @@ export const saveBrowserPreferences = (preferences: BrowserPreferences): void =>
   } catch {
     // Browser persistence is optional; the active Redux state remains authoritative.
   }
+}
+
+export const applyPresentationPreferences = (
+  preferences: Pick<BrowserPreferences, 'density' | 'theme'>,
+  root: HTMLElement = document.documentElement,
+): void => {
+  root.dataset.theme = preferences.theme
+  root.dataset.density = preferences.density
 }

@@ -10,6 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use sha2::Digest;
 use signalbox_application::{
     CreateSessionFromImportedFrontierOutcome, CreateSessionFromImportedFrontierRequest,
     CreateSessionFromImportedFrontierService, UuidV7CreateSessionFromImportedFrontierIdGenerator,
@@ -21,6 +22,10 @@ use signalbox_domain::{
     ModelSelectionRequest, SessionConfigurationDefaults,
 };
 use signalbox_persistence::{
+    conversation_import::{
+        ImportedConversationRepository, ImportedConversationRepositoryError,
+        ImportedRawBlobStorageError,
+    },
     conversation_import_discovery::{
         ImportedContinuationReference, ImportedConversationDescriptor,
         ImportedConversationDiscoveryError, ImportedConversationDiscoveryRepository,
@@ -46,8 +51,12 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    HubModelConfiguration,
-    web_http::{application_error, decode_bounded_json, transport_error, validate_json_mutation},
+    BlobStoreRegistry, HubModelConfiguration,
+    imported_source_blobs::ImportedSourceBlobStorage,
+    web_http::{
+        application_error, decode_bounded_json, decode_bounded_utf8, transport_error,
+        validate_json_mutation, validate_text_mutation,
+    },
 };
 
 // Tunable effective ceiling: ordinary catalog views ask for a dense first page below the hard cap.
@@ -58,21 +67,42 @@ const DEFAULT_IMPORT_WINDOW_RADIUS: u32 = 25;
 #[derive(Clone, Debug)]
 struct WebImportState {
     pool: PgPool,
-    model_configuration: Arc<HubModelConfiguration>,
+    model_configuration: HubModelConfiguration,
+    imported_conversations: ImportedConversationRepository,
 }
 
-pub(crate) fn router(pool: PgPool, model_configuration: HubModelConfiguration) -> Router {
+pub(crate) fn router(
+    pool: PgPool,
+    model_configuration: HubModelConfiguration,
+    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+) -> Router {
+    // Continuations reconstitute the imported aggregate from immutable blob
+    // storage, so the browser adapter shares the daemon's publication adapter
+    // rather than reading raw bytes the database no longer holds.
+    let imported_conversations = ImportedConversationRepository::with_blob_storage(
+        pool.clone(),
+        Arc::new(ImportedSourceBlobStorage::new(
+            pool.clone(),
+            blob_store_registry,
+            model_configuration.conversation_import_max_source_bytes(),
+        )),
+    );
     let state = WebImportState {
         pool,
-        model_configuration: Arc::new(model_configuration),
+        model_configuration,
+        imported_conversations,
     };
     let mutation = Router::new()
         .route("/{conversation}/continuations", post(continue_import))
         .route_layer(middleware::from_fn(validate_json_mutation));
+    let searches = Router::new()
+        .route("/searches", post(search_imports))
+        .route_layer(middleware::from_fn(validate_text_mutation));
     Router::new()
         .route("/", get(list_imports))
         .route("/{conversation}", get(read_descriptor))
         .route("/{conversation}/entries", get(read_entry_window))
+        .merge(searches)
         .merge(mutation)
         .with_state(state)
 }
@@ -85,6 +115,45 @@ async fn list_imports(
         Ok(request) => request,
         Err(_) => return invalid_request("imports query is malformed"),
     };
+    if request.source_session_id.is_some() || request.search_correlation.is_some() {
+        return invalid_request("exact source-session filters use the bounded search body");
+    }
+    execute_list_imports(state, request, None).await
+}
+
+async fn search_imports(
+    State(state): State<WebImportState>,
+    query: Result<Query<WebImportListRequest>, axum::extract::rejection::QueryRejection>,
+    request: axum::extract::Request,
+) -> Response {
+    let Query(mut catalog_request) = match query {
+        Ok(request) => request,
+        Err(_) => return invalid_request("imports search query is malformed"),
+    };
+    if catalog_request.source_session_id.is_some() {
+        return invalid_request("exact source-session filters belong in the search body");
+    }
+    let search_correlation = match catalog_request.search_correlation.as_deref() {
+        Some(value) if required_uuid(value).is_ok() => Some(value.to_owned()),
+        Some(_) => return invalid_request("imports search correlation is not a UUID"),
+        None => return invalid_request("imports search correlation is required"),
+    };
+    let maximum_bytes = state
+        .model_configuration
+        .conversation_import_max_source_bytes();
+    let source_session_id = match decode_bounded_utf8(request, maximum_bytes).await {
+        Ok(source_session_id) => source_session_id,
+        Err(response) => return response,
+    };
+    catalog_request.source_session_id = Some(source_session_id);
+    execute_list_imports(state, catalog_request, search_correlation).await
+}
+
+async fn execute_list_imports(
+    state: WebImportState,
+    request: WebImportListRequest,
+    search_correlation: Option<String>,
+) -> Response {
     let limit = request.limit.unwrap_or(DEFAULT_IMPORT_LIST_ITEMS);
     let Some(limit) = NonZeroU32::new(limit).filter(|limit| limit.get() <= MAX_IMPORT_LIST_ITEMS)
     else {
@@ -97,6 +166,10 @@ async fn list_imports(
     let Some(source_session_maximum_bytes) = source_session_maximum_bytes() else {
         return invalid_import_contract();
     };
+    let exact_source_session_id_sha256 = request
+        .source_session_id
+        .as_deref()
+        .map(|value| lowercase_hex(&sha2::Sha256::digest(value.as_bytes())));
     let query = ImportedConversationPageRequest {
         after,
         format: request.format.map(domain_format),
@@ -111,6 +184,8 @@ async fn list_imports(
         Ok(page) => Json(WebImportListPage {
             items: page.items.into_iter().map(web_summary).collect(),
             next_cursor: page.next_after.map(|cursor| cursor.into_uuid().to_string()),
+            search_correlation,
+            exact_source_session_id_sha256,
         })
         .into_response(),
         Err(error) => discovery_error(error),
@@ -194,7 +269,7 @@ async fn read_entry_window(
         Ok(None) => import_not_found(),
         Err(ImportedConversationDiscoveryError::Request(
             ImportedConversationDiscoveryRequestError::PositionOutOfRange,
-        )) => position_out_of_range(),
+        )) => import_position_out_of_range(),
         Err(error) => discovery_error(error),
     }
 }
@@ -227,6 +302,7 @@ struct CanonicalContinuationRequest {
     relationship: ImportedSessionRelationship,
     web_relationship: WebImportedSessionRelationship,
     model_selection: ModelSelectionRequest,
+    web_frontier: WebImportContinuationReference,
 }
 
 fn canonical_continuation_request(
@@ -241,8 +317,7 @@ fn canonical_continuation_request(
     if frontier_conversation != path_conversation {
         return Err("continuation frontier belongs to another import");
     }
-    let position = canonical_positive_u64(&request.frontier.position)
-        .and_then(ImportedTranscriptPosition::try_from_u64)
+    let position = ImportedTranscriptPosition::try_from_u64(request.frontier.position)
         .ok_or("continuation position must be positive")?;
     let entry = required_uuid(&request.frontier.imported_entry_id)
         .map(ImportedTranscriptEntryId::from_uuid)
@@ -269,6 +344,7 @@ fn canonical_continuation_request(
         relationship,
         web_relationship: request.relationship,
         model_selection,
+        web_frontier: request.frontier,
     })
 }
 
@@ -276,9 +352,10 @@ async fn execute_continuation(
     state: &WebImportState,
     request: CanonicalContinuationRequest,
 ) -> Response {
-    let repository = ImportedSessionRepository::new(
+    let repository = ImportedSessionRepository::with_imported_conversations(
         state.pool.clone(),
         state.model_configuration.session_credential_pin(),
+        state.imported_conversations.clone(),
     );
     match repository.load(request.command_id).await {
         Ok(Some(recorded)) => {
@@ -309,11 +386,9 @@ async fn execute_continuation(
         .resolve_session_model(request.model_selection)
         .is_err()
     {
-        // The request passed transport decoding; rejecting an unconfigured model is a
-        // state-dependent application decision, not a trust-boundary failure.
         return application_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "model_selection_not_configured",
+            StatusCode::BAD_REQUEST,
+            "model_not_configured",
             "initial model selection is not configured",
         );
     }
@@ -338,10 +413,8 @@ async fn execute_continuation(
             import_not_found()
         }
         Ok(CreateSessionFromImportedFrontierOutcome::ImportedFrontierNotFound { .. }) => {
-            // The frontier decoded successfully and failed only against durable application
-            // state, so this is an application rejection, not a trust-boundary failure.
             application_error(
-                StatusCode::UNPROCESSABLE_ENTITY,
+                StatusCode::BAD_REQUEST,
                 "import_frontier_not_found",
                 "selected imported frontier no longer resolves",
             )
@@ -359,7 +432,11 @@ fn web_summary(summary: ImportedConversationSummary) -> WebImportSummary {
         display_title: summary.display_title.map(|title| title.into_string()),
         format: web_format(summary.format),
         source_session_id: summary.source_session_id.map(web_source_session),
-        entry_count: summary.entry_count.to_string(),
+        source_session_id_sha256: summary
+            .source_session_digest
+            .as_ref()
+            .map(|digest| lowercase_hex(digest)),
+        entry_count: summary.entry_count,
     }
 }
 
@@ -367,20 +444,17 @@ fn web_descriptor(descriptor: ImportedConversationDescriptor) -> WebImportDescri
     WebImportDescriptor {
         imported_conversation_id: descriptor.conversation.into_uuid().to_string(),
         display_title: descriptor.display_title.map(|title| title.into_string()),
-        raw_record_count: descriptor.raw_record_count.to_string(),
-        entry_count: descriptor.entry_count.to_string(),
+        raw_record_count: descriptor.raw_record_count,
+        entry_count: descriptor.entry_count,
         source: WebImportSourceEvidence {
             format: web_format(descriptor.format),
             source_digest_sha256: lowercase_hex(&descriptor.source_digest),
             source_session_id: descriptor.source_session_id.map(web_source_session),
         },
         sizes: WebImportSizeFacts {
-            raw_source_bytes: descriptor.sizes.raw_source_bytes.to_string(),
-            normalized_source_record_bytes: descriptor
-                .sizes
-                .normalized_source_record_bytes
-                .to_string(),
-            normalized_entry_bytes: descriptor.sizes.normalized_entry_bytes.to_string(),
+            raw_source_bytes: descriptor.sizes.raw_source_bytes,
+            normalized_source_record_bytes: descriptor.sizes.normalized_source_record_bytes,
+            normalized_entry_bytes: descriptor.sizes.normalized_entry_bytes,
         },
         timeline: WebImportTimelineBounds {
             first: web_frontier(descriptor.first),
@@ -391,9 +465,9 @@ fn web_descriptor(descriptor: ImportedConversationDescriptor) -> WebImportDescri
 
 fn web_entry_window(window: ImportedEntryWindow) -> WebImportEntryWindow {
     WebImportEntryWindow {
-        anchor_position: window.anchor_position.to_string(),
-        first_position: window.first_position.to_string(),
-        last_position: window.last_position.to_string(),
+        anchor_position: window.anchor_position,
+        first_position: window.first_position,
+        last_position: window.last_position,
         has_before: window.has_before,
         has_after: window.has_after,
         items: window.items.into_iter().map(web_entry).collect(),
@@ -404,8 +478,8 @@ fn web_entry(entry: ImportedEntryProjection) -> WebImportedEntry {
     let (content_kind, text) = web_content(&entry.content);
     WebImportedEntry {
         frontier: web_frontier(entry.frontier),
-        raw_record_position: entry.raw_record_position.to_string(),
-        record_entry_position: entry.record_entry_position.to_string(),
+        raw_record_position: entry.raw_record_position,
+        record_entry_position: entry.record_entry_position,
         source_speaker: match entry.source_speaker {
             ImportedSourceAttestation::NotAttested => WebImportedSpeakerEvidence::NotAttested,
             ImportedSourceAttestation::AttestedAbsent => WebImportedSpeakerEvidence::AttestedAbsent,
@@ -472,23 +546,15 @@ fn web_frontier(frontier: ImportedContinuationReference) -> WebImportContinuatio
     WebImportContinuationReference {
         imported_conversation_id: frontier.conversation.into_uuid().to_string(),
         imported_entry_id: frontier.entry.into_uuid().to_string(),
-        position: frontier.position.to_string(),
+        position: frontier.position,
     }
 }
 
 fn continuation_response(request: CanonicalContinuationRequest, session: Uuid) -> Response {
-    // The receipt spells every identity from the canonical domain values, never from the
-    // caller's request text: `Uuid::parse_str` admits noncanonical spellings the generated
-    // browser contract would refuse to decode, and an undecodable receipt for a committed
-    // command would make every exact replay fail the same way.
     Json(WebImportContinuationResponse {
         command_id: request.command_id.as_uuid().to_string(),
         session_id: session.to_string(),
-        frontier: WebImportContinuationReference {
-            imported_conversation_id: request.conversation.into_uuid().to_string(),
-            imported_entry_id: request.entry.into_uuid().to_string(),
-            position: request.position.as_u64().to_string(),
-        },
+        frontier: request.web_frontier,
         relationship: request.web_relationship,
     })
     .into_response()
@@ -496,23 +562,16 @@ fn continuation_response(request: CanonicalContinuationRequest, session: Uuid) -
 
 fn web_window_anchor(
     anchor: Option<WebImportWindowAnchor>,
-    position: Option<String>,
+    position: Option<u64>,
 ) -> Result<ImportedEntryWindowAnchor, &'static str> {
     match (anchor.unwrap_or(WebImportWindowAnchor::First), position) {
         (WebImportWindowAnchor::First, None) => Ok(ImportedEntryWindowAnchor::First),
         (WebImportWindowAnchor::Latest, None) => Ok(ImportedEntryWindowAnchor::Latest),
-        (WebImportWindowAnchor::Position, Some(position)) => canonical_positive_u64(&position)
-            .map(ImportedEntryWindowAnchor::Position)
-            .ok_or("entry-window position must be a positive canonical decimal u64"),
+        (WebImportWindowAnchor::Position, Some(position)) => {
+            Ok(ImportedEntryWindowAnchor::Position(position))
+        }
         _ => Err("entry-window position is present exactly for the position anchor"),
     }
-}
-
-fn canonical_positive_u64(value: &str) -> Option<u64> {
-    if value.starts_with('0') || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    value.parse().ok().filter(|value| *value > 0)
 }
 
 fn domain_format(format: WebImportFormat) -> ImportedConversationFormat {
@@ -584,7 +643,7 @@ fn discovery_error(error: ImportedConversationDiscoveryError) -> Response {
         ),
         ImportedConversationDiscoveryError::Request(
             ImportedConversationDiscoveryRequestError::PositionOutOfRange,
-        ) => position_out_of_range(),
+        ) => import_position_out_of_range(),
         ImportedConversationDiscoveryError::Request(
             ImportedConversationDiscoveryRequestError::WindowTooLarge,
         ) => invalid_request("imported entry window exceeds the contract bound"),
@@ -603,7 +662,13 @@ fn imported_session_error(error: ImportedSessionRepositoryError) -> Response {
             "continuation_commit_ambiguous",
             "continuation acknowledgement is ambiguous; retry the exact command",
         ),
-        ImportedSessionRepositoryError::Database(_) => application_error(
+        ImportedSessionRepositoryError::Database(_)
+        | ImportedSessionRepositoryError::ImportedConversation(
+            ImportedConversationRepositoryError::Database(_)
+            | ImportedConversationRepositoryError::BlobStorage(
+                ImportedRawBlobStorageError::Unavailable,
+            ),
+        ) => application_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "continuation_unavailable",
             "imported continuation is temporarily unavailable",
@@ -611,6 +676,7 @@ fn imported_session_error(error: ImportedSessionRepositoryError) -> Response {
         ImportedSessionRepositoryError::DifferentCommandKind { .. } => conflicting_reuse(),
         ImportedSessionRepositoryError::Preparation(_)
         | ImportedSessionRepositoryError::IdentityCollision(_)
+        | ImportedSessionRepositoryError::ImportedConversation(_)
         | ImportedSessionRepositoryError::Corruption(_) => application_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "continuation_corrupt",
@@ -637,21 +703,19 @@ fn invalid_request(message: &'static str) -> Response {
     transport_error(StatusCode::BAD_REQUEST, "invalid_import_request", message)
 }
 
-// A syntactically valid position that exceeds the stored entry count is rejected only after
-// reading current application state, so it is an application decision, not a transport one.
-fn position_out_of_range() -> Response {
-    application_error(
-        StatusCode::UNPROCESSABLE_ENTITY,
-        "import_position_out_of_range",
-        "imported entry-window position is outside the timeline",
-    )
-}
-
 fn import_not_found() -> Response {
     application_error(
         StatusCode::NOT_FOUND,
         "import_not_found",
         "imported conversation does not exist",
+    )
+}
+
+fn import_position_out_of_range() -> Response {
+    application_error(
+        StatusCode::BAD_REQUEST,
+        "import_position_out_of_range",
+        "imported entry-window position is outside the timeline",
     )
 }
 
@@ -666,6 +730,108 @@ fn conflicting_reuse() -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const CONVERSATION_ID: &str = "00000000-0000-7000-8000-000000000001";
+    const OTHER_CONVERSATION_ID: &str = "00000000-0000-7000-8000-000000000002";
+    const ENTRY_ID: &str = "00000000-0000-7000-8000-000000000003";
+    const COMMAND_ID: &str = "00000000-0000-7000-8000-000000000004";
+    const MODEL_ID: &str = "00000000-0000-7000-8000-000000000005";
+
+    fn continuation_request() -> WebImportContinuationRequest {
+        WebImportContinuationRequest {
+            command_id: COMMAND_ID.to_owned(),
+            frontier: WebImportContinuationReference {
+                imported_conversation_id: CONVERSATION_ID.to_owned(),
+                imported_entry_id: ENTRY_ID.to_owned(),
+                position: 1,
+            },
+            relationship: WebImportedSessionRelationship::Resume,
+            initial_model_selection: WebModelSelection::Direct {
+                selection_id: MODEL_ID.to_owned(),
+            },
+        }
+    }
+
+    fn conversation_id() -> ImportedConversationId {
+        ImportedConversationId::from_uuid(
+            Uuid::parse_str(CONVERSATION_ID).expect("fixture UUID is valid"),
+        )
+    }
+
+    #[test]
+    fn canonical_continuation_accepts_a_correlated_request() {
+        assert!(canonical_continuation_request(conversation_id(), continuation_request()).is_ok());
+    }
+
+    #[test]
+    fn canonical_continuation_rejects_a_non_uuid_command() {
+        let mut request = continuation_request();
+        request.command_id = "not-a-uuid".to_owned();
+
+        assert_eq!(
+            canonical_continuation_request(conversation_id(), request).err(),
+            Some("continuation command identity is not a UUID")
+        );
+    }
+
+    #[test]
+    fn canonical_continuation_rejects_another_import() {
+        let mut request = continuation_request();
+        request.frontier.imported_conversation_id = OTHER_CONVERSATION_ID.to_owned();
+
+        assert_eq!(
+            canonical_continuation_request(conversation_id(), request).err(),
+            Some("continuation frontier belongs to another import")
+        );
+    }
+
+    #[test]
+    fn canonical_continuation_rejects_zero_position() {
+        let mut request = continuation_request();
+        request.frontier.position = 0;
+
+        assert_eq!(
+            canonical_continuation_request(conversation_id(), request).err(),
+            Some("continuation position must be positive")
+        );
+    }
+
+    #[test]
+    fn canonical_continuation_rejects_a_non_uuid_entry() {
+        let mut request = continuation_request();
+        request.frontier.imported_entry_id = "not-a-uuid".to_owned();
+
+        assert_eq!(
+            canonical_continuation_request(conversation_id(), request).err(),
+            Some("continuation imported-entry identity is not a UUID")
+        );
+    }
+
+    #[test]
+    fn canonical_continuation_rejects_a_non_uuid_direct_model() {
+        let mut request = continuation_request();
+        request.initial_model_selection = WebModelSelection::Direct {
+            selection_id: "not-a-uuid".to_owned(),
+        };
+
+        assert_eq!(
+            canonical_continuation_request(conversation_id(), request).err(),
+            Some("direct model selection identity is not a UUID")
+        );
+    }
+
+    #[test]
+    fn canonical_continuation_rejects_a_non_uuid_alias() {
+        let mut request = continuation_request();
+        request.initial_model_selection = WebModelSelection::Alias {
+            alias_id: "not-a-uuid".to_owned(),
+        };
+
+        assert_eq!(
+            canonical_continuation_request(conversation_id(), request).err(),
+            Some("model alias identity is not a UUID")
+        );
+    }
 
     #[test]
     fn imported_text_projection_preserves_truncated_utf8_evidence() {
@@ -726,7 +892,7 @@ mod tests {
     #[test]
     fn position_anchor_preserves_its_exact_position() {
         assert_eq!(
-            web_window_anchor(Some(WebImportWindowAnchor::Position), Some("7".to_owned())),
+            web_window_anchor(Some(WebImportWindowAnchor::Position), Some(7)),
             Ok(ImportedEntryWindowAnchor::Position(7))
         );
     }
@@ -742,8 +908,23 @@ mod tests {
     #[test]
     fn non_position_anchor_rejects_a_supplied_position() {
         assert_eq!(
-            web_window_anchor(Some(WebImportWindowAnchor::Latest), Some("7".to_owned())),
+            web_window_anchor(Some(WebImportWindowAnchor::Latest), Some(7)),
             Err("entry-window position is present exactly for the position anchor")
         );
+    }
+
+    #[tokio::test]
+    async fn out_of_range_position_is_an_application_error() {
+        let response = import_position_out_of_range();
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), 4_096)
+            .await
+            .expect("the bounded error body is readable");
+        let decoded: serde_json::Value =
+            serde_json::from_slice(&body).expect("the application error is JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(decoded["error"]["kind"], "application");
+        assert_eq!(decoded["error"]["code"], "import_position_out_of_range");
     }
 }

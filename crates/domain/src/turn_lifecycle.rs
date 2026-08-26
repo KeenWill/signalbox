@@ -8,7 +8,7 @@
 //! causes, but that marker remains part of an uncommitted candidate.
 //! Standalone values are not proof that aggregate guards hold.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, num::NonZeroU32};
 
 use crate::{
     AppliedInterruptProof, ChildWait, ContextFrontier, CurrentTurnAttempt, DurableCommandId,
@@ -221,6 +221,11 @@ pub enum ReconciliationReason {
         /// The complete fatal failures and retained interrupt state.
         causes: FatalMismatchStopCauses,
     },
+    /// The daemon spent one durable bounded recovery attempt on an ambiguity.
+    AutomaticRecovery {
+        /// One-based attempt recorded before the terminalization transaction.
+        attempt: NonZeroU32,
+    },
 }
 
 /// Complete immutable evidence named by a reconciliation-required turn.
@@ -258,6 +263,18 @@ impl ReconciliationMarker {
         Self {
             ambiguous_operations,
             reason: ReconciliationReason::InterruptRequiresReconciliation { interrupt },
+        }
+    }
+
+    /// Constructs a daemon-owned marker after the execution aggregate proves
+    /// the exact ambiguous operation and ended attempt still own the wait.
+    pub(crate) fn from_automatic_recovery(
+        ambiguous_operations: NonEmptyIssuedOperationRefs,
+        attempt: NonZeroU32,
+    ) -> Self {
+        Self {
+            ambiguous_operations,
+            reason: ReconciliationReason::AutomaticRecovery { attempt },
         }
     }
 
@@ -627,9 +644,15 @@ mod tests {
             },
         );
         assert_marker_preserves_set_and_reason(
-            ambiguous_operations,
+            ambiguous_operations.clone(),
             ReconciliationReason::FatalMismatchRequiresReconciliation {
                 causes: fatal_causes(),
+            },
+        );
+        assert_marker_preserves_set_and_reason(
+            ambiguous_operations,
+            ReconciliationReason::AutomaticRecovery {
+                attempt: NonZeroU32::new(3).expect("the fixture attempt is nonzero"),
             },
         );
     }

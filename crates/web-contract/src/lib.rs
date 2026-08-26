@@ -7,9 +7,13 @@
 use std::{collections::BTreeMap, error::Error, fmt};
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use signalbox_application::{max_timeline_window_bytes, max_timeline_window_items};
+use serde::{Deserialize, Deserializer, Serialize, de};
+use serde_json::{Value, json};
+use signalbox_application::{
+    max_search_page_items, max_search_query_bytes, max_search_snippet_bytes,
+    max_timeline_window_bytes, max_timeline_window_items, max_usage_aggregate_calls,
+    max_usage_aggregate_groups, max_usage_call_page_items,
+};
 
 /// Exact browser HTTP contract version served by this daemon build.
 pub const WEB_CONTRACT_VERSION: &str = "2";
@@ -47,12 +51,16 @@ pub struct WebContractCapabilities {
     pub blob_derivations: bool,
     /// The daemon can lazily produce isolated deterministic image derivatives.
     pub image_derivatives: bool,
-    /// Stable bounded session descriptors and historical windows are available.
-    pub bounded_session_timeline: bool,
     /// Bounded imported-conversation discovery and entry windows are available.
     pub import_discovery: bool,
     /// Imported frontiers can seed a native session through an idempotent command.
     pub imported_continuations: bool,
+    /// Stable bounded session descriptors and historical windows are available.
+    pub bounded_session_timeline: bool,
+    /// Bounded lexical search with stable history reveal addresses is available.
+    pub bounded_lexical_search: bool,
+    /// Dedicated bounded aggregate and per-call usage/cost reads are available.
+    pub bounded_usage_cost: bool,
 }
 
 /// Effective hard limits clients must honor for this contract version.
@@ -67,6 +75,16 @@ pub struct WebContractLimits {
     pub max_timeline_window_items: u32,
     /// Maximum projected structured item bytes in one timeline window.
     pub max_timeline_window_bytes: u32,
+    /// Maximum UTF-8 bytes in one product search expression.
+    pub max_search_query_bytes: u32,
+    /// Maximum results in one search page.
+    pub max_search_page_items: u32,
+    /// Maximum UTF-8 bytes in one search result snippet.
+    pub max_search_snippet_bytes: u32,
+    /// Maximum compatibility-preserving groups in one usage summary.
+    pub max_usage_aggregate_groups: u32,
+    /// Maximum individual calls in one usage detail page.
+    pub max_usage_call_page_items: u32,
 }
 
 /// Response from the contract bootstrap endpoint.
@@ -85,17 +103,12 @@ impl WebContractBootstrap {
     /// Describes this daemon build's one exact browser contract.
     #[must_use]
     pub fn current() -> Self {
-        Self::for_runtime(false, false, false, false)
+        Self::for_runtime(false, false)
     }
 
-    /// Describes this contract with deployment-bound capabilities.
+    /// Describes this contract with deployment-bound blob capabilities.
     #[must_use]
-    pub fn for_runtime(
-        immutable_blob_content: bool,
-        image_derivatives: bool,
-        bounded_session_timeline: bool,
-        imports_available: bool,
-    ) -> Self {
+    pub fn for_runtime(immutable_blob_content: bool, image_derivatives: bool) -> Self {
         Self {
             contract: WebContractIdentity {
                 name: WEB_CONTRACT_NAME.to_owned(),
@@ -108,15 +121,22 @@ impl WebContractBootstrap {
                 immutable_blob_content,
                 blob_derivations: image_derivatives,
                 image_derivatives,
-                bounded_session_timeline,
-                import_discovery: imports_available,
-                imported_continuations: imports_available,
+                import_discovery: true,
+                imported_continuations: true,
+                bounded_session_timeline: true,
+                bounded_lexical_search: true,
+                bounded_usage_cost: true,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
                 max_ndjson_item_bytes: MAX_NDJSON_ITEM_BYTES as u32,
                 max_timeline_window_items: u32::from(max_timeline_window_items()),
                 max_timeline_window_bytes: max_timeline_window_bytes(),
+                max_search_query_bytes: max_search_query_bytes() as u32,
+                max_search_page_items: u32::from(max_search_page_items()),
+                max_search_snippet_bytes: max_search_snippet_bytes() as u32,
+                max_usage_aggregate_groups: u32::from(max_usage_aggregate_groups()),
+                max_usage_call_page_items: u32::from(max_usage_call_page_items()),
             },
         }
     }
@@ -203,89 +223,6 @@ pub struct WebBlobDescriptor {
     pub available_views: Vec<WebBlobAvailableView>,
 }
 
-/// Stable browser-visible location of one durable session event.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebTimelineAddress {
-    /// Positive global durable event sequence encoded losslessly for JavaScript.
-    pub event_sequence: String,
-}
-
-/// Explicit lifetime size facts used only for browser loading policy.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebSessionTimelineSizeFacts {
-    pub item_count: String,
-    pub projected_text_bytes: String,
-    pub projected_structured_bytes: String,
-    pub referenced_blob_count: String,
-    pub referenced_blob_bytes: String,
-}
-
-/// Current work facts carried by the lightweight session descriptor.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebSessionWorkFacts {
-    pub active_turn_count: String,
-    pub queued_turn_count: String,
-}
-
-/// Browser descriptor for one authoritative bounded session projection.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebSessionTimelineDescriptor {
-    pub session_id: String,
-    pub sizes: WebSessionTimelineSizeFacts,
-    pub first_address: WebTimelineAddress,
-    pub latest_address: WebTimelineAddress,
-    pub work: WebSessionWorkFacts,
-    pub observed_through: String,
-}
-
-/// Closed durable event categories in the browser timeline foundation.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WebSessionTimelineEventKind {
-    SessionCreated,
-    SessionModelSettingsChanged,
-    TurnModelSettingsResolved,
-    InputAccepted,
-    GoalTurnRetired,
-    TurnActivated,
-    TurnFailed,
-    ModelCallTransition,
-    ToolBatchTransition,
-    ToolApprovalDecided,
-    ContextCompacted,
-    TurnCompleted,
-    TurnRefused,
-    TurnCancelled,
-    TurnReconciliationRequired,
-    RunnerStateTransition,
-    DelegationUpdate,
-    DelegationWake,
-}
-
-/// One typed, header-only event in a bounded browser window.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebSessionTimelineItem {
-    pub address: WebTimelineAddress,
-    pub kind: WebSessionTimelineEventKind,
-    pub projected_structured_bytes: u32,
-}
-
-/// One bounded, logically ordered browser timeline window.
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct WebSessionTimelineWindow {
-    pub session_id: String,
-    pub items: Vec<WebSessionTimelineItem>,
-    pub projected_structured_bytes: u32,
-    pub continuation_before: Option<WebTimelineAddress>,
-    pub continuation_after: Option<WebTimelineAddress>,
-}
-
 /// Hard safety ceiling protecting one imports catalog response.
 pub const MAX_IMPORT_LIST_ITEMS: u32 = 100;
 /// Hard safety ceiling protecting one imported-entry window response.
@@ -307,7 +244,9 @@ pub enum WebImportFormat {
     CodexRolloutJsonlV1,
 }
 
-/// Bounded imports catalog request carried as query parameters.
+/// Bounded imports catalog request carried as query parameters. An exact
+/// source-session filter is carried separately as the bounded raw UTF-8 body of
+/// `POST /api/imports/searches`; empty text and edge whitespace are preserved.
 #[derive(Clone, Debug, Default, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebImportListRequest {
@@ -319,6 +258,8 @@ pub struct WebImportListRequest {
     pub format: Option<WebImportFormat>,
     /// Optional exact converter-attested source-session identifier.
     pub source_session_id: Option<String>,
+    /// Client-selected UUID echoed by an exact-search response.
+    pub search_correlation: Option<String>,
 }
 
 /// One bounded imports catalog row.
@@ -333,8 +274,10 @@ pub struct WebImportSummary {
     pub format: WebImportFormat,
     /// Bounded converter-attested source-session evidence, when consistent.
     pub source_session_id: Option<WebImportSourceSessionEvidence>,
-    /// Number of normalized imported entries encoded losslessly for JavaScript.
-    pub entry_count: String,
+    /// SHA-256 of the complete source-session identifier, when present.
+    pub source_session_id_sha256: Option<String>,
+    /// Number of normalized imported entries.
+    pub entry_count: u64,
 }
 
 /// Bounded projection of exact converter-attested source-session evidence.
@@ -352,10 +295,13 @@ pub struct WebImportSourceSessionEvidence {
 #[serde(deny_unknown_fields)]
 pub struct WebImportListPage {
     /// Rows in stable UUID order.
-    #[schemars(length(max = 100))]
     pub items: Vec<WebImportSummary>,
     /// Exclusive cursor for the next page, absent at the end.
     pub next_cursor: Option<String>,
+    /// Client-selected exact-search correlation UUID, absent for ordinary catalog reads.
+    pub search_correlation: Option<String>,
+    /// SHA-256 of the complete exact-search value, absent for ordinary catalog reads.
+    pub exact_source_session_id_sha256: Option<String>,
 }
 
 /// Source and converter evidence retained by one immutable import.
@@ -374,12 +320,12 @@ pub struct WebImportSourceEvidence {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebImportSizeFacts {
-    /// Sum of exact raw source-record occurrence bytes, encoded losslessly for JavaScript.
-    pub raw_source_bytes: String,
-    /// Sum of normalized source-record encoding bytes, encoded losslessly for JavaScript.
-    pub normalized_source_record_bytes: String,
-    /// Sum of normalized entry and source-metadata encoding bytes, encoded losslessly for JavaScript.
-    pub normalized_entry_bytes: String,
+    /// Sum of exact raw source-record occurrence bytes.
+    pub raw_source_bytes: u64,
+    /// Sum of normalized source-record encoding bytes.
+    pub normalized_source_record_bytes: u64,
+    /// Sum of normalized entry and source-metadata encoding bytes.
+    pub normalized_entry_bytes: u64,
 }
 
 /// One immutable imported frontier suitable for precise continuation.
@@ -390,8 +336,8 @@ pub struct WebImportContinuationReference {
     pub imported_conversation_id: String,
     /// Exact imported-entry UUID at the inclusive frontier.
     pub imported_entry_id: String,
-    /// One-based immutable imported position encoded losslessly for JavaScript.
-    pub position: String,
+    /// One-based immutable imported position.
+    pub position: u64,
 }
 
 /// First and latest immutable positions in an imported timeline.
@@ -412,10 +358,10 @@ pub struct WebImportDescriptor {
     pub imported_conversation_id: String,
     /// Evidence-derived display title, when available.
     pub display_title: Option<String>,
-    /// Number of exact raw source records encoded losslessly for JavaScript.
-    pub raw_record_count: String,
-    /// Number of normalized imported entries encoded losslessly for JavaScript.
-    pub entry_count: String,
+    /// Number of exact raw source records.
+    pub raw_record_count: u64,
+    /// Number of normalized imported entries.
+    pub entry_count: u64,
     /// Source and converter evidence, distinct from native execution evidence.
     pub source: WebImportSourceEvidence,
     /// Projected byte facts; no raw blob bytes are included.
@@ -442,8 +388,8 @@ pub enum WebImportWindowAnchor {
 pub struct WebImportEntryWindowRequest {
     /// Logical anchor; defaults to `first` when omitted.
     pub anchor: Option<WebImportWindowAnchor>,
-    /// Required only for the `position` anchor; encoded losslessly for JavaScript.
-    pub position: Option<String>,
+    /// Required only for the `position` anchor.
+    pub position: Option<u64>,
     /// Number of entries requested before the anchor.
     pub before: Option<u32>,
     /// Number of entries requested after the anchor.
@@ -521,10 +467,10 @@ pub enum WebImportTextEvidence {
 pub struct WebImportedEntry {
     /// Exact immutable continuation frontier.
     pub frontier: WebImportContinuationReference,
-    /// One-based physical source-record occurrence encoded losslessly for JavaScript.
-    pub raw_record_position: String,
-    /// One-based normalized entry position within that source record, encoded losslessly for JavaScript.
-    pub record_entry_position: String,
+    /// One-based physical source-record occurrence.
+    pub raw_record_position: u64,
+    /// One-based normalized entry position within that source record.
+    pub record_entry_position: u64,
     /// Source speaker attestation, never native author evidence.
     pub source_speaker: WebImportedSpeakerEvidence,
     /// Source-neutral normalized content kind.
@@ -537,18 +483,17 @@ pub struct WebImportedEntry {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebImportEntryWindow {
-    /// Resolved immutable anchor position encoded losslessly for JavaScript.
-    pub anchor_position: String,
-    /// First position returned, encoded losslessly for JavaScript.
-    pub first_position: String,
-    /// Last position returned, encoded losslessly for JavaScript.
-    pub last_position: String,
+    /// Resolved immutable anchor position.
+    pub anchor_position: u64,
+    /// First position returned.
+    pub first_position: u64,
+    /// Last position returned.
+    pub last_position: u64,
     /// Whether earlier entries exist.
     pub has_before: bool,
     /// Whether later entries exist.
     pub has_after: bool,
     /// Entries in ascending immutable position order.
-    #[schemars(length(max = 101))]
     pub items: Vec<WebImportedEntry>,
 }
 
@@ -606,6 +551,803 @@ pub struct WebImportContinuationResponse {
     pub relationship: WebImportedSessionRelationship,
 }
 
+/// Checked positive durable-event sequence encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebTimelineEventSequence(#[schemars(regex(pattern = r"^[1-9][0-9]*$"))] String);
+
+fn canonical_u64(value: &str) -> Option<u64> {
+    let canonical = !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'));
+    canonical.then(|| value.parse::<u64>().ok()).flatten()
+}
+
+fn canonical_session_id(value: &str) -> bool {
+    value.len() == 36
+        && value.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+        })
+}
+
+/// Checked canonical UUID used for browser-visible session identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebSessionId(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebSessionId {
+    /// Encodes an already-validated UUID in canonical lowercase form.
+    #[must_use]
+    pub fn from_validated_uuid(value: String) -> Self {
+        debug_assert!(canonical_session_id(&value));
+        Self(value)
+    }
+
+    /// Constructs a canonical lowercase UUID from its 16 wire-order bytes.
+    #[must_use]
+    pub fn from_uuid_bytes(bytes: [u8; 16]) -> Self {
+        Self(format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            bytes[0],
+            bytes[1],
+            bytes[2],
+            bytes[3],
+            bytes[4],
+            bytes[5],
+            bytes[6],
+            bytes[7],
+            bytes[8],
+            bytes[9],
+            bytes[10],
+            bytes[11],
+            bytes[12],
+            bytes[13],
+            bytes[14],
+            bytes[15],
+        ))
+    }
+
+    /// Constructs a session identity from its canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn from_canonical(value: String) -> Option<Self> {
+        canonical_session_id(&value).then_some(Self(value))
+    }
+
+    /// Returns the canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebSessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value)
+            .ok_or_else(|| de::Error::custom("session ID must be a canonical lowercase UUID"))
+    }
+}
+
+/// Checked canonical UUID used for browser-visible non-session identities.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUuid(
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    String,
+);
+
+impl WebUuid {
+    /// Encodes an already-validated UUID in canonical lowercase form.
+    #[must_use]
+    pub fn from_validated_uuid(value: String) -> Self {
+        debug_assert!(canonical_session_id(&value));
+        Self(value)
+    }
+
+    /// Constructs an identity from its canonical lowercase UUID spelling.
+    #[must_use]
+    pub fn from_canonical(value: String) -> Option<Self> {
+        canonical_session_id(&value).then_some(Self(value))
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUuid {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value)
+            .ok_or_else(|| de::Error::custom("identity must be a canonical lowercase UUID"))
+    }
+}
+
+impl WebTimelineEventSequence {
+    /// Encodes one already-validated positive durable-event sequence.
+    #[must_use]
+    pub fn from_nonzero(sequence: std::num::NonZeroU64) -> Self {
+        Self(sequence.get().to_string())
+    }
+
+    /// Returns the canonical positive decimal wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebTimelineEventSequence {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let positive = canonical_u64(&value).and_then(std::num::NonZeroU64::new);
+        if positive.is_none() {
+            return Err(de::Error::custom(
+                "timeline event sequence must be a canonical positive u64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked unsigned 64-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebU64(#[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))] String);
+
+impl WebU64 {
+    /// Encodes one unsigned 64-bit value in canonical decimal form.
+    #[must_use]
+    pub fn from_u64(value: u64) -> Self {
+        Self(value.to_string())
+    }
+
+    /// Returns the canonical unsigned decimal wire spelling.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for WebU64 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if canonical_u64(&value).is_none() {
+            return Err(de::Error::custom(
+                "wire value must be a canonical unsigned 64-bit integer",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked unsigned 128-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebU128(#[schemars(regex(pattern = r"^(0|[1-9][0-9]{0,38})$"))] String);
+
+impl WebU128 {
+    /// Encodes one unsigned 128-bit value in canonical decimal form.
+    #[must_use]
+    pub fn from_u128(value: u128) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebU128 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value
+            .parse::<u128>()
+            .ok()
+            .is_none_or(|parsed| parsed.to_string() != value)
+        {
+            return Err(de::Error::custom(
+                "wire value must be a canonical unsigned 128-bit integer",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Stable browser-visible location of one durable session event.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebTimelineAddress {
+    /// Positive global durable event sequence encoded losslessly for JavaScript.
+    pub event_sequence: WebTimelineEventSequence,
+}
+
+/// Explicit lifetime size facts used only for browser loading policy.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineSizeFacts {
+    pub item_count: WebU64,
+    pub projected_text_bytes: WebU64,
+    pub projected_structured_bytes: WebU64,
+    pub referenced_blob_count: WebU64,
+    pub referenced_blob_bytes: WebU64,
+}
+
+/// Current work facts carried by the lightweight session descriptor.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionWorkFacts {
+    pub active_turn_count: WebU64,
+    pub queued_turn_count: WebU64,
+}
+
+/// Browser descriptor for one authoritative bounded session projection.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineDescriptor {
+    pub session_id: WebSessionId,
+    pub sizes: WebSessionTimelineSizeFacts,
+    pub first_address: WebTimelineAddress,
+    pub latest_address: WebTimelineAddress,
+    pub work: WebSessionWorkFacts,
+    pub observed_through: WebU64,
+}
+
+/// Closed durable event categories in the browser timeline foundation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSessionTimelineEventKind {
+    SessionCreated,
+    SessionModelSettingsChanged,
+    TurnModelSettingsResolved,
+    InputAccepted,
+    GoalTurnRetired,
+    TurnActivated,
+    TurnFailed,
+    ModelCallTransition,
+    ToolBatchTransition,
+    ToolApprovalDecided,
+    ContextCompacted,
+    TurnCompleted,
+    TurnRefused,
+    TurnCancelled,
+    TurnReconciliationRequired,
+    RunnerStateTransition,
+    DelegationUpdate,
+    DelegationWake,
+}
+
+/// One typed, header-only event in a bounded browser window.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineItem {
+    pub address: WebTimelineAddress,
+    pub kind: WebSessionTimelineEventKind,
+    pub projected_structured_bytes: u32,
+}
+
+/// One bounded, logically ordered browser timeline window.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionTimelineWindow {
+    pub session_id: WebSessionId,
+    pub items: Vec<WebSessionTimelineItem>,
+    pub projected_structured_bytes: u32,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub continuation_before: Option<WebTimelineAddress>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub continuation_after: Option<WebTimelineAddress>,
+}
+
+fn deserialize_present_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)
+}
+
+/// Closed browser-visible class of matched indexed content.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchContentClass {
+    UserTranscript,
+    AssistantTranscript,
+    ToolArguments,
+    ToolResult,
+    SessionMetadata,
+    AttachmentFilename,
+    AttachmentMediaMetadata,
+    DerivedTextArtifact,
+}
+
+/// Typed durable source of one browser search result.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebSearchResultSource {
+    Session {
+        session_id: WebSessionId,
+    },
+    AcceptedInput {
+        accepted_input_id: WebUuid,
+        turn_id: WebUuid,
+    },
+    SteeringInput {
+        accepted_input_id: WebUuid,
+        source_turn_id: WebUuid,
+    },
+    TurnTranscriptEntry {
+        semantic_entry_id: WebUuid,
+        turn_id: WebUuid,
+    },
+    SessionTranscriptEntry {
+        semantic_entry_id: WebUuid,
+    },
+    ToolRequest {
+        tool_request_id: WebUuid,
+        turn_id: WebUuid,
+    },
+    ToolAttempt {
+        tool_attempt_id: WebUuid,
+        turn_id: WebUuid,
+    },
+    Attachment {
+        attachment_id: WebUuid,
+    },
+    DerivedArtifact {
+        artifact_id: WebUuid,
+    },
+}
+
+/// One half-open UTF-8 byte range within a bounded snippet.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchHighlight {
+    pub start_byte: u32,
+    pub end_byte: u32,
+}
+
+/// Checked positive PostgreSQL projection identity encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebSearchProjectionId(#[schemars(regex(pattern = r"^[1-9][0-9]{0,18}$"))] String);
+
+impl WebSearchProjectionId {
+    /// Encodes one already-validated positive projection identity.
+    #[must_use]
+    pub fn from_nonzero(value: std::num::NonZeroU64) -> Self {
+        debug_assert!(i64::try_from(value.get()).is_ok());
+        Self(value.get().to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebSearchProjectionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let positive = canonical_u64(&value)
+            .and_then(std::num::NonZeroU64::new)
+            .filter(|value| i64::try_from(value.get()).is_ok());
+        if positive.is_none() {
+            return Err(de::Error::custom(
+                "search projection identity must be a canonical positive i64",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Stable opaque descending search keyset boundary.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchCursor {
+    pub address: WebTimelineAddress,
+    pub projection_id: WebSearchProjectionId,
+}
+
+/// One bounded lexical match with enough identity to reveal unloaded history.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchResult {
+    pub session_id: WebSessionId,
+    pub address: WebTimelineAddress,
+    pub projection_id: WebSearchProjectionId,
+    pub source: WebSearchResultSource,
+    pub content_class: WebSearchContentClass,
+    #[schemars(length(max = 512))]
+    pub snippet: String,
+    #[schemars(length(max = 512))]
+    pub highlights: Vec<WebSearchHighlight>,
+}
+
+/// One bounded, stable page of lexical matches.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSearchPage {
+    pub results: Vec<WebSearchResult>,
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub continuation: Option<WebSearchCursor>,
+}
+
+/// Closed physical class of one terminal usage record.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageCallKind {
+    ModelCall,
+    ApprovalJudge,
+    ContextCompaction,
+}
+
+/// Closed provenance of one token-evidence projection.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageProvenance {
+    Reported,
+    Estimated,
+}
+
+/// Meaning of one provider target's input-token axis.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageInputSemantics {
+    Unknown,
+    CacheExclusive,
+    CacheInclusive,
+}
+
+/// Independently nullable token axes; null is never interpreted as zero.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum WebNullableU64 {
+    Value(WebU64),
+    Null,
+}
+
+impl WebNullableU64 {
+    /// Preserves a missing axis as an explicit JSON null.
+    #[must_use]
+    pub fn from_option(value: Option<u64>) -> Self {
+        match value {
+            Some(value) => Self::Value(WebU64::from_u64(value)),
+            None => Self::Null,
+        }
+    }
+}
+
+/// Independently nullable aggregate token axis widened beyond one call.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum WebNullableU128 {
+    Value(WebU128),
+    Null,
+}
+
+impl WebNullableU128 {
+    /// Preserves a missing aggregate axis as an explicit JSON null.
+    #[must_use]
+    pub fn from_option(value: Option<u128>) -> Self {
+        match value {
+            Some(value) => Self::Value(WebU128::from_u128(value)),
+            None => Self::Null,
+        }
+    }
+}
+
+/// Independently nullable token axes; null is never interpreted as zero.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageTokenAxes {
+    pub input: WebNullableU64,
+    pub output: WebNullableU64,
+    pub cache_creation_input: WebNullableU64,
+    pub cache_read_input: WebNullableU64,
+}
+
+/// Aggregate token axes widened beyond one physical call.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageAggregateTokenAxes {
+    pub input: WebNullableU128,
+    pub output: WebNullableU128,
+    pub cache_creation_input: WebNullableU128,
+    pub cache_read_input: WebNullableU128,
+}
+
+/// Explicit presence shape retained by compatibility-preserving aggregates.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageTokenCoverage {
+    pub input: bool,
+    pub output: bool,
+    pub cache_creation_input: bool,
+    pub cache_read_input: bool,
+}
+
+/// Browser-visible billing label derived from the serving credential profile.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageCostLabel {
+    Real,
+    MeteredEquivalent,
+}
+
+/// Why no configured dollar derivation is available for exact token evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageCostUnavailableReason {
+    NoTokenEvidence,
+    UnknownInputSemantics,
+    IncompleteCacheAxes,
+    InvalidCacheBreakdown,
+    ConfigurationUnavailable,
+}
+
+/// Canonical nonnegative fixed-point USD amount derived by the daemon.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebDollarAmount(
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)(\.[0-9]{0,27}[1-9])?$"))] String,
+);
+
+impl WebDollarAmount {
+    /// Wraps configuration arithmetic already represented by `rust_decimal`.
+    #[must_use]
+    pub fn from_derived(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebDollarAmount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let (whole, fractional) = value
+            .split_once('.')
+            .map_or((value.as_str(), None), |(whole, fractional)| {
+                (whole, Some(fractional))
+            });
+        let whole_is_canonical = !whole.is_empty()
+            && whole.bytes().all(|byte| byte.is_ascii_digit())
+            && (whole == "0" || !whole.starts_with('0'));
+        let fractional_is_canonical = fractional.is_none_or(|fractional| {
+            !fractional.is_empty()
+                && fractional.len() <= 28
+                && fractional.bytes().all(|byte| byte.is_ascii_digit())
+                && !fractional.ends_with('0')
+        });
+        let coefficient = format!("{whole}{}", fractional.unwrap_or_default());
+        let significant_coefficient = coefficient.trim_start_matches('0');
+        let coefficient_fits = significant_coefficient.len() < 29
+            || (significant_coefficient.len() == 29
+                && significant_coefficient <= "79228162514264337593543950335");
+        if !whole_is_canonical || !fractional_is_canonical || !coefficient_fits {
+            return Err(de::Error::custom(
+                "dollar amount must be a canonical nonnegative decimal",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked nonempty configured rate version exposed to browser clients.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUsageRateVersion(#[schemars(length(min = 1, max = 128))] String);
+
+impl WebUsageRateVersion {
+    /// Wraps a rate version already admitted by daemon configuration.
+    #[must_use]
+    pub fn from_configured(value: String) -> Self {
+        debug_assert!(!value.is_empty() && value.len() <= 128);
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUsageRateVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() || value.len() > 128 {
+            return Err(de::Error::custom(
+                "usage rate version must contain 1 through 128 UTF-8 bytes",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Labeled configured cost, or an explicit reason it cannot be derived.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebUsageCost {
+    Derived {
+        amount_usd: WebDollarAmount,
+        rate_version: WebUsageRateVersion,
+        label: WebUsageCostLabel,
+    },
+    Unavailable {
+        reason: WebUsageCostUnavailableReason,
+    },
+}
+
+/// Non-secret bounded profile identity retained by usage summaries.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUsageProfileId(#[schemars(length(min = 1, max = 256))] String);
+
+impl WebUsageProfileId {
+    /// Wraps a profile identity already validated by the persistence boundary.
+    #[must_use]
+    pub fn from_bounded(value: String) -> Self {
+        debug_assert!(!value.is_empty() && value.len() <= 256);
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUsageProfileId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() || value.len() > 256 {
+            return Err(de::Error::custom(
+                "usage profile identity must contain 1 through 256 UTF-8 bytes",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked positive summary call count encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUsageCallCount(#[schemars(regex(pattern = r"^([1-9][0-9]{0,3}|10000)$"))] String);
+
+impl WebUsageCallCount {
+    /// Encodes a positive aggregate count produced by persistence.
+    #[must_use]
+    pub fn from_positive(value: u64) -> Self {
+        debug_assert!(value > 0 && value <= u64::from(max_usage_aggregate_calls()));
+        Self(value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUsageCallCount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if canonical_u64(&value)
+            .is_none_or(|parsed| parsed == 0 || parsed > u64::from(max_usage_aggregate_calls()))
+        {
+            return Err(de::Error::custom(
+                "usage summary call count must be canonical and within the aggregation ceiling",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked application-range usage timestamp encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUsageTimestampMicros(#[schemars(regex(pattern = r"^(0|[1-9][0-9]{0,17})$"))] String);
+
+impl WebUsageTimestampMicros {
+    /// Encodes one timestamp already admitted by the application boundary.
+    #[must_use]
+    pub fn from_application(value: u64) -> Self {
+        debug_assert!(value <= 253_402_300_799_999_999);
+        Self(value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUsageTimestampMicros {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if canonical_u64(&value).is_none_or(|parsed| parsed > 253_402_300_799_999_999) {
+            return Err(de::Error::custom(
+                "usage timestamp must be canonical and within the application range",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// One compatibility-preserving usage and configured-cost summary row.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageAggregateGroup {
+    pub call_kind: WebUsageCallKind,
+    pub model_id: WebUuid,
+    pub profile_id: WebUsageProfileId,
+    pub provenance: WebUsageProvenance,
+    pub input_semantics: WebUsageInputSemantics,
+    pub coverage: WebUsageTokenCoverage,
+    pub call_count: WebUsageCallCount,
+    pub tokens: WebUsageAggregateTokenAxes,
+    pub cost: WebUsageCost,
+}
+
+/// Bounded aggregate response; truncation is never implicit.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageSummary {
+    #[schemars(length(max = 256))]
+    pub groups: Vec<WebUsageAggregateGroup>,
+    pub truncated: bool,
+}
+
+/// One terminal call with exact token, provenance, rate, and billing evidence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageCall {
+    pub call_kind: WebUsageCallKind,
+    pub call_id: WebUuid,
+    pub session_id: WebSessionId,
+    /// Owning turn, present-but-null exactly for context compaction.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub turn_id: Option<WebUuid>,
+    pub model_id: WebUuid,
+    pub profile_id: WebUsageProfileId,
+    pub provenance: WebUsageProvenance,
+    pub input_semantics: WebUsageInputSemantics,
+    pub tokens: WebUsageTokenAxes,
+    pub recorded_at_micros: WebUsageTimestampMicros,
+    pub cost: WebUsageCost,
+}
+
+/// Stable terminal-time/UUID keyset boundary for usage detail traversal.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageCallCursor {
+    pub recorded_at_micros: WebUsageTimestampMicros,
+    pub call_id: WebUuid,
+}
+
+/// One bounded page of exact call evidence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageCallPage {
+    #[schemars(length(max = 100))]
+    pub calls: Vec<WebUsageCall>,
+    /// Present-but-null when the page exhausts the matching evidence, so an
+    /// omitted member is an incompatibility rather than a silent exhaustion.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub continuation: Option<WebUsageCallCursor>,
+}
+
 /// Layer that owns one browser API failure.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -642,6 +1384,508 @@ impl Error for WebApiError {}
 pub struct WebApiErrorResponse {
     /// Typed failure detail.
     pub error: WebApiError,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionState {
+    Active,
+    Queued,
+    Blocked,
+    AwaitingApproval,
+    Ambiguous,
+    AwaitingToolRecovery,
+    AwaitingReconciliation,
+    RunnerLost,
+    Idle,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionAction {
+    ProvideGoalNeed,
+    DecideApproval,
+    ReconcileTurn,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebAttentionActivityKind {
+    Session,
+    Turn,
+    Goal,
+    ApprovalJudge,
+    Runner,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionGoalBlock {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub generation: String,
+    pub reason: WebAttentionBlockedReason,
+    /// At most 128 Unicode scalar values; exact text is in session detail.
+    #[schemars(length(max = 128))]
+    pub need_summary: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionJudgeFacts {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub actionable: String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub completed: String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub escalated: String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub failed: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionActivity {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub unix_milliseconds: String,
+    pub kind: WebAttentionActivityKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionSummary {
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub session_id: String,
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub current_turn_id: Option<String>,
+    pub state: WebAttentionState,
+    pub action: Option<WebAttentionAction>,
+    pub goal_block: Option<WebAttentionGoalBlock>,
+    pub judge: WebAttentionJudgeFacts,
+    pub last_activity: WebAttentionActivity,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionSnapshot {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub cursor: String,
+    #[schemars(length(max = 32))]
+    pub summaries: Vec<WebAttentionSummary>,
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub continuation_after_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebAttentionStreamEvent {
+    Snapshot {
+        snapshot: WebAttentionSnapshot,
+    },
+    Update {
+        #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+        cursor: String,
+        #[schemars(length(max = 32))]
+        summaries: Vec<WebAttentionSummary>,
+    },
+    ResyncRequired {
+        #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+        cursor: String,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchEventKind {
+    PullRequestOpened,
+    PullRequestClosed,
+    PullRequestMerged,
+    HeadChanged,
+    MergeableStateChanged,
+    ChecksCompleted,
+    CheckRunCompleted,
+    BranchWorkflowRunCompleted,
+    ReviewSubmitted,
+    ThreadOpened,
+    ThreadResolved,
+    Labeled,
+    Unlabeled,
+    BaseAdvanced,
+    ReactionChanged,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchEvent {
+    pub id: String,
+    pub cursor_generation: String,
+    pub event_ordinal: u32,
+    pub kind: WebRepoWatchEventKind,
+    pub pull_request: Option<String>,
+    pub observed_at_unix_milliseconds: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchDispatch {
+    pub id: String,
+    pub event_id: String,
+    pub rule: String,
+    pub attempted_at_unix_milliseconds: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchSettlement {
+    pub dispatch_id: String,
+    pub event_id: String,
+    pub settled_at_unix_milliseconds: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchLatestWebhook {
+    pub receipt_sequence: String,
+    pub event_name: String,
+    pub action_name: Option<String>,
+    pub received_at_unix_milliseconds: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchWebhookWindow {
+    pub seconds: u32,
+    pub received: String,
+    pub projected: String,
+    pub terminal: String,
+    pub quarantined: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchEventKindCount {
+    pub kind: WebRepoWatchEventKind,
+    pub count: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchRepositoryStatus {
+    pub repository: String,
+    pub cursor_generation: Option<String>,
+    pub observed_at_unix_milliseconds: Option<String>,
+    pub latest_webhook: Option<WebRepoWatchLatestWebhook>,
+    pub previous_five_minutes: WebRepoWatchWebhookWindow,
+    pub previous_hour: WebRepoWatchWebhookWindow,
+    pub latest_projection_latency_milliseconds: Option<String>,
+    pub maximum_projection_latency_milliseconds_previous_hour: Option<String>,
+    pub event_kind_counts_previous_hour: Vec<WebRepoWatchEventKindCount>,
+    pub last_observed_event: Option<WebRepoWatchEvent>,
+    pub last_actionable_event: Option<WebRepoWatchEvent>,
+    pub last_dispatch_attempt: Option<WebRepoWatchDispatch>,
+    pub last_automation_settlement: Option<WebRepoWatchSettlement>,
+    pub held_slot_count: String,
+    pub queued_obligation_count: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchRepositoryStatusPage {
+    #[schemars(length(max = 64))]
+    pub repositories: Vec<WebRepoWatchRepositoryStatus>,
+    pub continuation_after_repository: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchLifecycle {
+    Open,
+    Closed,
+    Merged,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchMergeable {
+    Mergeable,
+    Conflicting,
+    Unknown,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchDraftStatus {
+    Draft,
+    ReadyForReview,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchChecksStatus {
+    NoCompletedSuites,
+    Passing,
+    Failing,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchReviewDecision {
+    None,
+    Commented,
+    Approved,
+    ChangesRequested,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebRepoWatchAutomationStatus {
+    Unattempted {},
+    Held {
+        dispatch_id: String,
+    },
+    Queued {
+        latest_event_id: String,
+    },
+    NonConverged {
+        dispatch_id: String,
+    },
+    StaleSeal {
+        dispatch_id: String,
+        sealed_event_id: String,
+    },
+    CurrentHeadSealed {
+        dispatch_id: String,
+        sealed_event_id: String,
+        settled_at_unix_milliseconds: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchPullRequest {
+    pub number: String,
+    pub title: String,
+    pub head: String,
+    pub head_repository: String,
+    pub head_branch: String,
+    pub base_branch: String,
+    pub lifecycle: WebRepoWatchLifecycle,
+    pub mergeable: WebRepoWatchMergeable,
+    pub draft: WebRepoWatchDraftStatus,
+    pub checks: WebRepoWatchChecksStatus,
+    pub review_decision: WebRepoWatchReviewDecision,
+    pub stale_review_count: String,
+    pub unresolved_thread_count: String,
+    pub open_parent: Option<String>,
+    pub open_child_count: String,
+    pub automation: WebRepoWatchAutomationStatus,
+    pub last_observed_event: Option<WebRepoWatchEvent>,
+    pub last_actionable_event: Option<WebRepoWatchEvent>,
+    pub last_dispatch_attempt: Option<WebRepoWatchDispatch>,
+    pub last_automation_settlement: Option<WebRepoWatchSettlement>,
+    pub held_slot_count: String,
+    pub queued_obligation_count: String,
+    pub commissioned_session_count: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchPullRequestPage {
+    pub repository: String,
+    #[schemars(length(max = 64))]
+    pub pull_requests: Vec<WebRepoWatchPullRequest>,
+    pub continuation_after_pull_request: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchHeldSlotBlocker {
+    UndeliveredAction,
+    DeliveryTurnRuntimeRelevant,
+    LiveRuntimeTurn,
+    PursuingGoal,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebRepoWatchSingletonScope {
+    PullRequest {
+        repository: String,
+        number: String,
+    },
+    Stack {
+        repository: String,
+        root_pull_request: String,
+    },
+    Rule {},
+    Repository {
+        repository: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchHeldSlot {
+    pub dispatch_id: String,
+    pub scope: WebRepoWatchSingletonScope,
+    pub rule: String,
+    pub held_since_unix_microseconds: String,
+    pub session_ids: Vec<String>,
+    pub blockers: Vec<WebRepoWatchHeldSlotBlocker>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebRepoWatchObligationReadiness {
+    Ready {},
+    Occupied {
+        dispatch_id: String,
+        session_ids: Vec<String>,
+    },
+    /// Held by a live independently commissioned session, which owns no
+    /// repository-watch dispatch identity to report alongside it.
+    ExternallyBlocked {
+        session_ids: Vec<String>,
+    },
+    Cooldown {
+        eligible_at_unix_milliseconds: Option<String>,
+    },
+    Parked {
+        parked_at_unix_milliseconds: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchQueuedObligation {
+    pub id: String,
+    pub scope: WebRepoWatchSingletonScope,
+    pub rule: String,
+    pub first_event_id: String,
+    pub latest_event_id: String,
+    pub matched_event_count: String,
+    pub owed_since_unix_microseconds: String,
+    pub latest_match_at_unix_milliseconds: String,
+    pub failed_attempts: String,
+    pub readiness: WebRepoWatchObligationReadiness,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchHeldCursor {
+    pub held_since_unix_microseconds: String,
+    pub dispatch_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchObligationCursor {
+    pub owed_since_unix_microseconds: String,
+    pub obligation_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchWorkPage {
+    #[schemars(length(max = 64))]
+    pub held_slots: Vec<WebRepoWatchHeldSlot>,
+    pub held_continuation_after: Option<WebRepoWatchHeldCursor>,
+    #[schemars(length(max = 64))]
+    pub queued_obligations: Vec<WebRepoWatchQueuedObligation>,
+    pub obligation_continuation_after: Option<WebRepoWatchObligationCursor>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebRepoWatchSessionPurpose {
+    RuleDispatch {
+        dispatch_id: String,
+        event_id: String,
+        rule: String,
+        template: String,
+    },
+    OperatorCommission {
+        dispatch_id: String,
+        template: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchPullRequestSession {
+    pub commissioned_at_unix_microseconds: String,
+    pub purpose: WebRepoWatchSessionPurpose,
+    pub attention: WebAttentionSummary,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchSessionCursor {
+    pub commissioned_at_unix_microseconds: String,
+    pub session_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchPullRequestSessionPage {
+    #[schemars(length(max = 64))]
+    pub sessions: Vec<WebRepoWatchPullRequestSession>,
+    pub continuation_before: Option<WebRepoWatchSessionCursor>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebRepoWatchWebhookDisposition {
+    Projected,
+    Committed,
+    DuplicateState,
+    Superseded,
+    Ignored,
+    Quarantined,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchWebhookActivity {
+    pub receipt_sequence: String,
+    pub event_name: String,
+    pub action_name: Option<String>,
+    pub received_at_unix_milliseconds: String,
+    pub projection_count: String,
+    pub latest_projected_at_unix_milliseconds: Option<String>,
+    pub disposition: Option<WebRepoWatchWebhookDisposition>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchEventCursor {
+    pub cursor_generation: String,
+    pub event_ordinal: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebRepoWatchActivityPage {
+    #[schemars(length(max = 100))]
+    pub events: Vec<WebRepoWatchEvent>,
+    pub event_continuation_before: Option<WebRepoWatchEventCursor>,
+    #[schemars(length(max = 100))]
+    pub webhooks: Vec<WebRepoWatchWebhookActivity>,
+    pub webhook_continuation_before_receipt_sequence: Option<String>,
 }
 
 /// One generated file and its repository-relative destination.
@@ -682,7 +1926,7 @@ impl Error for GenerateWebContractError {}
 /// Returns a closed build-time error when serde cannot encode a generated value
 /// or a DTO schema grows beyond the generator's focused supported shapes.
 pub fn generated_artifacts() -> Result<Vec<GeneratedArtifact>, GenerateWebContractError> {
-    let schemas = contract_schemas();
+    let schemas = contract_schemas()?;
     let example = WebContractExample {
         request_id: "contract-round-trip".to_owned(),
         message: "browser contract fixture".to_owned(),
@@ -713,8 +1957,23 @@ struct ContractSchema {
     schema: Value,
 }
 
-fn contract_schemas() -> Vec<ContractSchema> {
-    vec![
+fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
+    let mut timeline_window_schema =
+        canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value());
+    make_property_nullable(&mut timeline_window_schema, "continuation_before")?;
+    make_property_nullable(&mut timeline_window_schema, "continuation_after")?;
+
+    let mut search_page_schema = schemars::schema_for!(WebSearchPage).to_value();
+    search_page_schema["properties"]["results"]["maxItems"] = json!(max_search_page_items());
+    make_property_nullable(&mut search_page_schema, "continuation")?;
+    let search_page_schema = canonical_schema(search_page_schema);
+
+    let mut usage_call_page_schema = schemars::schema_for!(WebUsageCallPage).to_value();
+    make_property_nullable(&mut usage_call_page_schema, "continuation")?;
+    make_definition_property_nullable(&mut usage_call_page_schema, "WebUsageCall", "turn_id")?;
+    let usage_call_page_schema = canonical_schema(usage_call_page_schema);
+
+    Ok(vec![
         ContractSchema {
             name: "WebContractBootstrap",
             decoder: "decodeWebContractBootstrap",
@@ -745,7 +2004,17 @@ fn contract_schemas() -> Vec<ContractSchema> {
         ContractSchema {
             name: "WebSessionTimelineWindow",
             decoder: "decodeWebSessionTimelineWindow",
-            schema: canonical_schema(schemars::schema_for!(WebSessionTimelineWindow).to_value()),
+            schema: timeline_window_schema,
+        },
+        ContractSchema {
+            name: "WebAttentionSnapshot",
+            decoder: "decodeWebAttentionSnapshot",
+            schema: canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value()),
+        },
+        ContractSchema {
+            name: "WebAttentionStreamEvent",
+            decoder: "decodeWebAttentionStreamEvent",
+            schema: canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value()),
         },
         ContractSchema {
             name: "WebImportListRequest",
@@ -786,7 +2055,51 @@ fn contract_schemas() -> Vec<ContractSchema> {
                 schemars::schema_for!(WebImportContinuationResponse).to_value(),
             ),
         },
-    ]
+        ContractSchema {
+            name: "WebSearchPage",
+            decoder: "decodeWebSearchPage",
+            schema: search_page_schema,
+        },
+        ContractSchema {
+            name: "WebUsageSummary",
+            decoder: "decodeWebUsageSummary",
+            schema: canonical_schema(schemars::schema_for!(WebUsageSummary).to_value()),
+        },
+        ContractSchema {
+            name: "WebUsageCallPage",
+            decoder: "decodeWebUsageCallPage",
+            schema: usage_call_page_schema,
+        },
+        ContractSchema {
+            name: "WebRepoWatchRepositoryStatusPage",
+            decoder: "decodeWebRepoWatchRepositoryStatusPage",
+            schema: canonical_schema(
+                schemars::schema_for!(WebRepoWatchRepositoryStatusPage).to_value(),
+            ),
+        },
+        ContractSchema {
+            name: "WebRepoWatchPullRequestPage",
+            decoder: "decodeWebRepoWatchPullRequestPage",
+            schema: canonical_schema(schemars::schema_for!(WebRepoWatchPullRequestPage).to_value()),
+        },
+        ContractSchema {
+            name: "WebRepoWatchWorkPage",
+            decoder: "decodeWebRepoWatchWorkPage",
+            schema: canonical_schema(schemars::schema_for!(WebRepoWatchWorkPage).to_value()),
+        },
+        ContractSchema {
+            name: "WebRepoWatchPullRequestSessionPage",
+            decoder: "decodeWebRepoWatchPullRequestSessionPage",
+            schema: canonical_schema(
+                schemars::schema_for!(WebRepoWatchPullRequestSessionPage).to_value(),
+            ),
+        },
+        ContractSchema {
+            name: "WebRepoWatchActivityPage",
+            decoder: "decodeWebRepoWatchActivityPage",
+            schema: canonical_schema(schemars::schema_for!(WebRepoWatchActivityPage).to_value()),
+        },
+    ])
 }
 
 fn canonical_schema(mut schema: Value) -> Value {
@@ -797,7 +2110,38 @@ fn canonical_schema(mut schema: Value) -> Value {
     schema
 }
 
+fn make_property_nullable(
+    schema: &mut Value,
+    property_name: &str,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(&format!("/properties/{property_name}"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let concrete = property.take();
+    *property = json!({ "anyOf": [concrete, { "type": "null" }] });
+    Ok(())
+}
+
+// `#[schemars(required)]` marks an `Option` member required by emitting the
+// inner type alone, so a required-present nullable member restores its null
+// branch here. Definitions carry the members of referenced types.
+fn make_definition_property_nullable(
+    schema: &mut Value,
+    definition_name: &str,
+    property_name: &str,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(&format!(
+            "/$defs/{definition_name}/properties/{property_name}"
+        ))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let concrete = property.take();
+    *property = json!({ "anyOf": [concrete, { "type": "null" }] });
+    Ok(())
+}
+
 fn runtime_module(schemas: &[ContractSchema]) -> Result<String, GenerateWebContractError> {
+    let current_bootstrap = WebContractBootstrap::current();
     let mut schema_values = serde_json::Map::new();
     for schema in schemas {
         schema_values.insert(schema.name.to_owned(), schema.schema.clone());
@@ -814,6 +2158,22 @@ const schemas = {schema_values};
 
 function fail(path, expected) {{
   throw new TypeError(`${{path}} must be ${{expected}}`);
+}}
+
+function isWellFormedUnicode(value) {{
+  for (let index = 0; index < value.length; index += 1) {{
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {{
+      const next = value.charCodeAt(index + 1);
+      if (!(next >= 0xdc00 && next <= 0xdfff)) {{
+        return false;
+      }}
+      index += 1;
+    }} else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {{
+      return false;
+    }}
+  }}
+  return true;
 }}
 
 function resolveReference(root, reference) {{
@@ -940,14 +2300,53 @@ function assertSchema(root, schema, value, path) {{
     if (typeof value !== "string") {{
       fail(path, "string");
     }}
-    if (schema.minLength !== undefined && value.length < schema.minLength) {{
-      fail(path, `at least ${{schema.minLength}} characters`);
+    if (!isWellFormedUnicode(value)) {{
+      fail(path, "well-formed Unicode scalar values");
     }}
-    if (schema.maxLength !== undefined && value.length > schema.maxLength) {{
-      fail(path, `at most ${{schema.maxLength}} characters`);
+    if (
+      (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+      value.length > 20
+    ) {{
+      fail(path, "an unsigned 64-bit integer");
+    }}
+    if (schema.minLength !== undefined && Array.from(value).length < schema.minLength) {{
+      fail(path, `at least ${{schema.minLength}} Unicode scalar values`);
     }}
     if (schema.pattern !== undefined && !new RegExp(schema.pattern, "u").test(value)) {{
       fail(path, `matching ${{schema.pattern}}`);
+    }}
+    if (
+      (schema.pattern === "^[1-9][0-9]*$" || schema.pattern === "^(0|[1-9][0-9]*)$") &&
+      BigInt(value) > 18446744073709551615n
+    ) {{
+      fail(path, "an unsigned 64-bit integer");
+    }}
+    if (
+      schema.pattern === "^[1-9][0-9]{{0,18}}$" &&
+      BigInt(value) > 9223372036854775807n
+    ) {{
+      fail(path, "a positive signed 64-bit integer");
+    }}
+    if (
+      schema.pattern === "^(0|[1-9][0-9]*)(\\.[0-9]{{0,27}}[1-9])?$" &&
+      BigInt(value.replace(".", "")) > 79228162514264337593543950335n
+    ) {{
+      fail(path, "a rust_decimal coefficient");
+    }}
+    if (
+      schema.pattern === "^(0|[1-9][0-9]{{0,17}})$" &&
+      BigInt(value) > 253402300799999999n
+    ) {{
+      fail(path, "an application-range usage timestamp");
+    }}
+    if (
+      schema.pattern === "^(0|[1-9][0-9]{{0,38}})$" &&
+      BigInt(value) > 340282366920938463463374607431768211455n
+    ) {{
+      fail(path, "an unsigned 128-bit integer");
+    }}
+    if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {{
+      fail(path, `at most ${{schema.maxLength}} Unicode scalar values`);
     }}
     return;
   }}
@@ -956,98 +2355,62 @@ function assertSchema(root, schema, value, path) {{
   }}
 }}
 
+function assertAttentionSummary(summary, path) {{
+  const action = summary.action ?? null;
+  const goalBlock = summary.goal_block ?? null;
+  const valid =
+    (summary.state === "blocked" &&
+      (action === "provide_goal_need" ||
+        (action === null && goalBlock?.reason === "execution_failure"))) ||
+    (summary.state === "awaiting_approval" &&
+      (action === null || action === "decide_approval")) ||
+    (summary.state === "ambiguous" && action === "reconcile_turn") ||
+    ([
+      "active",
+      "queued",
+      "awaiting_tool_recovery",
+      "awaiting_reconciliation",
+      "runner_lost",
+      "idle",
+    ].includes(summary.state) && action === null);
+  if (!valid) {{
+    fail(`${{path}}.action`, `consistent with attention state ${{JSON.stringify(summary.state)}}`);
+  }}
+  const validGoalBlock =
+    (summary.state === "blocked" && goalBlock !== null) ||
+    summary.state === "runner_lost" ||
+    (summary.state !== "blocked" && goalBlock === null);
+  if (!validGoalBlock) {{
+    fail(
+      `${{path}}.goal_block`,
+      `consistent with attention state ${{JSON.stringify(summary.state)}}`,
+    );
+  }}
+}}
+
+function assertAttentionSummaries(summaries, path) {{
+  summaries.forEach((summary, index) =>
+    assertAttentionSummary(summary, `${{path}}[${{index}}]`),
+  );
+}}
+
+function assertAttentionSnapshot(snapshot, path) {{
+  assertAttentionSummaries(snapshot.summaries, `${{path}}.summaries`);
+  const continuation = snapshot.continuation_after_session_id ?? null;
+  if (continuation !== null) {{
+    const last = snapshot.summaries.at(-1);
+    if (last === undefined || continuation !== last.session_id) {{
+      fail(
+        `${{path}}.continuation_after_session_id`,
+        "the last returned session identity",
+      );
+    }}
+  }}
+}}
+
 function assertCanonicalU64(value, path) {{
   if (!/^[1-9][0-9]{{0,19}}$/.test(value) || BigInt(value) > 18446744073709551615n) {{
     fail(path, "a positive canonical decimal u64 string");
-  }}
-}}
-
-function assertCanonicalNonnegativeU64(value, path) {{
-  if (!/^(?:0|[1-9][0-9]{{0,19}})$/.test(value) || BigInt(value) > 18446744073709551615n) {{
-    fail(path, "a nonnegative canonical decimal u64 string");
-  }}
-}}
-
-function assertSha256(value, path) {{
-  if (!/^[0-9a-f]{{64}}$/.test(value)) {{
-    fail(path, "a lowercase hexadecimal SHA-256 digest");
-  }}
-}}
-
-function assertImportEvidenceBytes(value, path) {{
-  if (utf8.encode(value).byteLength > 512) {{
-    fail(path, "at most 512 UTF-8 bytes");
-  }}
-}}
-
-function validateWebImportFrontier(value, path) {{
-  assertUuid(value.imported_conversation_id, `${{path}}.imported_conversation_id`);
-  assertUuid(value.imported_entry_id, `${{path}}.imported_entry_id`);
-  assertCanonicalU64(value.position, `${{path}}.position`);
-}}
-
-function validateWebImportListPage(value) {{
-  value.items.forEach((item, index) => {{
-    const path = `import_list_page.items[${{index}}]`;
-    assertCanonicalU64(item.entry_count, `${{path}}.entry_count`);
-    if (item.source_session_id !== undefined && item.source_session_id !== null) {{
-      assertImportEvidenceBytes(item.source_session_id.leading_text, `${{path}}.source_session_id.leading_text`);
-    }}
-  }});
-}}
-
-function validateWebImportDescriptor(value) {{
-  assertSha256(value.source.source_digest_sha256, "import_descriptor.source.source_digest_sha256");
-  assertCanonicalU64(value.raw_record_count, "import_descriptor.raw_record_count");
-  assertCanonicalNonnegativeU64(value.entry_count, "import_descriptor.entry_count");
-  assertCanonicalU64(value.sizes.raw_source_bytes, "import_descriptor.sizes.raw_source_bytes");
-  assertCanonicalU64(value.sizes.normalized_source_record_bytes, "import_descriptor.sizes.normalized_source_record_bytes");
-  assertCanonicalU64(value.sizes.normalized_entry_bytes, "import_descriptor.sizes.normalized_entry_bytes");
-  validateWebImportFrontier(value.timeline.first, "import_descriptor.timeline.first");
-  validateWebImportFrontier(value.timeline.latest, "import_descriptor.timeline.latest");
-  if (value.source.source_session_id !== undefined && value.source.source_session_id !== null) {{
-    assertImportEvidenceBytes(value.source.source_session_id.leading_text, "import_descriptor.source.source_session_id.leading_text");
-  }}
-}}
-
-function validateWebImportEntryWindowRequest(value) {{
-  if (value.position !== undefined && value.position !== null) {{
-    assertCanonicalU64(value.position, "import_entry_window_request.position");
-  }}
-}}
-
-function validateWebImportEntryWindow(value) {{
-  assertCanonicalU64(value.anchor_position, "import_entry_window.anchor_position");
-  assertCanonicalU64(value.first_position, "import_entry_window.first_position");
-  assertCanonicalU64(value.last_position, "import_entry_window.last_position");
-  value.items.forEach((item, index) => {{
-    const path = `import_entry_window.items[${{index}}]`;
-    validateWebImportFrontier(item.frontier, `${{path}}.frontier`);
-    assertCanonicalU64(item.raw_record_position, `${{path}}.raw_record_position`);
-    assertCanonicalU64(item.record_entry_position, `${{path}}.record_entry_position`);
-    const hasText = item.text !== undefined && item.text !== null;
-    if ((item.content_kind === "text") !== hasText) {{
-      throw new TypeError(`${{path}}.text must be present exactly for text content`);
-    }}
-    if (item.text?.kind === "attested") {{
-      assertImportEvidenceBytes(item.text.leading_text, `${{path}}.text.leading_text`);
-    }}
-  }});
-}}
-
-function validateWebImportContinuation(value, path) {{
-  assertUuid(value.command_id, `${{path}}.command_id`);
-  validateWebImportFrontier(value.frontier, `${{path}}.frontier`);
-  if (path === "import_continuation_request") {{
-    const selection = value.initial_model_selection;
-    if (selection.kind === "direct") {{
-      assertUuid(selection.selection_id, `${{path}}.initial_model_selection.selection_id`);
-    }} else {{
-      assertUuid(selection.alias_id, `${{path}}.initial_model_selection.alias_id`);
-    }}
-  }}
-  if (path === "import_continuation_response") {{
-    assertUuid(value.session_id, `${{path}}.session_id`);
   }}
 }}
 
@@ -1308,7 +2671,8 @@ function deterministicCacheKey(derivation) {{
   return `sha256:${{sha256(framed)}}`;
 }}
 
-function validateWebBlobDescriptor(value) {{
+export function decodeWebBlobDescriptor(value) {{
+  assertSchema(schemas.WebBlobDescriptor, schemas.WebBlobDescriptor, value, "blob_descriptor");
   assertBlobDigest(value.digest, "blob_descriptor.digest");
   assertCanonicalU64(value.byte_length, "blob_descriptor.byte_length");
   assertMediaType(value.declared_media_type, "blob_descriptor.declared_media_type");
@@ -1413,9 +2777,292 @@ function validateWebBlobDescriptor(value) {{
   return value;
 }}
 
+export function decodeWebAttentionSnapshot(value) {{
+  assertSchema(schemas.WebAttentionSnapshot, schemas.WebAttentionSnapshot, value, "attention_snapshot");
+  assertAttentionSnapshot(value, "attention_snapshot");
+  return value;
+}}
+
+export function decodeWebAttentionStreamEvent(value) {{
+  assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
+  if (value.kind === "snapshot") {{
+    assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
+  }} else if (value.kind === "update") {{
+    assertAttentionSummaries(value.summaries, "attention_event.summaries");
+  }}
+  return value;
+}}
+
+function validSearchSourceCorrelation(result) {{
+  switch (result.source.kind) {{
+    case "session":
+      return result.source.session_id === result.session_id && result.content_class === "session_metadata";
+    case "accepted_input":
+    case "steering_input":
+      return result.content_class === "user_transcript";
+    case "turn_transcript_entry":
+      return result.content_class === "assistant_transcript";
+    case "session_transcript_entry":
+      return result.content_class === "derived_text_artifact";
+    case "tool_request":
+      return result.content_class === "tool_arguments";
+    case "tool_attempt":
+      return result.content_class === "tool_result";
+    case "attachment":
+      return result.content_class === "attachment_filename" ||
+        result.content_class === "attachment_media_metadata";
+    case "derived_artifact":
+      return result.content_class === "derived_text_artifact";
+    default:
+      return false;
+  }}
+}}
+
+export function decodeWebSearchPage(value) {{
+  assertSchema(schemas.WebSearchPage, schemas.WebSearchPage, value, "search_page");
+  if (value.continuation !== null) {{
+    const lastResult = value.results.at(-1);
+    if (
+      lastResult === undefined ||
+      value.continuation.address.event_sequence !== lastResult.address.event_sequence ||
+      value.continuation.projection_id !== lastResult.projection_id
+    ) {{
+      fail(
+        "search_page.continuation",
+        "a cursor anchored to the final search result",
+      );
+    }}
+  }}
+  const encoder = new TextEncoder();
+  let previousKey = null;
+  value.results.forEach((result, resultIndex) => {{
+    const address = BigInt(result.address.event_sequence);
+    const projection = BigInt(result.projection_id);
+    if (
+      previousKey !== null &&
+      (address > previousKey.address ||
+        (address === previousKey.address && projection >= previousKey.projection))
+    ) {{
+      fail(
+        `search_page.results[${{resultIndex}}]`,
+        "a strictly descending search result key",
+      );
+    }}
+    previousKey = {{ address, projection }};
+    if (!validSearchSourceCorrelation(result)) {{
+      fail(
+        `search_page.results[${{resultIndex}}].source`,
+        "a source consistent with the result session and content class",
+      );
+    }}
+    const bytes = encoder.encode(result.snippet);
+    if (bytes.length > {max_search_snippet_bytes}) {{
+      fail(
+        `search_page.results[${{resultIndex}}].snippet`,
+        `at most {max_search_snippet_bytes} UTF-8 bytes`,
+      );
+    }}
+    let previousEnd = 0;
+    result.highlights.forEach((highlight, highlightIndex) => {{
+      const rangePath = `search_page.results[${{resultIndex}}].highlights[${{highlightIndex}}]`;
+      if (
+        highlight.start_byte < previousEnd ||
+        highlight.start_byte >= highlight.end_byte ||
+        highlight.end_byte > bytes.length
+      ) {{
+        fail(rangePath, "an ordered non-overlapping in-bounds UTF-8 byte range");
+      }}
+      if (
+        (highlight.start_byte > 0 && (bytes[highlight.start_byte] & 0xc0) === 0x80) ||
+        (highlight.end_byte < bytes.length && (bytes[highlight.end_byte] & 0xc0) === 0x80)
+      ) {{
+        fail(rangePath, "a range on UTF-8 boundaries");
+      }}
+      previousEnd = highlight.end_byte;
+    }});
+  }});
+  return value;
+}}
+
+export function decodeWebUsageSummary(value) {{
+  assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
+  const encoder = new TextEncoder();
+  const compatibilityKeys = new Set();
+  let totalCallCount = 0n;
+  value.groups.forEach((group, index) => {{
+    const callCount = BigInt(group.call_count);
+    totalCallCount += callCount;
+    if (totalCallCount > 10000n) {{
+      fail("usage_summary.groups", "at most 10000 represented calls");
+    }}
+    assertUsageEvidence(
+      group.input_semantics,
+      group.tokens,
+      group.cost,
+      `usage_summary.groups[${{index}}]`,
+      group.input_semantics === "cache_inclusive" &&
+        callCount > 1n &&
+        group.tokens.input !== null &&
+        group.tokens.cache_creation_input !== null &&
+        group.tokens.cache_read_input !== null,
+    );
+    const compatibilityKey = JSON.stringify([
+      group.call_kind,
+      group.model_id,
+      group.profile_id,
+      group.provenance,
+      group.input_semantics,
+      group.coverage.input,
+      group.coverage.output,
+      group.coverage.cache_creation_input,
+      group.coverage.cache_read_input,
+    ]);
+    if (compatibilityKeys.has(compatibilityKey)) {{
+      fail(`usage_summary.groups[${{index}}]`, "a unique compatibility key");
+    }}
+    compatibilityKeys.add(compatibilityKey);
+    const profileBytes = encoder.encode(group.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {{
+      fail(`usage_summary.groups[${{index}}].profile_id`, "1 through 256 UTF-8 bytes");
+    }}
+    for (const axis of ["input", "output", "cache_creation_input", "cache_read_input"]) {{
+      if (group.coverage[axis] !== (group.tokens[axis] !== null)) {{
+        fail(`usage_summary.groups[${{index}}].coverage.${{axis}}`, "consistent with token evidence");
+      }}
+      if (
+        group.tokens[axis] !== null &&
+        BigInt(group.tokens[axis]) > callCount * 18446744073709551615n
+      ) {{
+        fail(`usage_summary.groups[${{index}}].tokens.${{axis}}`, "bounded by call_count times u64::MAX");
+      }}
+    }}
+  }});
+  return value;
+}}
+
+export function decodeWebUsageCallPage(value, order) {{
+  assertSchema(schemas.WebUsageCallPage, schemas.WebUsageCallPage, value, "usage_call_page");
+  if (order !== "newest") {{
+    fail("usage_call_page.order", "newest");
+  }}
+  const encoder = new TextEncoder();
+  let previousKey = null;
+  const callIds = new Set();
+  value.calls.forEach((call, index) => {{
+    assertUsageEvidence(
+      call.input_semantics,
+      call.tokens,
+      call.cost,
+      `usage_call_page.calls[${{index}}]`,
+      false,
+    );
+    const profileBytes = encoder.encode(call.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {{
+      fail(`usage_call_page.calls[${{index}}].profile_id`, "1 through 256 UTF-8 bytes");
+    }}
+    const isCompaction = call.call_kind === "context_compaction";
+    if (!Object.hasOwn(call, "turn_id") || isCompaction !== (call.turn_id === null)) {{
+      fail(
+        `usage_call_page.calls[${{index}}].turn_id`,
+        "null exactly for context compaction calls",
+      );
+    }}
+    const key = {{ recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id }};
+    if (callIds.has(call.call_id)) {{
+      fail(`usage_call_page.calls[${{index}}].call_id`, "unique within the page");
+    }}
+    callIds.add(call.call_id);
+    if (previousKey !== null) {{
+      const comparison = key.recordedAt === previousKey.recordedAt
+        ? key.callId < previousKey.callId ? -1 : key.callId > previousKey.callId ? 1 : 0
+        : key.recordedAt < previousKey.recordedAt ? -1 : 1;
+      if (comparison >= 0) {{
+        fail(
+          `usage_call_page.calls[${{index}}]`,
+          "strictly descending by call key",
+        );
+      }}
+    }}
+    previousKey = key;
+  }});
+  if (value.continuation != null) {{
+    const lastCall = value.calls.at(-1);
+    if (
+      lastCall === undefined ||
+      value.continuation.recorded_at_micros !== lastCall.recorded_at_micros ||
+      value.continuation.call_id !== lastCall.call_id
+    ) {{
+      fail("usage_call_page.continuation", "a cursor anchored to the final usage call");
+    }}
+  }}
+  return value;
+}}
+
+function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInvalidBreakdown) {{
+  if (cost.status === "derived") {{
+    const rateVersionBytes = new TextEncoder().encode(cost.rate_version).length;
+    if (rateVersionBytes === 0 || rateVersionBytes > 128) {{
+      fail(`${{path}}.cost.rate_version`, "1 through 128 UTF-8 bytes");
+    }}
+  }}
+  const hasTokenEvidence = Object.values(tokens).some((value) => value !== null);
+  const incompleteCacheAxes =
+    inputSemantics === "cache_inclusive" &&
+    tokens.input !== null &&
+    tokens.output === null &&
+    tokens.cache_creation_input === null &&
+    tokens.cache_read_input === null;
+  const invalidCacheBreakdown =
+    inputSemantics === "cache_inclusive" &&
+    tokens.input !== null &&
+    tokens.cache_creation_input !== null &&
+    tokens.cache_read_input !== null &&
+    BigInt(tokens.input) <
+      BigInt(tokens.cache_creation_input) + BigInt(tokens.cache_read_input);
+  const requiredReason = !hasTokenEvidence
+    ? "no_token_evidence"
+    : inputSemantics === "unknown"
+      ? "unknown_input_semantics"
+      : incompleteCacheAxes
+        ? "incomplete_cache_axes"
+        : invalidCacheBreakdown
+          ? "invalid_cache_breakdown"
+          : null;
+  if (requiredReason !== null) {{
+    if (cost.status !== "unavailable" || cost.reason !== requiredReason) {{
+      fail(`${{path}}.cost`, `unavailable with reason ${{requiredReason}}`);
+    }}
+    return;
+  }}
+  if (
+    cost.status === "unavailable" &&
+    (cost.reason === "no_token_evidence" ||
+      cost.reason === "unknown_input_semantics" ||
+      cost.reason === "incomplete_cache_axes" ||
+      (cost.reason === "invalid_cache_breakdown" && !allowHiddenInvalidBreakdown))
+  ) {{
+    fail(`${{path}}.cost.reason`, "consistent with token evidence and input semantics");
+  }}
+}}
 "##,
+        max_search_snippet_bytes = max_search_snippet_bytes(),
     );
     for schema in schemas {
+        // These decoders carry hand-written structural invariants beyond their
+        // schema shape (blob view provenance, attention state/action agreement,
+        // search highlight ranges) and are emitted verbatim in the template
+        // above.
+        if matches!(
+            schema.name,
+            "WebBlobDescriptor"
+                | "WebAttentionSnapshot"
+                | "WebAttentionStreamEvent"
+                | "WebSearchPage"
+                | "WebUsageSummary"
+                | "WebUsageCallPage"
+        ) {
+            continue;
+        }
         let path = schema.name.to_ascii_lowercase();
         output.push_str(&format!(
             "export function {decoder}(value) {{\n  assertSchema(schemas.{name}, schemas.{name}, value, {path:?});\n",
@@ -1424,30 +3071,17 @@ function validateWebBlobDescriptor(value) {{
         ));
         if schema.name == "WebContractBootstrap" {
             output.push_str(&format!(
-                "  if (value.contract.name !== {name:?} || value.contract.version !== {version:?}) {{\n    throw new TypeError(\"bootstrap carries an incompatible web contract\");\n  }}\n",
+                "  if (value.contract.name !== {name:?} || value.contract.version !== {version:?} ||\n      value.capabilities.bounded_json !== {bounded_json} ||\n      value.capabilities.same_origin_json_mutations !== {same_origin_json_mutations} ||\n      value.capabilities.ndjson_streaming !== {ndjson_streaming} ||\n      value.capabilities.import_discovery !== {import_discovery} ||\n      value.capabilities.imported_continuations !== {imported_continuations} ||\n      value.limits.max_json_body_bytes !== {max_json_body_bytes} ||\n      value.limits.max_ndjson_item_bytes !== {max_ndjson_item_bytes}) {{\n    throw new TypeError(\"bootstrap carries an incompatible web contract\");\n  }}\n",
                 name = WEB_CONTRACT_NAME,
                 version = WEB_CONTRACT_VERSION,
+                bounded_json = current_bootstrap.capabilities.bounded_json,
+                same_origin_json_mutations = current_bootstrap.capabilities.same_origin_json_mutations,
+                ndjson_streaming = current_bootstrap.capabilities.ndjson_streaming,
+                import_discovery = current_bootstrap.capabilities.import_discovery,
+                imported_continuations = current_bootstrap.capabilities.imported_continuations,
+                max_json_body_bytes = current_bootstrap.limits.max_json_body_bytes,
+                max_ndjson_item_bytes = current_bootstrap.limits.max_ndjson_item_bytes,
             ));
-        }
-        if schema.name == "WebBlobDescriptor" {
-            output.push_str("  validateWebBlobDescriptor(value);\n");
-        }
-        match schema.name {
-            "WebImportListPage" => output.push_str("  validateWebImportListPage(value);\n"),
-            "WebImportDescriptor" => output.push_str("  validateWebImportDescriptor(value);\n"),
-            "WebImportEntryWindowRequest" => {
-                output.push_str("  validateWebImportEntryWindowRequest(value);\n");
-            }
-            "WebImportEntryWindow" => {
-                output.push_str("  validateWebImportEntryWindow(value);\n");
-            }
-            "WebImportContinuationRequest" => output.push_str(
-                "  validateWebImportContinuation(value, \"import_continuation_request\");\n",
-            ),
-            "WebImportContinuationResponse" => output.push_str(
-                "  validateWebImportContinuation(value, \"import_continuation_response\");\n",
-            ),
-            _ => {}
         }
         output.push_str("  return value;\n}\n\n");
     }
@@ -1465,6 +3099,13 @@ fn declaration_module(schemas: &[ContractSchema]) -> Result<String, GenerateWebC
             typescript_type(&schema.schema, &schema.schema, &mut definitions)?,
         ));
     }
+    // A root DTO reached by `$ref` from another root (the attention stream event
+    // embeds the attention snapshot) also lands in `definitions`. Its root
+    // export below already declares the name, so keeping the definition too
+    // would emit the same `export type` twice.
+    for (schema, _) in &roots {
+        definitions.remove(schema.name);
+    }
     let mut output = String::from(
         "// @generated by `cargo run -p signalbox-web-contract --bin generate-web-contract`.\n// Do not edit by hand.\n\n",
     );
@@ -1475,8 +3116,15 @@ fn declaration_module(schemas: &[ContractSchema]) -> Result<String, GenerateWebC
         output.push_str(&format!("export type {} = {root};\n\n", schema.name));
     }
     for (schema, _) in roots {
+        // The usage call page decoder also takes the page order its caller
+        // requested, which is what lets it check descending call keys.
+        let parameters = if schema.name == "WebUsageCallPage" {
+            "value: unknown, order: \"newest\""
+        } else {
+            "value: unknown"
+        };
         output.push_str(&format!(
-            "export function {}(value: unknown): {};\n",
+            "export function {}({parameters}): {};\n",
             schema.decoder, schema.name
         ));
     }
@@ -1588,7 +3236,12 @@ fn typescript_object(
 mod tests {
     use std::{fs, path::Path};
 
-    use super::{WebContractBootstrap, WebContractExample, generated_artifacts};
+    use super::{
+        WebAttentionStreamEvent, WebContractBootstrap, WebContractExample, WebDollarAmount,
+        WebRepoWatchAutomationStatus, WebRepoWatchObligationReadiness, WebRepoWatchSessionPurpose,
+        WebSessionId, WebTimelineEventSequence, WebU64, WebUsageCallCount, WebUsageRateVersion,
+        WebUsageTimestampMicros, generated_artifacts,
+    };
 
     #[track_caller]
     fn assert_generated_artifact_current(path: &str) {
@@ -1630,34 +3283,12 @@ mod tests {
     }
 
     #[test]
-    fn runtime_bootstrap_reports_only_configured_capabilities() {
-        let unavailable = WebContractBootstrap::for_runtime(false, false, false, false);
-        let available = WebContractBootstrap::for_runtime(true, true, true, true);
-
-        assert!(!unavailable.capabilities.immutable_blob_content);
-        assert!(!unavailable.capabilities.blob_derivations);
-        assert!(!unavailable.capabilities.image_derivatives);
-        assert!(!unavailable.capabilities.bounded_session_timeline);
-        assert!(!unavailable.capabilities.import_discovery);
-        assert!(!unavailable.capabilities.imported_continuations);
-        assert!(available.capabilities.immutable_blob_content);
-        assert!(available.capabilities.blob_derivations);
-        assert!(available.capabilities.image_derivatives);
-        assert!(available.capabilities.bounded_session_timeline);
-        assert!(available.capabilities.import_discovery);
-        assert!(available.capabilities.imported_continuations);
-    }
-
-    #[test]
     fn blob_derivation_capability_requires_exposed_derivative_views() {
-        let bootstrap = WebContractBootstrap::for_runtime(true, false, true, false);
+        let bootstrap = WebContractBootstrap::for_runtime(true, false);
 
         assert!(bootstrap.capabilities.immutable_blob_content);
         assert!(!bootstrap.capabilities.blob_derivations);
         assert!(!bootstrap.capabilities.image_derivatives);
-        assert!(bootstrap.capabilities.bounded_session_timeline);
-        assert!(!bootstrap.capabilities.import_discovery);
-        assert!(!bootstrap.capabilities.imported_continuations);
     }
 
     #[test]
@@ -1670,5 +3301,122 @@ mod tests {
             serde_json::from_str(fixture).expect("generated fixture is JSON");
 
         assert_eq!(encoded, fixture_value);
+    }
+
+    #[test]
+    fn attention_stream_event_rejects_unknown_variant_fields() {
+        let encoded = r#"{"kind":"resync_required","cursor":"1","unexpected":true}"#;
+
+        assert!(serde_json::from_str::<WebAttentionStreamEvent>(encoded).is_err());
+    }
+
+    #[test]
+    fn repository_tagged_variants_reject_unknown_fields() {
+        assert!(
+            serde_json::from_str::<WebRepoWatchAutomationStatus>(
+                r#"{"kind":"held","dispatch_id":"dispatch","future_field":true}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<WebRepoWatchObligationReadiness>(
+                r#"{"kind":"ready","future_field":true}"#,
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_str::<WebRepoWatchSessionPurpose>(
+                r#"{"kind":"operator_commission","dispatch_id":"dispatch","template":"template","future_field":true}"#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn attention_runtime_decoder_enforces_string_patterns() {
+        let runtime = generated_artifacts()
+            .expect("the Rust schemas can generate browser artifacts")
+            .into_iter()
+            .find(|artifact| artifact.path == "clients/web/src/generated/web-contract.mjs")
+            .expect("the runtime decoder artifact exists")
+            .contents;
+
+        assert!(runtime.contains("new RegExp(schema.pattern, \"u\").test(value)"));
+        assert!(runtime.contains(r#""pattern": "^(0|[1-9][0-9]*)$""#));
+        assert!(runtime.contains(
+            r#""pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$""#,
+        ));
+    }
+
+    #[test]
+    fn timeline_event_sequence_rejects_invalid_wire_spellings() {
+        assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""0""#).is_err());
+        assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""+1""#).is_err());
+        assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""01""#).is_err());
+        assert!(
+            serde_json::from_str::<WebTimelineEventSequence>(r#""18446744073709551616""#).is_err()
+        );
+        assert!(serde_json::from_str::<WebTimelineEventSequence>(r#""1""#).is_ok());
+    }
+
+    #[test]
+    fn unsigned_wire_value_rejects_invalid_spellings() {
+        assert!(serde_json::from_str::<WebU64>(r#""+1""#).is_err());
+        assert!(serde_json::from_str::<WebU64>(r#""01""#).is_err());
+        assert!(serde_json::from_str::<WebU64>(r#""18446744073709551616""#).is_err());
+        assert!(serde_json::from_str::<WebU64>(r#""0""#).is_ok());
+        assert!(serde_json::from_str::<WebU64>(r#""18446744073709551615""#).is_ok());
+    }
+
+    #[test]
+    fn usage_call_count_requires_canonical_positive_u64() {
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""0""#).is_err());
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""01""#).is_err());
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""1""#).is_ok());
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""10000""#).is_ok());
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""10001""#).is_err());
+    }
+
+    #[test]
+    fn usage_timestamp_requires_the_application_range() {
+        assert!(serde_json::from_str::<WebUsageTimestampMicros>(r#""0""#).is_ok());
+        assert!(serde_json::from_str::<WebUsageTimestampMicros>(r#""253402300799999999""#).is_ok());
+        assert!(
+            serde_json::from_str::<WebUsageTimestampMicros>(r#""253402300800000000""#).is_err()
+        );
+    }
+
+    #[test]
+    fn usage_rate_version_requires_one_through_128_utf8_bytes() {
+        assert!(serde_json::from_str::<WebUsageRateVersion>(r#""""#).is_err());
+        let oversized = serde_json::to_string(&"é".repeat(65)).expect("fixture serializes");
+        assert!(serde_json::from_str::<WebUsageRateVersion>(&oversized).is_err());
+        assert!(serde_json::from_str::<WebUsageRateVersion>(r#""fixture-v2""#).is_ok());
+    }
+
+    #[test]
+    fn dollar_amount_rejects_noncanonical_wire_spellings() {
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""-1""#).is_err());
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""01""#).is_err());
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""1.""#).is_err());
+        assert!(
+            serde_json::from_str::<WebDollarAmount>(r#""0.12345678901234567890123456789""#)
+                .is_err()
+        );
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""0""#).is_ok());
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""0.17""#).is_ok());
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""0.170""#).is_err());
+        assert!(
+            serde_json::from_str::<WebDollarAmount>(r#""79228162514264337593543950336""#).is_err()
+        );
+    }
+
+    #[test]
+    fn session_id_rejects_noncanonical_uuid_spellings() {
+        assert!(serde_json::from_str::<WebSessionId>(r#""not-a-uuid""#).is_err());
+        assert!(
+            serde_json::from_str::<WebSessionId>(r#""00000000-0000-0000-0000-000000000991""#)
+                .is_ok()
+        );
     }
 }

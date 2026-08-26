@@ -15,19 +15,19 @@ use std::time::Duration;
 use crate::{
     AcceptedInputDisposition, AcceptedInputId, AcceptedInputLifecycle, AcceptedInputQueueOrder,
     AcceptedInputTurnStart, ActivatedTurn, ActiveTurnPhase, AppliedInterruptCommandResult,
-    AppliedInterruptProof, AssistantResponsePart, AssistantText, AttemptEnd, AwaitingToolRecovery,
-    CancellationStopDisposition, ContextFrontierId, CurrentModelCall, CurrentModelCallState,
-    CurrentTurnAttempt, CurrentTurnAttemptState, DangerousToolAutoApproval, DelegationWaitMode,
-    DirectModelSelection, EffectiveConfiguration, EndedModelCall, EndedToolAttempt,
-    EndedTurnAttempt, FrozenModelSelection, InitialToolApproval, ModelCallDisposition, ModelCallId,
-    ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs, OriginConfiguration,
-    PinnedProviderTarget, PinnedProviderTargetReconstitutionInput, PreparedToolResultProjection,
-    ReconciliationMarker, ReconstitutedModelCall, ReconstitutedSubmitInput,
-    ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
-    ResolvedProviderTarget, SemanticTranscriptEntry, SemanticTranscriptEntryId,
-    SemanticTranscriptEntryPayload, SessionId, SteeringBinding, SteeringReclassificationReason,
-    SubmitInputResult, SubmitInputTurnOriginReconstitutionInput, ToolApprovalDecision,
-    ToolApprovalResolution, ToolRequest, ToolRequestId, ToolRequestOrdinal,
+    AppliedInterruptProof, AssistantResponsePart, AssistantText, AttachmentBlobFact, AttemptEnd,
+    AwaitingToolRecovery, CancellationStopDisposition, ContextFrontierId, CurrentModelCall,
+    CurrentModelCallState, CurrentTurnAttempt, CurrentTurnAttemptState, DangerousToolAutoApproval,
+    DelegationWaitMode, DirectModelSelection, EffectiveConfiguration, EndedModelCall,
+    EndedToolAttempt, EndedTurnAttempt, FrozenModelSelection, InitialToolApproval,
+    ModelCallDisposition, ModelCallId, ModelCallReconstitutionInput, NonEmptyIssuedOperationRefs,
+    OriginConfiguration, PinnedProviderTarget, PinnedProviderTargetReconstitutionInput,
+    PreparedToolResultProjection, ReconciliationMarker, ReconstitutedModelCall,
+    ReconstitutedSubmitInput, ResolvedContextFrontierReconstitutionInput,
+    ResolvedContextFrontierSnapshot, ResolvedProviderTarget, SemanticTranscriptEntry,
+    SemanticTranscriptEntryId, SemanticTranscriptEntryPayload, SessionId, SteeringBinding,
+    SteeringReclassificationReason, SubmitInputResult, SubmitInputTurnOriginReconstitutionInput,
+    ToolApprovalDecision, ToolApprovalResolution, ToolRequest, ToolRequestId, ToolRequestOrdinal,
     ToolUsingAssistantResponse, TurnAttemptId, TurnAttemptStopCauses, TurnDisposition, TurnId,
     UnstoppedAttemptDisposition, UserContent, ValidatedModelSettings,
 };
@@ -239,6 +239,7 @@ pub struct ModelCallExecutionReconstitutionInput {
     call_snapshot: Option<ResolvedContextFrontierReconstitutionInput>,
     frontier_entries: Vec<SemanticTranscriptEntry>,
     origin_contents: Vec<ModelCallOriginContent>,
+    attachment_blob_facts: Vec<AttachmentBlobFact>,
     pinned_target: Option<PinnedProviderTargetReconstitutionInput>,
     calls: Vec<ModelCallReconstitutionInput>,
     tool_result_correlations: Vec<ToolResultAttemptCorrelation>,
@@ -266,6 +267,7 @@ impl ModelCallExecutionReconstitutionInput {
             call_snapshot: None,
             frontier_entries,
             origin_contents,
+            attachment_blob_facts: Vec::new(),
             pinned_target,
             calls,
             tool_result_correlations: Vec::new(),
@@ -273,6 +275,12 @@ impl ModelCallExecutionReconstitutionInput {
             uncommitted_tool_result_projection: None,
             availability_successor: false,
         }
+    }
+
+    /// Supplies immutable catalog length facts for every referenced attachment.
+    pub fn with_attachment_blob_facts(mut self, facts: Vec<AttachmentBlobFact>) -> Self {
+        self.attachment_blob_facts = facts;
+        self
     }
 
     /// Supplies exact request and producing-call ownership for every physical
@@ -418,6 +426,8 @@ pub enum ModelCallExecutionReconstitutionFailure {
     /// User content was supplied for an accepted input absent from the
     /// frontier and pending steering inventory.
     UnreferencedOriginContent,
+    /// Attachment catalog facts do not exactly cover referenced blob identities.
+    AttachmentBlobFactMismatch,
     /// Consumed steering does not exactly match the call frontier suffix.
     ConsumedSteeringMismatch,
     /// A call belongs to a different turn or session frontier.
@@ -481,6 +491,7 @@ pub struct ModelCallExecution {
     current_snapshot: ResolvedContextFrontierSnapshot,
     frontier_entries: Box<[SemanticTranscriptEntry]>,
     origin_contents: BTreeMap<AcceptedInputId, UserContent>,
+    attachment_blob_facts: BTreeMap<crate::BlobDigest, std::num::NonZeroU64>,
     pinned_target: Option<PinnedProviderTarget>,
     current_call: Option<CurrentModelCall>,
     tool_continuation_frontier: bool,
@@ -550,6 +561,7 @@ impl ModelCallExecution {
             call: prepared.call().clone(),
             frontier_entries: self.frontier_entries.clone(),
             origin_contents: self.origin_contents.clone(),
+            attachment_blob_facts: self.attachment_blob_facts.clone(),
         })
     }
 
@@ -748,6 +760,7 @@ impl ModelCallExecution {
             call: call.clone(),
             frontier_entries: self.frontier_entries.clone(),
             origin_contents,
+            attachment_blob_facts: self.attachment_blob_facts.clone(),
         })
     }
 
@@ -1186,6 +1199,32 @@ impl ModelCallExecution {
         Ok(CredentialPoolExhaustedModelCallTurn { pool_name, failed })
     }
 
+    /// Closes a call-free attempt whose required automatic context compaction failed.
+    pub fn fail_automatic_context_compaction(
+        self,
+        identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError> {
+        if self.current_call.is_some() || !self.attempt_accepts_prepared_call() {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        }
+        let reclassified_pending_steering = reclassify_pending_steering(
+            &self.active_turn,
+            &identities.pending_steering_reclassifications,
+        )?;
+        close_failed_turn(
+            ModelCallTurnScope {
+                session: self.session,
+                turn: self.turn,
+            },
+            self.current_attempt,
+            None,
+            self.current_snapshot,
+            identities,
+            UnstoppedAttemptDisposition::KnownFailure,
+            reclassified_pending_steering,
+        )
+    }
+
     /// Closes a trustworthy local capability-preparation failure before send.
     pub fn fail_prepared_call(
         self,
@@ -1380,6 +1419,41 @@ impl ModelCallExecution {
             reclassified_pending_steering,
         )
     }
+
+    /// Closes a resolved tool continuation before another call when durable
+    /// provider usage proves that call cannot retain configured output
+    /// headroom without compaction.
+    pub fn require_context_compaction_after_tool_results(
+        self,
+        producing_call: ModelCallId,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<ContextHeadroomExhaustedModelCallTurn, ModelCallClosureError> {
+        if self.current_call.is_some()
+            || !frontier_contains_tool_round(&self.starting_snapshot, &self.frontier_entries)
+        {
+            return Err(ModelCallClosureError::CallStateMismatch);
+        }
+        let reclassified_pending_steering = reclassify_pending_steering(
+            &self.active_turn,
+            &failure_identities.pending_steering_reclassifications,
+        )?;
+        let failed = close_failed_turn(
+            ModelCallTurnScope {
+                session: self.session,
+                turn: self.turn,
+            },
+            self.current_attempt,
+            None,
+            self.current_snapshot,
+            failure_identities,
+            UnstoppedAttemptDisposition::KnownFailure,
+            reclassified_pending_steering,
+        )?;
+        Ok(ContextHeadroomExhaustedModelCallTurn {
+            producing_call,
+            failed,
+        })
+    }
 }
 
 /// Why a fresh prepared checkpoint could not be derived.
@@ -1516,6 +1590,7 @@ pub struct PreparedModelCallRequest {
     call: CurrentModelCall,
     frontier_entries: Box<[SemanticTranscriptEntry]>,
     origin_contents: BTreeMap<AcceptedInputId, UserContent>,
+    attachment_blob_facts: BTreeMap<crate::BlobDigest, std::num::NonZeroU64>,
 }
 
 impl PreparedModelCallRequest {
@@ -1551,12 +1626,29 @@ impl PreparedModelCallRequest {
 
     /// Iterates over the exact ordered semantic frontier.
     pub fn frontier_entries(&self) -> impl ExactSizeIterator<Item = &SemanticTranscriptEntry> {
-        self.frontier_entries.iter()
+        self.frontier_entry_slice().iter()
+    }
+
+    /// Borrows the exact ordered semantic frontier.
+    ///
+    /// Rendering projects and bounds the frontier before cloning any of it,
+    /// which a borrow of the stored order supports and an owning copy of the
+    /// same entries would defeat by duplicating every payload's content first.
+    pub const fn frontier_entry_slice(&self) -> &[SemanticTranscriptEntry] {
+        &self.frontier_entries
     }
 
     /// Borrows the exact user content for a frontier origin.
     pub fn origin_content(&self, accepted_input: AcceptedInputId) -> Option<&UserContent> {
         self.origin_contents.get(&accepted_input)
+    }
+
+    /// Returns the immutable byte length for one referenced attachment blob.
+    pub fn attachment_byte_length(
+        &self,
+        digest: crate::BlobDigest,
+    ) -> Option<std::num::NonZeroU64> {
+        self.attachment_blob_facts.get(&digest).copied()
     }
 }
 
@@ -3042,6 +3134,30 @@ pub struct CredentialPoolExhaustedModelCallTurn {
     failed: FailedModelCallTurn,
 }
 
+/// Typed terminal boundary that requires compaction before another model call.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ContextHeadroomExhaustedModelCallTurn {
+    producing_call: ModelCallId,
+    failed: FailedModelCallTurn,
+}
+
+impl ContextHeadroomExhaustedModelCallTurn {
+    /// Returns the completed tool-producing call whose usage exhausted headroom.
+    pub const fn producing_call(&self) -> ModelCallId {
+        self.producing_call
+    }
+
+    /// Borrows the ordinary failed-turn projection committed for clients.
+    pub const fn failed(&self) -> &FailedModelCallTurn {
+        &self.failed
+    }
+
+    /// Consumes the typed boundary into its failed-turn persistence payload.
+    pub fn into_failed(self) -> FailedModelCallTurn {
+        self.failed
+    }
+}
+
 impl CredentialPoolExhaustedModelCallTurn {
     /// Borrows the deployment-owned pool name whose members were unavailable.
     pub fn pool_name(&self) -> &str {
@@ -3550,6 +3666,36 @@ fn reconstitute(
             ModelCallExecutionReconstitutionFailure::UnreferencedOriginContent,
         ));
     }
+    let referenced_attachments = origin_contents
+        .values()
+        .flat_map(UserContent::parts)
+        .filter_map(|part| match part {
+            crate::UserContentPart::Attachment { digest, .. } => Some(*digest),
+            crate::UserContentPart::Text { .. } => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut attachment_blob_facts = BTreeMap::new();
+    for fact in &input.attachment_blob_facts {
+        if attachment_blob_facts
+            .insert(fact.digest(), fact.byte_length())
+            .is_some()
+        {
+            return Err(fail(
+                input,
+                ModelCallExecutionReconstitutionFailure::AttachmentBlobFactMismatch,
+            ));
+        }
+    }
+    if attachment_blob_facts
+        .keys()
+        .copied()
+        .ne(referenced_attachments)
+    {
+        return Err(fail(
+            input,
+            ModelCallExecutionReconstitutionFailure::AttachmentBlobFactMismatch,
+        ));
+    }
     let consumed = input.active_turn.consumed_steering();
     let consumed_entries = input
         .frontier_entries
@@ -3843,6 +3989,7 @@ fn reconstitute(
         current_snapshot,
         frontier_entries: input.frontier_entries.into_boxed_slice(),
         origin_contents,
+        attachment_blob_facts,
         pinned_target,
         current_call,
         tool_continuation_frontier: running_tool_continuation,
@@ -4189,6 +4336,7 @@ fn initial_tool_approval_matches_posture(
             | InitialToolApproval::PolicyAuto
             | InitialToolApproval::Human
             | InitialToolApproval::Delegated
+            | InitialToolApproval::RuntimeSafetyDeny
             | InitialToolApproval::UserOverride { .. },
         )
         | (
@@ -4198,6 +4346,7 @@ fn initial_tool_approval_matches_posture(
             | InitialToolApproval::PolicyAuto
             | InitialToolApproval::Human
             | InitialToolApproval::Delegated
+            | InitialToolApproval::RuntimeSafetyDeny
             | InitialToolApproval::UserOverride { .. },
         ) => true,
     }
@@ -4375,6 +4524,7 @@ pub(crate) fn apply_interrupt_to_recovery_wait(
         || call.attempt() != attempt.id()
         || call.disposition() != ModelCallDisposition::Ambiguous
         || call.frontier() != source_snapshot.frontier()
+        || source_snapshot.frontier().owning_session() != active_turn.session()
     {
         return Err(ModelCallClosureError::InterruptCorrelationMismatch);
     }
@@ -4393,6 +4543,64 @@ pub(crate) fn apply_interrupt_to_recovery_wait(
     }
     let marker =
         ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), proof);
+    Ok(ReconciliationRequiredModelCallTurn {
+        session: active_turn.session(),
+        turn: active_turn.turn(),
+        call,
+        attempt,
+        disposition: TurnDisposition::ReconciliationRequired { marker },
+        terminal_snapshot,
+        reclassified_pending_steering,
+    })
+}
+
+pub(crate) fn apply_automatic_reconciliation(
+    active_turn: ActivatedTurn,
+    call: EndedModelCall,
+    attempt: EndedTurnAttempt,
+    source_snapshot: ResolvedContextFrontierSnapshot,
+    recovery_attempt: std::num::NonZeroU32,
+    identities: AmbiguousModelCallTurnIdentities,
+) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError> {
+    let ActiveTurnPhase::AwaitingRecoveryDecision {
+        ambiguous_operations,
+        applied_interrupt,
+    } = active_turn.phase()
+    else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    if ambiguous_operations.operation_count() != 1
+        || !ambiguous_operations.contains(crate::IssuedOperationRef::ModelCall(call.id()))
+        || call.turn() != active_turn.turn()
+        || call.attempt() != attempt.id()
+        || call.disposition() != ModelCallDisposition::Ambiguous
+        || call.frontier() != source_snapshot.frontier()
+        || source_snapshot.frontier().owning_session() != active_turn.session()
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    let terminal_snapshot = source_snapshot
+        .derive_appending_candidate(identities.terminal_frontier, Vec::new())
+        .map_err(|_| ModelCallClosureError::FrontierDerivationFailed)?;
+    if !matches!(
+        attempt.end(),
+        AttemptEnd::WithoutStop {
+            disposition: UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost,
+        }
+    ) {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    }
+    let marker = match applied_interrupt {
+        Some(proof) => {
+            ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), *proof)
+        }
+        None => ReconciliationMarker::from_automatic_recovery(
+            ambiguous_operations.clone(),
+            recovery_attempt,
+        ),
+    };
     Ok(ReconciliationRequiredModelCallTurn {
         session: active_turn.session(),
         turn: active_turn.turn(),
@@ -4709,6 +4917,88 @@ pub(crate) fn apply_interrupt_to_tool_recovery_wait(
     })
 }
 
+pub(crate) fn apply_automatic_tool_reconciliation(
+    active_turn: ActivatedTurn,
+    wait: AwaitingToolRecovery,
+    tool_attempt: EndedToolAttempt,
+    attempt: EndedTurnAttempt,
+    result_projection: PreparedToolResultProjection,
+    recovery_attempt: std::num::NonZeroU32,
+    identities: AmbiguousModelCallTurnIdentities,
+) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError> {
+    let ActiveTurnPhase::AwaitingRecoveryDecision {
+        ambiguous_operations,
+        applied_interrupt,
+    } = active_turn.phase()
+    else {
+        return Err(ModelCallClosureError::AttemptStateMismatch);
+    };
+    let attempt_end_matches = match attempt.end() {
+        AttemptEnd::WithoutStop { disposition } => {
+            applied_interrupt.is_none()
+                && matches!(
+                    disposition,
+                    UnstoppedAttemptDisposition::Ambiguous | UnstoppedAttemptDisposition::Lost
+                )
+        }
+        AttemptEnd::AfterCancellation { cause, disposition } => {
+            applied_interrupt == &Some(*cause)
+                && matches!(
+                    disposition,
+                    CancellationStopDisposition::Ambiguous | CancellationStopDisposition::Lost
+                )
+        }
+        AttemptEnd::AfterFatalMismatch { .. } => false,
+    };
+    if ambiguous_operations.operation_count() != 1
+        || !ambiguous_operations.contains(crate::IssuedOperationRef::ToolAttempt(wait.attempt()))
+        || wait.session() != active_turn.session()
+        || wait.turn() != active_turn.turn()
+        || wait.producing_call() != result_projection.producing_call()
+        || wait.issuing_attempt() != attempt.id()
+        || wait.attempt() != tool_attempt.attempt()
+        || result_projection.turn() != active_turn.turn()
+        || wait.yielded_frontier() != result_projection.source_frontier()
+        || result_projection.snapshot().frontier().owning_session() != active_turn.session()
+        || result_projection.snapshot().frontier().snapshot() != identities.terminal_frontier
+        || !result_projection.entries().iter().any(|entry| {
+            entry.payload()
+                == &SemanticTranscriptEntryPayload::ToolClosed {
+                    request: tool_attempt.request(),
+                }
+        })
+        || tool_attempt.session() != active_turn.session()
+        || tool_attempt.turn() != active_turn.turn()
+        || tool_attempt.issuing_attempt() != attempt.id()
+        || tool_attempt.end() != &crate::ToolAttemptEnd::Ambiguous
+        || !attempt_end_matches
+    {
+        return Err(ModelCallClosureError::InterruptCorrelationMismatch);
+    }
+    let reclassified_pending_steering =
+        reclassify_pending_steering(&active_turn, &identities.pending_steering_reclassifications)?;
+    let (tool_result_entries, terminal_snapshot) = result_projection.into_parts();
+    let marker = match applied_interrupt {
+        Some(proof) => {
+            ReconciliationMarker::from_interrupt_ambiguity(ambiguous_operations.clone(), *proof)
+        }
+        None => ReconciliationMarker::from_automatic_recovery(
+            ambiguous_operations.clone(),
+            recovery_attempt,
+        ),
+    };
+    Ok(ReconciliationRequiredToolTurn {
+        session: active_turn.session(),
+        turn: active_turn.turn(),
+        tool_attempt,
+        attempt,
+        disposition: TurnDisposition::ReconciliationRequired { marker },
+        tool_result_entries,
+        terminal_snapshot,
+        reclassified_pending_steering,
+    })
+}
+
 pub(crate) fn apply_interrupt_to_executing_tool_batch(
     active_turn: ActivatedTurn,
     batch: crate::ToolBatch,
@@ -5001,22 +5291,24 @@ pub(crate) use tests::{cancelled_turn_fixture, completed_turn_fixture, failed_tu
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroU64;
+
     use super::*;
     use crate::{
         AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputQueueOrder,
         AcceptedInputSchedulingReconstitutionInput, AcceptedInputTurnActivationIdentities,
-        AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState,
-        DelegationContent, DelegationOutcome, DelegationOutcomeKind, DelegationOutcomeReason,
-        DelegationProvenanceReconstitutionInput, DeliveryRequest, ModelCallReconstitutionState,
-        ModelSelectionOverride, ModelSelectionRequest, NormalizedToolArguments,
-        PerInputConfigurationChoices, SemanticTranscriptEntryRef, Session,
+        AcceptedInputTurnSchedulingRecord, AcceptedInputTurnSchedulingRecordState, AttachmentKind,
+        BlobDigest, DeclaredMediaType, DelegationContent, DelegationOutcome, DelegationOutcomeKind,
+        DelegationOutcomeReason, DelegationProvenanceReconstitutionInput, DeliveryRequest,
+        ModelCallReconstitutionState, ModelSelectionOverride, ModelSelectionRequest,
+        NormalizedToolArguments, PerInputConfigurationChoices, SemanticTranscriptEntryRef, Session,
         SessionConfigurationDefaults, SessionConfigurationDefaultsVersion, SessionCreationCause,
         SessionCreationProvenance, SessionReconstitutionInput, ToolApprovalDecision,
         ToolApprovalResolutionReconstitutionInput, ToolAttemptEnd, ToolAttemptReconstitutionInput,
         ToolAttemptReconstitutionState, ToolBatchPhaseReconstitutionInput,
         ToolBatchReconstitutionInput, ToolDispatchGeneration, ToolEffectClass, ToolExecutionError,
         ToolExecutionErrorKind, ToolName, ToolRequestOrdinal, ToolRequestReconstitutionInput,
-        TranscriptAncestry,
+        TranscriptAncestry, UserContentPart,
         test_support::{
             accepted_input_id, command_id, context_frontier_id, direct, model_call_id,
             provider_model_identity, semantic_transcript_entry_id, session_id, tool_attempt_id,
@@ -5317,6 +5609,65 @@ mod tests {
         )
         .reconstitute()
         .expect("activation facts reconstruct live execution")
+    }
+
+    fn attachment_execution_input(
+        facts: Vec<AttachmentBlobFact>,
+    ) -> ModelCallExecutionReconstitutionInput {
+        let execution = active_execution();
+        let digest = BlobDigest::digest(b"attachment fixture bytes");
+        let content = UserContent::try_parts(vec![UserContentPart::Attachment {
+            digest,
+            kind: AttachmentKind::Document,
+            media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+                .expect("the fixture media type is valid"),
+            display_filename: None,
+        }])
+        .expect("the attachment-only fixture is valid");
+        ModelCallExecutionReconstitutionInput::new(
+            execution.active_turn,
+            execution.targets,
+            execution.starting_snapshot,
+            execution.frontier_entries.into_vec(),
+            vec![ModelCallOriginContent::from_validated_parts(
+                accepted_input_id(4),
+                content,
+            )],
+            None,
+            Vec::new(),
+        )
+        .with_attachment_blob_facts(facts)
+    }
+
+    /// S02 / INV-015 / INV-062: model preparation admits immutable catalog
+    /// facts when they exactly cover every referenced attachment digest.
+    #[test]
+    fn s02_inv015_inv062_exact_attachment_catalog_facts_reach_preparation() {
+        let digest = BlobDigest::digest(b"attachment fixture bytes");
+        let length = NonZeroU64::new(24).expect("the fixture length is positive");
+
+        let execution = attachment_execution_input(vec![AttachmentBlobFact::new(digest, length)])
+            .reconstitute()
+            .expect("the exact attachment catalog projection is complete");
+        let request = execution
+            .preview_initial_call(model_call_id(9))
+            .expect("the covered attachment can reach call preparation");
+
+        assert_eq!(request.attachment_byte_length(digest), Some(length));
+    }
+
+    /// INV-062: model preparation fails closed when the catalog projection
+    /// omits a referenced attachment digest.
+    #[test]
+    fn inv062_missing_attachment_catalog_fact_fails_preparation() {
+        let missing = attachment_execution_input(Vec::new())
+            .reconstitute()
+            .expect_err("a missing attachment catalog fact fails closed");
+
+        assert_eq!(
+            missing.failure(),
+            ModelCallExecutionReconstitutionFailure::AttachmentBlobFactMismatch
+        );
     }
 
     fn targets() -> ModelTargetCatalog {
@@ -6823,7 +7174,8 @@ mod tests {
             request
                 .origin_content(accepted_input_id(4))
                 .expect("the checked origin has exact user content")
-                .text()
+                .single_text()
+                .expect("the fixture has exactly one text part")
                 .as_str(),
             "hello"
         );
@@ -7924,6 +8276,44 @@ mod tests {
             pending,
             turn_id(3),
             successor,
+        );
+    }
+
+    /// S03 / INV-015: a failed required compaction closes the fresh physical
+    /// attempt without fabricating a provider call.
+    #[test]
+    fn s03_inv015_automatic_compaction_failure_closes_call_free_turn() {
+        let failure_entry = semantic_transcript_entry_id(10);
+        let execution = active_execution();
+        let session = execution.session();
+        let starting_entry = execution
+            .current_snapshot
+            .ordered_entries()
+            .next()
+            .expect("fixture activation carries its origin");
+        let failed = execution
+            .fail_automatic_context_compaction(FailedModelCallTurnIdentities::new(
+                failure_entry,
+                context_frontier_id(11),
+            ))
+            .expect("required compaction failure closes the call-free attempt");
+
+        assert_eq!(failed.call(), None);
+        assert!(matches!(
+            failed.attempt().end(),
+            crate::AttemptEnd::WithoutStop {
+                disposition: UnstoppedAttemptDisposition::KnownFailure,
+            }
+        ));
+        assert_eq!(
+            failed
+                .terminal_snapshot()
+                .ordered_entries()
+                .collect::<Vec<_>>(),
+            vec![
+                starting_entry,
+                SemanticTranscriptEntryRef::from_source(session, failure_entry),
+            ]
         );
     }
 
