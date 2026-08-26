@@ -1142,6 +1142,18 @@ async fn usage_summary(
     let (Some(repository), Some(configuration)) = (state.usage, state.model_configuration) else {
         return usage_unavailable();
     };
+    // The aggregate read holds one pooled connection for its grouped scan, so
+    // it is a snapshot reader on the same footing as the attention snapshot
+    // and the lexical page: it draws its permit from the daemon-wide budget
+    // that reserves pool connections for mutations and outbox work. Admitting
+    // it after the query and repository checks keeps a malformed or
+    // unconfigured request from spending a permit.
+    let Some(budget) = state.snapshot_reader_budget else {
+        return usage_projection_failed();
+    };
+    let Ok(_permit) = budget.acquire().await else {
+        return usage_projection_failed();
+    };
     match repository.aggregate(query).await {
         Ok(report) => Json(WebUsageSummary {
             groups: report
@@ -1194,6 +1206,15 @@ async fn usage_calls(
     };
     let (Some(repository), Some(configuration)) = (state.usage, state.model_configuration) else {
         return usage_unavailable();
+    };
+    // Same footing as the aggregate read above: one pooled connection for the
+    // keyset page, drawn from the shared snapshot-reader budget after the
+    // request and repository checks.
+    let Some(budget) = state.snapshot_reader_budget else {
+        return usage_projection_failed();
+    };
+    let Ok(_permit) = budget.acquire().await else {
+        return usage_projection_failed();
     };
     match repository
         .calls(UsageCallQuery {
@@ -1317,17 +1338,21 @@ fn usage_unavailable() -> Response {
     )
 }
 
+fn usage_projection_failed() -> Response {
+    application_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "usage_projection_failed",
+        "the durable usage projection could not be read",
+    )
+}
+
 fn usage_repository_error(error: UsageRepositoryError) -> Response {
     let failure_class = match &error {
         UsageRepositoryError::Database(_) => "infrastructure",
         UsageRepositoryError::Corruption(_) => "fail_closed_corruption",
     };
     tracing::error!(failure_class, cause = %error, "usage projection read failed");
-    application_error(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "usage_projection_failed",
-        "the durable usage projection could not be read",
-    )
+    usage_projection_failed()
 }
 
 fn usage_aggregate_dto(
