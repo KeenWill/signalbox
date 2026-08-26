@@ -28,6 +28,7 @@ export interface CommandContext {
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
   navigate?: (path: string) => void
   configuresTranscriptDetail?: boolean
+  openArtifactInspector?: () => void
   openSession?: (sessionId: string) => void
   toggleTimelineExpansion?: () => void
 }
@@ -66,6 +67,7 @@ const setDensity = (density: DensityMode) => (context: CommandContext) =>
   context.dispatch(actions.densitySet(density))
 const setTheme = (theme: ThemeMode) => (context: CommandContext) =>
   context.dispatch(actions.themeSet(theme))
+const artifactInspector = (context: CommandContext) => context.openArtifactInspector !== undefined
 export const commandRegistry = [
   {
     id: 'artifact.select',
@@ -219,6 +221,15 @@ export const commandRegistry = [
     bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
     available: productNavigation,
     run: (context) => context.navigate?.('/settings'),
+  },
+  {
+    id: 'artifact.open',
+    title: 'Open artifact inspector',
+    description: 'Resolve and inspect an immutable blob by its server-provided identity.',
+    category: 'Surface',
+    bindings: [],
+    available: artifactInspector,
+    run: (context) => context.openArtifactInspector?.(),
   },
   {
     id: 'palette.open',

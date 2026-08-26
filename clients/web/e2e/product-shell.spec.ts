@@ -26,6 +26,17 @@ const settingsPreferenceFixture = {
 const useDeterministicBootstrap = (page: Page) =>
   page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
 
+const useRecoveringBootstrap = async (page: Page) => {
+  const state = { unavailable: true, attempts: 0 }
+  await page.route('**/api/bootstrap', (route) => {
+    state.attempts += 1
+    return state.unavailable
+      ? route.fulfill({ status: 503, body: 'temporarily unavailable' })
+      : route.fulfill({ json: bootstrapFixture })
+  })
+  return { recover: () => (state.unavailable = false), attempts: () => state.attempts }
+}
+
 // Playwright matches route handlers most-recently-registered first and retires a `times: 1`
 // handler after its single use, so the transport refuses the first admission and serves the
 // deterministic bootstrap on every retry. The sequence lives here so a test body reads as
@@ -216,22 +227,16 @@ test('leaves focus in place when Escape has no surface to unwind', async ({ page
 
 test('retries a failed product bootstrap after the daemon recovers', async ({ page }) => {
   const problems = watchBrowser(page)
-  let attempts = 0
-  await page.route('**/api/bootstrap', (route) => {
-    attempts += 1
-    if (attempts === 1) {
-      return route.fulfill({ status: 503, body: 'temporarily unavailable' })
-    }
-    return route.fulfill({ json: bootstrapFixture })
-  })
+  const scenario = await useRecoveringBootstrap(page)
   await page.goto('/sessions')
 
-  await expect(page.getByText('Transport unavailable')).toBeVisible()
-  await page.getByRole('button', { name: 'Retry contract' }).click()
+  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  scenario.recover()
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
 
   await expect(page.getByText('Timeline reads available')).toBeVisible()
   await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
-  expect(attempts).toBe(2)
+  expect(scenario.attempts()).toBe(2)
   expect(problems.pageErrors).toEqual([])
   expect(
     problems.consoleErrors.every((message) =>
@@ -1000,4 +1005,147 @@ test('locks product navigation while an ambiguous continuation command is retain
     'Failed to load resource: the server responded with a status of 503 (Service Unavailable)'
   expect(problems.pageErrors).toEqual([])
   expect(problems.consoleErrors.every((error) => error === expectedResourceError)).toBe(true)
+})
+
+test('runs advertised product navigation sequences', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/sessions$/)
+  await expect(page.getByRole('main')).toBeFocused()
+  await page.keyboard.press('g')
+  await page.keyboard.press(',')
+  await expect(page).toHaveURL(/\/settings$/)
+  await expect(page).toHaveTitle('Settings · Signalbox')
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('does not run product navigation sequences while a modal owns focus', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await palette.getByRole('button', { name: /Go to Sessions/ }).focus()
+  await page.keyboard.press('g')
+  await page.keyboard.press('s')
+  await expect(page).toHaveURL(/\/attention$/)
+  await expect(palette).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('does not run product view hotkeys while a modal owns focus', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.goto('/attention')
+  const presentationBefore = await page.evaluate(() => ({
+    theme: document.documentElement.dataset.theme,
+    density: document.documentElement.dataset.density,
+  }))
+
+  await page.getByRole('button', { name: 'Open command palette' }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette' })
+  await palette.getByRole('button', { name: /Go to Sessions/ }).focus()
+  await page.keyboard.press('Shift+T')
+  await page.keyboard.press('Shift+D')
+  await page.keyboard.press('Shift+W')
+  expect(
+    await page.evaluate(() => ({
+      theme: document.documentElement.dataset.theme,
+      density: document.documentElement.dataset.density,
+    })),
+  ).toEqual(presentationBefore)
+  await expect(palette).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('does not run product view hotkeys while the artifact sheet owns focus', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+  const presentationBefore = await page.evaluate(() => ({
+    theme: document.documentElement.dataset.theme,
+    density: document.documentElement.dataset.density,
+  }))
+
+  await page.getByRole('button', { name: 'Open artifact inspector' }).click()
+  const sheet = page.getByRole('dialog', { name: 'Artifact inspector' })
+  await expect(sheet).toBeVisible()
+  await sheet.getByRole('button', { name: 'Close artifact inspector' }).focus()
+  await page.keyboard.press('Shift+T')
+  await page.keyboard.press('Shift+D')
+  await page.keyboard.press('Shift+W')
+
+  expect(
+    await page.evaluate(() => ({
+      theme: document.documentElement.dataset.theme,
+      density: document.documentElement.dataset.density,
+    })),
+  ).toEqual(presentationBefore)
+  await expect(sheet).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('unwinds the phone navigation sheet with Escape', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  const openNavigation = page.getByRole('button', { name: 'Open navigation' })
+  await openNavigation.click()
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog', { name: 'Product navigation' })).toBeHidden()
+  await expect(openNavigation).toBeFocused()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('closes the phone navigation sheet before entering Scenario studio', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/attention')
+
+  await page.getByRole('button', { name: 'Open navigation' }).click()
+  const navigation = page.getByRole('dialog', { name: 'Product navigation' })
+  await navigation.getByRole('link', { name: /Scenario studio/ }).click()
+  await expect(page).toHaveURL(/\/scenario\/streaming$/)
+  await expect(navigation).toBeHidden()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
+})
+
+test('retries a transient bootstrap failure without reloading', async ({ page }) => {
+  const problems = watchBrowser(page)
+  const scenario = await useRecoveringBootstrap(page)
+  await page.goto('/attention')
+
+  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  scenario.recover()
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
+  await expect(
+    page.getByText(`${bootstrapFixture.contract.name} · ${bootstrapFixture.contract.version}`),
+  ).toBeVisible()
+  await expect(page.getByRole('status')).toBeFocused()
+  expect(problems.pageErrors).toEqual([])
+  expect(
+    problems.consoleErrors.every((message) =>
+      message.includes('Failed to load resource: the server responded with a status of 503'),
+    ),
+  ).toBe(true)
+})
+
+test('distinguishes a rejected bootstrap contract from transport failure', async ({ page }) => {
+  const problems = watchBrowser(page)
+  await page.route('**/api/bootstrap', (route) => route.fulfill({ json: { invented: true } }))
+  await page.goto('/attention')
+
+  await expect(page.getByText('Contract rejected')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Retry bootstrap' })).toBeVisible()
+  expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
 })
