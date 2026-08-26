@@ -42,6 +42,7 @@ use signalbox_model_runtime_anthropic::{
 use signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version;
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 use signalbox_persistence::{
+    automatic_reconciliation::RETRY_LADDER_ARITY,
     convergence_sweep::PostgresConvergenceSweepStore,
     conversation_import::backfill_imported_conversation_display_titles,
     hub_fence::FENCED_POOL_MAX_CONNECTIONS,
@@ -1456,6 +1457,23 @@ async fn run_hub(
             RuntimePhase::Configuration,
             SanitizedStartupCause::Static(
                 "automatic_reconciliation_attempt_budget_exceeds_storage",
+            ),
+        ));
+    }
+    // The claim statement schedules one `CASE` arm per admitted attempt and ends
+    // in an `ELSE`, so a budget above that arity is admitted silently and then
+    // reuses the last rung's deadline for every attempt past it while the
+    // failure path schedules the true exponential. The claim side is the shorter
+    // of the two, so the abandonment sweep would settle attempts that are still
+    // running. Refusing the budget here keeps the arity a configuration fact
+    // rather than something a deployment discovers from a mis-settled attempt.
+    if automatic_reconciliation_attempt_budget.is_some_and(|budget| {
+        usize::try_from(budget).is_ok_and(|budget| budget > RETRY_LADDER_ARITY)
+    }) {
+        return Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static(
+                "automatic_reconciliation_attempt_budget_exceeds_retry_ladder",
             ),
         ));
     }

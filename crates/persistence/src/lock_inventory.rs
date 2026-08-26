@@ -324,13 +324,23 @@ pub(crate) const AUTOMATIC_RECONCILIATION_SUPERSESSION: &str = "WITH cursor AS (
 
 /// Claims one due window of automatic reconciliations.
 ///
-/// The attempt budget (`$2`) and the retry ladder (`$3`..`$7`, in seconds) are
-/// bound by the caller from `AutomaticReconciliationAttempt` rather than written
-/// here. They were literals, which meant the schedule this daemon actually
-/// enforces lived only in this string: the Rust ladder had no production reader,
-/// so the two could diverge in either direction with nothing failing. The CASE
-/// has one arm per admitted attempt, so its arity is part of the contract — the
-/// caller asserts it against the budget at compile time.
+/// The attempt budget (`$2`) and the retry ladder (`$3`..`$7`, in milliseconds)
+/// are bound by the caller from `AutomaticReconciliationAttempt` rather than
+/// written here. They were literals, which meant the schedule this daemon
+/// actually enforces lived only in this string: the Rust ladder had no
+/// production reader, so the two could diverge in either direction with nothing
+/// failing.
+///
+/// Milliseconds rather than seconds because the failure path schedules its own
+/// retry in milliseconds. Seconds here truncated every sub-second configured
+/// backoff to zero, which is not a short abandonment deadline but an immediate
+/// one, so the two paths disagreed for exactly the policies a second cannot
+/// express.
+///
+/// The CASE has one arm per admitted attempt, so its arity is part of the
+/// contract: a configured budget above it would reach the `ELSE` arm and reuse
+/// the last deadline while the failure path kept computing the true schedule.
+/// The daemon refuses such a budget at configuration admission.
 pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                 SELECT turn_id
                   FROM automatic_reconciliation
@@ -353,7 +363,7 @@ pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                                     WHEN 3 THEN $5::bigint
                                     WHEN 4 THEN $6::bigint
                                     ELSE $7::bigint
-                                  END * interval '1 second')
+                                  END * interval '1 millisecond')
                        END
                   FROM due
                  WHERE recovery.turn_id = due.turn_id

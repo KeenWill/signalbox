@@ -44,8 +44,18 @@ use crate::{
 const CLAIM_WINDOW: i64 = 1;
 
 /// Admitted attempts the claim statement schedules, one `CASE` arm each.
-// numeric-bound: not-a-bound - the claim statement's fixed CASE arity, which the ladder must match
-const RETRY_LADDER_ARITY: usize = 5;
+///
+/// Published because it is the ceiling a deployment's attempt budget has to
+/// respect. The claim statement's `CASE` ends in an `ELSE` arm, so a budget
+/// above this arity does not fail — it silently reuses the last rung's deadline
+/// for every attempt past it, while the failure path keeps computing the true
+/// exponential. The two paths would then disagree about when an in-flight
+/// attempt counts as abandoned, and the claim side is the shorter one, so the
+/// sweep would settle attempts that are still running. Configuration admission
+/// refuses such a budget rather than letting the arity be discovered in
+/// production.
+// numeric-bound: not-a-bound - the claim statement's fixed CASE arity, which the ladder and the configured budget must match
+pub const RETRY_LADDER_ARITY: usize = 5;
 
 /// How long any one reconciliation statement waits for a contended row.
 ///
@@ -76,15 +86,39 @@ pub const RECONCILIATION_LOCK_WAIT: Duration = Duration::from_secs(1);
 // numeric-bound: guard - prevents a saturated pool from consuming the attempt's deadline before it begins
 pub const RECONCILIATION_ACQUIRE_WAIT: Duration = Duration::from_millis(250);
 
+/// Headroom the caller's deadline keeps above the summed database-side budgets.
+///
+/// The deadline covers more than those budgets. It starts before the pool is
+/// asked for a connection and so also spans `BEGIN`, the `lock_timeout`
+/// statement that installs the lock budget, and the scheduling latency between
+/// them — the one stretch no database-side budget covers, because the budget is
+/// what the end of it installs. A floor equal to the summed budgets leaves that
+/// stretch outside the deadline, so the deadline could expire in the same
+/// instant PostgreSQL was about to report `55P03`, which is the strand these
+/// bounds exist to prevent rather than a smaller version of it.
+// numeric-bound: guard - keeps the caller deadline above the database-side budgets by more than the uncovered BEGIN stretch
+pub const RECONCILIATION_DEADLINE_MARGIN: Duration = Duration::from_millis(500);
+
 /// The smallest caller deadline that lets the database-side budgets expire first.
 ///
-/// The caller's deadline starts before the pool is asked for a connection, so a
-/// deadline at or below the acquisition plus lock budgets would end the attempt
-/// before `55P03` could arrive, stranding the connection this module exists to
-/// protect. A deployment-configured bound is raised to this floor.
-// numeric-bound: guard - keeps a configured attempt deadline above the database-side budgets
-pub const RECONCILIATION_DEADLINE_FLOOR: Duration =
-    RECONCILIATION_ACQUIRE_WAIT.saturating_add(RECONCILIATION_LOCK_WAIT);
+/// Derived from the budgets it must outlast plus
+/// [`RECONCILIATION_DEADLINE_MARGIN`], never written as their sum: a budget
+/// raised without raising this floor would otherwise close the margin silently.
+/// A deployment-configured bound is raised to this floor.
+// numeric-bound: derived guard from RECONCILIATION_DEADLINE_MARGIN
+pub const RECONCILIATION_DEADLINE_FLOOR: Duration = RECONCILIATION_ACQUIRE_WAIT
+    .saturating_add(RECONCILIATION_LOCK_WAIT)
+    .saturating_add(RECONCILIATION_DEADLINE_MARGIN);
+
+/// The floor must strictly exceed the budgets it exists to outlast, as an
+/// arithmetic fact rather than a comment: an equal floor is the stranding case.
+const _: () = assert!(
+    RECONCILIATION_DEADLINE_FLOOR.as_millis()
+        > RECONCILIATION_ACQUIRE_WAIT
+            .saturating_add(RECONCILIATION_LOCK_WAIT)
+            .as_millis(),
+    "the reconciliation deadline floor must outlast the summed database-side budgets"
+);
 
 /// The last-resort deadline for one reconciliation transaction.
 ///
@@ -167,6 +201,33 @@ async fn begin_budgeted(
         Ok(transaction)
     })
     .await
+}
+
+/// Commits beyond the caller's deadline.
+///
+/// Everything before the commit is safe for a caller to abandon: `lock_timeout`
+/// bounds it, and dropping it rolls the transaction back leaving nothing durable
+/// in doubt. The commit is the one statement that is not. Abandoning it drops
+/// the driver mid-`COMMIT`, so the attempt's fate becomes unknown to the daemon
+/// exactly as if the backend had failed — the ambiguity this module exists to
+/// resolve, reintroduced by the bound meant to contain it.
+///
+/// Driving it through [`uncancellable`] means an expiring deadline abandons only
+/// the join handle while the commit reaches its server-enforced outcome. That is
+/// what makes the caller's deadline the last resort the specification describes
+/// instead of an interruption of the one statement no bound above it may cut.
+async fn commit_uncancellable(
+    transaction: Transaction<'static, Postgres>,
+) -> Result<(), AutomaticReconciliationRepositoryError> {
+    uncancellable(async move { transaction.commit().await.map_err(commit_error) }).await
+}
+
+/// Records whether a failed commit left the transaction's fate unknown.
+fn commit_error(source: sqlx::Error) -> AutomaticReconciliationRepositoryError {
+    AutomaticReconciliationRepositoryError::Database {
+        commit_ambiguous: commit_failure_is_ambiguous(&source),
+        source,
+    }
 }
 
 /// Applies [`RECONCILIATION_LOCK_WAIT`] to the transaction on `connection`.
@@ -381,15 +442,16 @@ impl PostgresAutomaticReconciliationRepository {
             .map_err(|_| AutomaticReconciliationRepositoryError::Corruption("attempt budget"))?;
         settle_abandoned_attempts(&mut transaction, attempt_budget, CLAIM_WINDOW).await?;
         mark_superseded_recoveries(&mut transaction, CLAIM_WINDOW).await?;
-        let exhausted_rows = mark_exhausted_recoveries(&mut transaction, attempt_budget).await?;
+        let exhausted_rows =
+            mark_exhausted_recoveries(&mut transaction, attempt_budget, CLAIM_WINDOW).await?;
         let mut claim = sqlx::query(crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLAIM)
             .bind(CLAIM_WINDOW)
             .bind(attempt_budget.unwrap_or(i32::MAX));
-        for seconds in self.retry_ladder_seconds()? {
-            claim = claim.bind(seconds);
+        for millis in self.retry_ladder_millis()? {
+            claim = claim.bind(millis);
         }
         let rows = claim.fetch_all(&mut *transaction).await?;
-        transaction.commit().await.map_err(Self::commit_error)?;
+        commit_uncancellable(transaction).await?;
 
         let mut claimed = Vec::with_capacity(rows.len());
         for row in rows {
@@ -468,7 +530,7 @@ impl PostgresAutomaticReconciliationRepository {
         .await?;
         let Some(origin) = origin else {
             finish_superseded(&mut transaction, claimed).await?;
-            transaction.commit().await.map_err(Self::commit_error)?;
+            commit_uncancellable(transaction).await?;
             return Ok(AutomaticReconciliationOutcome::Superseded);
         };
         let Some(session) = load_session_from_connection(&mut transaction, claimed.session())
@@ -644,7 +706,7 @@ impl PostgresAutomaticReconciliationRepository {
             }
         }
         finish_attempt(&mut transaction, claimed, "reconciled", "reconciled").await?;
-        transaction.commit().await.map_err(Self::commit_error)?;
+        commit_uncancellable(transaction).await?;
         Ok(AutomaticReconciliationOutcome::Reconciled)
     }
 
@@ -698,7 +760,7 @@ impl PostgresAutomaticReconciliationRepository {
                 "attempt failure cardinality",
             ));
         }
-        transaction.commit().await.map_err(Self::commit_error)?;
+        commit_uncancellable(transaction).await?;
         Ok(())
     }
 
@@ -712,39 +774,48 @@ impl PostgresAutomaticReconciliationRepository {
     /// An unconfigured base backoff yields an all-`NULL` ladder, which the
     /// statement reads as the chain's "no claimable deadline" semantics. Every
     /// slot shares one base, so the statement tests only the first.
-    fn retry_ladder_seconds(
+    ///
+    /// Milliseconds, matching the unit [`Self::record_failure`] schedules in and
+    /// the unit the claim statement multiplies by. Whole seconds would truncate
+    /// every sub-second configured backoff to zero, and a zero claim-side
+    /// deadline is not a short wait but an immediate one: the very next scan's
+    /// abandonment sweep would settle an attempt that is still running, while
+    /// the failure path scheduled the true sub-second delay. One configured
+    /// policy has to produce one schedule on both paths.
+    fn retry_ladder_millis(
         &self,
     ) -> Result<[Option<i64>; RETRY_LADDER_ARITY], AutomaticReconciliationRepositoryError> {
-        let mut ladder = [None; RETRY_LADDER_ARITY];
-        let Some(base) = self.retry_backoff_base else {
-            return Ok(ladder);
-        };
-        for (index, slot) in ladder.iter_mut().enumerate() {
-            let ordinal = u32::try_from(index)
-                .map_err(|_| {
-                    AutomaticReconciliationRepositoryError::Corruption("retry ladder ordinal")
-                })?
-                .saturating_add(1);
-            let attempt = AutomaticReconciliationAttempt::try_from_u32(ordinal).ok_or(
-                AutomaticReconciliationRepositoryError::Corruption("retry ladder ordinal"),
-            )?;
-            let seconds = i64::try_from(
-                attempt
-                    .retry_backoff(base, self.retry_backoff_cap)
-                    .as_secs(),
-            )
-            .map_err(|_| AutomaticReconciliationRepositoryError::Corruption("retry backoff"))?;
-            *slot = Some(seconds);
-        }
-        Ok(ladder)
+        retry_ladder_millis(self.retry_backoff_base, self.retry_backoff_cap)
     }
+}
 
-    fn commit_error(source: sqlx::Error) -> AutomaticReconciliationRepositoryError {
-        AutomaticReconciliationRepositoryError::Database {
-            commit_ambiguous: commit_failure_is_ambiguous(&source),
-            source,
-        }
+/// Renders one retry policy as the claim statement's ladder, in milliseconds.
+///
+/// Free of the repository because the ladder is a function of configuration
+/// alone: no connection, no pool, and nothing about the deployment's database
+/// participates in the schedule.
+fn retry_ladder_millis(
+    base: Option<Duration>,
+    cap: Option<Duration>,
+) -> Result<[Option<i64>; RETRY_LADDER_ARITY], AutomaticReconciliationRepositoryError> {
+    let mut ladder = [None; RETRY_LADDER_ARITY];
+    let Some(base) = base else {
+        return Ok(ladder);
+    };
+    for (index, slot) in ladder.iter_mut().enumerate() {
+        let ordinal = u32::try_from(index)
+            .map_err(|_| {
+                AutomaticReconciliationRepositoryError::Corruption("retry ladder ordinal")
+            })?
+            .saturating_add(1);
+        let attempt = AutomaticReconciliationAttempt::try_from_u32(ordinal).ok_or(
+            AutomaticReconciliationRepositoryError::Corruption("retry ladder ordinal"),
+        )?;
+        let millis = i64::try_from(attempt.retry_backoff(base, cap).as_millis())
+            .map_err(|_| AutomaticReconciliationRepositoryError::Corruption("retry backoff"))?;
+        *slot = Some(millis);
     }
+    Ok(ladder)
 }
 
 async fn discover_recoveries(
@@ -806,23 +877,53 @@ async fn mark_superseded_recoveries(
     Ok(())
 }
 
+/// Exhausts one bounded window of recoveries that have spent their budget.
+///
+/// Paged the way `settle_abandoned_attempts` and the claim statement page. A
+/// mass-exhaustion event — one provider outage ending many ambiguous calls at
+/// the same attempt — would otherwise update and materialize the entire backlog
+/// inside a single transaction, outlast the caller's deadline, and leave a large
+/// transaction running on a connection nobody is waiting for any more. The
+/// specification promises bounded exhaustion work, and the window is what makes
+/// it bounded; successive scans drain the rest.
+///
+/// The budget test is `>=`, the exact complement of the claim statement's
+/// `attempt_count < $2`. Equality only looked equivalent while the budget never
+/// moved: lowering it below a recovery's persisted `attempt_count` left that row
+/// matching neither predicate, so it was never claimed again and never reported
+/// exhausted — parked durably with nothing watching it. Complementary predicates
+/// mean every recovery is on exactly one side of the budget whatever it is set
+/// to next.
 async fn mark_exhausted_recoveries(
     connection: &mut PgConnection,
     attempt_budget: Option<i32>,
+    window: i64,
 ) -> Result<Vec<sqlx::postgres::PgRow>, AutomaticReconciliationRepositoryError> {
     let rows = sqlx::query(
-        "UPDATE automatic_reconciliation
+        "WITH spent AS MATERIALIZED (
+            SELECT turn_id
+              FROM automatic_reconciliation
+             WHERE $1::integer IS NOT NULL
+               AND state_kind IN ('scheduled', 'attempting')
+               AND attempt_count >= $1
+               AND (
+                   state_kind = 'scheduled'
+                   OR next_attempt_at <= statement_timestamp()
+               )
+             ORDER BY next_attempt_at, turn_id
+             LIMIT $2
+         )
+         UPDATE automatic_reconciliation AS recovery
             SET state_kind = 'exhausted', exhausted_at = statement_timestamp()
-          WHERE $1::integer IS NOT NULL
-            AND state_kind IN ('scheduled', 'attempting')
-            AND attempt_count = $1
-            AND (
-                state_kind = 'scheduled'
-                OR next_attempt_at <= statement_timestamp()
-            )
-      RETURNING session_id, turn_id, model_call_id, tool_attempt_id",
+           FROM spent
+          WHERE recovery.turn_id = spent.turn_id
+            AND recovery.state_kind IN ('scheduled', 'attempting')
+            AND recovery.attempt_count >= $1
+      RETURNING recovery.session_id, recovery.turn_id,
+                recovery.model_call_id, recovery.tool_attempt_id",
     )
     .bind(attempt_budget)
+    .bind(window)
     .fetch_all(connection)
     .await?;
     Ok(rows)
@@ -876,20 +977,130 @@ async fn finish_attempt(
 #[cfg(test)]
 mod tests {
     use super::{
-        RECONCILIATION_ACQUIRE_WAIT, RECONCILIATION_DEADLINE_DEFAULT,
-        RECONCILIATION_DEADLINE_FLOOR, RECONCILIATION_LOCK_WAIT, reconciliation_deadline,
+        AutomaticReconciliationAttempt, RECONCILIATION_ACQUIRE_WAIT,
+        RECONCILIATION_DEADLINE_DEFAULT, RECONCILIATION_DEADLINE_FLOOR,
+        RECONCILIATION_DEADLINE_MARGIN, RECONCILIATION_LOCK_WAIT, RETRY_LADDER_ARITY,
+        reconciliation_deadline, retry_ladder_millis,
     };
     use std::time::Duration;
 
-    /// The floor is what keeps a configured deadline from ending an attempt
-    /// before the database-side budgets can report, which is the failure mode
-    /// the layered bounds exist to close.
+    /// The floor has to outlast the database-side budgets *strictly*. Equal is
+    /// the stranding case the layered bounds exist to close: the deadline would
+    /// start before the pool is asked for a connection and so also cover `BEGIN`
+    /// and the `lock_timeout` statement, leaving it able to expire in the same
+    /// instant PostgreSQL was about to report `55P03`.
     #[test]
-    fn the_deadline_floor_covers_both_database_side_budgets() {
-        assert_eq!(
-            RECONCILIATION_DEADLINE_FLOOR,
-            RECONCILIATION_ACQUIRE_WAIT + RECONCILIATION_LOCK_WAIT
+    fn the_deadline_floor_outlasts_both_database_side_budgets() {
+        let budgets = RECONCILIATION_ACQUIRE_WAIT + RECONCILIATION_LOCK_WAIT;
+        assert!(
+            RECONCILIATION_DEADLINE_FLOOR > budgets,
+            "floor {RECONCILIATION_DEADLINE_FLOOR:?} must outlast budgets {budgets:?}"
         );
+        assert_eq!(
+            RECONCILIATION_DEADLINE_FLOOR - budgets,
+            RECONCILIATION_DEADLINE_MARGIN
+        );
+        assert!(!RECONCILIATION_DEADLINE_MARGIN.is_zero());
+    }
+
+    /// The ladder carries milliseconds, not truncated seconds. A sub-second
+    /// configured backoff is the case whole seconds destroyed: every rung
+    /// collapsed to a zero claim-side deadline, which the abandonment sweep
+    /// reads as "already due" and settles an attempt that is still running.
+    #[test]
+    fn a_sub_second_backoff_survives_the_claim_ladder() {
+        let ladder = retry_ladder_millis(Some(Duration::from_millis(500)), None)
+            .expect("a representable sub-second ladder");
+        assert_eq!(
+            ladder,
+            [
+                Some(500),
+                Some(1_000),
+                Some(2_000),
+                Some(4_000),
+                Some(8_000)
+            ]
+        );
+        assert!(
+            ladder.iter().all(|rung| rung != &Some(0)),
+            "no rung may collapse to an immediate deadline: {ladder:?}"
+        );
+    }
+
+    /// The claim ladder and the failure path have to schedule one policy, so
+    /// each rung must equal what `record_failure` would compute for the same
+    /// attempt. This is the divergence the unit mismatch introduced.
+    #[test]
+    fn every_ladder_rung_matches_the_failure_paths_schedule() {
+        let base = Duration::from_millis(750);
+        let cap = Some(Duration::from_secs(4));
+        let ladder = retry_ladder_millis(Some(base), cap).expect("a representable ladder");
+        for (index, rung) in ladder.iter().enumerate() {
+            let attempt = AutomaticReconciliationAttempt::try_from_u32(
+                u32::try_from(index).expect("a ladder index fits a u32") + 1,
+            )
+            .expect("a one-based ladder ordinal");
+            let expected = i64::try_from(attempt.retry_backoff(base, cap).as_millis())
+                .expect("a representable backoff");
+            assert_eq!(rung, &Some(expected), "rung {index} diverged");
+        }
+    }
+
+    /// An unconfigured base backoff still yields the all-`NULL` ladder the claim
+    /// statement reads as "no claimable deadline".
+    #[test]
+    fn an_unconfigured_backoff_yields_no_claimable_deadline() {
+        let ladder = retry_ladder_millis(None, None).expect("an unconfigured ladder");
+        assert_eq!(ladder, [None; RETRY_LADDER_ARITY]);
+    }
+
+    /// The published arity has to be the arity the claim statement actually
+    /// carries, because configuration admission refuses budgets above it. If the
+    /// two drifted, the daemon would reject admissible budgets or admit ones the
+    /// `ELSE` arm silently flattens.
+    #[test]
+    fn the_published_arity_is_the_claim_statements_ladder_arity() {
+        let claim = crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLAIM;
+        // The ladder occupies the parameters after the window ($1) and the
+        // attempt budget ($2).
+        const LADDER_FIRST_PARAMETER: usize = 3;
+        for offset in 0..RETRY_LADDER_ARITY {
+            let parameter = format!("${}::bigint", LADDER_FIRST_PARAMETER + offset);
+            assert!(
+                claim.contains(&parameter),
+                "the claim statement must bind {parameter}"
+            );
+        }
+        let beyond = format!("${}", LADDER_FIRST_PARAMETER + RETRY_LADDER_ARITY);
+        assert!(
+            !claim.contains(&beyond),
+            "the claim statement binds {beyond}, so the published arity is short"
+        );
+        // The schedule is expressed in the same unit the failure path uses.
+        assert!(claim.contains("interval '1 millisecond'"));
+        assert!(!claim.contains("interval '1 second'"));
+    }
+
+    /// The claim statement admits attempts strictly below the budget and the
+    /// exhaustion sweep takes everything from the budget upward. The two have to
+    /// partition the space: a gap parks a recovery durably with nothing watching
+    /// it, which is what an equality test did the moment a budget was lowered.
+    #[test]
+    fn the_claim_and_exhaustion_predicates_partition_the_budget() {
+        assert!(
+            crate::lock_inventory::AUTOMATIC_RECONCILIATION_CLAIM.contains("attempt_count < $2"),
+            "the claim statement must admit attempts below the budget"
+        );
+        for budget in [1_i64, 2, 5, 9] {
+            for attempt_count in 0..12_i64 {
+                let claimable = attempt_count < budget;
+                let exhausted = attempt_count >= budget;
+                assert!(
+                    claimable ^ exhausted,
+                    "attempt_count {attempt_count} under budget {budget} is on both sides or neither"
+                );
+            }
+        }
     }
 
     /// A deployment cannot configure a deadline that would expire inside the
