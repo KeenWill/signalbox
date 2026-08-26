@@ -37,10 +37,13 @@ INSERT INTO imported_conversation_size_totals (
     normalized_entry_bytes
 )
 SELECT imported.imported_conversation_id,
-       (SELECT COALESCE(SUM(octet_length(blob.raw_bytes)), 0)::numeric
+       -- 202608110019_imported_source_blobs.sql moved raw source bytes out of
+       -- imported_raw_source_record and into immutable blob storage, so the
+       -- durable byte total is the catalog length of each referenced blob.
+       (SELECT COALESCE(SUM(stored_blob.byte_length), 0)::numeric
           FROM imported_conversation_raw_record AS occurrence
-          JOIN imported_raw_source_record AS blob
-            ON blob.content_hash = occurrence.content_hash
+          JOIN blob AS stored_blob
+            ON stored_blob.digest = occurrence.content_hash
          WHERE occurrence.imported_conversation_id = imported.imported_conversation_id),
        (SELECT COALESCE(SUM(octet_length(normalized_value_encoding)), 0)::numeric
           FROM imported_conversation_raw_record AS occurrence
