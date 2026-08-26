@@ -742,12 +742,18 @@ change the lexical request into a database query language.
 The dedicated PostgreSQL full-text projection indexes canonical accepted user
 text, final assistant transcript text, model-visible tool arguments and results,
 current session title/tags/searchable attributes, explicitly published
-attachment filenames and media metadata, and durable derived text. Context
-summaries are the implemented transcript-owned derived-text producer. Attachment
-and other derivation producers publish only text their durable contract
-explicitly supplies, through the typed projection-writer port and after their
-own source exists. The projection performs no implicit attachment reading, OCR,
-text extraction, or model pass.
+attachment filenames and media metadata, and durable derived text. The
+implemented producers are durable transitions that project their own text as
+they commit: input acceptance, steering acceptance, a terminal model call, a
+tool batch transition, context compaction, and session-metadata installation.
+Context summaries are the implemented transcript-owned derived-text producer.
+Publication through the typed projection-writer port is committed unimplemented
+functionality — no present producer calls it, so attachment filenames,
+attachment media metadata, and explicitly derived text artifacts are classes the
+schema admits and a read returns, with nothing in the daemon publishing them
+yet. A producer that adopts the port publishes only text its durable contract
+explicitly supplies, and only after its own source exists. The projection
+performs no implicit attachment reading, OCR, text extraction, or model pass.
 
 Every result carries its session, stable timeline address, typed owning
 session/input/turn transcript entry/tool request/tool attempt/attachment/derived
