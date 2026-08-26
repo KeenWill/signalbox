@@ -211,12 +211,13 @@ bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
 listener therefore rejects non-loopback binds; any future remote deployment
 requires an explicit authentication and transport-security design first.
 Unauthenticated session reads — the session descriptor, the session timeline,
-the operator attention snapshot and its follow stream, and the blob descriptor
-and content routes — additionally require a loopback `Host` authority:
-`localhost` or an IPv4 or IPv6 loopback address, with an optional port. Another
-authority receives a structured `403 Forbidden` transport error with code
-`non_loopback_host_rejected` before session data, blob metadata, or blob bytes
-are read, and before a descriptor read may start image derivation work.
+the bounded lexical search, the operator attention snapshot and its follow
+stream, and the blob descriptor and content routes — additionally require a
+loopback `Host` authority: `localhost` or an IPv4 or IPv6 loopback address, with
+an optional port. Another authority receives a structured `403 Forbidden`
+transport error with code `non_loopback_host_rejected` before session data,
+search results, blob metadata, or blob bytes are read, and before a descriptor
+read may start image derivation work.
 
 `GET /api/bootstrap` describes the production browser contract. It returns the
 exact contract family `signalbox.web-http`, version `2`, the `bounded_json`,
