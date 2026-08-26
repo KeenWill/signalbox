@@ -12,6 +12,8 @@
     reason = "the standalone live integration smoke uses explicit fixture assertions"
 )]
 
+mod support;
+
 use std::{
     error::Error,
     fs, io,
@@ -34,7 +36,7 @@ use signalbox_model_runtime::{
     ToolCallId, ToolCallProposal, ToolName,
 };
 use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
@@ -46,6 +48,7 @@ use signalbox_process_protocol::{
     encode_client_line,
 };
 use signalbox_tools_basic::SESSION_STATUS_UPDATE_NAME;
+use signalbox_tools_code_host::CodeHostNumericBounds;
 use signalbox_tools_conversations::{
     LIST_CONVERSATIONS_NAME, READ_CONVERSATION_NAME, READ_IMPORTED_CONVERSATION_NAME,
     READ_OWN_CONVERSATION_NAME,
@@ -230,6 +233,24 @@ async fn run_live_smoke() -> SmokeResult {
         .exec_supervisor_executable()
         .to_path_buf();
     let web_fetch_egress_policy = model_configuration.web_fetch_egress_policy();
+    let numeric_bounds = model_configuration.numeric_bounds();
+    let configured_usize = |field| {
+        numeric_bounds
+            .integer(field)
+            .flatten()
+            .map(usize::try_from)
+            .transpose()
+    };
+    let code_host_numeric_bounds = CodeHostNumericBounds::new(
+        numeric_bounds
+            .duration("code_host_request_timeout")
+            .flatten(),
+        configured_usize("max_job_log_bytes")?,
+        configured_usize("max_stack_comparisons_in_flight")?,
+        configured_usize("max_code_host_result_text_bytes")?,
+        configured_usize("max_code_host_result_items")?,
+        configured_usize("max_repository_file_content_bytes")?,
+    );
 
     let listener = LocalProcessListener::bind(&socket)?;
     let (eligibility_nudge, _work_source) =
@@ -266,11 +287,12 @@ async fn run_live_smoke() -> SmokeResult {
             code_host: credentials.clone(),
             github: credentials,
         },
-        GitHubCodeHostTransport::try_new()?,
+        GitHubCodeHostTransport::try_new(code_host_numeric_bounds)?,
         github_egress_policy,
         &configured_workspace,
         git_identity,
         &exec_supervisor_executable,
+        None,
         web_fetch_egress_policy,
     )?;
     let (tool_catalog, tool_executor) = tools.into_parts();
@@ -284,7 +306,7 @@ async fn run_live_smoke() -> SmokeResult {
     let expected_model_operations = scripts.len();
     let scripted = ScriptedModel::<ModelCallId>::following(scripts);
     let probe = scripted.clone();
-    let provider = RuntimeModelCallProvider::new(scripted, runtime_models);
+    let provider = RuntimeModelCallProvider::new(scripted, runtime_models, None);
     let execution = signalboxd::PostgresProviderModelExecution::new(
         PostgresModelCallRepository::new(
             pool.clone(),
@@ -293,6 +315,7 @@ async fn run_live_smoke() -> SmokeResult {
         ),
         InProcessAttemptDispatchGate::default(),
         provider,
+        None,
     )
     .with_tool_loop(tool_gate, tool_catalog, tool_executor)
     .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
@@ -520,7 +543,7 @@ selection_id = "00000000-0000-0000-0000-000000000001"
         workspace.display(),
         executable.display(),
     );
-    Ok(HubModelConfiguration::parse(&configuration)?)
+    Ok(support::parse_model_configuration(&configuration)?)
 }
 
 fn session_template_configuration(
@@ -907,9 +930,18 @@ fn assert_own_transcript(results: &[Value]) -> SmokeResult {
         return Err(io::Error::other("conversation round returned the wrong result count").into());
     };
     let visible = transcript["entries"].as_array().is_some_and(|entries| {
-        entries
-            .iter()
-            .any(|entry| entry["content"] == TRANSCRIPT_MARKER)
+        entries.iter().any(|entry| {
+            entry["content"]
+                .as_str()
+                .and_then(|content| serde_json::from_str::<Value>(content).ok())
+                .is_some_and(|content| {
+                    content
+                        == serde_json::json!([{
+                            "type": "text",
+                            "text": TRANSCRIPT_MARKER,
+                        }])
+                })
+        })
     });
     assert!(
         visible,
@@ -1235,7 +1267,7 @@ async fn migrated_postgres() -> SmokeResult<(ContainerAsync<Postgres>, PgPool)> 
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()

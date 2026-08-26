@@ -5,7 +5,7 @@ use std::{error::Error, fmt, future::Future, time::SystemTime};
 use jiff::{
     Timestamp,
     fmt::strtime,
-    tz::{self, TimeZone},
+    tz::{TimeZone, TimeZoneDatabase},
 };
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
@@ -242,7 +242,7 @@ where
     serde::Deserialize::deserialize(deserializer).map(Some)
 }
 
-/// One recognized IANA zone or link identifier resolved against the installed
+/// One recognized IANA zone or link identifier resolved against Jiff's bundled
 /// time-zone database.
 ///
 /// Admission is the contract the executor relies on: auxiliary TZif paths
@@ -269,7 +269,7 @@ impl TryFrom<String> for IanaTimeZone {
     type Error = UnrecognizedIanaTimeZone;
 
     fn try_from(name: String) -> Result<Self, Self::Error> {
-        let database = tz::db();
+        let database = TimeZoneDatabase::bundled();
         if matches!(name.as_str(), "localtime" | "posixrules")
             || !database
                 .available()

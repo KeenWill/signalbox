@@ -459,6 +459,8 @@ export function ProductApp({
       dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
       focusTimeline: () => {
         if (timelineRef.current !== null) {

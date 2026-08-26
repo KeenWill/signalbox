@@ -287,7 +287,7 @@ async fn poll_terminal_transcript(
     loop {
         let rows = sqlx::query_as::<_, TranscriptRow>(
             "SELECT entry.payload_kind,
-                    accepted.content_text,
+                    accepted_part.text_value,
                     entry.assistant_text_value
                FROM turn_lifecycle AS lifecycle
                JOIN context_frontier_member AS member
@@ -299,6 +299,10 @@ async fn poll_terminal_transcript(
                LEFT JOIN accepted_input AS accepted
                  ON accepted.session_id = entry.source_session_id
                 AND accepted.accepted_input_id = entry.origin_accepted_input_id
+               LEFT JOIN accepted_input_content_part AS accepted_part
+                 ON accepted_part.accepted_input_id = accepted.accepted_input_id
+                AND accepted_part.position = 0
+                AND accepted_part.part_kind = 'text'
               WHERE lifecycle.session_id = $1
                 AND lifecycle.turn_id = $2
                 AND lifecycle.state_kind = 'terminal'
@@ -407,6 +411,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
         credential_reference,
         credential_pin,
         credential_families,
+        automatic_tool_round_limit,
         instruction_roots,
         provider,
     ) = match provider {
@@ -430,6 +435,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 // catalog at all rather than an empty one: an empty catalog
                 // resolves no family and fails the call as corruption, while
                 // `None` is what selects the fallback reference.
+                None,
                 None,
                 Vec::new(),
                 DebugProviderRuntime::Scripted(
@@ -457,13 +463,39 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                     }),
             );
             let credential_reference = ModelCallCredentialReference::new(credential_profile);
-            let mut adapter_configuration = AnthropicConfig::new();
+            let native_message_limit = configuration
+                .numeric_bounds()
+                .integer("max_native_message_bytes")
+                .ok_or(DebugDriverError::Configuration)?
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| DebugDriverError::Configuration)?;
+            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = configuration
+                .numeric_bounds()
+                .duration("model_exchange_timeout")
+                .ok_or(DebugDriverError::Configuration)?;
             adapter_configuration.model_capabilities =
                 configuration.runtime_model_capability_catalog();
             let runtime = AnthropicRuntime::new(adapter_configuration, credential_access)
                 .map_err(|_| DebugDriverError::Configuration)?;
-            let provider =
-                RuntimeModelCallProvider::new(runtime, configuration.runtime_model_catalog());
+            let diagnostic_model_identity_limit = configuration
+                .numeric_bounds()
+                .integer("diagnostic_model_identity_limit")
+                .flatten()
+                .and_then(|value| usize::try_from(value).ok());
+            let automatic_tool_round_limit = configuration
+                .numeric_bounds()
+                .integer("max_automatic_tool_rounds_per_turn")
+                .ok_or(DebugDriverError::Configuration)?
+                .map(usize::try_from)
+                .transpose()
+                .map_err(|_| DebugDriverError::Configuration)?;
+            let provider = RuntimeModelCallProvider::new(
+                runtime,
+                configuration.runtime_model_catalog(),
+                diagnostic_model_identity_limit,
+            );
             let instruction_roots = configuration.workspace_instructions().roots().to_vec();
             (
                 selection,
@@ -471,6 +503,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                 credential_reference,
                 configuration.session_credential_pin(),
                 Some(configuration.credential_family_catalog()),
+                automatic_tool_round_limit,
                 instruction_roots,
                 DebugProviderRuntime::Anthropic(provider),
             )
@@ -583,6 +616,7 @@ async fn run(arguments: DebugArguments) -> Result<(), DebugDriverError> {
                         repository,
                         InProcessAttemptDispatchGate::default(),
                         provider,
+                        automatic_tool_round_limit,
                     ),
                     workspace_instructions,
                 ));
@@ -683,7 +717,7 @@ mod tests {
     fn anthropic_debug_mode_rejects_a_configured_codex_route() {
         let selection =
             DirectModelSelection::from_uuid(Uuid::from_u128(0x10000000000040008000000000000001));
-        let configuration = HubModelConfiguration::parse(
+        let configuration = parse_model_configuration(
             r#"
 version = 1
 
@@ -720,8 +754,7 @@ provider_model = "gpt-example"
 max_output_tokens = 20
 context_window_tokens = 100
 "#,
-        )
-        .expect("Codex debug fixture configuration is valid");
+        );
 
         assert_eq!(
             require_anthropic_selection(&configuration, selection),
@@ -739,5 +772,17 @@ context_window_tokens = 100
         );
         failure.wait().await;
         assert!(failure.is_triggered());
+    }
+
+    fn parse_model_configuration(content: &str) -> HubModelConfiguration {
+        let example = include_str!("../../../../config/signalboxd.example.toml");
+        let (_, numeric_bounds_and_after) = example
+            .split_once("[numeric_bounds]")
+            .expect("the example declares numeric bounds");
+        let (numeric_bounds, _) = numeric_bounds_and_after
+            .split_once("\n# Blob bytes live outside PostgreSQL.")
+            .expect("the example terminates numeric bounds");
+        HubModelConfiguration::parse(&format!("{content}\n[numeric_bounds]{numeric_bounds}\n"))
+            .expect("the model configuration fixture is valid")
     }
 }
