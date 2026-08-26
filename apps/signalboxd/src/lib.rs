@@ -1128,9 +1128,11 @@ struct SchedulerPassOccupancyRecovery {
     /// in-process reconciles that shape: the session's compaction boundary
     /// answers busy while it stands, which closes every queued turn before
     /// dispatch until the daemon restarts.
-    /// Each entry holds the compaction call that window has made durable so
-    /// far, which stays `None` while the read-only preflight is still choosing
-    /// a boundary and nothing is yet owed recovery.
+    /// Each entry holds the compaction call that window has staked, which stays
+    /// `None` only while the read-only preflight is still choosing a boundary
+    /// and no identity has been committed to yet. The identity is recorded
+    /// before its preparation is awaited, so a prepare that commits and is then
+    /// dropped mid-acknowledgement is still named.
     compacting_sessions: std::sync::Arc<std::sync::Mutex<HashMap<SessionId, Option<ModelCallId>>>>,
     policy: ExpiredPassRecoveryPolicy,
     persistence_bounds: TurnLivenessPersistenceBounds,
@@ -1143,7 +1145,8 @@ enum ExpiredPassSubject {
     ActiveTurn(TurnId),
     /// The pass expired inside its pre-activation compaction window, which
     /// reports no turn and owns the named durable compaction instead. `None`
-    /// means the window had not made anything durable yet, so it owes nothing.
+    /// means the window had not yet staked an identity, so nothing durable can
+    /// exist for it to owe.
     PreActivationCompaction(Option<ModelCallId>),
     /// Nothing durable this pass owns can be named here.
     Uncorrelated,
@@ -1212,11 +1215,17 @@ impl SchedulerPassOccupancyRecovery {
     }
 
     /// Marks the session for the length of its pre-activation compaction, and
-    /// returns the observer that names the call once one becomes durable.
+    /// returns the observer that stakes the call it is about to prepare.
     ///
     /// The observer is what makes a stranded compaction recoverable by
-    /// identity. Until it fires the window owns nothing durable, so an expiry
-    /// inside the read-only preflight correctly hands over no recovery at all.
+    /// identity. It fires before preparation is awaited rather than after it
+    /// returns, because that await is itself droppable: a prepare can commit
+    /// and lose its acknowledgement to the occupancy bound, and an identity
+    /// recorded only on success would leave that row unnamed. Recovery names
+    /// the exact call, so staking one that never becomes durable costs
+    /// nothing — it is simply found absent. Until the observer fires no
+    /// identity is in play, so an expiry inside the read-only preflight
+    /// correctly hands over no recovery at all.
     fn compaction_window(
         &self,
         session: SessionId,

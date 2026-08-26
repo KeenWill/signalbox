@@ -7503,6 +7503,7 @@ pub(crate) async fn compact_automatically(
     .await?
     .ok_or(AutomaticContextCompactionError::InputDoesNotFit)?;
     let prepared = loop {
+        let call = ModelCallId::from_uuid(uuid::Uuid::now_v7());
         let request = PrepareContextCompactionRequest {
             command: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
             session,
@@ -7513,11 +7514,25 @@ pub(crate) async fn compact_automatically(
             target,
             input_includes_cache_tokens,
             credential_reference: credential_reference.as_str().to_owned(),
-            call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
+            call,
             compaction: ContextCompactionId::from_uuid(uuid::Uuid::now_v7()),
             summary_entry: SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
             result_frontier: ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
         };
+        // Named before the await, not after it. A scheduler pass drops this
+        // future the moment its occupancy bound expires, and that drop can land
+        // while this prepare is waiting for its commit to be acknowledged — the
+        // row durable, the answer never delivered. Reporting the identity only
+        // on the way out would leave that compaction unnamed, so expiry would
+        // read the window as still inside its read-only preflight and hand over
+        // no recovery at all: exactly the wedge this handoff exists to close.
+        // Early reporting is safe in the other direction, because recovery
+        // names this exact call and a prepare that never became durable is
+        // simply found absent. A collision retry is rejected before it commits,
+        // so overwriting with the next attempt's identity cannot orphan a row.
+        if let Some(observe_prepared) = observe_prepared {
+            observe_prepared(call);
+        }
         match repository.prepare(request).await {
             Ok(PrepareContextCompactionOutcome::Prepared(prepared)) => break prepared,
             Ok(
@@ -7539,9 +7554,6 @@ pub(crate) async fn compact_automatically(
             Err(error) => return Err(AutomaticContextCompactionError::Repository(error)),
         }
     };
-    if let Some(observe_prepared) = observe_prepared {
-        observe_prepared(prepared.call());
-    }
     let rendered_range = match retry_context_compaction_range_database_reads(|| {
         load_context_compaction_range(model_calls.pool(), &prepared)
     })
