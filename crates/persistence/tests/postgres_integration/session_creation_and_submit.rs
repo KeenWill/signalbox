@@ -3408,12 +3408,12 @@ async fn unknown_attachment_fixture() -> Result<UnknownAttachmentFixture, Box<dy
     })
 }
 
-/// INV-012 / INV-061: an attachment without a catalogued verified replica is
+/// INV-012 / INV-089: an attachment without a catalogued verified replica is
 /// rejected only after the durable command identity is claimed, and the
 /// unavailable digest is the recorded evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv012_inv061_unknown_attachment_is_a_post_claim_rejection() -> Result<(), Box<dyn Error>>
+async fn inv012_inv089_unknown_attachment_is_a_post_claim_rejection() -> Result<(), Box<dyn Error>>
 {
     let fixture = unknown_attachment_fixture().await?;
     assert_eq!(
@@ -3591,12 +3591,12 @@ fn distinct_attachment_command(
     )
 }
 
-/// INV-061: repeated references to one digest consume its catalogued length
+/// INV-089: repeated references to one digest consume its catalogued length
 /// only once, so a doubled reference within the bound reaches session lookup
 /// rather than the byte-budget rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<dyn Error>> {
+async fn inv089_attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<dyn Error>> {
     let fixture = attachment_budget_fixture().await?;
     let repeated = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb322)),
@@ -3624,11 +3624,11 @@ async fn inv061_attachment_admission_counts_a_repeated_digest_once() -> Result<(
     Ok(())
 }
 
-/// INV-061: distinct catalogued digest lengths above the deployment maximum
+/// INV-089: distinct catalogued digest lengths above the deployment maximum
 /// produce the typed rejection and its durable maximum evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_distinct_attachment_bytes_above_the_maximum_are_rejected()
+async fn inv089_distinct_attachment_bytes_above_the_maximum_are_rejected()
 -> Result<(), Box<dyn Error>> {
     let fixture = attachment_budget_fixture().await?;
     let distinct_command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xb325));
@@ -3763,12 +3763,12 @@ async fn queued_frontier_fixture() -> Result<QueuedFrontierFixture, Box<dyn Erro
     })
 }
 
-/// INV-061: a newly queued input is rejected when the complete prospective
+/// INV-089: a newly queued input is rejected when the complete prospective
 /// rendered frontier, rather than either input alone, exceeds the attachment
 /// verification bound.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_queued_input_checks_the_complete_prospective_attachment_frontier()
+async fn inv089_queued_input_checks_the_complete_prospective_attachment_frontier()
 -> Result<(), Box<dyn Error>> {
     let fixture = queued_frontier_fixture().await?;
     let delivery = DeliveryRequest::StartWhenNoActiveTurn {
@@ -3903,11 +3903,11 @@ async fn inv012_queued_frontier_rejection_replays_exactly() -> Result<(), Box<dy
     Ok(())
 }
 
-/// INV-061: a rejected queued frontier rolls back every provisional accepted
+/// INV-089: a rejected queued frontier rolls back every provisional accepted
 /// input and queue-origin effect.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_queued_frontier_rejection_rolls_back_provisional_effects()
+async fn inv089_queued_frontier_rejection_rolls_back_provisional_effects()
 -> Result<(), Box<dyn Error>> {
     let fixture = queued_frontier_fixture().await?;
     let delivery = DeliveryRequest::StartWhenNoActiveTurn {
@@ -4049,11 +4049,11 @@ async fn steering_frontier_fixture() -> Result<SteeringFrontierFixture, Box<dyn 
     })
 }
 
-/// INV-061: pending steering is rejected when it would make a queued
+/// INV-089: pending steering is rejected when it would make a queued
 /// successor's eventual rendered frontier exceed the attachment bound.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_pending_steering_rechecks_affected_queued_attachment_frontiers()
+async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
 -> Result<(), Box<dyn Error>> {
     let fixture = steering_frontier_fixture().await?;
     let queued = SubmitInput::new(
@@ -4166,11 +4166,11 @@ async fn inv012_steering_frontier_rejection_replays_exactly() -> Result<(), Box<
     Ok(())
 }
 
-/// INV-061: a rejected steering frontier rolls back the provisional pending
+/// INV-089: a rejected steering frontier rolls back the provisional pending
 /// steering while preserving the active and queued origins.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv061_steering_frontier_rejection_rolls_back_provisional_effects()
+async fn inv089_steering_frontier_rejection_rolls_back_provisional_effects()
 -> Result<(), Box<dyn Error>> {
     let fixture = steering_frontier_fixture().await?;
     fixture
