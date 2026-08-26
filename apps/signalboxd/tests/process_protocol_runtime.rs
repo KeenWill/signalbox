@@ -34,7 +34,8 @@ use signalbox_application::{
     RepoWatchConvergenceVerdict, RepoWatchReviewDecision, SchedulerLoop, SchedulerLoopExit,
     ScriptedModelCallProvider, ScriptedModelCallStep, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanService, UuidV7ModelCallExecutionIdGenerator,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator, scheduler_pass_admission_cap,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    scheduler_ordinary_pass_limit,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
@@ -102,7 +103,7 @@ use signalbox_process_protocol::{
     ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame,
     ServerMessage, SessionEvent, SessionMetadata, SessionPlacement, SettingOverlay,
     SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry,
-    TurnState, decode_server_line, encode_client_line,
+    TurnState, UserInputContent, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
@@ -673,7 +674,7 @@ where
         let witness = self.witness.clone();
         async move {
             let batch = self.inner.find_sessions().await?;
-            let (sessions, continuation) = batch.clone().into_parts();
+            let (sessions, _dispatch_starts, continuation) = batch.clone().into_parts();
             witness.record_batch(&sessions, continuation);
             Ok(batch)
         }
@@ -1826,7 +1827,7 @@ async fn submit_first_input(
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(content),
+                content: UserInputContent::text(content),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -2425,7 +2426,10 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
 // slices: they need the same fleet census but not more boot infrastructure.
 
 // numeric-bound: derived ceiling from SCHEDULER_PASS_ADMISSION_CAP
-const FLEET_SESSION_COUNT: usize = scheduler_pass_admission_cap();
+// One place inside the shared admission cap stays reserved for a
+// repository-watch dispatch start, so a fleet that saturates ordinary
+// scheduler capacity is one session smaller than the cap itself.
+const FLEET_SESSION_COUNT: usize = scheduler_ordinary_pass_limit();
 // numeric-bound: tunable - keeps each fault observation short in CI
 const FLEET_ASSERTION_BOUND: Duration = Duration::from_secs(2);
 // numeric-bound: tunable - admits contended CI scheduling without weakening assertions
@@ -3207,7 +3211,7 @@ struct InputAcceptedEventFacts {
     session_id: CanonicalUuid,
     accepted_input_id: CanonicalUuid,
     acceptance_position: u64,
-    content: InputContent,
+    content: UserInputContent,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -5179,7 +5183,7 @@ async fn s28_submit_accepts_imported_session_continuation() -> Result<(), Box<dy
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(String::from("native continuation")),
+                content: UserInputContent::text(String::from("native continuation")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -5201,25 +5205,32 @@ async fn process_runtime_rejects_oversized_submitted_input() -> Result<(), Box<d
     let mut connection = Connection::connect(runtime.socket()).await?;
     let session_id = create_alias_session(&mut connection).await?;
 
-    connection
-        .request(
-            2,
-            ClientRequest::SubmitInput {
-                command_id: command()?,
-                session_id,
-                content: InputContent::new("x".repeat(OVERSIZED_SUBMITTED_INPUT_BYTES)),
-                expected_defaults_version: Some(CanonicalU64::new(1)),
-                model_settings: ModelSettingsOverlay::inherit_all(),
-                delivery: None,
+    let frame = serde_json::json!({
+        "version": 1,
+        "request_id": "2",
+        "request": {
+            "type": "submit_input",
+            "command_id": command()?,
+            "session_id": session_id,
+            "content": [{
+                "type": "text",
+                "text": "x".repeat(OVERSIZED_SUBMITTED_INPUT_BYTES),
+            }],
+            "expected_defaults_version": "1",
+            "model_settings": {
+                "reasoning_level": { "kind": "inherit" },
+                "fast_mode": { "kind": "inherit" },
+                "service_tier": { "kind": "inherit" },
             },
-        )
-        .await?;
+        },
+    });
+    connection.raw_request(&format!("{frame}\n")).await?;
 
     let response = response_within(&mut connection).await?;
     assert!(matches!(
         response.message(),
         ServerMessage::Error {
-            code: ErrorCode::InvalidRequest,
+            code: ErrorCode::MalformedFrame,
             ..
         }
     ));
@@ -5327,7 +5338,9 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(String::from("work while the ambiguity is unresolved")),
+                content: UserInputContent::text(String::from(
+                    "work while the ambiguity is unresolved",
+                )),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -5351,7 +5364,7 @@ async fn s04_inv029_reconcile_turn_releases_a_wedged_ambiguous_session()
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("continue after reconciliation")),
+                content: UserInputContent::text(String::from("continue after reconciliation")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: ModelSettingsOverlay::inherit_all(),
             },
@@ -5483,7 +5496,7 @@ async fn connection_reconciles_the_parked_turn(
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("continue after the wedge")),
+                content: UserInputContent::text(String::from("continue after the wedge")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: ModelSettingsOverlay::inherit_all(),
             },
@@ -5517,7 +5530,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: unparked_turn_id,
-                content: InputContent::new(String::from("names no parked turn")),
+                content: UserInputContent::text(String::from("names no parked turn")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: ModelSettingsOverlay::inherit_all(),
             },
@@ -5539,7 +5552,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("continue after reconciliation")),
+                content: UserInputContent::text(String::from("continue after reconciliation")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: ModelSettingsOverlay::inherit_all(),
             },
@@ -5555,7 +5568,7 @@ async fn s04_inv029_reconcile_turn_refuses_a_turn_that_owes_no_decision()
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("the decision is already recorded")),
+                content: UserInputContent::text(String::from("the decision is already recorded")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: ModelSettingsOverlay::inherit_all(),
             },
@@ -5590,7 +5603,7 @@ async fn inv012_reconcile_turn_replays_a_committed_decision() -> Result<(), Box<
         command_id: command()?,
         session_id,
         expected_active_turn_id: parked_turn_id,
-        content: InputContent::new(String::from("continue after reconciliation")),
+        content: UserInputContent::text(String::from("continue after reconciliation")),
         expected_defaults_version: CanonicalU64::new(1),
         model_settings: ModelSettingsOverlay::inherit_all(),
     };
@@ -5635,7 +5648,7 @@ async fn s37_inv053_reconcile_turn_records_its_per_call_model_settings()
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("continue with deliberate reasoning")),
+                content: UserInputContent::text(String::from("continue with deliberate reasoning")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: requested,
             },
@@ -5681,7 +5694,7 @@ async fn inv012_overlapping_equal_reconciliations_both_reach_the_committed_decis
         command_id: command()?,
         session_id,
         expected_active_turn_id: parked_turn_id,
-        content: InputContent::new(String::from("continue after reconciliation")),
+        content: UserInputContent::text(String::from("continue after reconciliation")),
         expected_defaults_version: CanonicalU64::new(1),
         model_settings: ModelSettingsOverlay::inherit_all(),
     };
@@ -5725,7 +5738,7 @@ async fn s04_reconcile_turn_reports_an_absent_session_exactly() -> Result<(), Bo
                 command_id: command()?,
                 session_id: absent_session_id,
                 expected_active_turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(0xB3)),
-                content: InputContent::new(String::from("names no session")),
+                content: UserInputContent::text(String::from("names no session")),
                 expected_defaults_version: CanonicalU64::new(1),
                 model_settings: ModelSettingsOverlay::inherit_all(),
             },
@@ -5772,7 +5785,7 @@ async fn process_runtime_reads_one_queued_transcript_snapshot() -> Result<(), Bo
         projected_state,
         TurnState::Queued {
             accepted_input_id: accepted_input,
-            content: InputContent::new(content),
+            content: UserInputContent::text(content),
         }
     );
     let model_calls_end = response_within(&mut connection).await?;
@@ -5814,7 +5827,7 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
     // its start frame. Commit the next update before draining the snapshot so
     // only a subscription formed before snapshot transmission can retain it.
     let second_position = 2;
-    let second_content = InputContent::new(String::from("second input"));
+    let second_content = UserInputContent::text(String::from("second input"));
     commands
         .request(
             6,
@@ -5841,7 +5854,7 @@ async fn s24_process_runtime_follow_snapshot_handoff_has_no_race() -> Result<(),
         projected_state,
         TurnState::Queued {
             accepted_input_id: first_accepted_input,
-            content: InputContent::new(first_content),
+            content: UserInputContent::text(first_content),
         }
     );
     let model_calls_end = response_within(&mut follow).await?;
@@ -6321,7 +6334,7 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: stopped_turn_id,
-                content: InputContent::new(successor_content.clone()),
+                content: UserInputContent::text(successor_content.clone()),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6342,7 +6355,7 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
     let TurnState::Queued { content, .. } = turn_state_of(&messages, successor_turn_id) else {
         panic!("fixture expected queued successor turn");
     };
-    assert_eq!(content.as_str(), successor_content);
+    assert_eq!(content.single_text(), Some(successor_content.as_str()));
     assert_eq!(cancellation_marker_count(&messages, stopped_turn_id), 1);
 
     drop(connection);
@@ -6352,7 +6365,7 @@ async fn s07_inv029_stop_turn_cancels_the_activated_turn_and_queues_its_successo
 /// S07 / INV-029: stopping an issued call records the durable cancellation
 /// request and retains the slot for lifecycle closure, and a distinct second
 /// stop is refused with the exact prior stop authority named.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_once()
 -> Result<(), Box<dyn Error>> {
@@ -6373,7 +6386,7 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
                 command_id: first_stop_command,
                 session_id,
                 expected_active_turn_id: stopped_turn_id,
-                content: InputContent::new(String::from("continue after the stop")),
+                content: UserInputContent::text(String::from("continue after the stop")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6409,7 +6422,7 @@ async fn s07_inv029_stop_turn_requests_cancellation_of_an_issued_call_exactly_on
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: stopped_turn_id,
-                content: InputContent::new(String::from("a second distinct stop")),
+                content: UserInputContent::text(String::from("a second distinct stop")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6448,7 +6461,7 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: unstarted_turn_id,
-                content: InputContent::new(String::from("names no active turn")),
+                content: UserInputContent::text(String::from("names no active turn")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6474,7 +6487,7 @@ async fn s07_stop_turn_refusals_are_typed_and_exact() -> Result<(), Box<dyn Erro
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: unstarted_turn_id,
-                content: InputContent::new(String::from("names a stale turn")),
+                content: UserInputContent::text(String::from("names a stale turn")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6510,7 +6523,7 @@ async fn inv012_stop_turn_replays_its_recorded_successor() -> Result<(), Box<dyn
         command_id: command()?,
         session_id,
         expected_active_turn_id: stopped_turn_id,
-        content: InputContent::new(String::from("continue after the stop")),
+        content: UserInputContent::text(String::from("continue after the stop")),
         expected_defaults_version: CanonicalU64::new(1),
         descendant_scope: DescendantTerminationScope::ParentAlone,
         model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6555,7 +6568,7 @@ async fn s37_inv053_stop_turn_records_its_per_call_model_settings() -> Result<()
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: stopped_turn_id,
-                content: InputContent::new(String::from("continue with deliberate reasoning")),
+                content: UserInputContent::text(String::from("continue with deliberate reasoning")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: requested,
@@ -6605,7 +6618,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("stop during the approval wait")),
+                content: UserInputContent::text(String::from("stop during the approval wait")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6665,7 +6678,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
                 command_id: command()?,
                 session_id,
                 expected_active_turn_id: parked_turn_id,
-                content: InputContent::new(String::from("continue after the denied round")),
+                content: UserInputContent::text(String::from("continue after the denied round")),
                 expected_defaults_version: CanonicalU64::new(1),
                 descendant_scope: DescendantTerminationScope::ParentAlone,
                 model_settings: ModelSettingsOverlay::inherit_all(),
@@ -6681,7 +6694,7 @@ async fn s07_s10_inv029_stop_against_a_tool_round_stays_fail_closed_then_deny_an
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(String::from("ordinary later work")),
+                content: UserInputContent::text(String::from("ordinary later work")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -6965,7 +6978,7 @@ async fn inv012_decide_tool_request_replays_equally_and_refuses_conflicting_reus
             ClientRequest::SubmitInput {
                 command_id: submit_command,
                 session_id,
-                content: InputContent::new(String::from("claims a submit identity")),
+                content: UserInputContent::text(String::from("claims a submit identity")),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -7114,7 +7127,7 @@ async fn submit_queued_input(
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(content.to_owned()),
+                content: UserInputContent::text(content.to_owned()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Queue {
@@ -7178,7 +7191,7 @@ async fn s08_steering_without_an_active_turn_is_a_typed_rejection() -> Result<()
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(String::from("steer no turn")),
+                content: UserInputContent::text(String::from("steer no turn")),
                 expected_defaults_version: None,
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: Some(InputDelivery::Steer {
@@ -8116,7 +8129,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(second_user.clone()),
+                content: UserInputContent::text(second_user.clone()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -8500,7 +8513,7 @@ async fn inv009_inv014_compaction_preparation_serializes_turn_activation()
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(String::from(
+                content: UserInputContent::text(String::from(
                     "scheduler race successor remains singular",
                 )),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
@@ -8597,7 +8610,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(second_user.clone()),
+                content: UserInputContent::text(second_user.clone()),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -8743,7 +8756,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
             ClientRequest::SubmitInput {
                 command_id: command()?,
                 session_id,
-                content: InputContent::new(oversized_suffix),
+                content: UserInputContent::text(oversized_suffix),
                 expected_defaults_version: Some(CanonicalU64::new(1)),
                 model_settings: ModelSettingsOverlay::inherit_all(),
                 delivery: None,
@@ -9398,7 +9411,7 @@ impl ReviewRuntimeDriver {
                 ClientRequest::SubmitInput {
                     command_id: command()?,
                     session_id: session,
-                    content: InputContent::new(format!("review pass fixture {seed}")),
+                    content: UserInputContent::text(format!("review pass fixture {seed}")),
                     expected_defaults_version: Some(CanonicalU64::new(1)),
                     model_settings: ModelSettingsOverlay::inherit_all(),
                     delivery: None,

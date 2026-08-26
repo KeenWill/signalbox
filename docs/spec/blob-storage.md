@@ -31,6 +31,10 @@ Bounded direct metadata and range reads, replica fallback classification,
 non-waiting process admission, and the terminal read commands are verified
 against this implementing change (`agent/blob-storage-read-wire`).
 
+The canonical multipart domain algebra and ordered process-protocol vocabulary
+are verified against this implementing change
+(`agent/blob-storage-multipart-algebra`).
+
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
 configuration and routing, the ingest and read lifecycle, the blob wire
