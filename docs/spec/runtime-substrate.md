@@ -887,11 +887,12 @@ does not nest the outer JSON, and reports over-depth text as boundary loss; it
 judges neither syntax nor shape, so malformed and non-object argument text
 passes onward byte-verbatim when it is credential-shape clean rather than
 becoming boundary loss. Preserved text is proposal material the
-provider-independent decoders classify: `decode_tool_arguments` and
-`decode_structured_json` only return their typed `JsonSyntax` and
-`SchemaMismatch` failures, never a model call or repair round, and it is the
-tool loop that projects an ordinary proposal's typed failure as its
-`invalid_arguments` result for the next model round. Caller JSON remains raw
+provider-independent decoders classify: `decode_tool_arguments` returns exactly
+its typed `JsonSyntax` or `SchemaMismatch` failure, and `decode_structured_json`
+returns `JsonSyntax`, `SchemaMismatch`, or — where the caller supplies a domain
+validator — `DomainInvalid`. Neither performs a model call or a repair round,
+and it is the tool loop that projects an ordinary proposal's typed failure as
+its `invalid_arguments` result for the next model round. Caller JSON remains raw
 through serialization, preserving deep admitted values and their numeric
 lexemes. Buffered delivery retains its content without deltas; streamed delivery
 feeds raw bounded CLI reasoning and final-envelope text through the stateful
