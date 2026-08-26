@@ -3408,6 +3408,38 @@ async fn inv012_multipart_command_and_accepted_satellites_are_identical()
     Ok(())
 }
 
+/// Catalogues one blob identity with a verified replica in its own store
+/// binding, which is the only committed shape an admission check can observe as
+/// available.
+async fn catalog_verified_blob(
+    pool: &PgPool,
+    digest: BlobDigest,
+    byte_length: u64,
+    store_name: &str,
+    namespace_id: Uuid,
+    object_key: &str,
+) -> Result<(), Box<dyn Error>> {
+    let mut catalog = pool.begin().await?;
+    sqlx::query("INSERT INTO blob_store_binding (store_name, namespace_id) VALUES ($1, $2)")
+        .bind(store_name)
+        .bind(namespace_id)
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2)")
+        .bind(digest.as_bytes().as_slice())
+        .bind(Decimal::from(byte_length))
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query("INSERT INTO blob_replica (digest, store_name, object_key) VALUES ($1, $2, $3)")
+        .bind(digest.as_bytes().as_slice())
+        .bind(store_name)
+        .bind(object_key)
+        .execute(&mut *catalog)
+        .await?;
+    catalog.commit().await?;
+    Ok(())
+}
+
 struct UnknownAttachmentFixture {
     container: ContainerAsync<Postgres>,
     pool: PgPool,
@@ -3495,7 +3527,9 @@ async fn inv012_inv089_unknown_attachment_is_a_post_claim_rejection() -> Result<
     Ok(())
 }
 
-/// INV-012: an unknown-attachment rejection replays exactly.
+/// INV-012: an unknown-attachment rejection replays exactly. The digest is
+/// catalogued with a verified replica between the two calls, so revalidation
+/// would now admit the command and only durable replay returns the rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_unknown_attachment_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
@@ -3512,6 +3546,15 @@ async fn inv012_unknown_attachment_rejection_replays_exactly() -> Result<(), Box
         first,
         SubmitInputHandlingOutcome::Recorded(fixture.expected_result.clone())
     );
+    catalog_verified_blob(
+        &fixture.pool,
+        fixture.digest,
+        16,
+        "replayed_test",
+        Uuid::from_u128(0xb31a),
+        "replayed",
+    )
+    .await?;
     assert_eq!(
         fixture
             .repository
@@ -3573,27 +3616,15 @@ async fn inv012_changed_unknown_attachment_is_conflicting_reuse() -> Result<(), 
             .await?,
         SubmitInputHandlingOutcome::Recorded(fixture.expected_result.clone())
     );
-    let mut catalog = fixture.pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO blob_store_binding (store_name, namespace_id)
-         VALUES ('changed_test', $1)",
+    catalog_verified_blob(
+        &fixture.pool,
+        fixture.changed_digest,
+        16,
+        "changed_test",
+        Uuid::from_u128(0xb318),
+        "changed",
     )
-    .bind(Uuid::from_u128(0xb318))
-    .execute(&mut *catalog)
     .await?;
-    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2)")
-        .bind(fixture.changed_digest.as_bytes().as_slice())
-        .bind(Decimal::from(16_u64))
-        .execute(&mut *catalog)
-        .await?;
-    sqlx::query(
-        "INSERT INTO blob_replica (digest, store_name, object_key)
-         VALUES ($1, 'changed_test', 'changed')",
-    )
-    .bind(fixture.changed_digest.as_bytes().as_slice())
-    .execute(&mut *catalog)
-    .await?;
-    catalog.commit().await?;
     let changed = SubmitInput::new(
         fixture.command.command_id(),
         fixture.command.session(),
@@ -3627,8 +3658,12 @@ struct AttachmentBudgetFixture {
     /// repeated part value.
     repeated_first_part: UserContentPart,
     second_part: UserContentPart,
+    /// A third catalogued digest whose length completes `first_part`'s to
+    /// exactly `maximum`, so admission at the bound is observable.
+    completing_part: UserContentPart,
     session: SessionId,
     delivery: DeliveryRequest,
+    first_length: u64,
     maximum: u64,
 }
 
@@ -3643,13 +3678,17 @@ async fn attachment_budget_fixture() -> Result<AttachmentBudgetFixture, Box<dyn 
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_digest = BlobDigest::digest(b"first attachment");
     let second_digest = BlobDigest::digest(b"second attachment");
+    let completing_digest = BlobDigest::digest(b"completing attachment");
     // Each catalogued length is admissible on its own and only their sum
     // exceeds the maximum, so admission has to aggregate rather than compare
     // lengths one at a time. Doubling the first length also exceeds the
-    // maximum, so counting one digest twice cannot pass either.
+    // maximum, so counting one digest twice cannot pass either. The completing
+    // length brings the first to exactly the maximum, which the spec's "must
+    // not exceed" admits, so a `>=` comparison is observable.
     let first_length = 16_u64;
     let second_length = 12_u64;
     let maximum = 20_u64;
+    let completing_length = maximum - first_length;
     let mut catalog = pool.begin().await?;
     sqlx::query(
         "INSERT INTO blob_store_binding (store_name, namespace_id)
@@ -3658,20 +3697,24 @@ async fn attachment_budget_fixture() -> Result<AttachmentBudgetFixture, Box<dyn 
     .bind(Uuid::from_u128(0xb320))
     .execute(&mut *catalog)
     .await?;
-    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2), ($3, $4)")
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2), ($3, $4), ($5, $6)")
         .bind(first_digest.as_bytes().as_slice())
         .bind(Decimal::from(first_length))
         .bind(second_digest.as_bytes().as_slice())
         .bind(Decimal::from(second_length))
+        .bind(completing_digest.as_bytes().as_slice())
+        .bind(Decimal::from(completing_length))
         .execute(&mut *catalog)
         .await?;
     sqlx::query(
         "INSERT INTO blob_replica (digest, store_name, object_key)
          VALUES ($1, 'attachment_test', 'first'),
-                ($2, 'attachment_test', 'second')",
+                ($2, 'attachment_test', 'second'),
+                ($3, 'attachment_test', 'completing')",
     )
     .bind(first_digest.as_bytes().as_slice())
     .bind(second_digest.as_bytes().as_slice())
+    .bind(completing_digest.as_bytes().as_slice())
     .execute(&mut *catalog)
     .await?;
     catalog.commit().await?;
@@ -3698,8 +3741,10 @@ async fn attachment_budget_fixture() -> Result<AttachmentBudgetFixture, Box<dyn 
             ),
         },
         second_part: attachment_part(second_digest),
+        completing_part: attachment_part(completing_digest),
         session,
         delivery,
+        first_length,
         maximum,
     })
 }
@@ -3720,15 +3765,12 @@ fn distinct_attachment_command(
     )
 }
 
-/// INV-089: the digest is the accounting key, so two metadata-distinct parts
-/// naming one catalogued digest consume its length only once and reach session
-/// lookup rather than the byte-budget rejection.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn inv089_attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<dyn Error>> {
-    let fixture = attachment_budget_fixture().await?;
-    let repeated = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0xb322)),
+fn repeated_attachment_command(
+    fixture: &AttachmentBudgetFixture,
+    command_id: DurableCommandId,
+) -> SubmitInput {
+    SubmitInput::new(
+        command_id,
         fixture.session,
         UserContent::try_parts(vec![
             fixture.first_part.clone(),
@@ -3736,6 +3778,19 @@ async fn inv089_attachment_admission_counts_a_repeated_digest_once() -> Result<(
         ])
         .expect("the repeated fixture content is canonical"),
         fixture.delivery,
+    )
+}
+
+/// INV-089: the digest is the accounting key, so two metadata-distinct parts
+/// naming one catalogued digest consume its length only once and reach session
+/// lookup rather than the byte-budget rejection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<dyn Error>> {
+    let fixture = attachment_budget_fixture().await?;
+    let repeated = repeated_attachment_command(
+        &fixture,
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb322)),
     );
     assert_eq!(
         fixture
@@ -3744,6 +3799,74 @@ async fn inv089_attachment_admission_counts_a_repeated_digest_once() -> Result<(
                 repeated,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb323)),
                 Some(TurnId::from_uuid(Uuid::from_u128(0xb324))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::SessionNotFound {
+                session: fixture.session,
+            }
+        ))
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-089: a repeated digest is charged once rather than not at all, so the
+/// same two metadata-distinct parts are rejected under a maximum below their
+/// one catalogued length.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_attachment_admission_charges_a_repeated_digest_at_least_once()
+-> Result<(), Box<dyn Error>> {
+    let fixture = attachment_budget_fixture().await?;
+    let narrow_maximum = fixture.first_length - 1;
+    let narrow = SubmitInputRepository::new(fixture.pool.clone())
+        .with_attachment_maximum_bytes(narrow_maximum);
+    let repeated = repeated_attachment_command(
+        &fixture,
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb32a)),
+    );
+    assert_eq!(
+        narrow
+            .handle(
+                repeated,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb32b)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb32c))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: narrow_maximum,
+            }
+        ))
+    );
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-089: the bound is "must not exceed", so distinct catalogued digests
+/// summing to exactly the maximum are admitted and reach session lookup.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_attachment_bytes_equal_to_the_maximum_are_admitted() -> Result<(), Box<dyn Error>> {
+    let fixture = attachment_budget_fixture().await?;
+    let exact = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb32d)),
+        fixture.session,
+        UserContent::try_parts(vec![
+            fixture.first_part.clone(),
+            fixture.completing_part.clone(),
+        ])
+        .expect("the completing fixture content is canonical"),
+        fixture.delivery,
+    );
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                exact,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb32e)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb32f))),
             )
             .await?,
         SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
@@ -3793,7 +3916,9 @@ async fn inv089_distinct_attachment_bytes_above_the_maximum_are_rejected()
     Ok(())
 }
 
-/// INV-012: the attachment-byte-bound rejection replays exactly.
+/// INV-012: the attachment-byte-bound rejection replays exactly. The replay
+/// runs under a maximum that now admits the same aggregate, so revalidation
+/// would return acceptance and only durable replay returns the first maximum.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_attachment_byte_bound_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
@@ -3818,9 +3943,10 @@ async fn inv012_attachment_byte_bound_rejection_replays_exactly() -> Result<(), 
             .await?,
         expected
     );
+    let widened = SubmitInputRepository::new(fixture.pool.clone())
+        .with_attachment_maximum_bytes(fixture.maximum * 4);
     assert_eq!(
-        fixture
-            .repository
+        widened
             .handle(
                 distinct,
                 AcceptedInputId::from_uuid(Uuid::from_u128(0xb328)),
@@ -3935,12 +4061,122 @@ async fn inv089_queued_input_checks_the_complete_prospective_attachment_frontier
     .await?;
     assert_eq!(effects, (1, 1));
 
-    // Attachment evidence is retained only for the rejection that authorizes
-    // it. Dropping the rejection kind while the maximum stands leaves both
-    // named-rejection comparisons null, so the shape is asserted with `IS TRUE`
-    // and rejects the row rather than admitting an unreadable one. The
-    // append-only guard is suspended inside a transaction this test rolls back.
-    let mut orphaned_maximum = pool.begin().await?;
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-089: the frontier sum is over distinct digests, so one digest referenced
+/// by both the rendered origin and a newly queued input is charged once and the
+/// queued input is admitted, even though doubling that length would exceed the
+/// bound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_prospective_frontier_charges_a_shared_digest_once() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let shared_digest = BlobDigest::digest(b"shared prospective attachment");
+    let shared_length = 7_u64;
+    let maximum = 10_u64;
+    catalog_verified_blob(
+        &pool,
+        shared_digest,
+        shared_length,
+        "prospective_shared",
+        Uuid::from_u128(0xb350),
+        "shared",
+    )
+    .await?;
+
+    let session = SessionId::from_uuid(Uuid::from_u128(0xb351));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(0xb352, 0xb351, direct(0xb353)))
+        .await?;
+    let delivery = DeliveryRequest::StartWhenNoActiveTurn {
+        configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+    };
+    let repository =
+        SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(maximum);
+    assert!(matches!(
+        repository
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0xb354)),
+                    session,
+                    attachment_content(shared_digest),
+                    delivery,
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb355)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb356))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    // The same digest carried by different attachment metadata, so a shared
+    // digest cannot be mistaken for a repeated input value.
+    let restated = UserContent::try_parts(vec![UserContentPart::Attachment {
+        digest: shared_digest,
+        kind: AttachmentKind::Document,
+        media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+            .expect("the fixture media type is valid"),
+        display_filename: Some(
+            AttachmentDisplayFilename::try_new(String::from("restated.pdf"))
+                .expect("the fixture display filename is valid"),
+        ),
+    }])
+    .expect("the restated fixture content is canonical");
+    assert!(2 * shared_length > maximum);
+    assert!(matches!(
+        repository
+            .handle(
+                SubmitInput::new(
+                    DurableCommandId::from_uuid(Uuid::from_u128(0xb357)),
+                    session,
+                    restated,
+                    delivery,
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb358)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb359))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: retained attachment evidence never outlives the rejection that
+/// authorizes it. Dropping the rejection kind while the maximum stands leaves
+/// both named-rejection comparisons null, so the shape is asserted with
+/// `IS TRUE` and rejects the row rather than admitting an unreadable one. The
+/// append-only guard is suspended inside a transaction this test rolls back.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_retained_attachment_maximum_requires_its_rejection_kind()
+-> Result<(), Box<dyn Error>> {
+    let fixture = attachment_budget_fixture().await?;
+    let rejected_command_id = DurableCommandId::from_uuid(Uuid::from_u128(0xb325));
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                distinct_attachment_command(&fixture, rejected_command_id),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb326)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb327))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Rejected(
+            SubmitInputRejectedResult::AttachmentByteBudgetExceeded {
+                maximum_bytes: fixture.maximum,
+            }
+        ))
+    );
+    let mut orphaned_maximum = fixture.pool.begin().await?;
     sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER USER")
         .execute(&mut *orphaned_maximum)
         .await?;
@@ -3949,7 +4185,7 @@ async fn inv089_queued_input_checks_the_complete_prospective_attachment_frontier
             SET rejection_kind = NULL
           WHERE command_id = $1",
     )
-    .bind(Uuid::from_u128(0xb337))
+    .bind(rejected_command_id.as_uuid())
     .execute(&mut *orphaned_maximum)
     .await
     .expect_err("a retained attachment maximum cannot outlive its rejection");
@@ -3960,22 +4196,29 @@ async fn inv089_queued_input_checks_the_complete_prospective_attachment_frontier
         Some("submit_input_command_attachment_result_evidence_shape")
     );
     orphaned_maximum.rollback().await?;
-
-    pool.close().await;
-    drop(container);
+    fixture.finish().await;
     Ok(())
 }
 
 /// INV-089: pending steering is rejected when it would make a queued
-/// successor's eventual rendered frontier exceed the attachment bound.
+/// successor's eventual rendered frontier exceed the attachment bound. Two
+/// successors are queued in canonical order: after the steering transition the
+/// earlier one's prospective frontier still fits and only the later one
+/// exceeds the bound, so every affected queued frontier has to be recomputed
+/// rather than just the first.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let queued_digest = BlobDigest::digest(b"queued prospective attachment");
+    let later_queued_digest = BlobDigest::digest(b"later queued prospective attachment");
     let steering_digest = BlobDigest::digest(b"steering prospective attachment");
-    let maximum = 10_u64;
+    // Each catalogued attachment is seven bytes. Before steering the queue
+    // totals fourteen; steering adds a third to the rendered base, so the
+    // earlier successor reaches fourteen and only the later one reaches
+    // twenty-one.
+    let maximum = 20_u64;
     let mut catalog = pool.begin().await?;
     sqlx::query(
         "INSERT INTO blob_store_binding (store_name, namespace_id)
@@ -3984,17 +4227,20 @@ async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
     .bind(Uuid::from_u128(0xb340))
     .execute(&mut *catalog)
     .await?;
-    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7), ($2, 7)")
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7), ($2, 7), ($3, 7)")
         .bind(queued_digest.as_bytes().as_slice())
+        .bind(later_queued_digest.as_bytes().as_slice())
         .bind(steering_digest.as_bytes().as_slice())
         .execute(&mut *catalog)
         .await?;
     sqlx::query(
         "INSERT INTO blob_replica (digest, store_name, object_key)
          VALUES ($1, 'prospective_steering', 'queued'),
-                ($2, 'prospective_steering', 'steering')",
+                ($2, 'prospective_steering', 'later_queued'),
+                ($3, 'prospective_steering', 'steering')",
     )
     .bind(queued_digest.as_bytes().as_slice())
+    .bind(later_queued_digest.as_bytes().as_slice())
     .bind(steering_digest.as_bytes().as_slice())
     .execute(&mut *catalog)
     .await?;
@@ -4051,6 +4297,27 @@ async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
             SubmitInputAppliedResult::TurnOrigin(_)
         ))
     ));
+    let later_queued = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(0xb360)),
+        session,
+        attachment_content(later_queued_digest),
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: active_turn,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    assert!(matches!(
+        repository
+            .handle(
+                later_queued,
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb361)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb362))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
     let steering = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
         session,
@@ -4095,7 +4362,7 @@ async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
     .bind(active_turn.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(effects, (2, 1, 0));
+    assert_eq!(effects, (3, 2, 0));
 
     pool.close().await;
     drop(container);
