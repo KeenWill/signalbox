@@ -22,6 +22,7 @@ members = [
     "crates/file-media-adapter-office",
     "crates/file-media-adapter-pdf",
     "crates/file-media-adapter-svg",
+    "crates/file-media-adapter-video",
     "crates/file-media-provider-runtime",
     "crates/file-media-processor-runtime",
     "crates/model-runtime",

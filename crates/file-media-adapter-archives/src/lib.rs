@@ -108,22 +108,28 @@ impl FileMediaProvider for ArchiveProvider {
             if prefix_matches
                 || kind == ArchiveKind::Zip && source.byte_length().get() <= SOURCE_BYTES
             {
-                let strength = if source.byte_length().get() <= SOURCE_BYTES
+                let (strength, examined) = if source.byte_length().get() <= SOURCE_BYTES
                     && (kind == ArchiveKind::Zip
                         || prefix_matches && matches!(kind, ArchiveKind::Gzip | ArchiveKind::Zstd))
                 {
                     let complete = read_complete_after_prefix(source, prefix).await?;
                     require_active(cancellation)?;
+                    let examined = complete.as_bytes().len();
                     let Some(strength) = kind.probe_strength_with_complete_bytes(&complete) else {
                         return Ok(ProcessorProbeOutput::NoMatch);
                     };
-                    strength
+                    (strength, examined)
                 } else {
-                    kind.probe_strength(prefix.as_bytes())
+                    (
+                        kind.probe_strength(prefix.as_bytes()),
+                        prefix.as_bytes().len(),
+                    )
                 };
                 Ok(ProcessorProbeOutput::Candidate {
                     media_type: String::from(kind.media_type()),
                     strength,
+                    evidence_bytes: u64::try_from(examined)
+                        .map_err(|_| FileMediaProviderFailure::Failed)?,
                 })
             } else {
                 Ok(ProcessorProbeOutput::NoMatch)

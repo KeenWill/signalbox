@@ -96,6 +96,8 @@ impl FileMediaProvider for SvgProvider {
                 ProbeRoot::Svg => ProcessorProbeOutput::Candidate {
                     media_type: String::from(MEDIA_TYPE),
                     strength: ProbeStrength::StructuralCandidate,
+                    evidence_bytes: u64::try_from(bytes.len())
+                        .map_err(|_| FileMediaProviderFailure::Failed)?,
                 },
                 ProbeRoot::MalformedSvg => malformed_probe(MALFORMED_REASON),
                 ProbeRoot::ActiveSvg => malformed_probe(ACTIVE_CONTENT_REASON),

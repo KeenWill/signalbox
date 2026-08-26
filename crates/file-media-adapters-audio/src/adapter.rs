@@ -34,6 +34,8 @@ pub(crate) async fn probe(
     cancellation: &dyn CancellationSignal,
 ) -> Result<ProcessorProbeOutput, FileMediaProviderFailure> {
     let prefix = source::read_probe_prefix(source, cancellation).await?;
+    let mut evidence_bytes =
+        u64::try_from(prefix.len()).map_err(|_| FileMediaProviderFailure::Failed)?;
     let matches = if format == AdapterFormat::Mp3 && prefix.starts_with(b"ID3") {
         let Some((tag_end, has_footer)) = id3_tag_layout(&prefix) else {
             return Ok(ProcessorProbeOutput::NoMatch);
@@ -54,13 +56,17 @@ pub(crate) async fn probe(
                 if remaining < 10 {
                     return Ok(ProcessorProbeOutput::NoMatch);
                 }
-                source
+                let footer = source
                     .read_range(
                         offset,
                         NonZeroU64::new(10).ok_or(FileMediaProviderFailure::Failed)?,
                     )
                     .await
-                    .map_err(|_| FileMediaProviderFailure::Failed)?
+                    .map_err(|_| FileMediaProviderFailure::Failed)?;
+                evidence_bytes = evidence_bytes
+                    .checked_add(10)
+                    .ok_or(FileMediaProviderFailure::Failed)?;
+                footer
             };
             if !valid_id3_footer(Id3Footer {
                 header: &prefix[..10],
@@ -91,6 +97,9 @@ pub(crate) async fn probe(
                 )
                 .await
                 .map_err(|_| FileMediaProviderFailure::Failed)?;
+            evidence_bytes = evidence_bytes
+                .checked_add(4)
+                .ok_or(FileMediaProviderFailure::Failed)?;
             valid_mp3_frame_header(&header)
         }
     } else {
@@ -100,6 +109,7 @@ pub(crate) async fn probe(
         Ok(ProcessorProbeOutput::Candidate {
             media_type: String::from(format.media_type()),
             strength: ProbeStrength::Strong,
+            evidence_bytes,
         })
     } else {
         Ok(ProcessorProbeOutput::NoMatch)
