@@ -82,9 +82,12 @@ const TEXT_CONTENT_TYPE: &str = "text/plain";
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
 const HTTP_DEFAULT_PORT: u16 = 80;
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+// numeric-bound: guard - prevents an unbounded caller-supplied filename from reaching a response header
 const MAX_DISPLAY_FILENAME_BYTES: usize = 1024;
 const BLOB_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+// numeric-bound: guard - prevents concurrent blob reads from exhausting process memory and store handles
 const MAX_CONCURRENT_WEB_BLOB_READS: usize = 4;
+// numeric-bound: guard - prevents a wedged blob store from holding a read permit forever
 const BLOB_RESPONSE_TIMEOUT_SECONDS: u64 = 120;
 
 #[derive(Clone, Debug)]
