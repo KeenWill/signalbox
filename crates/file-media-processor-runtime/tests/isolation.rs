@@ -202,7 +202,7 @@ fn successful_probe() -> ProcessorProbeOutput {
     ProcessorProbeOutput::Candidate {
         media_type: String::from("application/x-signalbox-synthetic"),
         strength: ProbeStrength::Strong,
-        evidence_bytes: 4,
+        evidence_bytes: 1,
     }
 }
 
