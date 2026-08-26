@@ -1,26 +1,14 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+// The shared fixture is the single copy kept aligned with WebContractBootstrap::current();
+// readBootstrap now rejects any bootstrap whose limits contradict it.
+import { webContractBootstrapFixture } from '../src/product.fixture'
+import { useDeterministicImportApi } from './import-api-fixture'
 
 interface RouteEvidence {
   path: string
   title: string
   snapshot: string
 }
-
-const bootstrapFixture = {
-  contract: { name: 'signalbox.web-http', version: '1' },
-  capabilities: {
-    bounded_json: true,
-    bounded_session_timeline: true,
-    same_origin_json_mutations: true,
-    ndjson_streaming: true,
-  },
-  limits: {
-    max_json_body_bytes: 65_536,
-    max_ndjson_item_bytes: 262_144,
-    max_timeline_window_items: 256,
-    max_timeline_window_bytes: 65_536,
-  },
-} as const
 
 const sessionEvidenceFixture = {
   id: '00000000-0000-0000-0000-000000000991',
@@ -45,7 +33,7 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
 }
 
 const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  page.route('**/api/bootstrap', (route) => route.fulfill({ json: webContractBootstrapFixture }))
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
@@ -62,6 +50,8 @@ const useDeterministicSession = (page: Page) =>
       return route.fulfill({
         json: {
           session_id: sessionEvidenceFixture.id,
+          // Item charges follow the wire contract: a 64-byte envelope plus the UTF-8
+          // event-kind spelling (21 bytes for tool_batch_transition, 14 for the others).
           items: [
             {
               address: { event_sequence: '999998' },
@@ -106,6 +96,8 @@ const useDeterministicSession = (page: Page) =>
 const captureRouteEvidence = async (page: Page, evidence: RouteEvidence) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
+  // Only the Imports route reads this adapter; every other route ignores it.
+  await useDeterministicImportApi(page)
   await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto(evidence.path)
   await expect(page.getByRole('heading', { name: evidence.title, level: 1 })).toBeVisible()

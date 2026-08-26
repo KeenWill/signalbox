@@ -1,23 +1,41 @@
 import type { HotkeySequence, RegisterableHotkey } from '@tanstack/react-hotkeys'
-import type { AppDispatch, RootState } from './state'
+import type { BrowserPreferences } from './preferences'
+import type { AppDispatch, DensityMode, LayoutMode, RootState, ThemeMode } from './state'
 import { actions } from './state'
 
 export interface CommandContext {
   dispatch: AppDispatch
   getState: () => RootState
   timelineIds: readonly string[]
+  artifactPreviewIds: readonly string[]
+  artifactOriginalIds: readonly string[]
+  artifactSelectionTarget?: string
   paneSize?: number
   sessionId?: string
   timelineWindowAvailable?: boolean
   focusTimeline: () => void
+  importEntryIds?: readonly string[]
+  selectedImportEntry?: string | null
+  requestedImportEntry?: string
+  selectImportEntry?: (id: string) => void
+  canSelectImportEntry?: boolean
+  canContinueImport?: boolean
+  continueImport?: (relationship: 'resume' | 'fork') => void
+  canRetryImport?: boolean
+  retryImport?: () => void
+  canAbandonImport?: boolean
+  abandonImport?: () => void
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
   navigate?: (path: string) => void
+  configuresTranscriptDetail?: boolean
+  openArtifactInspector?: () => void
   openSession?: (sessionId: string) => void
   toggleTimelineExpansion?: () => void
 }
 
 export interface CommandBinding {
   label: string
+  scope?: 'workspace' | 'imports'
   registration?:
     | { kind: 'hotkey'; hotkey: RegisterableHotkey }
     | { kind: 'sequence'; sequence: HotkeySequence }
@@ -27,15 +45,102 @@ interface CommandDefinitionShape {
   id: string
   title: string
   description: string
-  category: 'Navigate' | 'View' | 'Surface'
+  category: 'Navigate' | 'View' | 'Surface' | 'Artifact' | 'Settings' | 'Imports'
   bindings: readonly CommandBinding[]
   available: (context: CommandContext) => boolean
   run: (context: CommandContext) => void
 }
 
 const always = () => true
+const selectedArtifact = (context: CommandContext) => context.getState().app.selectedArtifact
+const hasSelectedArtifactPreview = (context: CommandContext) => {
+  const id = selectedArtifact(context)
+  return id !== null && context.artifactPreviewIds.includes(id)
+}
 const productNavigation = (context: CommandContext) => context.navigate !== undefined
+const transcriptDetail = (context: CommandContext) =>
+  context.timelineIds.length > 0 || context.configuresTranscriptDetail === true
+const paneSizeProvided = (context: CommandContext) => context.paneSize !== undefined
+const setLayout = (layout: LayoutMode) => (context: CommandContext) =>
+  context.dispatch(actions.layoutSet(layout))
+const setDensity = (density: DensityMode) => (context: CommandContext) =>
+  context.dispatch(actions.densitySet(density))
+const setTheme = (theme: ThemeMode) => (context: CommandContext) =>
+  context.dispatch(actions.themeSet(theme))
+const artifactInspector = (context: CommandContext) => context.openArtifactInspector !== undefined
 export const commandRegistry = [
+  {
+    id: 'artifact.select',
+    title: 'Select artifact',
+    description: 'Select the artifact targeted by the invoking control.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => context.artifactSelectionTarget !== undefined,
+    run: (context) => {
+      if (context.artifactSelectionTarget !== undefined) {
+        context.dispatch(actions.artifactSelected(context.artifactSelectionTarget))
+      }
+    },
+  },
+  {
+    id: 'artifact.preview.expand',
+    title: 'Expand bounded artifact preview',
+    description: 'Show the larger bounded projection of the selected artifact.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => {
+      const id = selectedArtifact(context)
+      return (
+        id !== null &&
+        hasSelectedArtifactPreview(context) &&
+        !context.getState().app.expandedArtifacts[id]
+      )
+    },
+    run: (context) => {
+      const id = selectedArtifact(context)
+      if (id !== null) context.dispatch(actions.artifactExpansionSet({ id, expanded: true }))
+    },
+  },
+  {
+    id: 'artifact.preview.collapse',
+    title: 'Collapse artifact preview',
+    description: 'Return the selected artifact to its initial bounded projection.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => {
+      const id = selectedArtifact(context)
+      return (
+        id !== null &&
+        hasSelectedArtifactPreview(context) &&
+        Boolean(context.getState().app.expandedArtifacts[id])
+      )
+    },
+    run: (context) => {
+      const id = selectedArtifact(context)
+      if (id !== null) context.dispatch(actions.artifactExpansionSet({ id, expanded: false }))
+    },
+  },
+  {
+    id: 'artifact.original.load',
+    title: 'Load artifact original',
+    description: 'Request the admitted browser-native original for the selected artifact.',
+    category: 'Artifact',
+    bindings: [],
+    available: (context) => {
+      const id = selectedArtifact(context)
+      const originalState = id === null ? undefined : context.getState().app.originalArtifacts[id]
+      return (
+        id !== null &&
+        context.artifactOriginalIds.includes(id) &&
+        originalState !== 'loading' &&
+        originalState !== 'loaded'
+      )
+    },
+    run: (context) => {
+      const id = selectedArtifact(context)
+      if (id !== null) context.dispatch(actions.artifactOriginalRequested(id))
+    },
+  },
   {
     id: 'navigate.attention',
     title: 'Go to Attention',
@@ -116,6 +221,15 @@ export const commandRegistry = [
     bindings: [{ label: 'g ,', registration: { kind: 'sequence', sequence: ['G', ','] } }],
     available: productNavigation,
     run: (context) => context.navigate?.('/settings'),
+  },
+  {
+    id: 'artifact.open',
+    title: 'Open artifact inspector',
+    description: 'Resolve and inspect an immutable blob by its server-provided identity.',
+    category: 'Surface',
+    bindings: [],
+    available: artifactInspector,
+    run: (context) => context.openArtifactInspector?.(),
   },
   {
     id: 'palette.open',
@@ -233,6 +347,134 @@ export const commandRegistry = [
     },
   },
   {
+    id: 'imports.entry.select',
+    title: 'Select imported frontier',
+    description: 'Select the requested immutable imported entry.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      context.requestedImportEntry !== undefined &&
+      context.selectImportEntry !== undefined,
+    run: (context) => context.selectImportEntry?.(context.requestedImportEntry ?? ''),
+  },
+  {
+    id: 'imports.entry.next',
+    title: 'Select next imported frontier',
+    description: 'Move toward the latest entry in the loaded import window.',
+    category: 'Imports',
+    bindings: [
+      { label: 'j', scope: 'imports', registration: { kind: 'hotkey', hotkey: 'J' } },
+      { label: 'ArrowDown', scope: 'imports' },
+    ],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
+    run: (context) => {
+      const ids = context.importEntryIds ?? []
+      const currentIndex = ids.indexOf(context.selectedImportEntry ?? '')
+      const nextIndex = currentIndex < 0 ? 0 : Math.min(currentIndex + 1, ids.length - 1)
+      context.selectImportEntry?.(ids[nextIndex] ?? '')
+    },
+  },
+  {
+    id: 'imports.entry.previous',
+    title: 'Select previous imported frontier',
+    description: 'Move toward the first entry in the loaded import window.',
+    category: 'Imports',
+    bindings: [
+      { label: 'k', scope: 'imports', registration: { kind: 'hotkey', hotkey: 'K' } },
+      { label: 'ArrowUp', scope: 'imports' },
+    ],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
+    run: (context) => {
+      const ids = context.importEntryIds ?? []
+      const currentIndex = Math.max(ids.indexOf(context.selectedImportEntry ?? ''), 0)
+      context.selectImportEntry?.(ids[Math.max(currentIndex - 1, 0)] ?? '')
+    },
+  },
+  {
+    id: 'imports.entry.first',
+    title: 'Select first loaded imported frontier',
+    description: 'Move to the earliest entry in the loaded import window.',
+    category: 'Imports',
+    bindings: [
+      {
+        label: 'g g',
+        scope: 'imports',
+        registration: { kind: 'sequence', sequence: ['G', 'G'] },
+      },
+      { label: 'Home', scope: 'imports' },
+    ],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
+    run: (context) => context.selectImportEntry?.(context.importEntryIds?.[0] ?? ''),
+  },
+  {
+    id: 'imports.entry.last',
+    title: 'Select latest loaded imported frontier',
+    description: 'Move to the latest entry in the loaded import window.',
+    category: 'Imports',
+    bindings: [
+      {
+        label: 'G',
+        scope: 'imports',
+        registration: { kind: 'hotkey', hotkey: 'Shift+G' },
+      },
+      { label: 'End', scope: 'imports' },
+    ],
+    available: (context) =>
+      context.canSelectImportEntry === true &&
+      (context.importEntryIds?.length ?? 0) > 0 &&
+      context.selectImportEntry !== undefined,
+    run: (context) => context.selectImportEntry?.(context.importEntryIds?.at(-1) ?? ''),
+  },
+  {
+    id: 'imports.continue.resume',
+    title: 'Resume from imported frontier',
+    description: 'Create a native session by resuming the selected imported frontier.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canContinueImport === true && context.continueImport !== undefined,
+    run: (context) => context.continueImport?.('resume'),
+  },
+  {
+    id: 'imports.continue.fork',
+    title: 'Fork from imported frontier',
+    description: 'Create a native session by forking the selected imported frontier.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canContinueImport === true && context.continueImport !== undefined,
+    run: (context) => context.continueImport?.('fork'),
+  },
+  {
+    id: 'imports.continue.retry',
+    title: 'Retry exact imported continuation',
+    description: 'Replay the retained imported-continuation command without changing its payload.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) => context.canRetryImport === true && context.retryImport !== undefined,
+    run: (context) => context.retryImport?.(),
+  },
+  {
+    id: 'imports.continue.abandon',
+    title: 'Abandon exact imported continuation',
+    description: 'Discard the retained imported-continuation command after explicit confirmation.',
+    category: 'Imports',
+    bindings: [],
+    available: (context) =>
+      context.canAbandonImport === true && context.abandonImport !== undefined,
+    run: (context) => context.abandonImport?.(),
+  },
+  {
     id: 'layout.toggle',
     title: 'Toggle focus/workbench layout',
     description: 'Switch between a quiet transcript and the full operator workspace.',
@@ -244,6 +486,24 @@ export const commandRegistry = [
       if (current === 'workbench') context.focusTimeline()
       context.dispatch(actions.layoutSet(current === 'focus' ? 'workbench' : 'focus'))
     },
+  },
+  {
+    id: 'layout.workbench',
+    title: 'Use workbench layout',
+    description: 'Show navigation, the primary surface, and the contextual inspector.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: setLayout('workbench'),
+  },
+  {
+    id: 'layout.focus',
+    title: 'Use focus layout',
+    description: 'Show the primary surface without secondary panes.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: setLayout('focus'),
   },
   {
     id: 'density.toggle',
@@ -258,6 +518,24 @@ export const commandRegistry = [
     },
   },
   {
+    id: 'density.compact',
+    title: 'Use compact density',
+    description: 'Use dense rows for high-volume operator work.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: setDensity('compact'),
+  },
+  {
+    id: 'density.comfortable',
+    title: 'Use comfortable density',
+    description: 'Add separation without changing information detail.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: setDensity('comfortable'),
+  },
+  {
     id: 'theme.toggle',
     title: 'Toggle light/dark theme',
     description: 'Switch the CSS-variable theme.',
@@ -270,12 +548,30 @@ export const commandRegistry = [
     },
   },
   {
+    id: 'theme.dark',
+    title: 'Use dark theme',
+    description: 'Use the dark workstation color theme.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: setTheme('dark'),
+  },
+  {
+    id: 'theme.light',
+    title: 'Use light theme',
+    description: 'Use the light workstation color theme.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: setTheme('light'),
+  },
+  {
     id: 'detail.full',
     title: 'Show full transcript detail',
     description: 'Show every supported timeline record.',
     category: 'View',
     bindings: [],
-    available: always,
+    available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('full')),
   },
   {
@@ -284,7 +580,7 @@ export const commandRegistry = [
     description: 'Keep origins, tools, progress, warnings, and results compact.',
     category: 'View',
     bindings: [],
-    available: always,
+    available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('condensed')),
   },
   {
@@ -293,17 +589,8 @@ export const commandRegistry = [
     description: 'Emphasize origins and durable results.',
     category: 'View',
     bindings: [],
-    available: always,
+    available: transcriptDetail,
     run: (context) => context.dispatch(actions.detailSet('results')),
-  },
-  {
-    id: 'preferences.reset',
-    title: 'Restore preference defaults',
-    description: 'Restore browser-local workstation preferences to their defaults.',
-    category: 'View',
-    bindings: [],
-    available: always,
-    run: (context) => context.dispatch(actions.preferencesReset()),
   },
   {
     id: 'session.open',
@@ -318,38 +605,77 @@ export const commandRegistry = [
     },
   },
   {
-    id: 'pane.navigation.resize',
-    title: 'Resize navigation pane',
-    description: 'Set the browser-local Workbench navigation pane width.',
-    category: 'View',
+    id: 'pane.navigation.preview',
+    title: 'Preview navigation pane size',
+    description: 'Preview the browser-local navigation pane width without persisting it.',
+    category: 'Settings',
     bindings: [],
-    available: (context) => context.paneSize !== undefined,
+    available: paneSizeProvided,
     run: (context) => {
       if (context.paneSize === undefined) return
-      context.dispatch(
-        actions.paneSizesSet({
-          ...context.getState().app.paneSizes,
-          navigation: context.paneSize,
-        }),
-      )
+      const paneSizes: BrowserPreferences['paneSizes'] = {
+        ...context.getState().app.paneSizes,
+        navigation: context.paneSize,
+      }
+      context.dispatch(actions.paneSizesPreviewed(paneSizes))
+    },
+  },
+  {
+    id: 'pane.navigation.resize',
+    title: 'Resize navigation pane',
+    description: 'Set the browser-local navigation pane width.',
+    category: 'Settings',
+    bindings: [],
+    available: paneSizeProvided,
+    run: (context) => {
+      if (context.paneSize === undefined) return
+      const paneSizes: BrowserPreferences['paneSizes'] = {
+        ...context.getState().app.paneSizes,
+        navigation: context.paneSize,
+      }
+      context.dispatch(actions.paneSizesSet(paneSizes))
+    },
+  },
+  {
+    id: 'pane.inspector.preview',
+    title: 'Preview inspector pane size',
+    description: 'Preview the browser-local inspector pane width without persisting it.',
+    category: 'Settings',
+    bindings: [],
+    available: paneSizeProvided,
+    run: (context) => {
+      if (context.paneSize === undefined) return
+      const paneSizes: BrowserPreferences['paneSizes'] = {
+        ...context.getState().app.paneSizes,
+        inspector: context.paneSize,
+      }
+      context.dispatch(actions.paneSizesPreviewed(paneSizes))
     },
   },
   {
     id: 'pane.inspector.resize',
     title: 'Resize inspector pane',
-    description: 'Set the browser-local Workbench inspector pane width.',
-    category: 'View',
+    description: 'Set the browser-local inspector pane width.',
+    category: 'Settings',
     bindings: [],
-    available: (context) => context.paneSize !== undefined,
+    available: paneSizeProvided,
     run: (context) => {
       if (context.paneSize === undefined) return
-      context.dispatch(
-        actions.paneSizesSet({
-          ...context.getState().app.paneSizes,
-          inspector: context.paneSize,
-        }),
-      )
+      const paneSizes: BrowserPreferences['paneSizes'] = {
+        ...context.getState().app.paneSizes,
+        inspector: context.paneSize,
+      }
+      context.dispatch(actions.paneSizesSet(paneSizes))
     },
+  },
+  {
+    id: 'preferences.reset',
+    title: 'Restore preference defaults',
+    description: 'Restore every browser-local workstation preference to its default.',
+    category: 'Settings',
+    bindings: [],
+    available: always,
+    run: (context) => context.dispatch(actions.preferencesReset()),
   },
 ] as const satisfies readonly CommandDefinitionShape[]
 
@@ -359,7 +685,7 @@ export type CommandId = CommandDefinition['id']
 export const globalHotkeyBindings = commandRegistry.flatMap((command) => {
   const bindings: readonly CommandBinding[] = command.bindings
   return bindings.flatMap((binding) =>
-    binding.registration?.kind === 'hotkey'
+    binding.scope !== 'imports' && binding.registration?.kind === 'hotkey'
       ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
       : [],
   )
@@ -368,7 +694,43 @@ export const globalHotkeyBindings = commandRegistry.flatMap((command) => {
 export const globalHotkeySequenceBindings = commandRegistry.flatMap((command) => {
   const bindings: readonly CommandBinding[] = command.bindings
   return bindings.flatMap((binding) =>
-    binding.registration?.kind === 'sequence'
+    binding.scope !== 'imports' && binding.registration?.kind === 'sequence'
+      ? [{ commandId: command.id, sequence: binding.registration.sequence }]
+      : [],
+  )
+})
+
+export const importHotkeyBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    binding.scope === 'imports' && binding.registration?.kind === 'hotkey'
+      ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
+      : [],
+  )
+})
+
+export const importHotkeySequenceBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    binding.scope === 'imports' && binding.registration?.kind === 'sequence'
+      ? [{ commandId: command.id, sequence: binding.registration.sequence }]
+      : [],
+  )
+})
+
+export const surfaceHotkeyBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    command.category === 'Surface' && binding.registration?.kind === 'hotkey'
+      ? [{ commandId: command.id, hotkey: binding.registration.hotkey }]
+      : [],
+  )
+})
+
+export const surfaceHotkeySequenceBindings = commandRegistry.flatMap((command) => {
+  const bindings: readonly CommandBinding[] = command.bindings
+  return bindings.flatMap((binding) =>
+    command.category === 'Surface' && binding.registration?.kind === 'sequence'
       ? [{ commandId: command.id, sequence: binding.registration.sequence }]
       : [],
   )

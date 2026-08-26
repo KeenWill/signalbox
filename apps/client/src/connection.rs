@@ -201,6 +201,7 @@ fn oversized_frame_is_import_source(request: &ClientRequest) -> bool {
     match request {
         ClientRequest::ImportConversation { .. } => true,
         ClientRequest::CreateSession { .. }
+        | ClientRequest::ReadDeploymentLimits {}
         | ClientRequest::CreateSessionFromTemplate { .. }
         | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}

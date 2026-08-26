@@ -23,9 +23,10 @@ use std::{
 use signalbox_application::{
     ClassifyOperatorFailure, GoalAwareEligibilityPass, InProcessAttemptDispatchGate,
     InProcessEligibilityWorkSource, InProcessToolDispatchGate, ModelCallCredentialReference,
-    OperatorFailureClass, SchedulerLoop, SchedulerLoopExit, StaleActiveTurnBound,
-    StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
-    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    OperatorFailureClass, ReconciliationSweepInterval, SchedulerLoop, SchedulerLoopExit,
+    SchedulerPassOccupancyBound, StaleActiveTurnBound, StartEligibleTurnService,
+    StartupScanService, TurnLivenessScanInterval, UuidV7StartEligibleTurnIdGenerator,
+    UuidV7StartupScanIdGenerator,
 };
 #[cfg(test)]
 use signalbox_application::{EligibilityPass, EligibilityWorkSource};
@@ -38,16 +39,20 @@ use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{
     AnthropicConfig, AnthropicConstructionError, AnthropicRuntime,
 };
+use signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version;
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 use signalbox_persistence::{
+    automatic_reconciliation::RETRY_LADDER_ARITY,
     convergence_sweep::PostgresConvergenceSweepStore,
     conversation_import::backfill_imported_conversation_display_titles,
+    hub_fence::FENCED_POOL_MAX_CONNECTIONS,
     migrate,
     model_execution::PostgresModelCallRepository,
     repo_watch_dispatch::{PostgresRepoWatchDispatchStore, RepoWatchDispatchRepositoryError},
     scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository,
     startup::PostgresStartupScanRepository,
+    turn_liveness::TurnLivenessPersistenceBounds,
 };
 use signalbox_tools_web::BRAVE_SEARCH_CREDENTIAL_REFERENCE;
 use signalboxd::runner_protocol_runtime::{
@@ -55,18 +60,22 @@ use signalboxd::runner_protocol_runtime::{
     RunnerRegistrationFailureCause,
 };
 use signalboxd::{
-    ActivatedTurnPass, BaseDaemonCredentialInputs, BlobStoreRegistry,
-    CODE_HOST_CREDENTIAL_REFERENCE, ConfiguredApprovalPostureError, ConvergenceSweepRuntime,
+    ActivatedTurnPass, AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs,
+    BlobStoreRegistry, CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds,
+    ConfiguredApprovalPostureError, ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
     DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
-    FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError, FileCredentialAccess,
-    GitHubCodeHostTransport, HubModelConfiguration, HubModelConfigurationError,
-    LocalProcessListener, LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter,
-    OtlpRuntime, PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
-    ProcessRuntimeError, PrometheusServer, RepositoryWatchRuntime, RepositoryWatchRuntimeError,
-    SessionTemplateConfiguration, SessionTemplateConfigurationError, SingleHubGuardError,
-    SystemCurrentTimeClock, TelemetryConfiguration, TelemetryConfigurationError,
-    TelemetryExportFilter, TelemetryMetrics, TurnLivenessRuntime, WorkspaceInstructionRuntime,
+    ExpiredPassRecoveryPolicy, FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
+    FencedPoolFloorReconciliation, FileCredentialAccess, GitHubCodeHostTransport,
+    GoalModeNumericBounds, HubModelConfiguration, HubModelConfigurationError, LocalProcessListener,
+    LocalSocketError, MappedDaemonCredentialInputs, ModelAdapter, OtlpRuntime,
+    PostgresGoalPassDisposition, PostgresProviderModelExecution, ProcessRuntime,
+    ProcessRuntimeError, PrometheusServer, ReportedUsageCompaction, RepositoryWatchNumericBounds,
+    RepositoryWatchRuntime, RepositoryWatchRuntimeError, SessionTemplateConfiguration,
+    SessionTemplateConfigurationError, SingleHubGuardError, SystemCurrentTimeClock,
+    TelemetryConfiguration, TelemetryConfigurationError, TelemetryExportFilter, TelemetryMetrics,
+    TurnLivenessNumericBounds, TurnLivenessRuntime, WebBlobRuntime, WorkspaceInstructionRuntime,
     model_adapter::ConfiguredModelRuntime,
+    reconcile_fenced_pool_floor, run_web_image_derivative_worker_if_requested,
     usage_limits::UsageLimitedModelCallProvider,
     web_http::{
         WebHttpConfiguration, WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError,
@@ -81,7 +90,6 @@ use tokio::{
     time::{sleep, timeout},
 };
 
-const GRACEFUL_SHUTDOWN_WINDOW: Duration = Duration::from_secs(30);
 const MODEL_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_CONFIG_FILE";
 const DATABASE_URL_ENVIRONMENT: &str = "DATABASE_URL";
 const TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT: &str = "SIGNALBOX_TEMPLATE_CONFIG_FILE";
@@ -91,6 +99,44 @@ const LOG_FILTER_ENVIRONMENT: &str = "RUST_LOG";
 const PROCESS_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_SOCKET_PATH";
 const RUNNER_SOCKET_PATH_ENVIRONMENT: &str = "SIGNALBOX_RUNNER_SOCKET_PATH";
 const GUARD_CHECK_INTERVAL: Duration = Duration::from_secs(1);
+
+fn graceful_shutdown_window(
+    model_exchange_timeout: Option<Duration>,
+    cleanup_window: Option<Duration>,
+) -> Option<Duration> {
+    model_exchange_timeout
+        .zip(cleanup_window)
+        .map(|(exchange, cleanup)| exchange.saturating_add(cleanup))
+}
+
+fn validate_fenced_pool_min_connections(minimum: Option<u32>) -> Option<Option<u32>> {
+    (!minimum.is_some_and(|minimum| minimum > FENCED_POOL_MAX_CONNECTIONS)).then_some(minimum)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FencedPoolFloorReconciliationPolicy {
+    minimum: u32,
+    interval: Duration,
+    attempt_bound: Duration,
+}
+
+fn fenced_pool_floor_reconciliation_policy(
+    minimum: Option<u32>,
+    interval: Option<Duration>,
+    attempt_bound: Option<Duration>,
+) -> Option<Option<FencedPoolFloorReconciliationPolicy>> {
+    let minimum = minimum.filter(|minimum| *minimum > 0);
+    let Some(minimum) = minimum else {
+        return Some(None);
+    };
+    let interval = interval.filter(|interval| !interval.is_zero())?;
+    let attempt_bound = attempt_bound.filter(|bound| !bound.is_zero())?;
+    Some(Some(FencedPoolFloorReconciliationPolicy {
+        minimum,
+        interval,
+        attempt_bound,
+    }))
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimePhase {
@@ -624,9 +670,11 @@ enum RuntimeDrainOutcome {
 
 enum RuntimeTaskExit {
     Scheduler(SchedulerLoopExit),
+    FencedPoolFloor,
     Process(Result<(), ProcessRuntimeError>),
     Runner(Result<(), RunnerProtocolRuntimeError>),
     RepositoryWatch(Result<(), RepositoryWatchRuntimeError>),
+    RepositoryWatchLeaseExpiry(Result<(), RepoWatchDispatchRepositoryError>),
     ConvergenceSweep,
     WebHttp(Result<(), WebHttpRuntimeError>),
     TurnLiveness,
@@ -667,9 +715,11 @@ const fn combine_runtime_stop_cause(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RuntimeTaskDefect {
     SchedulerCompletedBeforeShutdown,
+    FencedPoolFloorCompletedBeforeShutdown,
     ProcessCompletedBeforeShutdown,
     RunnerCompletedBeforeShutdown,
     RepositoryWatchCompletedBeforeShutdown,
+    RepositoryWatchLeaseExpiryCompletedBeforeShutdown,
     ConvergenceSweepCompletedBeforeShutdown,
     WebHttpCompletedBeforeShutdown,
     TurnLivenessCompletedBeforeShutdown,
@@ -683,10 +733,16 @@ impl RuntimeTaskDefect {
     const fn cause_code(self) -> &'static str {
         match self {
             Self::SchedulerCompletedBeforeShutdown => "scheduler_completed_before_shutdown",
+            Self::FencedPoolFloorCompletedBeforeShutdown => {
+                "fenced_pool_floor_completed_before_shutdown"
+            }
             Self::ProcessCompletedBeforeShutdown => "process_runtime_completed_before_shutdown",
             Self::RunnerCompletedBeforeShutdown => "runner_runtime_completed_before_shutdown",
             Self::RepositoryWatchCompletedBeforeShutdown => {
                 "repository_watch_completed_before_shutdown"
+            }
+            Self::RepositoryWatchLeaseExpiryCompletedBeforeShutdown => {
+                "repository_watch_lease_expiry_completed_before_shutdown"
             }
             Self::ConvergenceSweepCompletedBeforeShutdown => {
                 "convergence_sweep_completed_before_shutdown"
@@ -809,6 +865,71 @@ async fn wait_for_guard_loss(database: &mut FencedHubDatabase) {
             return;
         }
         sleep(GUARD_CHECK_INTERVAL).await;
+    }
+}
+
+async fn run_fenced_pool_floor_reconciliation(
+    pool: sqlx::PgPool,
+    policy: FencedPoolFloorReconciliationPolicy,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+                continue;
+            }
+            () = sleep(policy.interval) => {}
+        }
+        let prior_size = pool.size();
+        if prior_size >= policy.minimum {
+            continue;
+        }
+        let attempt = timeout(
+            policy.attempt_bound,
+            reconcile_fenced_pool_floor(&pool, policy.minimum),
+        );
+        let outcome = select! {
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+                continue;
+            }
+            outcome = attempt => outcome,
+        };
+        let current_size = pool.size();
+        match outcome {
+            Ok(Ok(FencedPoolFloorReconciliation::Replenished)) => tracing::info!(
+                prior_size,
+                current_size,
+                minimum = policy.minimum,
+                "fenced pool floor reconciliation added one physical session"
+            ),
+            Ok(Ok(
+                FencedPoolFloorReconciliation::Satisfied
+                | FencedPoolFloorReconciliation::DeferredForIdleCapacity,
+            )) => {}
+            Ok(Err(_)) => tracing::warn!(
+                failure_class = ?OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+                cause_code = "fenced_pool_floor_reconciliation_failed",
+                prior_size,
+                current_size,
+                minimum = policy.minimum,
+                "fenced pool floor reconciliation will retry"
+            ),
+            Err(_) => tracing::warn!(
+                failure_class = ?OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+                cause_code = "fenced_pool_floor_reconciliation_timed_out",
+                prior_size,
+                current_size,
+                minimum = policy.minimum,
+                attempt_bound_seconds = policy.attempt_bound.as_secs(),
+                "fenced pool floor reconciliation will retry"
+            ),
+        }
     }
 }
 
@@ -950,6 +1071,38 @@ fn report_repository_watch_runtime_defect(error: &RepositoryWatchRuntimeError) {
     );
 }
 
+/// Classifies a lease-expiry failure without flattening commit ambiguity.
+///
+/// An ambiguous commit may already have applied the goal stop and the
+/// expiration receipt, so operator telemetry must not present the
+/// expiration transaction as safe to retry; corruption stays fail-closed.
+fn repository_watch_lease_expiry_failure_class(
+    error: &RepoWatchDispatchRepositoryError,
+) -> OperatorFailureClass {
+    match error {
+        RepoWatchDispatchRepositoryError::CommitAmbiguous(_) => {
+            OperatorFailureClass::Infrastructure {
+                commit_ambiguous: true,
+            }
+        }
+        RepoWatchDispatchRepositoryError::Corruption(_) => {
+            OperatorFailureClass::FailClosedCorruption
+        }
+        _ => OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        },
+    }
+}
+
+fn report_repository_watch_lease_expiry_failure(error: &RepoWatchDispatchRepositoryError) {
+    tracing::error!(
+        phase = ?RuntimePhase::Runtime,
+        failure_class = ?repository_watch_lease_expiry_failure_class(error),
+        cause = %error,
+        "global repository-watch lease expiry reconciliation failed"
+    );
+}
+
 fn report_web_http_runtime_failure(error: &WebHttpRuntimeError) {
     tracing::error!(
         phase = ?RuntimePhase::Runtime,
@@ -985,9 +1138,11 @@ fn joined_task_defect(error: &JoinError) -> RuntimeTaskDefect {
 fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> RuntimeTaskCompletion {
     match completed {
         Ok(RuntimeTaskExit::Scheduler(SchedulerLoopExit::Shutdown))
+        | Ok(RuntimeTaskExit::FencedPoolFloor)
         | Ok(RuntimeTaskExit::Process(Ok(())))
         | Ok(RuntimeTaskExit::Runner(Ok(())))
         | Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))
+        | Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Ok(())))
         | Ok(RuntimeTaskExit::ConvergenceSweep)
         | Ok(RuntimeTaskExit::WebHttp(Ok(())))
         | Ok(RuntimeTaskExit::TurnLiveness) => RuntimeTaskCompletion::Clean,
@@ -1002,6 +1157,10 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
         Ok(RuntimeTaskExit::RepositoryWatch(Err(error))) => {
             report_repository_watch_runtime_defect(&error);
             RuntimeTaskCompletion::Defect
+        }
+        Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Err(error))) => {
+            report_repository_watch_lease_expiry_failure(&error);
+            RuntimeTaskCompletion::Failed
         }
         Ok(RuntimeTaskExit::WebHttp(Err(error))) => {
             report_web_http_runtime_failure(&error);
@@ -1022,24 +1181,32 @@ fn runtime_task_completion(completed: Result<RuntimeTaskExit, JoinError>) -> Run
 async fn drain_runtime_tasks<GuardLoss>(
     runtime_tasks: &mut JoinSet<RuntimeTaskExit>,
     guard_loss: GuardLoss,
-    grace_window: Duration,
+    grace_window: Option<Duration>,
 ) -> (RuntimeDrainOutcome, RuntimeTaskCompletion)
 where
     GuardLoss: Future<Output = ()>,
 {
     let completion = Cell::new(RuntimeTaskCompletion::Clean);
-    let drain = select! {
-        () = guard_loss => RuntimeDrainOutcome::GuardLost,
-        result = timeout(grace_window, async {
-            while let Some(completed) = runtime_tasks.join_next().await {
-                completion.set(completion.get().combine(runtime_task_completion(completed)));
-            }
-        }) => match result {
-            Ok(()) => RuntimeDrainOutcome::Complete,
-            Err(_) => RuntimeDrainOutcome::GraceWindowExpired,
+    let drain = async {
+        while let Some(completed) = runtime_tasks.join_next().await {
+            completion.set(completion.get().combine(runtime_task_completion(completed)));
         }
     };
-    (drain, completion.get())
+    tokio::pin!(drain);
+    let outcome = match grace_window {
+        Some(grace_window) => select! {
+            () = guard_loss => RuntimeDrainOutcome::GuardLost,
+            result = timeout(grace_window, &mut drain) => match result {
+                Ok(()) => RuntimeDrainOutcome::Complete,
+                Err(_) => RuntimeDrainOutcome::GraceWindowExpired,
+            }
+        },
+        None => select! {
+            () = guard_loss => RuntimeDrainOutcome::GuardLost,
+            () = &mut drain => RuntimeDrainOutcome::Complete,
+        },
+    };
+    (outcome, completion.get())
 }
 
 const fn completed_runtime_outcome(
@@ -1154,6 +1321,214 @@ async fn run_hub(
                 SanitizedStartupCause::ModelConfiguration(&error),
             )
         })?;
+    let numeric_bounds = model_configuration.numeric_bounds();
+    let configured_duration = |field| numeric_bounds.duration(field).flatten();
+    let configured_usize = |field| {
+        numeric_bounds
+            .integer(field)
+            .flatten()
+            .map(usize::try_from)
+            .transpose()
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("configured_numeric_bound_exceeds_platform"),
+                )
+            })
+    };
+    let configured_u32 = |field| {
+        numeric_bounds
+            .integer(field)
+            .flatten()
+            .map(u32::try_from)
+            .transpose()
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("configured_numeric_bound_exceeds_u32"),
+                )
+            })
+    };
+    let model_exchange_timeout = configured_duration("model_exchange_timeout");
+    let codex_cli_version_probe_bound = configured_duration("codex_cli_version_probe_bound")
+        .filter(|bound| !bound.is_zero())
+        .ok_or_else(|| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_codex_cli_version_probe_bound"),
+            )
+        })?;
+    if let Some(codex_cli) = model_configuration.codex_cli() {
+        verify_pinned_codex_cli_version(codex_cli.executable(), codex_cli_version_probe_bound)
+            .await
+            .map_err(|_| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("codex_cli_version_probe_failed"),
+                )
+            })?;
+    }
+    let fenced_pool_min_connections =
+        validate_fenced_pool_min_connections(configured_u32("fenced_pool_min_connections")?)
+            .ok_or_else(|| {
+                erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("invalid_fenced_pool_min_connections"),
+                )
+            })?;
+    let fenced_pool_floor_reconciliation = fenced_pool_floor_reconciliation_policy(
+        fenced_pool_min_connections,
+        configured_duration("fenced_pool_floor_reconciliation_interval"),
+        configured_duration("fenced_pool_floor_reconciliation_attempt_bound"),
+    )
+    .ok_or_else(|| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static("invalid_fenced_pool_floor_reconciliation_policy"),
+        )
+    })?;
+    let scheduler_pass_occupancy_bound = configured_duration("scheduler_pass_occupancy_bound")
+        .map(SchedulerPassOccupancyBound::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_scheduler_pass_occupancy_bound"),
+            )
+        })?
+        .unwrap_or_else(SchedulerPassOccupancyBound::unbounded);
+    let shutdown_grace_window = graceful_shutdown_window(
+        model_exchange_timeout,
+        configured_duration("graceful_shutdown_cleanup_window"),
+    );
+    let stale_active_turn_bound = configured_duration("stale_active_turn_bound")
+        .map(StaleActiveTurnBound::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_stale_active_turn_bound"),
+            )
+        })?;
+    let turn_liveness_scan_interval = configured_duration("turn_liveness_scan_interval")
+        .map(TurnLivenessScanInterval::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_turn_liveness_scan_interval"),
+            )
+        })?;
+    let reconciliation_sweep_interval = configured_duration("reconciliation_sweep_interval")
+        .map(ReconciliationSweepInterval::try_new)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_reconciliation_sweep_interval"),
+            )
+        })?;
+    let nudge_buffer_capacity = match configured_usize("nudge_buffer_capacity")? {
+        Some(capacity) => Some(NonZeroUsize::new(capacity).ok_or_else(|| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("invalid_nudge_buffer_capacity"),
+            )
+        })?),
+        None => None,
+    };
+    let scheduler_pass_admission_cap = configured_usize("scheduler_pass_admission_cap")?;
+    let automatic_reconciliation_attempt_budget = numeric_bounds
+        .integer("automatic_reconciliation_attempt_budget")
+        .flatten()
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static(
+                    "automatic_reconciliation_attempt_budget_exceeds_platform",
+                ),
+            )
+        })?;
+    if automatic_reconciliation_attempt_budget.is_some_and(|budget| i32::try_from(budget).is_err())
+    {
+        return Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static(
+                "automatic_reconciliation_attempt_budget_exceeds_storage",
+            ),
+        ));
+    }
+    // The claim statement schedules one `CASE` arm per admitted attempt and ends
+    // in an `ELSE`, so a budget above that arity is admitted silently and then
+    // reuses the last rung's deadline for every attempt past it while the
+    // failure path schedules the true exponential. The claim side is the shorter
+    // of the two, so the abandonment sweep would settle attempts that are still
+    // running. Refusing the budget here keeps the arity a configuration fact
+    // rather than something a deployment discovers from a mis-settled attempt.
+    if automatic_reconciliation_attempt_budget.is_some_and(|budget| {
+        usize::try_from(budget).is_ok_and(|budget| budget > RETRY_LADDER_ARITY)
+    }) {
+        return Err(erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static(
+                "automatic_reconciliation_attempt_budget_exceeds_retry_ladder",
+            ),
+        ));
+    }
+    let automatic_reconciliation_base_backoff =
+        configured_duration("automatic_reconciliation_base_backoff");
+    let automatic_reconciliation_backoff_cap =
+        configured_duration("automatic_reconciliation_backoff_cap");
+    let expired_pass_recovery_policy = ExpiredPassRecoveryPolicy::new(
+        configured_u32("expired_pass_recovery_attempts")?,
+        configured_duration("expired_pass_recovery_attempt_bound"),
+        configured_duration("expired_pass_recovery_lock_retry_delay"),
+        configured_duration("expired_pass_recovery_conservative_retry_delay"),
+    );
+    let repository_watch_numeric_bounds = RepositoryWatchNumericBounds::new(
+        configured_usize("repository_reconciliation_quantum")?,
+        configured_duration("webhook_drain_work_budget"),
+    );
+    let convergence_sweep_numeric_bounds = ConvergenceSweepNumericBounds::new(
+        configured_duration("convergence_sweep_request_timeout"),
+        configured_usize("max_convergence_sweep_connection_pages")?,
+        configured_usize("max_concurrent_convergence_sweep_targets")?,
+        configured_usize("max_convergence_sweep_request_attempts")?,
+        configured_duration("convergence_sweep_request_retry_delay"),
+        configured_duration("convergence_sweep_retry_backoff_base"),
+        configured_duration("convergence_sweep_retry_backoff_cap"),
+    );
+    let turn_liveness_persistence_bounds = TurnLivenessPersistenceBounds::new(
+        configured_duration("terminalization_lock_wait"),
+        configured_duration("terminalization_acquire_wait"),
+        configured_duration("terminalization_write_lock_wait"),
+    );
+    let turn_liveness_numeric_bounds = TurnLivenessNumericBounds::new(
+        configured_usize("terminalizations_per_liveness_scan")?,
+        configured_duration("turn_liveness_recovery_attempt_bound"),
+        configured_usize("automatic_reconciliations_per_liveness_scan")?,
+        turn_liveness_persistence_bounds,
+    );
+    let goal_mode_numeric_bounds = GoalModeNumericBounds::new(
+        configured_duration("automatic_resume_base_backoff"),
+        configured_duration("automatic_resume_backoff_cap"),
+        configured_u32("automatic_resume_attempt_budget")?,
+        configured_duration("automatic_resume_startup_retry_delay"),
+    );
+    let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;
+    let automatic_tool_round_limit = configured_usize("max_automatic_tool_rounds_per_turn")?;
+    let post_kill_reap_bound = configured_duration("post_kill_reap_bound");
+    let native_message_limit = configured_usize("max_native_message_bytes")?;
+    let code_host_numeric_bounds = CodeHostNumericBounds::new(
+        configured_duration("code_host_request_timeout"),
+        configured_usize("max_job_log_bytes")?,
+        configured_usize("max_stack_comparisons_in_flight")?,
+        configured_usize("max_code_host_result_text_bytes")?,
+        configured_usize("max_code_host_result_items")?,
+        configured_usize("max_repository_file_content_bytes")?,
+    );
     if configuration.repository_watch_credential_conflicts(&model_configuration) {
         let error = HubConfigurationError::new(
             GITHUB_TOKEN_FILE_ENVIRONMENT,
@@ -1241,7 +1616,11 @@ async fn run_hub(
     );
     let compaction_anthropic = anthropic_credential_access
         .clone()
-        .map(|credential_access| AnthropicRuntime::new(AnthropicConfig::new(), credential_access))
+        .map(|credential_access| {
+            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
+            AnthropicRuntime::new(adapter_configuration, credential_access)
+        })
         .transpose()
         .map_err(|error| {
             erase_startup_cause(
@@ -1251,7 +1630,11 @@ async fn run_hub(
         })?;
     let compaction_openai = openai_credential_access
         .clone()
-        .map(|credential_access| OpenAiRuntime::new(OpenAiConfig::new(), credential_access))
+        .map(|credential_access| {
+            let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
+            OpenAiRuntime::new(adapter_configuration, credential_access)
+        })
         .transpose()
         .map_err(|error| {
             erase_startup_cause(
@@ -1265,7 +1648,8 @@ async fn run_hub(
         .uses_anthropic_adapter()
         .then(|| anthropic_model_credentials.clone())
         .map(|credential_access| {
-            let mut adapter_configuration = AnthropicConfig::new();
+            let mut adapter_configuration = AnthropicConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
             adapter_configuration.model_capabilities = anthropic_model_capabilities;
             AnthropicRuntime::new(adapter_configuration, credential_access)
         })
@@ -1278,7 +1662,8 @@ async fn run_hub(
         })?;
     let openai = openai_credential_access
         .map(|credential_access| {
-            let mut adapter_configuration = OpenAiConfig::new();
+            let mut adapter_configuration = OpenAiConfig::new(native_message_limit);
+            adapter_configuration.exchange_timeout = model_exchange_timeout;
             adapter_configuration.model_capabilities = openai_model_capabilities;
             OpenAiRuntime::new(adapter_configuration, credential_access)
         })
@@ -1289,17 +1674,21 @@ async fn run_hub(
                 SanitizedStartupCause::Static(openai_construction_cause(&error)),
             )
         })?;
-    let code_host_transport = GitHubCodeHostTransport::try_new().map_err(|_| {
-        erase_startup_cause(
-            RuntimePhase::Configuration,
-            SanitizedStartupCause::Static("github_transport_construction_failed"),
-        )
-    })?;
+    let code_host_transport =
+        GitHubCodeHostTransport::try_new(code_host_numeric_bounds).map_err(|_| {
+            erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("github_transport_construction_failed"),
+            )
+        })?;
     let runtime_models = model_configuration.runtime_model_catalog();
     let compaction_runtime = ConfiguredModelRuntime::new(
         compaction_anthropic,
         compaction_openai,
         &model_configuration,
+        model_exchange_timeout,
+        post_kill_reap_bound,
+        native_message_limit,
     )
     .map_err(|error| {
         erase_startup_cause(
@@ -1307,35 +1696,53 @@ async fn run_hub(
             SanitizedStartupCause::Static(error.cause_code()),
         )
     })?;
-    let runtime =
-        ConfiguredModelRuntime::new(anthropic, openai, &model_configuration).map_err(|error| {
-            erase_startup_cause(
-                RuntimePhase::Configuration,
-                SanitizedStartupCause::Static(error.cause_code()),
-            )
-        })?;
+    let runtime = ConfiguredModelRuntime::new(
+        anthropic,
+        openai,
+        &model_configuration,
+        model_exchange_timeout,
+        post_kill_reap_bound,
+        native_message_limit,
+    )
+    .map_err(|error| {
+        erase_startup_cause(
+            RuntimePhase::Configuration,
+            SanitizedStartupCause::Static(error.cause_code()),
+        )
+    })?;
     let context_compaction_model: Arc<dyn ContextCompactionModel> = Arc::new(
         RuntimeContextCompactionModel::new(compaction_runtime, runtime_models.clone()),
     );
     let approval_judge_model: Arc<dyn ApprovalJudgeModel> = Arc::new(
         RuntimeApprovalJudgeModel::new(runtime.clone(), runtime_models.clone()),
     );
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models.clone());
+    let provider = RuntimeModelCallProvider::new(
+        runtime,
+        runtime_models.clone(),
+        diagnostic_model_identity_limit,
+    );
     let model_targets = model_configuration.target_catalog();
-    let mut database = FencedHubDatabase::connect_production(configuration.database_url())
-        .await
-        .map_err(|error| {
-            let phase = match &error {
-                FencedHubDatabaseError::InitializeFence(_) => RuntimePhase::Migration,
-                FencedHubDatabaseError::ParseOptions(_)
-                | FencedHubDatabaseError::ConnectBootstrap(_)
-                | FencedHubDatabaseError::AcquireGuard(_)
-                | FencedHubDatabaseError::AdvanceFence(_)
-                | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
-            };
-            erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
-        })?;
+    let mut database = FencedHubDatabase::connect_production(
+        configuration.database_url(),
+        fenced_pool_min_connections,
+    )
+    .await
+    .map_err(|error| {
+        let phase = match &error {
+            FencedHubDatabaseError::InitializeFence(_) => RuntimePhase::Migration,
+            FencedHubDatabaseError::ParseOptions(_)
+            | FencedHubDatabaseError::ConnectBootstrap(_)
+            | FencedHubDatabaseError::AcquireGuard(_)
+            | FencedHubDatabaseError::AdvanceFence(_)
+            | FencedHubDatabaseError::ConnectFencedPool(_) => RuntimePhase::DatabaseConnection,
+        };
+        erase_startup_cause(phase, SanitizedStartupCause::Database(&error))
+    })?;
     let pool = database.pool().clone();
+    let fenced_pool_floor_pool = pool.clone();
+    let image_derivative_supervisor = daemon_tool_configuration
+        .as_ref()
+        .map(|configuration| configuration.exec_supervisor_executable().to_path_buf());
     let tools = match daemon_tool_configuration {
         Some(tool_configuration) => DaemonTools::try_new_production(
             SystemCurrentTimeClock,
@@ -1350,6 +1757,7 @@ async fn run_hub(
             tool_configuration.workspace_root(),
             tool_configuration.git_identity().clone(),
             tool_configuration.exec_supervisor_executable(),
+            tool_configuration.cargo_registry_cache(),
             model_configuration.web_fetch_egress_policy(),
         ),
         None => DaemonTools::try_new_without_tool_mappings(
@@ -1429,6 +1837,10 @@ async fn run_hub(
                 PostgresStartupScanRepository::new(scan_pool),
             );
             let outcome = scan.execute().await.map_err(|error| {
+                tracing::error!(
+                    startup_scan_detail = %error.repository_error(),
+                    "startup scan rejected durable state"
+                );
                 let failure_class = error.operator_failure_class();
                 let cause_code = error.operator_failure_cause_code();
                 let session = error.session();
@@ -1611,7 +2023,75 @@ async fn run_hub(
             return Err(failure);
         }
     };
-    let web_http_runtime = match WebHttpRuntime::bind(web_configuration, pool.clone()).await {
+    let snapshot_reader_budget = match signalboxd::shared_snapshot_reader_budget(
+        pool.options().get_max_connections(),
+        Some(&model_configuration),
+    ) {
+        Some(budget) => budget,
+        None => {
+            let failure = erase_startup_cause(
+                RuntimePhase::Configuration,
+                SanitizedStartupCause::Static("insufficient_snapshot_reader_pool_capacity"),
+            );
+            let _ = listener.cleanup();
+            let _ = runner_listener.cleanup();
+            disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+            drop(blob_store_registry);
+            let _ = database.close().await;
+            return Err(failure);
+        }
+    };
+    let web_blob_runtime = match blob_store_registry.as_ref() {
+        Some(registry) => {
+            let worker_program = match std::env::current_exe() {
+                Ok(path) => path,
+                Err(_) => {
+                    let failure = erase_startup_cause(
+                        RuntimePhase::Configuration,
+                        SanitizedStartupCause::Static("web_blob_worker_path_failed"),
+                    );
+                    let _ = listener.cleanup();
+                    let _ = runner_listener.cleanup();
+                    disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
+                        .await;
+                    drop(blob_store_registry);
+                    let _ = database.close().await;
+                    return Err(failure);
+                }
+            };
+            match WebBlobRuntime::new(
+                pool.clone(),
+                registry.clone(),
+                image_derivative_supervisor,
+                worker_program,
+            ) {
+                Ok(runtime) => Some(runtime),
+                Err(_) => {
+                    let failure = erase_startup_cause(
+                        RuntimePhase::Configuration,
+                        SanitizedStartupCause::Static("web_blob_runtime_construction_failed"),
+                    );
+                    let _ = listener.cleanup();
+                    let _ = runner_listener.cleanup();
+                    disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
+                        .await;
+                    drop(blob_store_registry);
+                    let _ = database.close().await;
+                    return Err(failure);
+                }
+            }
+        }
+        None => None,
+    };
+    let web_http_runtime = match WebHttpRuntime::bind_with_snapshot_reader_budget(
+        web_configuration,
+        pool.clone(),
+        web_blob_runtime,
+        model_configuration.clone(),
+        Arc::clone(&snapshot_reader_budget),
+    )
+    .await
+    {
         Ok(runtime) => runtime,
         Err(_) => {
             let failure = erase_startup_cause(
@@ -1631,6 +2111,11 @@ async fn run_hub(
         "daemon startup phase completed"
     );
     let repository_watch_reconciliation = async {
+        repository_watch_store
+            .process_pending_expired_start_leases(|| {
+                DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+            })
+            .await?;
         repository_watch_store
             .process_pending_lifecycle_cutoffs(|| DurableCommandId::from_uuid(uuid::Uuid::now_v7()))
             .await?;
@@ -1667,9 +2152,13 @@ async fn run_hub(
     }
     let scheduler_pool = pool.clone();
     let sweep = PostgresEligibilitySweep::new(scheduler_pool.clone());
-    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
+    let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::with_options(
+        sweep,
+        reconciliation_sweep_interval,
+        nudge_buffer_capacity,
+    );
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
-    let repository_watch_runtime = match model_configuration.repository_watch() {
+    let mut repository_watch_runtime = match model_configuration.repository_watch() {
         Some(configuration) => match RepositoryWatchRuntime::try_new(
             pool.clone(),
             configuration,
@@ -1677,6 +2166,7 @@ async fn run_hub(
             model_configuration.clone(),
             model_configuration.session_credential_pin(),
             eligibility_nudge.clone(),
+            repository_watch_numeric_bounds,
         ) {
             Ok(runtime) => Some(runtime),
             Err(_) => {
@@ -1701,6 +2191,7 @@ async fn run_hub(
             template_configuration.clone(),
             model_configuration.clone(),
             eligibility_nudge.clone(),
+            convergence_sweep_numeric_bounds,
         ) {
             Ok(runtime) => runtime,
             Err(_) => {
@@ -1786,6 +2277,36 @@ async fn run_hub(
             return Ok(ShutdownOutcome::GuardLost);
         }
     }
+    if let Some(runtime) = repository_watch_runtime.as_mut() {
+        match await_while_guarded(&mut database, runtime.prepare_startup()).await {
+            GuardedAwait::Completed(Ok(())) => tracing::info!(
+                phase = ?RuntimePhase::StartupScan,
+                "daemon startup completed bounded repository-watch webhook reconciliation"
+            ),
+            GuardedAwait::Completed(Err(_)) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::StartupScan,
+                    SanitizedStartupCause::Static("repository_watch_startup_webhook_failed"),
+                );
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+            GuardedAwait::GuardLost => {
+                let _ = listener.cleanup();
+                let _ = runner_listener.cleanup();
+                if let Some(registry) = blob_store_registry.as_ref() {
+                    registry.disarm_staging_sweep();
+                }
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Ok(ShutdownOutcome::GuardLost);
+            }
+        }
+    }
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
@@ -1795,7 +2316,8 @@ async fn run_hub(
         model_configuration.clone(),
         template_configuration,
     )
-    .with_context_compaction_model(Arc::clone(&context_compaction_model));
+    .with_context_compaction_model(Arc::clone(&context_compaction_model))
+    .with_snapshot_reader_budget(snapshot_reader_budget);
     let process_runtime = match prometheus_runtime.as_ref() {
         Some((metrics, _server)) => process_runtime.with_metrics(metrics.clone()),
         None => process_runtime,
@@ -1812,12 +2334,28 @@ async fn run_hub(
     )
     .with_session_credentials(model_configuration.credential_family_catalog())
     .with_credential_pools(model_configuration.credential_pool_runtime_catalog())
-    .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets());
+    .with_cache_inclusive_input_targets(model_configuration.cache_inclusive_input_targets())
+    .with_continuation_usage_limits(model_configuration.tool_continuation_usage_limits());
+    let provider = AttachmentPreparingModelCallProvider::new(
+        UsageLimitedModelCallProvider::new(provider, &model_configuration),
+        scheduler_pool.clone(),
+        blob_store_registry.clone(),
+    );
+    let reported_usage_compaction = ReportedUsageCompaction::new(
+        StartEligibleTurnRepository::new(scheduler_pool.clone()),
+        model_repository.clone(),
+        tool_catalog.clone(),
+        runtime_models,
+        model_configuration.clone(),
+        Arc::clone(&context_compaction_model),
+    );
+    let (turn_execution_shutdown, turn_execution_shutdown_receiver) = watch::channel(false);
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
             model_repository,
             InProcessAttemptDispatchGate::default(),
-            UsageLimitedModelCallProvider::new(provider, &model_configuration),
+            provider,
+            automatic_tool_round_limit,
         )
         .with_tool_loop(tool_dispatch_gate, tool_catalog, tool_executor)
         .with_workspace_instructions(workspace_instruction_runtime)
@@ -1825,7 +2363,8 @@ async fn run_hub(
             approval_judge_model,
             model_configuration.configured_approval_judge_selection(),
             model_configuration.clone(),
-        ),
+        )
+        .with_shutdown_checkpoint(turn_execution_shutdown_receiver),
     );
     // The connection runtime has no execution role, so it reaches the same
     // fatal recovery signal through this handle rather than ending an
@@ -1838,21 +2377,46 @@ async fn run_hub(
         ),
         execution,
     )
-    .with_occupancy_recovery(scheduler_pool.clone(), eligibility_nudge.clone());
+    .with_reported_usage_compaction(reported_usage_compaction)
+    .with_occupancy_recovery(
+        scheduler_pool.clone(),
+        eligibility_nudge.clone(),
+        expired_pass_recovery_policy,
+        turn_liveness_persistence_bounds,
+    );
     let turn_liveness_runtime = TurnLivenessRuntime::new(
         scheduler_pool.clone(),
-        StaleActiveTurnBound::hard_ceiling(),
-        TurnLivenessScanInterval::baseline(),
+        stale_active_turn_bound,
+        turn_liveness_scan_interval,
+        automatic_reconciliation_attempt_budget,
+        automatic_reconciliation_base_backoff,
+        automatic_reconciliation_backoff_cap,
+        turn_liveness_numeric_bounds,
     );
-    let pass = GoalAwareEligibilityPass::new(
-        activated_pass,
-        PostgresGoalPassDisposition::new(
-            scheduler_pool,
-            model_configuration.clone(),
-            eligibility_nudge,
+    let goal_disposition = PostgresGoalPassDisposition::new(
+        scheduler_pool,
+        model_configuration.clone(),
+        eligibility_nudge,
+        goal_mode_numeric_bounds,
+    );
+    match goal_disposition
+        .reconcile_automatic_resumptions_after_restart()
+        .await
+    {
+        Ok(rearmed) => tracing::info!(
+            phase = ?RuntimePhase::StartupScan,
+            rearmed_goal_resumption_count = rearmed,
+            "daemon startup reconciled automatic goal resumptions"
         ),
-    );
-    let scheduler_max_in_flight_passes = model_configuration.scheduler_max_in_flight_passes();
+        Err(error) => tracing::error!(
+            phase = ?RuntimePhase::StartupScan,
+            cause_code = error.operator_failure_cause_code(),
+            cause = %error,
+            "daemon startup exhausted automatic goal-resumption reconciliation"
+        ),
+    }
+    let pass = GoalAwareEligibilityPass::new(activated_pass, goal_disposition);
+    let scheduler_max_in_flight_passes = scheduler_pass_admission_cap;
     let mut scheduler = match scheduler_max_in_flight_passes {
         Some(limit) => match NonZeroUsize::new(limit) {
             Some(limit) => SchedulerLoop::with_max_in_flight(work_source, pass, limit),
@@ -1860,6 +2424,7 @@ async fn run_hub(
         },
         None => SchedulerLoop::new(work_source, pass),
     };
+    scheduler = scheduler.with_occupancy_bound(scheduler_pass_occupancy_bound);
     if let Some((metrics, _server)) = prometheus_runtime.as_ref() {
         scheduler = scheduler.with_occupancy_observer(Arc::new(metrics.clone()));
     }
@@ -1870,9 +2435,14 @@ async fn run_hub(
         );
     }
     let (scheduler_shutdown, scheduler_shutdown_receiver) = oneshot::channel();
+    let (fenced_pool_floor_shutdown, fenced_pool_floor_shutdown_receiver) = watch::channel(false);
     let (process_shutdown, process_shutdown_receiver) = watch::channel(false);
     let (runner_shutdown, runner_shutdown_receiver) = watch::channel(false);
     let (repository_watch_shutdown, repository_watch_shutdown_receiver) = watch::channel(false);
+    let (
+        repository_watch_lease_expiry_shutdown,
+        mut repository_watch_lease_expiry_shutdown_receiver,
+    ) = watch::channel(false);
     let (convergence_sweep_shutdown, convergence_sweep_shutdown_receiver) = watch::channel(false);
     let (web_http_shutdown, web_http_shutdown_receiver) = watch::channel(false);
     let (turn_liveness_shutdown, turn_liveness_shutdown_receiver) = watch::channel(false);
@@ -1886,6 +2456,17 @@ async fn run_hub(
                 .await,
         )
     });
+    if let Some(policy) = fenced_pool_floor_reconciliation {
+        runtime_tasks.spawn(async move {
+            run_fenced_pool_floor_reconciliation(
+                fenced_pool_floor_pool,
+                policy,
+                fenced_pool_floor_shutdown_receiver,
+            )
+            .await;
+            RuntimeTaskExit::FencedPoolFloor
+        });
+    }
     runtime_tasks.spawn(async move {
         RuntimeTaskExit::Process(process_runtime.run(process_shutdown_receiver).await)
     });
@@ -1904,6 +2485,33 @@ async fn run_hub(
             )
         });
     }
+    let repository_watch_lease_expiry_store = repository_watch_store.clone();
+    runtime_tasks.spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let outcome = loop {
+            select! {
+                changed = repository_watch_lease_expiry_shutdown_receiver.changed() => {
+                    if changed.is_err()
+                        || *repository_watch_lease_expiry_shutdown_receiver.borrow_and_update()
+                    {
+                        break Ok(());
+                    }
+                }
+                _ = ticker.tick() => {
+                    if let Err(error) = repository_watch_lease_expiry_store
+                        .process_pending_expired_start_leases(|| {
+                            DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+                        })
+                        .await
+                    {
+                        break Err(error);
+                    }
+                }
+            }
+        };
+        RuntimeTaskExit::RepositoryWatchLeaseExpiry(outcome)
+    });
     if let Some(convergence_sweep_runtime) = convergence_sweep_runtime {
         runtime_tasks.spawn(async move {
             convergence_sweep_runtime
@@ -1939,6 +2547,12 @@ async fn run_hub(
                         report_process_runtime_failure(&error);
                         RuntimeStopCause::RuntimeFailed
                     }
+                    Some(Ok(RuntimeTaskExit::FencedPoolFloor)) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::FencedPoolFloorCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
                     Some(Ok(RuntimeTaskExit::Process(Ok(())))) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::ProcessCompletedBeforeShutdown,
@@ -1962,6 +2576,16 @@ async fn run_hub(
                     Some(Ok(RuntimeTaskExit::RepositoryWatch(Ok(())))) => {
                         report_runtime_task_defect(
                             RuntimeTaskDefect::RepositoryWatchCompletedBeforeShutdown,
+                        );
+                        RuntimeStopCause::RuntimeDefect
+                    }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Err(error)))) => {
+                        report_repository_watch_lease_expiry_failure(&error);
+                        RuntimeStopCause::RuntimeFailed
+                    }
+                    Some(Ok(RuntimeTaskExit::RepositoryWatchLeaseExpiry(Ok(())))) => {
+                        report_runtime_task_defect(
+                            RuntimeTaskDefect::RepositoryWatchLeaseExpiryCompletedBeforeShutdown,
                         );
                         RuntimeStopCause::RuntimeDefect
                     }
@@ -2010,17 +2634,20 @@ async fn run_hub(
             while runtime_tasks.join_next().await.is_some() {}
             ShutdownOutcome::GuardLost
         } else {
+            let _ = turn_execution_shutdown.send(true);
             let _ = scheduler_shutdown.send(());
+            let _ = fenced_pool_floor_shutdown.send(true);
             let _ = process_shutdown.send(true);
             let _ = runner_shutdown.send(true);
             let _ = repository_watch_shutdown.send(true);
+            let _ = repository_watch_lease_expiry_shutdown.send(true);
             let _ = convergence_sweep_shutdown.send(true);
             let _ = web_http_shutdown.send(true);
             let _ = turn_liveness_shutdown.send(true);
             let (drain, components_clean) = drain_runtime_tasks(
                 &mut runtime_tasks,
                 guard_loss.as_mut(),
-                GRACEFUL_SHUTDOWN_WINDOW,
+                shutdown_grace_window,
             )
             .await;
             cause = combine_runtime_stop_cause(cause, components_clean);
@@ -2197,6 +2824,9 @@ fn install_tracing_subscriber(
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if let Some(exit_code) = run_web_image_derivative_worker_if_requested() {
+        return exit_code;
+    }
     let telemetry_configuration = match TelemetryConfiguration::from_environment() {
         Ok(configuration) => configuration,
         Err(error) => {
@@ -2236,10 +2866,7 @@ async fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(ShutdownOutcome::GraceWindowExpired) => {
-            tracing::warn!(
-                grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
-                "daemon shutdown grace window expired; abandoning in-flight work"
-            );
+            tracing::warn!("daemon shutdown grace window expired; abandoning in-flight work");
             ExitCode::SUCCESS
         }
         Ok(ShutdownOutcome::SignalListenerFailed) => {
@@ -2265,7 +2892,6 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
-                grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
                 "activated-turn execution failed and shutdown grace expired; abandoning in-flight work for startup recovery"
             );
             ExitCode::FAILURE
@@ -2293,7 +2919,6 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?error.phase,
                 failure_class = ?error.failure_class,
-                grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
                 "daemon runtime component failed and shutdown grace expired; abandoning in-flight work"
             );
             ExitCode::FAILURE
@@ -2310,7 +2935,6 @@ async fn main() -> ExitCode {
             tracing::error!(
                 phase = ?RuntimePhase::Runtime,
                 failure_class = ?OperatorFailureClass::CallerOrHubBug,
-                grace_window_seconds = GRACEFUL_SHUTDOWN_WINDOW.as_secs(),
                 "daemon runtime task defect was followed by an expired shutdown grace window"
             );
             ExitCode::FAILURE
@@ -2360,6 +2984,7 @@ mod tests {
 
     use super::{
         AnthropicConstructionError, BRAVE_API_KEY_FILE_ENVIRONMENT, DATABASE_URL_ENVIRONMENT,
+        FENCED_POOL_MAX_CONNECTIONS, FencedPoolFloorReconciliationPolicy,
         GITHUB_TOKEN_FILE_ENVIRONMENT, HubConfiguration, HubConfigurationError,
         HubConfigurationValues, HubRuntimeError, MODEL_CONFIGURATION_FILE_ENVIRONMENT,
         OpenAiConstructionError, OperatorFilterDisposition, PROCESS_SOCKET_PATH_ENVIRONMENT,
@@ -2369,14 +2994,68 @@ mod tests {
         ShutdownOutcome, SingleHubGuardError, TEMPLATE_CONFIGURATION_FILE_ENVIRONMENT,
         anthropic_construction_cause, combine_runtime_stop_cause, completed_runtime_outcome,
         credential_files_conflict, database_close_failure_outcome, drain_runtime_tasks,
-        erase_startup_cause, migrate_scan_then_schedule, openai_construction_cause,
-        operator_filter, process_runtime_failure_class, report_database_close_failure,
+        erase_startup_cause, fenced_pool_floor_reconciliation_policy, graceful_shutdown_window,
+        migrate_scan_then_schedule, openai_construction_cause, operator_filter,
+        process_runtime_failure_class, report_database_close_failure,
         repository_watch_rule_configuration_error, run_scheduler_until_shutdown,
         runner_lifecycle_failure_class, should_close_pool, staging_sweep_failure_outcome,
+        validate_fenced_pool_min_connections,
     };
     use signalboxd::runner_protocol_runtime::RunnerRegistrationFailureCause;
 
     const BRAVE_KEY_FILE_FIXTURE: &str = "brave-key";
+
+    #[test]
+    fn fenced_pool_prewarm_cannot_exceed_the_compiled_capacity() {
+        assert_eq!(
+            validate_fenced_pool_min_connections(Some(FENCED_POOL_MAX_CONNECTIONS)),
+            Some(Some(FENCED_POOL_MAX_CONNECTIONS))
+        );
+        assert_eq!(
+            validate_fenced_pool_min_connections(Some(FENCED_POOL_MAX_CONNECTIONS + 1)),
+            None
+        );
+        assert_eq!(validate_fenced_pool_min_connections(None), Some(None));
+    }
+
+    #[test]
+    fn positive_fenced_pool_floor_requires_bounded_reconciliation() {
+        let interval = Duration::from_secs(5);
+        let attempt_bound = Duration::from_secs(30);
+
+        assert_eq!(
+            fenced_pool_floor_reconciliation_policy(
+                Some(FENCED_POOL_MAX_CONNECTIONS),
+                Some(interval),
+                Some(attempt_bound),
+            ),
+            Some(Some(FencedPoolFloorReconciliationPolicy {
+                minimum: FENCED_POOL_MAX_CONNECTIONS,
+                interval,
+                attempt_bound,
+            }))
+        );
+        assert_eq!(
+            fenced_pool_floor_reconciliation_policy(
+                Some(FENCED_POOL_MAX_CONNECTIONS),
+                None,
+                Some(attempt_bound),
+            ),
+            None
+        );
+        assert_eq!(
+            fenced_pool_floor_reconciliation_policy(
+                Some(FENCED_POOL_MAX_CONNECTIONS),
+                Some(interval),
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            fenced_pool_floor_reconciliation_policy(None, None, None),
+            Some(None)
+        );
+    }
 
     fn hub_configuration_values() -> HubConfigurationValues {
         HubConfigurationValues {
@@ -2985,6 +3664,34 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct DelayedPass {
+        entered: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+        duration: Duration,
+    }
+
+    impl EligibilityPass for DelayedPass {
+        type Error = FakeFailure;
+
+        fn run(
+            &mut self,
+            _session: SessionId,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+            let entered = self
+                .entered
+                .lock()
+                .expect("the fake pass state is not poisoned")
+                .take()
+                .expect("the test pass runs once");
+            let duration = self.duration;
+            async move {
+                entered.send(()).expect("the test waits for pass entry");
+                tokio::time::sleep(duration).await;
+                Ok(())
+            }
+        }
+    }
+
     struct PendingWorkSource;
 
     impl EligibilityWorkSource for PendingWorkSource {
@@ -3042,6 +3749,45 @@ mod tests {
         assert_eq!(
             runtime.await.expect("the runtime task completes"),
             ShutdownOutcome::GraceWindowExpired
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adr0044_shutdown_drain_includes_the_configured_cleanup_window() {
+        let (entered_sender, entered_receiver) = oneshot::channel();
+        let (shutdown_sender, shutdown_receiver) = oneshot::channel();
+        let session = SessionId::from_uuid(Uuid::from_u128(1));
+        let pass_duration = Duration::from_secs(2);
+        let scheduler = SchedulerLoop::new(
+            OneHintThenPending {
+                hints: VecDeque::from([session]),
+            },
+            DelayedPass {
+                entered: Arc::new(Mutex::new(Some(entered_sender))),
+                duration: pass_duration,
+            },
+        );
+        let runtime = tokio::spawn(run_scheduler_until_shutdown(
+            scheduler,
+            async move {
+                shutdown_receiver.await.expect("the test requests shutdown");
+                SchedulerStopCause::Requested
+            },
+            graceful_shutdown_window(Some(Duration::from_secs(3)), Some(Duration::from_secs(1)))
+                .expect("the fixture cleanup window is bounded"),
+        ));
+
+        entered_receiver
+            .await
+            .expect("the scheduler admitted the first pass");
+        shutdown_sender
+            .send(())
+            .expect("the scheduler still listens for shutdown");
+        tokio::time::advance(pass_duration).await;
+
+        assert_eq!(
+            runtime.await.expect("the runtime task completes"),
+            ShutdownOutcome::Clean
         );
     }
 
@@ -3287,7 +4033,7 @@ mod tests {
         runtime_tasks.spawn(pending::<RuntimeTaskExit>());
 
         let (drain, completion) =
-            drain_runtime_tasks(&mut runtime_tasks, pending(), Duration::from_secs(5)).await;
+            drain_runtime_tasks(&mut runtime_tasks, pending(), Some(Duration::from_secs(5))).await;
         let cause = combine_runtime_stop_cause(RuntimeStopCause::Requested, completion);
 
         assert_eq!(drain, RuntimeDrainOutcome::GraceWindowExpired);
@@ -3307,7 +4053,7 @@ mod tests {
         runtime_tasks.spawn(pending::<RuntimeTaskExit>());
 
         let (drain, completion) =
-            drain_runtime_tasks(&mut runtime_tasks, pending(), Duration::from_secs(5)).await;
+            drain_runtime_tasks(&mut runtime_tasks, pending(), Some(Duration::from_secs(5))).await;
         let cause = combine_runtime_stop_cause(RuntimeStopCause::Requested, completion);
 
         assert_eq!(drain, RuntimeDrainOutcome::GraceWindowExpired);

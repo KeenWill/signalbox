@@ -15,6 +15,7 @@ export type DensityMode = 'compact' | 'comfortable'
 export type DetailMode = 'full' | 'condensed' | 'results'
 export type ThemeMode = 'light' | 'dark'
 export type Overlay = 'palette' | 'help' | 'navigation' | null
+export type ArtifactOriginalState = 'loading' | 'loaded' | 'failed'
 
 export interface VisibleRange {
   start: number
@@ -28,6 +29,9 @@ interface AppState extends BrowserPreferences {
   theme: ThemeMode
   overlay: Overlay
   selectedTimeline: string | null
+  selectedArtifact: string | null
+  expandedArtifacts: Record<string, boolean>
+  originalArtifacts: Record<string, ArtifactOriginalState>
   transcriptRange: VisibleRange
   tableRange: VisibleRange
   activitySequence: number
@@ -37,6 +41,9 @@ const initialState: AppState = {
   ...loadBrowserPreferences(),
   overlay: null,
   selectedTimeline: null,
+  selectedArtifact: null,
+  expandedArtifacts: {},
+  originalArtifacts: {},
   transcriptRange: { start: 0, end: 0 },
   tableRange: { start: 0, end: 0 },
   activitySequence: 0,
@@ -71,6 +78,9 @@ const appSlice = createSlice({
       state.paneSizes = action.payload
       state.activitySequence += 1
     },
+    paneSizesPreviewed(state, action: { payload: BrowserPreferences['paneSizes'] }) {
+      state.paneSizes = action.payload
+    },
     preferencesReset(state) {
       Object.assign(state, createDefaultBrowserPreferences())
       state.activitySequence += 1
@@ -103,6 +113,25 @@ const appSlice = createSlice({
     },
     timelineSelected(state, action: { payload: string | null }) {
       state.selectedTimeline = action.payload
+      state.activitySequence += 1
+    },
+    artifactSelected(state, action: { payload: string | null }) {
+      state.selectedArtifact = action.payload
+      state.activitySequence += 1
+    },
+    artifactExpansionSet(state, action: { payload: { id: string; expanded: boolean } }) {
+      state.expandedArtifacts[action.payload.id] = action.payload.expanded
+      state.activitySequence += 1
+    },
+    artifactOriginalRequested(state, action: { payload: string }) {
+      state.originalArtifacts[action.payload] = 'loading'
+      state.activitySequence += 1
+    },
+    artifactOriginalSettled(
+      state,
+      action: { payload: { id: string; result: 'loaded' | 'failed' } },
+    ) {
+      state.originalArtifacts[action.payload.id] = action.payload.result
       state.activitySequence += 1
     },
     transcriptRangeSet(state, action: { payload: VisibleRange }) {

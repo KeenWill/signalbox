@@ -1201,7 +1201,7 @@ async fn s17_inv032_automatic_delegated_reconciliation_closes_parent_delivery()
             |_| panic!("the delegated recovery fixture has no pending steering"),
         )
         .await?;
-    let recovery = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let recovery = PostgresAutomaticReconciliationRepository::new(pool.clone());
     let batch = recovery.claim_due().await?;
     let claimed = batch.claimed()[0];
     let outcome = recovery.reconcile(claimed).await?;
@@ -1238,7 +1238,7 @@ async fn s17_inv032_automatic_delegated_reconciliation_closes_parent_delivery()
                JOIN turn_lifecycle AS lifecycle
                  ON lifecycle.session_id = task.child_session_id
                 AND lifecycle.turn_id = task.turn_id
-               JOIN automatic_model_call_reconciliation AS automatic
+               JOIN automatic_reconciliation AS automatic
                  ON automatic.session_id = lifecycle.session_id
                 AND automatic.turn_id = lifecycle.turn_id
               WHERE result.spawning_tool_request_id = $1",
@@ -1257,7 +1257,7 @@ async fn s17_inv032_automatic_delegated_reconciliation_closes_parent_delivery()
     assert_eq!(batch.claimed().len(), 1);
     assert_eq!(batch.exhausted(), &[]);
     assert_eq!(claimed.session(), fixture.child);
-    assert_eq!(outcome, ModelCallReconciliationOutcome::Reconciled);
+    assert_eq!(outcome, AutomaticReconciliationOutcome::Reconciled);
     assert_eq!(
         evidence,
         (
@@ -1797,7 +1797,7 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
         .await?;
 
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
-    let (candidates, continuation) = EligibilitySweep::find_sessions(&mut sweep)
+    let (candidates, _dispatch_starts, continuation) = EligibilitySweep::find_sessions(&mut sweep)
         .await?
         .into_parts();
     assert!(!continuation);
@@ -1890,7 +1890,7 @@ async fn s17_inv032_foreground_delegation_result_is_a_durable_sweep_candidate()
     .execute(&pool)
     .await?;
 
-    let (candidates, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (candidates, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();

@@ -55,7 +55,7 @@ impl <Identity> {
 }
 ```
 
-The twenty-nine identities defined in `lib.rs`:
+The thirty identities defined in `lib.rs`:
 
 ```rust
 pub struct DurableCommandId(/* private */);
@@ -67,6 +67,7 @@ pub struct AcceptedInputId(/* private */);
 pub struct TurnId(/* private */);
 pub struct TurnAttemptId(/* private */);
 pub struct ModelCallId(/* private */);
+pub struct BlobDerivationId(/* private */);
 pub struct ProviderTargetEvidenceId(/* private */);
 pub struct ToolRequestId(/* private */);
 pub struct ToolAttemptId(/* private */);
@@ -125,6 +126,65 @@ pub enum BlobDigestParseFailure {
 pub struct BlobDigestParseError { /* private */ }
 impl BlobDigestParseError {
     // accessors: rejected(), failure()
+}
+
+pub struct BlobTransformationName(/* private */);
+impl BlobTransformationName {
+    pub fn try_new(value: impl Into<Arc<str>>) -> Result<Self, BlobTransformationError>;
+    // accessor: as_str()
+}
+
+pub struct BlobTransformation { /* private */ }
+impl BlobTransformation {
+    pub fn try_new(
+        name: BlobTransformationName,
+        version: u32,
+        parameters: &serde_json::Value,
+    ) -> Result<Self, BlobTransformationError>;
+    // accessors: name(), version(), parameters_json()
+}
+
+pub enum BlobTransformationError {
+    InvalidName,
+    ZeroVersion,
+    InvalidParameters,
+    ParametersTooLarge,
+}
+
+pub enum BlobDerivationProducer {
+    Deterministic { implementation: BlobDigest },
+    Executed { execution_id: uuid::Uuid, implementation: BlobDigest },
+    ModelDerived { model_call: ModelCallId },
+}
+
+pub struct DeterministicBlobDerivationKey(/* private BlobDigest */);
+impl DeterministicBlobDerivationKey {
+    pub fn try_derive(
+        inputs: &[BlobDigest],
+        transformation: &BlobTransformation,
+        implementation: BlobDigest,
+    ) -> Result<Self, BlobDerivationError>;
+    // accessor: digest()
+}
+
+pub struct BlobDerivation { /* private */ }
+impl BlobDerivation {
+    pub fn try_new(
+        id: BlobDerivationId,
+        inputs: impl Into<Box<[BlobDigest]>>,
+        transformation: BlobTransformation,
+        producer: BlobDerivationProducer,
+        outputs: impl Into<Box<[BlobDigest]>>,
+    ) -> Result<Self, BlobDerivationError>;
+    // accessors: id(), inputs(), transformation(), producer(), outputs(),
+    // deterministic_key()
+}
+
+pub enum BlobDerivationError {
+    EmptyInputs,
+    TooManyInputs,
+    EmptyOutputs,
+    TooManyOutputs,
 }
 ```
 
@@ -583,9 +643,13 @@ impl ImportedTranscriptEntry {
 }
 
 pub struct ImportedTranscriptFrontier { /* private */ }
-// sealed: ImportedConversation frontier methods
 // Copy; equality is the exact imported-conversation boundary.
 impl ImportedTranscriptFrontier {
+    pub const fn from_parts(
+        conversation: ImportedConversationId,
+        through_entry: ImportedTranscriptEntryId,
+        through_position: ImportedTranscriptPosition,
+    ) -> Self;
     // accessors: conversation(), through_entry(), through_position()
 }
 
@@ -1875,14 +1939,12 @@ impl SessionConfigurationDefaultsVersion {
 
 pub struct SessionSystemPrompt(/* private String */);
 impl SessionSystemPrompt {
-    pub const MAX_UTF8_BYTES: usize;  // 1_048_576
     pub fn try_new(value: String) -> Result<Self, SessionSystemPromptError>;
     // accessors: as_str(), into_string()
 }
 
 pub enum SessionSystemPromptFailure {
     Empty,
-    TooLarge { bytes: usize },
     ContainsNull,
 }
 
@@ -2317,10 +2379,12 @@ impl NonEmptyUnicodeText {
     pub fn into_string(self) -> String;
     // accessors: as_str()
 }
+// Debug is content-redacted.
 
 pub enum NonEmptyUnicodeTextFailure {
     Empty,
     ContainsNull,
+    TooLong,
 }
 
 pub struct NonEmptyUnicodeTextError { /* private */ }
@@ -2328,13 +2392,94 @@ impl NonEmptyUnicodeTextError {
     pub fn into_parts(self) -> (String, NonEmptyUnicodeTextFailure);
     // accessors: failure(), value()
 }
+// Debug is content-redacted.
 
-pub enum UserContent {
-    Text { value: NonEmptyUnicodeText },
+pub enum AttachmentKind {
+    Image,
+    Document,
+    File,
 }
-impl UserContent {
+
+pub struct AttachmentBlobFact { /* private */ }
+impl AttachmentBlobFact {
+    pub const fn new(digest: BlobDigest, byte_length: NonZeroU64) -> Self;
+    // accessors: digest(), byte_length()
+}
+
+pub struct DeclaredMediaType(/* private String */);
+impl DeclaredMediaType {
+    pub const MAX_BYTES: usize;
+    pub fn try_new(value: String) -> Result<Self, DeclaredMediaTypeError>;
+    // accessor: as_str()
+}
+
+pub enum DeclaredMediaTypeFailure {
+    Empty,
+    TooLong,
+    NotVisibleAscii,
+}
+
+pub struct DeclaredMediaTypeError { /* private */ }
+impl DeclaredMediaTypeError {
+    // accessors: failure(), value()
+}
+
+pub struct AttachmentDisplayFilename(/* private String */);
+impl AttachmentDisplayFilename {
+    pub const MAX_BYTES: usize;
+    pub fn try_new(value: String) -> Result<Self, AttachmentDisplayFilenameError>;
+    // accessor: as_str()
+}
+// Debug is content-redacted.
+
+pub enum AttachmentDisplayFilenameFailure {
+    Empty,
+    TooLong,
+    ReservedBasename,
+    ContainsPathSeparator,
+    ContainsNull,
+}
+
+pub struct AttachmentDisplayFilenameError { /* private */ }
+impl AttachmentDisplayFilenameError {
+    // accessors: failure(), value()
+}
+// Debug is content-redacted.
+
+pub enum UserContentPart {
+    Text { value: NonEmptyUnicodeText },
+    Attachment {
+        digest: BlobDigest,
+        kind: AttachmentKind,
+        media_type: DeclaredMediaType,
+        display_filename: Option<AttachmentDisplayFilename>,
+    },
+}
+impl UserContentPart {
     pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
-    // accessors: text()
+}
+
+pub struct UserContent { /* private */ }
+impl UserContent {
+    pub const MAX_PARTS: usize;
+    pub const MAX_TEXT_BYTES: usize;
+    pub fn try_text(value: String) -> Result<Self, NonEmptyUnicodeTextError>;
+    pub fn try_parts(parts: Vec<UserContentPart>) -> Result<Self, UserContentError>;
+    pub fn into_parts(self) -> Vec<UserContentPart>;
+    // accessors: parts(), single_text()
+}
+
+pub struct UserContentError { /* private */ }
+impl UserContentError {
+    pub fn into_parts(self) -> (Vec<UserContentPart>, UserContentFailure);
+    // accessors: failure(), parts()
+}
+
+pub enum UserContentFailure {
+    Empty,
+    TooManyParts,
+    AdjacentTextParts,
+    TextTooLarge,
 }
 ```
 
@@ -2350,6 +2495,14 @@ impl SubmitInput {
         delivery: DeliveryRequest,
     ) -> Self;
     pub fn prepare_session_not_found(self) -> PreparedSubmitInput;
+    pub fn prepare_attachment_blob_not_found(
+        self,
+        digest: BlobDigest,
+    ) -> PreparedSubmitInput;
+    pub fn prepare_attachment_byte_budget_exceeded(
+        self,
+        maximum_bytes: u64,
+    ) -> PreparedSubmitInput;
     pub fn prepare_when_no_active_turn(
         self,
         session: &Session,
@@ -2428,6 +2581,12 @@ impl SubmitInputPendingSteeringAppliedResult {
 }
 
 pub enum SubmitInputRejectedResult {
+    AttachmentBlobNotFound {
+        digest: BlobDigest,
+    },
+    AttachmentByteBudgetExceeded {
+        maximum_bytes: u64,
+    },
     SessionNotFound {
         session: SessionId,
     },
@@ -2521,6 +2680,9 @@ pub struct SubmitInputTerminalSourceConstructionInput {
 pub struct SubmitInputInterruptedModelCallReconciliationConstructionInput {
     /* public named canonical origin, turn, ambiguous call, and interrupt facts */
 }
+pub struct SubmitInputAutomaticReconciliationConstructionInput {
+    /* public named canonical origin, turn, ambiguous operation, and recovery-attempt facts */
+}
 pub struct SubmitInputInterruptedToolReconciliationConstructionInput {
     /* public named canonical origin, turn, ambiguous attempt, and interrupt facts */
 }
@@ -2528,6 +2690,9 @@ impl SubmitInputTerminalSourceReconstitutionInput {
     pub fn new(input: SubmitInputTerminalSourceConstructionInput) -> Self;
     pub fn interrupted_model_call_reconciliation(
         input: SubmitInputInterruptedModelCallReconciliationConstructionInput,
+    ) -> Self;
+    pub fn automatic_reconciliation(
+        input: SubmitInputAutomaticReconciliationConstructionInput,
     ) -> Self;
     pub fn interrupted_tool_reconciliation(
         input: SubmitInputInterruptedToolReconciliationConstructionInput,
@@ -2556,6 +2721,12 @@ pub struct SubmitInputAppliedTurnOriginReconstitutionInput {
 }
 pub struct SubmitInputAppliedPendingSteeringReconstitutionInput {
     /* public named command, result, source-turn, and accepted-input facts */
+}
+pub struct SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput {
+    /* public named command, actor, session, and unavailable-digest facts */
+}
+pub struct SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput {
+    /* public named command, actor, session, and maximum-byte facts */
 }
 pub struct SubmitInputRejectedSessionNotFoundReconstitutionInput {
     /* public named command, actor, and absent-session facts */
@@ -2594,6 +2765,12 @@ impl SubmitInputReconstitutionInput {
     ) -> Self;
     pub fn applied_pending_steering(
         input: SubmitInputAppliedPendingSteeringReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_attachment_blob_not_found(
+        input: SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput,
+    ) -> Self;
+    pub fn rejected_attachment_byte_budget_exceeded(
+        input: SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
     ) -> Self;
     pub fn rejected_safe_point_unavailable_while_stopping(
         input: SubmitInputRejectedSafePointUnavailableWhileStoppingReconstitutionInput,
@@ -2635,6 +2812,8 @@ pub enum SubmitInputReconstitutionFailure {
     AppliedDeliveryIsNotTurnOrigin,
     AppliedDeliveryIsNotNextSafePoint,
     ResultSessionMismatch,
+    AttachmentDigestMismatch,
+    AttachmentBudgetMismatch,
     AcceptedCommandMismatch,
     AcceptedInputMismatch,
     AcceptedSessionMismatch,
@@ -2817,7 +2996,7 @@ pub enum ReconciliationReason {
     UserChoseReconciliation { decision: AppliedStopForReconciliationProof },
     InterruptRequiresReconciliation { interrupt: AppliedInterruptProof },
     FatalMismatchRequiresReconciliation { causes: FatalMismatchStopCauses },
-    AutomaticModelCallRecovery { attempt: NonZeroU32 },
+    AutomaticRecovery { attempt: NonZeroU32 },
 }
 
 pub struct ReconciliationMarker { /* private */ }
@@ -2898,7 +3077,7 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         reconciling_attempt: TurnAttemptId,
         reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
         ambiguous_call: ModelCallId,
-        interrupt: Option<AppliedInterruptCommandResult>,
+        authority: AutomaticReconciliationAuthority,
         terminal_frontier: ContextFrontierId,
     },
     TerminalToolReconciliationRequired {
@@ -2906,10 +3085,15 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         starting_frontier: ContextFrontierId,
         reconciling_attempt: TurnAttemptId,
         reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
-        ambiguous_tool: AwaitingToolRecovery,
-        interrupt: AppliedInterruptCommandResult,
+        tool_batch: ToolBatch,
+        authority: AutomaticReconciliationAuthority,
         terminal_frontier: ContextFrontierId,
     },
+}
+
+pub enum AutomaticReconciliationAuthority {
+    AppliedInterrupt(AppliedInterruptCommandResult),
+    AutomaticRecovery { attempt: NonZeroU32 },
 }
 
 pub struct FailedTurnExecutionReconstitutionInput { /* private */ }
@@ -3410,11 +3594,19 @@ impl AcceptedInputSchedulingProjection {
         interrupt: AppliedInterruptCommandResult,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
-    pub fn apply_automatic_model_call_reconciliation(
+    pub fn apply_automatic_reconciliation(
         self,
         attempt: NonZeroU32,
         identities: AmbiguousModelCallTurnIdentities,
     ) -> Result<ReconciliationRequiredModelCallTurn, ModelCallClosureError>;
+    pub fn apply_automatic_tool_reconciliation(
+        self,
+        wait: AwaitingToolRecovery,
+        tool_attempt: EndedToolAttempt,
+        result_projection: PreparedToolResultProjection,
+        recovery_attempt: NonZeroU32,
+        identities: AmbiguousModelCallTurnIdentities,
+    ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
     pub fn apply_interrupt_to_runner_recovery(
         self,
         source_snapshot: ResolvedContextFrontierSnapshot,
@@ -3455,6 +3647,9 @@ impl AcceptedInputSchedulingProjection {
     ) -> Result<ReconciliationRequiredToolTurn, ModelCallClosureError>;
     pub fn earliest_queued_turn(&self)
         -> Option<&AcceptedInputTurnSchedulingProjection>;
+    pub fn earliest_queued_rendered_base_origins(
+        &self,
+    ) -> Option<Result<Vec<AcceptedInputId>, ContextFrontierProjectionFailure>>;
     pub fn resolved_snapshot(
         &self,
         snapshot: ContextFrontierId,
@@ -3988,6 +4183,10 @@ impl ModelCallExecutionReconstitutionInput {
         self,
         call_snapshot: ResolvedContextFrontierReconstitutionInput,
     ) -> Self;
+    pub fn with_attachment_blob_facts(
+        self,
+        facts: Vec<AttachmentBlobFact>,
+    ) -> Self;
     pub fn with_continuation_snapshot(
         self,
         continuation_snapshot: ResolvedContextFrontierReconstitutionInput,
@@ -4109,6 +4308,10 @@ impl ModelCallExecution {
         pool_name: String,
         identities: FailedModelCallTurnIdentities,
     ) -> Result<CredentialPoolExhaustedModelCallTurn, ModelCallClosureError>;
+    pub fn fail_automatic_context_compaction(
+        self,
+        identities: FailedModelCallTurnIdentities,
+    ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
     pub fn fail_prepared_call(
         self,
         identities: FailedModelCallTurnIdentities,
@@ -4125,6 +4328,11 @@ impl ModelCallExecution {
         self,
         failure_identities: FailedModelCallTurnIdentities,
     ) -> Result<FailedModelCallTurn, ModelCallClosureError>;
+    pub fn require_context_compaction_after_tool_results(
+        self,
+        producing_call: ModelCallId,
+        failure_identities: FailedModelCallTurnIdentities,
+    ) -> Result<ContextHeadroomExhaustedModelCallTurn, ModelCallClosureError>;
     // accessors: active_turn(), session(), turn(), configuration(), start(),
     // current_attempt(), current_call()
 }
@@ -4152,7 +4360,7 @@ impl PreparedSteeringConsumption {
 pub struct PreparedModelCallRequest { /* private */ }
 // accessors: session(), turn(), attempt(), dangerous_tool_auto_approval(),
 // model_settings(), call(), frontier_entries(), frontier_entry_slice(),
-// origin_content()
+// origin_content(), attachment_byte_length()
 pub enum ModelCallResumeFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub enum ModelCallAuthorizationFailure { CallMissing, CallIsNotPrepared, AttemptIsNotPrepared }
 pub struct ModelCallAuthorizationError { /* private */ }
@@ -4239,6 +4447,14 @@ pub struct CredentialPoolExhaustedModelCallTurn { /* private */ }
 // sealed: ModelCallExecution::fail_credential_pool_exhausted
 impl CredentialPoolExhaustedModelCallTurn {
     pub fn pool_name(&self) -> &str;
+    pub const fn failed(&self) -> &FailedModelCallTurn;
+    pub fn into_failed(self) -> FailedModelCallTurn;
+}
+
+pub struct ContextHeadroomExhaustedModelCallTurn { /* private */ }
+// sealed: ModelCallExecution::require_context_compaction_after_tool_results
+impl ContextHeadroomExhaustedModelCallTurn {
+    pub const fn producing_call(&self) -> ModelCallId;
     pub const fn failed(&self) -> &FailedModelCallTurn;
     pub fn into_failed(self) -> FailedModelCallTurn;
 }
@@ -4772,7 +4988,8 @@ impl ToolRequestOrdinal {
 pub struct ToolCallProposal { /* private */ }
 impl ToolCallProposal {
     pub const fn new(name: ToolName, arguments: NormalizedToolArguments) -> Self;
-    // accessors: name(), arguments()
+    pub fn suppressed(name: ToolName) -> Self;
+    // accessors: name(), arguments(), is_suppressed()
 }
 pub enum AssistantResponsePart {
     Text(AssistantText),
@@ -4835,6 +5052,7 @@ pub enum ToolDecisionSource {
     SessionBlanket,
     SessionOverride,
     Delegate,
+    RuntimeSafety,
     UserOverride,
 }
 
@@ -4896,7 +5114,8 @@ pub enum ToolApprovalDecision {
 }
 pub struct ToolApprovalResolution { /* private */ }
 // sealed live producers: user command, registry auto, frozen session blanket,
-// checked delegate, or consumed user override
+// checked delegate, consumed user override, or provider credential-boundary
+// safety denial
 impl ToolApprovalResolution {
     // accessors: request(), decision(), source(), decider(), rationale(), is_approved()
 }
@@ -4912,6 +5131,7 @@ impl ToolApprovalResolutionReconstitutionInput {
         request: ToolRequestId,
         frozen_posture: DangerousToolAutoApproval,
     ) -> Self;
+    pub const fn runtime_safety(request: ToolRequestId) -> Self;
     pub const fn user_override(
         request: ToolRequestId,
         command: DurableCommandId,
@@ -4931,6 +5151,7 @@ pub enum InitialToolApproval {
     Delegated,
     PolicyAuto,
     SessionBlanket,
+    RuntimeSafetyDeny,
     UserOverride { command: DurableCommandId, denied_request: ToolRequestId },
 }
 impl InitialToolApproval {
@@ -5663,14 +5884,20 @@ pub struct SessionMetadataContent { /* private */ }
 impl SessionMetadataContent {
     pub const MAX_TOTAL_UTF8_BYTES: usize;
     pub const MAX_INDEXED_UTF8_BYTES: usize;
-    pub const MAX_TAGS: usize;
-    pub const MAX_ATTRIBUTES: usize;
     pub fn empty() -> Self;
     pub fn try_new(
         title: Option<String>,
         tags: Vec<String>,
         attributes: Vec<(String, String)>,
         archived: bool,
+    ) -> Result<Self, SessionMetadataContentError>;
+    pub fn try_new_with_count_limits(
+        title: Option<String>,
+        tags: Vec<String>,
+        attributes: Vec<(String, String)>,
+        archived: bool,
+        max_tags: Option<usize>,
+        max_attributes: Option<usize>,
     ) -> Result<Self, SessionMetadataContentError>;
     pub fn title(&self) -> Option<&str>;
     pub fn tags(&self) -> impl ExactSizeIterator<Item = &str>;
@@ -5888,6 +6115,153 @@ impl WorkspaceRecord {
 }
 ```
 
+## application: attention
+
+```rust
+pub const fn max_attention_snapshot_items() -> u16;
+pub const fn max_attention_goal_summary_characters() -> u16;
+pub const fn max_attention_change_items() -> u16;
+pub const fn max_attention_title_characters() -> u16;
+pub const fn max_attention_filter_tags() -> u8;
+pub const fn max_attention_filter_utf8_bytes() -> u16;
+
+pub struct AttentionCursor(/* private */);
+impl AttentionCursor {
+    pub const fn new(value: u64) -> Self;
+    pub const fn value(self) -> u64;
+}
+
+pub enum AttentionState {
+    Active,
+    Queued,
+    Blocked,
+    AwaitingApproval,
+    Ambiguous,
+    AwaitingToolRecovery,
+    AwaitingReconciliation,
+    RunnerLost,
+    Idle,
+}
+
+pub enum AttentionSort {
+    LastActivityDescending,
+    SessionIdentityAscending,
+}
+
+pub enum AttentionContinuation {
+    LastActivity { recorded_at: SystemTime, session: SessionId },
+    SessionIdentity(SessionId),
+}
+
+pub struct AttentionQuery { /* private */ }
+impl AttentionQuery {
+    pub fn hot_page() -> Self;
+    pub fn try_new(
+        search: Option<String>,
+        required_tags: Vec<String>,
+        include_archived: bool,
+        sort: AttentionSort,
+        continuation: Option<AttentionContinuation>,
+    ) -> Result<Self, AttentionQueryError>;
+    pub fn search(&self) -> Option<&str>;
+    pub fn required_tags(&self) -> impl ExactSizeIterator<Item = &str>;
+    pub const fn include_archived(&self) -> bool;
+    pub const fn sort(&self) -> AttentionSort;
+    pub const fn continuation(&self) -> Option<&AttentionContinuation>;
+}
+
+pub enum AttentionQueryError {
+    TooManyTags,
+    InvalidTag,
+    DuplicateTag,
+    InvalidSearch,
+    FilterTooLarge,
+    ContinuationSortMismatch,
+}
+
+pub enum AttentionAction {
+    ProvideGoalNeed,
+    DecideApproval,
+    ReconcileTurn,
+}
+
+pub enum AttentionBlockedReason {
+    UserInputRequired,
+    ExternalChangeRequired,
+    AuthorizationRequired,
+    ExecutionFailure,
+}
+
+pub struct AttentionGoalBlock {
+    pub generation: u64,
+    pub reason: AttentionBlockedReason,
+    pub need_summary: String,
+}
+
+pub struct AttentionJudgeFacts {
+    pub actionable: u64,
+    pub completed: u64,
+    pub escalated: u64,
+    pub failed: u64,
+}
+
+pub struct AttentionActivity {
+    pub recorded_at: SystemTime,
+    pub kind: AttentionActivityKind,
+}
+
+pub enum AttentionActivityKind {
+    Session,
+    Turn,
+    Goal,
+    ApprovalJudge,
+    Runner,
+}
+
+pub struct AttentionSummary {
+    pub session: SessionId,
+    pub title_summary: Option<String>,
+    pub title_truncated: bool,
+    pub archived: bool,
+    pub current_turn: Option<TurnId>,
+    pub active_turn_count: u64,
+    pub queued_turn_count: u64,
+    pub state: AttentionState,
+    pub action: Option<AttentionAction>,
+    pub goal_block: Option<AttentionGoalBlock>,
+    pub judge: AttentionJudgeFacts,
+    pub last_activity: AttentionActivity,
+}
+
+pub struct AttentionSnapshot {
+    pub cursor: AttentionCursor,
+    pub total: u64,
+    pub sort: AttentionSort,
+    pub summaries: Vec<AttentionSummary>,
+    pub continuation: Option<AttentionContinuation>,
+}
+
+pub enum AttentionChanges {
+    Updated {
+        cursor: AttentionCursor,
+        summaries: Vec<AttentionSummary>,
+    },
+    ResyncRequired { cursor: AttentionCursor },
+}
+
+pub trait AttentionReader {
+    type Error;
+    fn snapshot(
+        &self,
+        query: AttentionQuery,
+    ) -> impl Future<Output = Result<AttentionSnapshot, Self::Error>> + Send;
+    fn changes_after(
+        &self,
+        cursor: AttentionCursor,
+    ) -> impl Future<Output = Result<AttentionChanges, Self::Error>> + Send;
+}
+```
+
 ## domain: workspace_instruction
 
 ```rust
@@ -6006,153 +6380,6 @@ impl TurnInstructionManifest {
 }
 ```
 
-## application: attention
-
-```rust
-pub const fn max_attention_snapshot_items() -> u16;
-pub const fn max_attention_goal_summary_characters() -> u16;
-pub const fn max_attention_change_items() -> u16;
-pub const fn max_attention_title_characters() -> u16;
-pub const fn max_attention_filter_tags() -> u8;
-pub const fn max_attention_filter_utf8_bytes() -> u16;
-
-pub struct AttentionCursor(/* private */);
-impl AttentionCursor {
-    pub const fn new(value: u64) -> Self;
-    pub const fn value(self) -> u64;
-}
-
-pub enum AttentionState {
-    Active,
-    Queued,
-    Blocked,
-    AwaitingApproval,
-    Ambiguous,
-    AwaitingReconciliation,
-    RunnerLost,
-    Idle,
-}
-
-pub enum AttentionSort {
-    LastActivityDescending,
-    SessionIdentityAscending,
-}
-
-pub enum AttentionContinuation {
-    LastActivity { recorded_at: SystemTime, session: SessionId },
-    SessionIdentity(SessionId),
-}
-
-pub struct AttentionQuery { /* private */ }
-impl AttentionQuery {
-    pub fn hot_page() -> Self;
-    pub fn try_new(
-        search: Option<String>,
-        required_tags: Vec<String>,
-        include_archived: bool,
-        sort: AttentionSort,
-        continuation: Option<AttentionContinuation>,
-    ) -> Result<Self, AttentionQueryError>;
-    pub fn search(&self) -> Option<&str>;
-    pub fn required_tags(&self) -> impl ExactSizeIterator<Item = &str>;
-    pub const fn include_archived(&self) -> bool;
-    pub const fn sort(&self) -> AttentionSort;
-    pub const fn continuation(&self) -> Option<&AttentionContinuation>;
-}
-
-pub enum AttentionQueryError {
-    TooManyTags,
-    InvalidTag,
-    DuplicateTag,
-    InvalidSearch,
-    FilterTooLarge,
-    ContinuationSortMismatch,
-}
-
-pub enum AttentionAction {
-    ProvideGoalNeed,
-    DecideApproval,
-    ReconcileTurn,
-    RestoreRunner,
-}
-
-pub enum AttentionBlockedReason {
-    UserInputRequired,
-    ExternalChangeRequired,
-    AuthorizationRequired,
-    ExecutionFailure,
-}
-
-pub struct AttentionGoalBlock {
-    pub generation: u64,
-    pub reason: AttentionBlockedReason,
-    pub need_summary: String,
-}
-
-pub struct AttentionJudgeFacts {
-    pub actionable: u64,
-    pub completed: u64,
-    pub escalated: u64,
-    pub failed: u64,
-}
-
-pub struct AttentionActivity {
-    pub recorded_at: SystemTime,
-    pub kind: AttentionActivityKind,
-}
-
-pub enum AttentionActivityKind {
-    Session,
-    Turn,
-    Goal,
-    ApprovalJudge,
-    Runner,
-}
-
-pub struct AttentionSummary {
-    pub session: SessionId,
-    pub title_summary: Option<String>,
-    pub title_truncated: bool,
-    pub archived: bool,
-    pub current_turn: Option<TurnId>,
-    pub active_turn_count: u64,
-    pub queued_turn_count: u64,
-    pub state: AttentionState,
-    pub action: Option<AttentionAction>,
-    pub goal_block: Option<AttentionGoalBlock>,
-    pub judge: AttentionJudgeFacts,
-    pub last_activity: AttentionActivity,
-}
-
-pub struct AttentionSnapshot {
-    pub cursor: AttentionCursor,
-    pub total: u64,
-    pub sort: AttentionSort,
-    pub summaries: Vec<AttentionSummary>,
-    pub continuation: Option<AttentionContinuation>,
-}
-
-pub enum AttentionChanges {
-    Updated {
-        cursor: AttentionCursor,
-        summaries: Vec<AttentionSummary>,
-    },
-    ResyncRequired { cursor: AttentionCursor },
-}
-
-pub trait AttentionReader {
-    type Error;
-    fn snapshot(
-        &self,
-        query: AttentionQuery,
-    ) -> impl Future<Output = Result<AttentionSnapshot, Self::Error>> + Send;
-    fn changes_after(
-        &self,
-        cursor: AttentionCursor,
-    ) -> impl Future<Output = Result<AttentionChanges, Self::Error>> + Send;
-}
-```
-
 ## application: approval_judge
 
 ```rust
@@ -6216,6 +6443,80 @@ pub trait ApprovalJudgeAuthorization {
     fn selection(&self) -> DirectModelSelection;
     fn target(&self) -> ResolvedProviderTarget;
     fn credential_reference(&self) -> &str;
+}
+```
+
+## application: blob_derivation
+
+```rust
+pub trait BlobDerivationIdGenerator {
+    fn next_blob_derivation_id(&mut self) -> BlobDerivationId;
+}
+
+pub struct UuidV7BlobDerivationIdGenerator;
+
+pub trait BlobDerivationStore {
+    type Error;
+    fn find_deterministic(
+        &self,
+        key: DeterministicBlobDerivationKey,
+    ) -> impl Future<Output = Result<Option<BlobDerivation>, Self::Error>> + Send;
+    fn record_deterministic(
+        &self,
+        key: DeterministicBlobDerivationKey,
+        derivation: BlobDerivation,
+    ) -> impl Future<Output = Result<BlobDerivationRecordOutcome, Self::Error>> + Send;
+}
+
+pub enum BlobDerivationRecordOutcome {
+    Recorded(BlobDerivation),
+    Existing(BlobDerivation),
+}
+
+pub trait DeterministicBlobProducer {
+    type Error;
+    fn produce(
+        &mut self,
+        inputs: &[BlobDigest],
+        transformation: &BlobTransformation,
+    ) -> impl Future<Output = Result<Box<[BlobDigest]>, Self::Error>> + Send;
+    fn outputs_retrievable(
+        &mut self,
+        outputs: &[BlobDigest],
+    ) -> impl Future<Output = Result<bool, Self::Error>> + Send;
+}
+
+pub struct DeterministicBlobDerivationRequest { /* private */ }
+impl DeterministicBlobDerivationRequest {
+    pub fn try_new(
+        inputs: impl Into<Box<[BlobDigest]>>,
+        transformation: BlobTransformation,
+        implementation: BlobDigest,
+    ) -> Result<Self, BlobDerivationError>;
+    // accessors: inputs(), transformation(), implementation(), key()
+}
+
+pub enum BlobDerivationServiceOutcome {
+    Reused(BlobDerivation),
+    Produced(BlobDerivation),
+}
+
+pub enum BlobDerivationServiceError<StoreError, ProducerError> {
+    Store(StoreError),
+    Producer(ProducerError),
+    InvalidProducerOutput(BlobDerivationError),
+}
+
+pub struct DeterministicBlobDerivationService<Ids, Store, Producer> { /* private */ }
+impl<Ids, Store, Producer> DeterministicBlobDerivationService<Ids, Store, Producer> {
+    pub const fn new(ids: Ids, store: Store, producer: Producer) -> Self;
+    pub async fn execute(
+        &mut self,
+        request: DeterministicBlobDerivationRequest,
+    ) -> Result<
+        BlobDerivationServiceOutcome,
+        BlobDerivationServiceError<Store::Error, Producer::Error>,
+    >;
 }
 ```
 
@@ -6663,13 +6964,22 @@ impl ConversationListCursor {
 
 pub struct ConversationListQuery { /* private */ }
 impl ConversationListQuery {
-    pub fn default_page() -> Self;
+    pub fn default_page(page_size: u64) -> Self;
     pub fn try_new(
         title_contains: Option<String>,
         origin: ConversationOriginFilter,
         include_archived: bool,
         page_size: u64,
         after: Option<ConversationListCursor>,
+    ) -> Result<Self, ConversationListQueryError>;
+    pub fn try_new_with_page_limits(
+        title_contains: Option<String>,
+        origin: ConversationOriginFilter,
+        include_archived: bool,
+        page_size: u64,
+        after: Option<ConversationListCursor>,
+        minimum_page_size: Option<u64>,
+        maximum_page_size: Option<u64>,
     ) -> Result<Self, ConversationListQueryError>;
     // accessors: title_contains(), origin(), include_archived(), page_size(),
     // after()
@@ -6751,6 +7061,136 @@ impl<Reader> LoadSessionService<Reader> {
 impl<Reader: SessionReader> LoadSessionService<Reader> {
     pub async fn execute(&self, session_id: SessionId)
         -> Result<Option<Session>, Reader::Error>;
+}
+```
+
+## application: search
+
+```rust
+pub const fn max_search_query_bytes() -> usize;
+pub const fn max_search_page_items() -> u16;
+pub const fn max_search_snippet_bytes() -> usize;
+pub const fn max_search_projection_text_bytes() -> usize;
+
+pub enum SearchTextError { Empty, TooLong, ContainsNul }
+
+pub struct SearchText(/* private String */);
+impl SearchText {
+    pub fn try_new(value: String) -> Result<Self, SearchTextError>;
+    pub fn as_str(&self) -> &str;
+}
+
+pub enum SearchStrategy { Lexical }
+
+pub enum SearchScope { Global, Session(SessionId) }
+
+pub struct SearchPageLimitError;
+
+pub struct SearchPageLimit(/* private u16 */);
+impl SearchPageLimit {
+    pub const fn new(value: u16) -> Result<Self, SearchPageLimitError>;
+    pub const fn get(self) -> u16;
+}
+
+pub struct SearchCursor { /* private */ }
+impl SearchCursor {
+    pub const fn new(address: TimelineAddress, projection: NonZeroU64) -> Self;
+    pub const fn address(self) -> TimelineAddress;
+    pub const fn projection(self) -> NonZeroU64;
+}
+
+pub struct SearchQuery {
+    pub strategy: SearchStrategy,
+    pub scope: SearchScope,
+    pub text: SearchText,
+    pub limit: SearchPageLimit,
+    pub after: Option<SearchCursor>,
+}
+
+pub enum SearchContentClass {
+    UserTranscript,
+    AssistantTranscript,
+    ToolArguments,
+    ToolResult,
+    SessionMetadata,
+    AttachmentFilename,
+    AttachmentMediaMetadata,
+    DerivedTextArtifact,
+}
+
+pub struct SearchArtifactId(/* private Uuid */);
+impl SearchArtifactId {
+    pub const fn from_uuid(value: Uuid) -> Self;
+    pub const fn into_uuid(self) -> Uuid;
+}
+
+pub enum SearchProjectionTextError { Empty, TooLong, ContainsNul }
+
+pub struct SearchProjectionText(/* private String */);
+impl SearchProjectionText {
+    pub fn try_new(value: String) -> Result<Self, SearchProjectionTextError>;
+    pub fn as_str(&self) -> &str;
+}
+
+pub enum SearchArtifactProjectionClass {
+    AttachmentFilename,
+    AttachmentMediaMetadata,
+    DerivedText,
+}
+
+pub struct SearchArtifactProjection {
+    pub session: SessionId,
+    pub address: TimelineAddress,
+    pub artifact: SearchArtifactId,
+    pub class: SearchArtifactProjectionClass,
+    pub text: SearchProjectionText,
+}
+
+pub enum SearchResultSource {
+    Session(SessionId),
+    AcceptedInput { input: AcceptedInputId, turn: TurnId },
+    SteeringInput { input: AcceptedInputId, source_turn: TurnId },
+    TurnTranscriptEntry { entry: SemanticTranscriptEntryId, turn: TurnId },
+    SessionTranscriptEntry { entry: SemanticTranscriptEntryId },
+    ToolRequest { request: ToolRequestId, turn: TurnId },
+    ToolAttempt { attempt: ToolAttemptId, turn: TurnId },
+    Attachment { attachment: SearchArtifactId },
+    DerivedArtifact { artifact: SearchArtifactId },
+}
+
+pub struct SearchHighlight { pub start_byte: u16, pub end_byte: u16 }
+pub struct SearchResult {
+    pub session: SessionId,
+    pub address: TimelineAddress,
+    pub projection: NonZeroU64,
+    pub source: SearchResultSource,
+    pub content_class: SearchContentClass,
+    pub snippet: String,
+    pub highlights: Vec<SearchHighlight>,
+}
+pub struct SearchPage {
+    pub results: Vec<SearchResult>,
+    pub next: Option<SearchCursor>,
+}
+
+pub trait SearchReader {
+    type Error;
+    fn search(&self, query: SearchQuery)
+        -> impl Future<Output = Result<SearchPage, Self::Error>> + Send;
+}
+
+pub trait SearchProjectionWriter {
+    type Error;
+    fn publish(&self, projection: SearchArtifactProjection)
+        -> impl Future<Output = Result<(), Self::Error>> + Send;
+}
+
+pub struct SearchService<Reader> { /* private */ }
+impl<Reader> SearchService<Reader> {
+    pub const fn new(reader: Reader) -> Self;
+}
+impl<Reader: SearchReader> SearchService<Reader> {
+    pub async fn search(&self, query: SearchQuery) -> Result<SearchPage, Reader::Error>;
 }
 ```
 
@@ -6882,6 +7322,25 @@ impl ModelCallCredentialReference {
     pub fn as_str(&self) -> &str;
 }
 
+pub enum ModelUserContentPart {
+    Text(NonEmptyUnicodeText),
+    AttachmentStub(ModelAttachmentStub),
+}
+impl ModelUserContentPart {
+    pub fn as_str(&self) -> &str;
+}
+
+pub struct ModelUserContent { /* private */ }
+impl ModelUserContent {
+    // accessors: parts(), single_text()
+}
+
+pub struct ModelAttachmentStub { /* private */ }
+impl ModelAttachmentStub {
+    pub fn as_str(&self) -> &str;
+}
+// Debug is content-redacted.
+
 pub enum ModelConversationMessage {
     ModelIdentityChanged {
         source: SemanticTranscriptEntryRef,
@@ -6967,8 +7426,14 @@ impl PreparedModelOperation {
         tools: Box<[ToolDefinition]>,
         tool_entries: &[ResolvedToolConversationEntry],
     ) -> Result<Self, ModelFrontierRenderingError>;
-    // accessors: request(), credential_reference(), system_prompt(), messages(), tools()
+    // accessors: request(), credential_reference(), system_prompt(), messages(), tools(),
+    // attachment_digests()
 }
+
+pub fn render_model_user_content(
+    content: UserContent,
+    attachment_byte_length: impl FnMut(BlobDigest) -> Option<NonZeroU64>,
+) -> Result<ModelUserContent, ModelFrontierRenderingError>;
 
 pub enum ModelFrontierRenderingError {
     MissingOriginContent {
@@ -7023,6 +7488,7 @@ pub trait FailPreparedModelCallTransaction {
         session: SessionId,
         call: ModelCallId,
         cause: PreparedModelCallFailureCause,
+        attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
         next_reclassified_turn: NextTurn,
     ) -> impl Future<Output = Result<FailedModelCallTurn, Self::Error>> + Send
@@ -7032,6 +7498,7 @@ pub trait FailPreparedModelCallTransaction {
         &mut self,
         session: SessionId,
         call: ModelCallId,
+        attachment_failure: Option<AttachmentPreparationFailure>,
     ) -> impl Future<Output = Result<RetainedPreparedFailureStatus, Self::Error>> + Send;
 }
 
@@ -7138,10 +7605,18 @@ pub enum RetainedModelCallObservationStatus {
 
 pub struct RetainedModelCallExecutionState { /* private */ }
 
+pub enum AttachmentPreparationFailure {
+    TooLarge { maximum_bytes: u64 },
+    Missing,
+    Corrupt,
+    Unavailable,
+}
+
 pub enum ModelCallCapabilityPreparation<Capability> {
     Ready(Capability),
     Cancelled,
     KnownFailure,
+    AttachmentFailure(AttachmentPreparationFailure),
 }
 
 pub enum ModelCallInputTokenCount {
@@ -7209,6 +7684,7 @@ pub enum ModelCallExecutionOutcome {
     Checkpointed(ModelCallId),
     TargetUnavailable(Box<FailedModelCallTurn>),
     CapabilityKnownFailure(Box<FailedModelCallTurn>),
+    AttachmentUnavailable,
     CapabilityFailureAlreadyCommitted(ModelCallId),
     ToolRoundLimitReached(Box<FailedModelCallTurn>),
     ToolRoundLimitAlreadyCommitted(ModelCallId),
@@ -7271,6 +7747,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
+        max_automatic_tool_rounds_per_turn: Option<usize>,
     ) -> Self;
     pub fn with_tool_catalog(self, catalog: impl ToolCatalog + 'static) -> Self;
     pub fn from_parts(
@@ -7283,6 +7760,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         gate: Gate,
         catalog: Arc<dyn ToolCatalog>,
         retained_state: Option<RetainedModelCallExecutionState>,
+        max_automatic_tool_rounds_per_turn: Option<usize>,
     ) -> Self;
     pub fn into_parts(
         self,
@@ -7296,6 +7774,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Gate,
         Arc<dyn ToolCatalog>,
         Option<RetainedModelCallExecutionState>,
+        Option<usize>,
     );
     pub const fn retained_state(&self) -> Option<&RetainedModelCallExecutionState>;
     pub fn retained_observation(&self) -> Option<&CorrelatedModelCallTerminalObservation>;
@@ -7530,6 +8009,8 @@ pub enum ToolExecutionServiceOutcome {
     CrashClassified(Box<ToolAttemptCrashOutcome>),
     ContinuationCheckpointed(ModelCallId),
     ContinuationTargetUnavailable(Box<FailedModelCallTurn>),
+    ContinuationPoolExhausted(Box<CredentialPoolExhaustedModelCallTurn>),
+    ContinuationContextCompactionRequired(Box<ContextHeadroomExhaustedModelCallTurn>),
 }
 
 pub enum ToolExecutionServiceError<TransactionError, ExecutorError> {
@@ -7758,7 +8239,12 @@ impl RepoWatchEventContentIdentityV1 {
 pub struct RepoWatchEventIdentityFrontierEntryV1 { /* private */ }
 impl RepoWatchEventIdentityFrontierEntryV1 {
     pub const fn new(stream_identity: [u8; 32], sequence: NonZeroU64) -> Self;
-    // accessors: stream_identity(), sequence()
+    pub const fn for_pull_request(
+        stream_identity: [u8; 32],
+        sequence: NonZeroU64,
+        pull_request_number: PullRequestNumber,
+    ) -> Self;
+    // accessors: stream_identity(), sequence(), pull_request_number()
 }
 
 pub struct RepoWatchEventIdentityFrontierV1 { /* private */ }
@@ -8867,14 +9353,31 @@ impl<Reader: SessionMetadataReader> LoadSessionMetadataService<Reader> {
 
 pub struct SessionMetadataListQuery { /* private */ }
 impl SessionMetadataListQuery {
-    pub const MAX_REQUIRED_TAGS: usize;
-    pub fn default_page() -> Self;
+    pub fn default_page(page_size: u64) -> Self;
     pub fn try_new(
         required_tags: Vec<String>,
         title_contains: Option<String>,
         include_archived: bool,
         page_size: u64,
         after_session: Option<SessionId>,
+    ) -> Result<Self, SessionMetadataListQueryError>;
+    pub fn try_new_with_required_tag_limit(
+        required_tags: Vec<String>,
+        title_contains: Option<String>,
+        include_archived: bool,
+        page_size: u64,
+        after_session: Option<SessionId>,
+        max_required_tags: Option<usize>,
+    ) -> Result<Self, SessionMetadataListQueryError>;
+    pub fn try_new_with_limits(
+        required_tags: Vec<String>,
+        title_contains: Option<String>,
+        include_archived: bool,
+        page_size: u64,
+        after_session: Option<SessionId>,
+        max_required_tags: Option<usize>,
+        minimum_page_size: Option<u64>,
+        maximum_page_size: Option<u64>,
     ) -> Result<Self, SessionMetadataListQueryError>;
     pub fn required_tags(&self) -> impl ExactSizeIterator<Item = &str>;
     // accessors: title_contains(), include_archived(), page_size(), after_session()
@@ -9069,11 +9572,10 @@ impl<
 ## application: scheduler
 
 ```rust
-pub const fn scheduler_pass_admission_cap() -> usize;
+pub const fn scheduler_ordinary_pass_limit(max_in_flight_passes: usize) -> usize;
 
 pub struct ReconciliationSweepInterval(/* private */);
 impl ReconciliationSweepInterval {
-    pub const fn baseline() -> Self;
     pub fn try_new(
         interval: Duration,
     ) -> Result<Self, InvalidReconciliationSweepInterval>;
@@ -9085,12 +9587,14 @@ pub struct InvalidReconciliationSweepInterval;
 
 pub enum EligibilityNudgeOutcome {
     Enqueued,
+    Coalesced,
     DroppedAtCapacity,
     WorkSourceClosed,
 }
 
 pub trait EligibilityNudge {
     fn nudge(&self, session: SessionId) -> EligibilityNudgeOutcome;
+    fn nudge_dispatch_start(&self, session: SessionId) -> EligibilityNudgeOutcome;
 }
 
 pub trait EligibilitySweep {
@@ -9104,13 +9608,23 @@ pub trait EligibilitySweep {
 pub struct EligibilitySweepBatch { /* private */ }
 impl EligibilitySweepBatch {
     pub fn new(sessions: Vec<SessionId>, continuation: bool) -> Self;
-    pub fn into_parts(self) -> (Vec<SessionId>, bool);
+    pub fn with_dispatch_starts(
+        sessions: Vec<SessionId>,
+        dispatch_starts: HashSet<SessionId>,
+        continuation: bool,
+    ) -> Self;
+    pub fn into_parts(self) -> (Vec<SessionId>, HashSet<SessionId>, bool);
 }
 
 pub trait EligibilityWorkSource {
     type Error;
 
     fn next(&mut self) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
+    fn take_returned_dispatch_start(&mut self, _session: SessionId) -> bool;
+    fn take_pending_dispatch_start(&mut self) -> Option<SessionId>;
+    fn next_pending_dispatch_start(
+        &mut self,
+    ) -> impl Future<Output = Result<SessionId, Self::Error>> + Send;
 }
 
 pub trait EligibilityPass {
@@ -9120,6 +9634,10 @@ pub trait EligibilityPass {
     fn failure_turn(_error: &Self::Error) -> Option<TurnId>;
     fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>>;
     fn run(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
+    fn run_dispatch_start(
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static;
@@ -9170,8 +9688,8 @@ impl<Sweep: EligibilitySweep> InProcessEligibilityWorkSource<Sweep> {
     ) -> (InProcessEligibilityNudge, Self);
     pub fn with_options(
         sweep: Sweep,
-        sweep_interval: ReconciliationSweepInterval,
-        nudge_buffer_capacity: NonZeroUsize,
+        sweep_interval: Option<ReconciliationSweepInterval>,
+        nudge_buffer_capacity: Option<NonZeroUsize>,
     ) -> (InProcessEligibilityNudge, Self);
 }
 
@@ -9181,9 +9699,9 @@ pub enum SchedulerLoopExit {
 
 pub struct SchedulerPassOccupancyBound(/* private */);
 impl SchedulerPassOccupancyBound {
-    pub const fn hard_ceiling() -> Self;
-    pub fn try_lowered(bound: Duration) -> Result<Self, InvalidSchedulerPassOccupancyBound>;
-    pub const fn get(self) -> Duration;
+    pub const fn unbounded() -> Self;
+    pub fn try_new(bound: Duration) -> Result<Self, InvalidSchedulerPassOccupancyBound>;
+    pub const fn get(self) -> Option<Duration>;
 }
 pub struct InvalidSchedulerPassOccupancyBound;
 // impl Display + std::error::Error
@@ -9315,12 +9833,18 @@ pub enum SubmitInputRequestError {
 
 pub struct SubmitInputRequest { /* private */ }
 impl SubmitInputRequest {
-    pub const MAX_CONTENT_UTF8_BYTES: usize; // 1_048_576
     pub fn try_new(
         command_id: DurableCommandId,
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
+    ) -> Result<Self, SubmitInputRequestError>;
+    pub fn try_new_with_content_limit(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        max_content_utf8_bytes: Option<usize>,
     ) -> Result<Self, SubmitInputRequestError>;
     // accessors: command_id(), session(), content(), delivery()
 }
@@ -9535,6 +10059,7 @@ pub enum PrepareToolContinuationOutcome {
     Checkpointed(ModelCallId),
     TargetUnavailable(Box<FailedModelCallTurn>),
     PoolExhausted(Box<CredentialPoolExhaustedModelCallTurn>),
+    ContextCompactionRequired(Box<ContextHeadroomExhaustedModelCallTurn>),
 }
 
 pub enum RetainedToolAttemptObservationStatus {
@@ -9628,74 +10153,82 @@ pub trait ToolExecutionTransaction {
 ## application: turn_liveness
 
 ```rust
-pub struct ModelCallReconciliationAttempt(/* private */);
-impl ModelCallReconciliationAttempt {
+pub struct AutomaticReconciliationAttempt(/* private */);
+impl AutomaticReconciliationAttempt {
     pub const fn first() -> Self;
     pub const fn try_from_u32(value: u32) -> Option<Self>;
     pub const fn get(self) -> u32;
-    pub fn retry_backoff(self) -> Duration;
+    pub fn retry_backoff(self, base: Duration, cap: Option<Duration>) -> Duration;
     pub const fn next(self) -> Option<Self>;
-    pub const fn budget() -> u32;
+    pub const fn is_within_budget(self, budget: Option<u32>) -> bool;
 }
 
-pub struct ClaimedModelCallReconciliation { /* private */ }
-impl ClaimedModelCallReconciliation {
+pub enum AutomaticReconciliationOperation {
+    ModelCall(ModelCallId),
+    ToolAttempt(ToolAttemptId),
+}
+
+pub struct ClaimedAutomaticReconciliation { /* private */ }
+impl ClaimedAutomaticReconciliation {
     pub const fn new(
         session: SessionId,
         turn: TurnId,
-        call: ModelCallId,
-        attempt: ModelCallReconciliationAttempt,
+        operation: AutomaticReconciliationOperation,
+        attempt: AutomaticReconciliationAttempt,
     ) -> Self;
-    // accessors: session(), turn(), call(), attempt()
+    // accessors: session(), turn(), operation(), attempt()
 }
 
-pub struct ExhaustedModelCallReconciliation { /* private */ }
-impl ExhaustedModelCallReconciliation {
-    pub const fn new(session: SessionId, turn: TurnId, call: ModelCallId) -> Self;
-    // accessors: session(), turn(), call()
+pub struct ExhaustedAutomaticReconciliation { /* private */ }
+impl ExhaustedAutomaticReconciliation {
+    pub const fn new(
+        session: SessionId,
+        turn: TurnId,
+        operation: AutomaticReconciliationOperation,
+    ) -> Self;
+    // accessors: session(), turn(), operation()
 }
 
-pub struct ModelCallReconciliationBatch { /* private */ }
-impl ModelCallReconciliationBatch {
+pub struct AutomaticReconciliationBatch { /* private */ }
+impl AutomaticReconciliationBatch {
     pub fn new(
-        claimed: Box<[ClaimedModelCallReconciliation]>,
-        exhausted: Box<[ExhaustedModelCallReconciliation]>,
+        claimed: Box<[ClaimedAutomaticReconciliation]>,
+        exhausted: Box<[ExhaustedAutomaticReconciliation]>,
     ) -> Self;
-    pub fn claimed(&self) -> &[ClaimedModelCallReconciliation];
-    pub fn exhausted(&self) -> &[ExhaustedModelCallReconciliation];
+    pub fn claimed(&self) -> &[ClaimedAutomaticReconciliation];
+    pub fn exhausted(&self) -> &[ExhaustedAutomaticReconciliation];
 }
 
-pub enum ModelCallReconciliationFailureKind {
+pub enum AutomaticReconciliationFailureKind {
     Infrastructure,
     Integrity,
 }
-impl ModelCallReconciliationFailureKind {
+impl AutomaticReconciliationFailureKind {
     pub const fn as_str(self) -> &'static str;
 }
 
-pub enum ModelCallReconciliationOutcome {
+pub enum AutomaticReconciliationOutcome {
     Reconciled,
     Superseded,
 }
 
 pub struct StaleActiveTurnBound(/* private */);
 impl StaleActiveTurnBound {
-    pub const fn hard_ceiling() -> Self;
-    pub fn try_lowered(bound: Duration) -> Result<Self, TurnLivenessBoundError>;
+    pub fn try_new(bound: Duration) -> Result<Self, TurnLivenessBoundError>;
     pub const fn as_secs(self) -> u64;
     pub const fn get(self) -> Duration;
 }
 
 pub struct TurnLivenessScanInterval(/* private */);
 impl TurnLivenessScanInterval {
-    pub const fn baseline() -> Self;
+    pub fn try_new(interval: Duration) -> Result<Self, TurnLivenessBoundError>;
     pub const fn get(self) -> Duration;
 }
 
 pub enum TurnLivenessBoundError {
     Zero,
-    AboveCeiling,
     Subsecond,
+    TimerRange,
 }
 // impl Display + std::error::Error
 
@@ -11800,9 +12333,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 
 | Module                                             | Public types                     |
 | -------------------------------------------------- | -------------------------------- |
-| domain: lib.rs identities                          | 29                               |
+| domain: lib.rs identities                          | 30                               |
 | domain: actor                                      | 1                                |
-| domain: blob                                       | 3                                |
+| domain: blob                                       | 10                               |
 | domain: program_journal                            | 25                               |
 | domain: imported_conversation                      | 32 (+5 free fn)                  |
 | domain: session_template                           | 6                                |
@@ -11815,16 +12348,16 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: model_settings                             | 25                               |
 | domain: accepted_input                             | 5                                |
 | domain: delivery_request                           | 2                                |
-| domain: user_content                               | 4                                |
-| domain: submit_input                               | 34                               |
+| domain: user_content                               | 15                               |
+| domain: submit_input                               | 37                               |
 | domain: queue_order                                | 5 (+1 free fn)                   |
 | domain: repo_watch                                 | 51                               |
 | domain: turn_lifecycle                             | 10                               |
-| domain: turn_eligibility                           | 38                               |
+| domain: turn_eligibility                           | 39                               |
 | domain: turn_attempt                               | 13                               |
 | domain: model_call                                 | 12                               |
 | domain: context_compaction                         | 12                               |
-| domain: model_execution                            | 53                               |
+| domain: model_execution                            | 54                               |
 | domain: context_frontier                           | 6                                |
 | domain: semantic_entry                             | 4                                |
 | domain: tool                                       | 53                               |
@@ -11841,9 +12374,10 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **833 (+12 free fn)**            |
-| application: attention                             | 16 (+6 free fn) (incl. 1 trait)  |
+| **signalbox-domain total**                         | **857 (+12 free fn)**            |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
+| application: attention                             | 16 (+6 free fn) (incl. 1 trait)  |
+| application: blob_derivation                       | 9 (incl. 3 traits)               |
 | application: commissioned_dispatch                 | 6 (incl. 1 trait)                |
 | application: conversation_import                   | 12 (incl. 4 traits)              |
 | application: create_session                        | 8 (incl. 2 traits)               |
@@ -11851,8 +12385,9 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
+| application: search                                | 21 (+4 free fn) (incl. 2 traits) |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
-| application: model_execution                       | 36 (incl. 8 traits)              |
+| application: model_execution                       | 41 (incl. 8 traits)              |
 | application: tool_loop                             | 27 (incl. 5 traits)              |
 | application: operator_failure                      | 2 (incl. 1 trait)                |
 | application: session_delegation                    | 1 (incl. 1 trait)                |
@@ -11870,6 +12405,6 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_dispatch_gate                    | 2                                |
 | application: tool_execution_test_support           | 7 (+1 free fn)                   |
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
-| application: turn_liveness                         | 13                               |
+| application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **357 (+17 free fn)**            |
+| **signalbox-application total**                    | **393 (+21 free fn)**            |

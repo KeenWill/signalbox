@@ -5,22 +5,22 @@ use std::{collections::BTreeSet, fmt, future::Future, time::SystemTime};
 use signalbox_domain::{SessionId, TurnId};
 
 /// Maximum session summaries returned by one coherent fleet snapshot.
-// numeric-bound: ceiling - caps one fleet response's rows and projected bytes
-const ATTENTION_SNAPSHOT_ITEM_CEILING: u16 = 16;
+// numeric-bound: guard - prevents a growing fleet from projecting an unbounded snapshot response
+const ATTENTION_SNAPSHOT_ITEM_CEILING: u16 = 32;
 /// Maximum Unicode scalar values retained from blocked-goal need text.
-// numeric-bound: ceiling - prevents one fleet summary from carrying unbounded goal text
+// numeric-bound: guard - prevents one operator-authored goal need from carrying unbounded text into every summary
 const ATTENTION_GOAL_SUMMARY_CHARACTER_CEILING: u16 = 128;
 /// Maximum journal records consumed by one incremental follow read.
-// numeric-bound: ceiling - bounds one follower database read and replacement batch
-const ATTENTION_CHANGE_ITEM_CEILING: u16 = 128;
+// numeric-bound: guard - prevents a change-journal backlog from driving an unbounded follow read and replacement batch
+const ATTENTION_CHANGE_ITEM_CEILING: u16 = 32;
 /// Maximum Unicode scalar values carried from one session title.
-// numeric-bound: ceiling - keeps the hot fleet page within its response byte bound
+// numeric-bound: guard - keeps the hot fleet page within its response byte bound
 const ATTENTION_TITLE_CHARACTER_CEILING: u16 = 128;
 /// Maximum exact tags accepted by one catalog filter.
-// numeric-bound: ceiling - bounds query decoding and indexed tag predicates
+// numeric-bound: guard - bounds query decoding and indexed tag predicates
 const ATTENTION_FILTER_TAG_CEILING: u8 = 8;
 /// Maximum UTF-8 bytes accepted across search text and exact tags.
-// numeric-bound: ceiling - bounds one catalog query's decoded filter material
+// numeric-bound: guard - bounds one catalog query's decoded filter material
 const ATTENTION_FILTER_UTF8_BYTE_CEILING: u16 = 1_024;
 
 /// Returns the hard safety ceiling for one coherent fleet snapshot.
@@ -76,13 +76,14 @@ impl AttentionCursor {
 }
 
 /// Closed current operator classification for one session.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AttentionState {
     Active,
     Queued,
     Blocked,
     AwaitingApproval,
     Ambiguous,
+    AwaitingToolRecovery,
     AwaitingReconciliation,
     RunnerLost,
     Idle,
@@ -230,7 +231,6 @@ pub enum AttentionAction {
     ProvideGoalNeed,
     DecideApproval,
     ReconcileTurn,
-    RestoreRunner,
 }
 
 /// Typed blocked-goal reason retained without parsing goal prose.
@@ -341,7 +341,7 @@ mod tests {
 
     #[test]
     fn fleet_snapshot_bound_is_pinned() {
-        assert_eq!(max_attention_snapshot_items(), 16);
+        assert_eq!(max_attention_snapshot_items(), 32);
     }
 
     #[test]
@@ -351,7 +351,7 @@ mod tests {
 
     #[test]
     fn change_batch_bound_is_pinned() {
-        assert_eq!(max_attention_change_items(), 128);
+        assert_eq!(max_attention_change_items(), 32);
     }
 
     #[test]

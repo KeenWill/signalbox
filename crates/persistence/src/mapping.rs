@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 use signalbox_application::{
     InstructionDiscoveryFindingKind, InstructionDiscoveryLimitKind, RepoWatchConvergenceVerdict,
     RepoWatchPullRequestLifecycle, RepoWatchReviewDecision, RepoWatchThreadState,
+    SearchContentClass,
 };
 use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
@@ -87,6 +88,78 @@ const fn outbox_event_kind_utf8_byte_bounds() -> (u64, u64) {
 
 pub(crate) const OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS: (u64, u64) =
     outbox_event_kind_utf8_byte_bounds();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SearchProjectionSourceKind {
+    SessionMetadata,
+    AcceptedInput,
+    SteeringInput,
+    SemanticEntry,
+    ToolRequest,
+    ToolAttempt,
+    Attachment,
+    DerivedArtifact,
+}
+
+pub(crate) const fn search_projection_source_kind_to_str(
+    value: SearchProjectionSourceKind,
+) -> &'static str {
+    match value {
+        SearchProjectionSourceKind::SessionMetadata => "session_metadata",
+        SearchProjectionSourceKind::AcceptedInput => "accepted_input",
+        SearchProjectionSourceKind::SteeringInput => "steering_input",
+        SearchProjectionSourceKind::SemanticEntry => "semantic_entry",
+        SearchProjectionSourceKind::ToolRequest => "tool_request",
+        SearchProjectionSourceKind::ToolAttempt => "tool_attempt",
+        SearchProjectionSourceKind::Attachment => "attachment",
+        SearchProjectionSourceKind::DerivedArtifact => "derived_artifact",
+    }
+}
+
+pub(crate) fn search_projection_source_kind_from_str(
+    value: &str,
+) -> Option<SearchProjectionSourceKind> {
+    Some(match value {
+        "session_metadata" => SearchProjectionSourceKind::SessionMetadata,
+        "accepted_input" => SearchProjectionSourceKind::AcceptedInput,
+        "steering_input" => SearchProjectionSourceKind::SteeringInput,
+        "semantic_entry" => SearchProjectionSourceKind::SemanticEntry,
+        "tool_request" => SearchProjectionSourceKind::ToolRequest,
+        "tool_attempt" => SearchProjectionSourceKind::ToolAttempt,
+        "attachment" => SearchProjectionSourceKind::Attachment,
+        "derived_artifact" => SearchProjectionSourceKind::DerivedArtifact,
+        _ => return None,
+    })
+}
+
+pub(crate) const fn search_projection_content_class_to_str(
+    value: SearchContentClass,
+) -> &'static str {
+    match value {
+        SearchContentClass::UserTranscript => "user_transcript",
+        SearchContentClass::AssistantTranscript => "assistant_transcript",
+        SearchContentClass::ToolArguments => "tool_arguments",
+        SearchContentClass::ToolResult => "tool_result",
+        SearchContentClass::SessionMetadata => "session_metadata",
+        SearchContentClass::AttachmentFilename => "attachment_filename",
+        SearchContentClass::AttachmentMediaMetadata => "attachment_media_metadata",
+        SearchContentClass::DerivedTextArtifact => "derived_text_artifact",
+    }
+}
+
+pub(crate) fn search_projection_content_class_from_str(value: &str) -> Option<SearchContentClass> {
+    Some(match value {
+        "user_transcript" => SearchContentClass::UserTranscript,
+        "assistant_transcript" => SearchContentClass::AssistantTranscript,
+        "tool_arguments" => SearchContentClass::ToolArguments,
+        "tool_result" => SearchContentClass::ToolResult,
+        "session_metadata" => SearchContentClass::SessionMetadata,
+        "attachment_filename" => SearchContentClass::AttachmentFilename,
+        "attachment_media_metadata" => SearchContentClass::AttachmentMediaMetadata,
+        "derived_text_artifact" => SearchContentClass::DerivedTextArtifact,
+        _ => return None,
+    })
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OutboxEventDiscriminator {
@@ -751,6 +824,7 @@ pub(crate) const fn repo_watch_webhook_disposition_to_str(
 ) -> &'static str {
     match value {
         RepoWatchWebhookDisposition::Projected => "projected",
+        RepoWatchWebhookDisposition::Committed => "committed",
         RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
         RepoWatchWebhookDisposition::Superseded => "superseded",
         RepoWatchWebhookDisposition::Ignored => "ignored",
@@ -766,6 +840,7 @@ pub(crate) fn repo_watch_webhook_disposition_from_str(
 ) -> Option<RepoWatchWebhookDisposition> {
     match value {
         "projected" => Some(RepoWatchWebhookDisposition::Projected),
+        "committed" => Some(RepoWatchWebhookDisposition::Committed),
         "duplicate_state" => Some(RepoWatchWebhookDisposition::DuplicateState),
         "superseded" => Some(RepoWatchWebhookDisposition::Superseded),
         "ignored" => Some(RepoWatchWebhookDisposition::Ignored),
@@ -1095,6 +1170,7 @@ pub(crate) enum ToolApprovalDecisionSourceStorageKind {
     PolicyAuto,
     SessionBlanket,
     Delegate,
+    RuntimeSafety,
     UserOverride,
 }
 
@@ -1106,6 +1182,7 @@ pub(crate) const fn tool_approval_decision_source_to_str(
         ToolApprovalDecisionSourceStorageKind::PolicyAuto => "policy_auto",
         ToolApprovalDecisionSourceStorageKind::SessionBlanket => "session_blanket",
         ToolApprovalDecisionSourceStorageKind::Delegate => "delegate",
+        ToolApprovalDecisionSourceStorageKind::RuntimeSafety => "runtime_safety",
         ToolApprovalDecisionSourceStorageKind::UserOverride => "user_override",
     }
 }
@@ -1118,6 +1195,7 @@ pub(crate) fn tool_approval_decision_source_from_str(
         "policy_auto" => Some(ToolApprovalDecisionSourceStorageKind::PolicyAuto),
         "session_blanket" => Some(ToolApprovalDecisionSourceStorageKind::SessionBlanket),
         "delegate" => Some(ToolApprovalDecisionSourceStorageKind::Delegate),
+        "runtime_safety" => Some(ToolApprovalDecisionSourceStorageKind::RuntimeSafety),
         "user_override" => Some(ToolApprovalDecisionSourceStorageKind::UserOverride),
         _ => None,
     }
@@ -1583,6 +1661,7 @@ pub(crate) const fn repo_watch_event_target_to_str(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepoWatchEventProducerStorageKind {
     Poll,
+    Webhook,
 }
 
 pub(crate) const fn repo_watch_event_producer_to_str(
@@ -1590,6 +1669,7 @@ pub(crate) const fn repo_watch_event_producer_to_str(
 ) -> &'static str {
     match value {
         RepoWatchEventProducerStorageKind::Poll => "poll",
+        RepoWatchEventProducerStorageKind::Webhook => "webhook",
     }
 }
 
@@ -1598,6 +1678,7 @@ pub(crate) fn repo_watch_event_producer_from_str(
 ) -> Option<RepoWatchEventProducerStorageKind> {
     match value {
         "poll" => Some(RepoWatchEventProducerStorageKind::Poll),
+        "webhook" => Some(RepoWatchEventProducerStorageKind::Webhook),
         _ => None,
     }
 }
@@ -3582,6 +3663,12 @@ mod tests {
                 ToolApprovalDecisionSourceStorageKind::Delegate,
             )),
             Some(ToolApprovalDecisionSourceStorageKind::Delegate)
+        );
+        assert_eq!(
+            tool_approval_decision_source_from_str(tool_approval_decision_source_to_str(
+                ToolApprovalDecisionSourceStorageKind::RuntimeSafety,
+            )),
+            Some(ToolApprovalDecisionSourceStorageKind::RuntimeSafety)
         );
         assert_eq!(
             tool_approval_decision_source_from_str(UNKNOWN_DISCRIMINATOR),

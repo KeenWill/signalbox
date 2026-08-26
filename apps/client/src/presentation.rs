@@ -26,7 +26,7 @@ use signalbox_process_protocol::{
     RunnerProjection, RunnerProjectionSelector, RunnerProjectionState, RunnerSandboxProfile,
     RunnerStateTransitionState, ServerMessage, SessionEvent, ToolApprovalEventDecider,
     ToolApprovalEventDecision, ToolBatchState, ToolDecision, TranscriptEntry, TranscriptTextEntry,
-    TurnState, UsageProvenance,
+    TurnState, UsageProvenance, UserInputContent, UserInputPart,
 };
 
 use crate::{
@@ -1986,7 +1986,7 @@ impl<'a> Output<'a> {
                      accepted_input={accepted_input_id} turn={turn_id} position={}",
                     acceptance_position.value()
                 )?;
-                self.text(content.as_str())
+                self.user_content(content)
             }
             SessionEvent::GoalTurnRetired { turn_id } => writeln!(
                 self.stdout,
@@ -2299,6 +2299,36 @@ impl<'a> Output<'a> {
         self.text_fragment(text, true, text.ends_with('\n'))
     }
 
+    fn user_content(&mut self, content: &UserInputContent) -> io::Result<()> {
+        match content.parts() {
+            [UserInputPart::Text { text }] => self.text(text),
+            parts => {
+                self.user_content_parts_json(parts)?;
+                writeln!(self.stdout)?;
+                if self.raw {
+                    self.stdout.flush()?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    fn user_content_parts_json(&mut self, parts: &[UserInputPart]) -> io::Result<()> {
+        let serialized = serde_json::to_string(parts)?;
+        if self.raw {
+            return self.stdout.write_all(serialized.as_bytes());
+        }
+        for character in serialized.chars() {
+            let code = character as u32;
+            if (0x7f..=0x9f).contains(&code) {
+                write!(self.stdout, "\\u{code:04x}")?;
+            } else {
+                write!(self.stdout, "{character}")?;
+            }
+        }
+        Ok(())
+    }
+
     fn text_fragment(
         &mut self,
         fragment: &str,
@@ -2332,7 +2362,7 @@ impl<'a> Output<'a> {
                     "turn={turn_id} position={position} state=queued \
                      accepted_input={accepted_input_id}"
                 )?;
-                self.text(content.as_str())
+                self.user_content(content)
             }
             TurnState::QueuedDelegated {
                 spawning_request_id,
@@ -2426,11 +2456,22 @@ impl<'a> Output<'a> {
             TurnState::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
                 recovery_tool_attempt_id,
-            } => writeln!(
-                self.stdout,
-                "turn={turn_id} position={position} state=active_awaiting_tool_recovery \
-                 attempt={ended_attempt_id} tool_attempt={recovery_tool_attempt_id}"
-            ),
+                automatic_reconciliation_attempts,
+                operator_action_required,
+            } => {
+                let recovery = if *operator_action_required {
+                    "operator_required"
+                } else {
+                    "automatic"
+                };
+                writeln!(
+                    self.stdout,
+                    "turn={turn_id} position={position} state=active_awaiting_tool_recovery \
+                     attempt={ended_attempt_id} tool_attempt={recovery_tool_attempt_id} \
+                     recovery={recovery} recovery_attempts={}",
+                    automatic_reconciliation_attempts.value()
+                )
+            }
             TurnState::ActiveAwaitingRunnerRecovery {
                 runner_id,
                 placement_revision,
@@ -2540,11 +2581,25 @@ impl<'a> Output<'a> {
 
     fn snapshot_entry(&mut self, entry: &SnapshotEntry) -> io::Result<()> {
         match &entry.kind {
+            SnapshotEntryKind::User {
+                accepted_input_id,
+                turn_id,
+                content,
+            } => {
+                write!(
+                    self.stdout,
+                    "user_content source_session={} entry={} accepted_input={accepted_input_id} turn={turn_id} parts=",
+                    entry.source_session_id, entry.entry_id
+                )?;
+                self.user_content_parts_json(content.parts())?;
+                writeln!(self.stdout)?;
+                if self.raw {
+                    self.stdout.flush()?;
+                }
+                Ok(())
+            }
             SnapshotEntryKind::Text(metadata) => {
                 let label = match metadata {
-                    TranscriptTextEntry::User { turn_id, .. } => {
-                        format!("user turn={turn_id}")
-                    }
                     TranscriptTextEntry::Assistant { turn_id, .. } => {
                         format!("assistant turn={turn_id}")
                     }
@@ -3110,7 +3165,7 @@ impl SnapshotSelection {
                 | Self::ToolBatchProposed { .. }
                 | Self::ToolBatchResults { .. }
                 | Self::ToolReconciliation { .. },
-                SnapshotEntryKind::Text(_),
+                SnapshotEntryKind::User { .. } | SnapshotEntryKind::Text(_),
             ) => false,
             (
                 Self::ToolBatchProposed { .. }
@@ -3172,7 +3227,8 @@ impl SnapshotSelection {
                 | Self::ToolBatchProposed { .. }
                 | Self::ToolBatchResults { .. }
                 | Self::ToolReconciliation { .. },
-                SnapshotEntryKind::Text(_)
+                SnapshotEntryKind::User { .. }
+                | SnapshotEntryKind::Text(_)
                 | SnapshotEntryKind::Marker(
                     TranscriptEntry::ModelIdentityChanged { .. }
                     | TranscriptEntry::DelegatedTask { .. }
@@ -3306,6 +3362,9 @@ const fn failed_model_call_disposition(disposition: FailedModelCallDisposition) 
 const fn failed_model_call_cause(cause: FailedModelCallCause) -> &'static str {
     match cause {
         FailedModelCallCause::CredentialRejected => "credential_rejected",
+        FailedModelCallCause::AttachmentTooLarge => "attachment_too_large",
+        FailedModelCallCause::AttachmentMissing => "attachment_missing",
+        FailedModelCallCause::AttachmentCorrupt => "attachment_corrupt",
         FailedModelCallCause::PermissionDenied => "permission_denied",
         FailedModelCallCause::InvalidRequest => "invalid_request",
         FailedModelCallCause::TargetNotFound => "target_not_found",
@@ -3589,7 +3648,7 @@ mod tests {
         RunnerProjectionSelector, RunnerProjectionState, RunnerRepositoryKey, RunnerSandboxProfile,
         RunnerStateTransitionState, RunnerWorkingDirectory, ServerMessage, SessionEvent,
         ToolApprovalEventDecider, ToolApprovalEventDecision, TranscriptEntry, TranscriptTextEntry,
-        TurnState, UsageProvenance,
+        TurnState, UsageProvenance, UserInputContent,
     };
     use uuid::Uuid;
 
@@ -4337,7 +4396,7 @@ mod tests {
                 model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id,
-                    content: InputContent::new("queued user text".to_owned()),
+                    content: UserInputContent::text("queued user text".to_owned()),
                 },
             }],
         )
@@ -4493,6 +4552,40 @@ mod tests {
             usage_total scope=session usage_provenance=estimated terminal_calls=0 input_tokens=unreported input_tokens_present_calls=0/0 output_tokens=unreported output_tokens_present_calls=0/0 cache_creation_input_tokens=unreported cache_creation_input_tokens_present_calls=0/0 cache_read_input_tokens=unreported cache_read_input_tokens_present_calls=0/0
         "#]]
         .assert_eq(&rendered);
+        assert!(stderr.is_empty());
+    }
+
+    #[test]
+    fn snapshot_user_entry_renders_canonical_parts_on_one_line() {
+        let mut snapshot = TranscriptSnapshot::from_messages(
+            9,
+            [ServerMessage::TranscriptUserEntry {
+                entry_index: CanonicalU64::new(0),
+                source_session_id: wire_uuid(1),
+                entry_id: wire_uuid(2),
+                accepted_input_id: wire_uuid(3),
+                turn_id: wire_uuid(4),
+                content: UserInputContent::text("first\nsecond".to_owned()),
+            }],
+        )
+        .expect("test snapshot must spool");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        Output::new(&mut stdout, &mut stderr, false)
+            .snapshot(&mut snapshot)
+            .expect("user snapshot must render");
+
+        let rendered = String::from_utf8(stdout).expect("rendered output is UTF-8");
+        assert!(rendered.starts_with(
+            "user_content source_session=00000000-0000-0000-0000-000000000001 entry=00000000-0000-0000-0000-000000000002 accepted_input=00000000-0000-0000-0000-000000000003 turn=00000000-0000-0000-0000-000000000004 parts=[{\"type\":\"text\",\"text\":\"first\\nsecond\"}]\n"
+        ));
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("user_content "))
+                .count(),
+            1
+        );
         assert!(stderr.is_empty());
     }
 
@@ -5255,7 +5348,7 @@ mod tests {
                     model_settings: None,
                     state: TurnState::Queued {
                         accepted_input_id: wire_uuid(10),
-                        content: InputContent::new("transcript content".to_owned()),
+                        content: UserInputContent::text("transcript content".to_owned()),
                     },
                 },
                 ServerMessage::TranscriptModelCallUsage {

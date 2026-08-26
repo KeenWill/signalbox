@@ -182,24 +182,33 @@ pub(crate) async fn insert_goal_turn(
     sqlx::query(
         "INSERT INTO accepted_input
             (accepted_input_id, accepting_command_id, session_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
              acceptance_position, disposition_kind, origin_turn_id)
          VALUES
-            ($1, NULL, $2, 'text', $3, 'start_when_no_active_turn',
-             NULL, $4, 'use_session_default', NULL, NULL, NULL,
-             $5, 'origin_of', $6)",
+            ($1, NULL, $2, 'start_when_no_active_turn',
+             NULL, $3, 'use_session_default', NULL, NULL, NULL,
+             $4, 'origin_of', $5)",
     )
     .bind(accepted)
     .bind(session_uuid)
-    .bind(content)
     .bind(defaults_version_to_numeric(
         configuration.session_defaults_version(),
     ))
     .bind(input_position_to_numeric(position))
     .bind(turn)
+    .execute(&mut *connection)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO accepted_input_content_part
+            (accepted_input_id, position, part_kind, text_value)
+         VALUES ($1, 0, 'text', $2)",
+    )
+    .bind(accepted)
+    .bind(content)
     .execute(&mut *connection)
     .await?;
 
