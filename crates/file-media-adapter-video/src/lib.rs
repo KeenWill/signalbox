@@ -445,7 +445,10 @@ fn ebml_header_has_webm_doc_type(bytes: &[u8], allow_truncated_tail: bool) -> bo
 struct VideoMetadata {
     duration_milliseconds: Option<u64>,
     video_tracks: u64,
-    profile: String,
+    /// The MP4 `ftyp` brand or the WebM DocType, never a codec profile: this
+    /// adapter compiles no codec library and never reads `avcC`/`hvcC`/`vpcC`
+    /// profile fields into output.
+    container_brand: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -584,7 +587,7 @@ fn parse_mp4(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIssu
     if prefix_incomplete && (!state.movie_seen || !state.movie_header_seen) {
         return Err(VideoIssue::UnsupportedWindow);
     }
-    let profile = state.brand.ok_or(VideoIssue::Malformed)?;
+    let container_brand = state.brand.ok_or(VideoIssue::Malformed)?;
     let timescale = state.movie_timescale.ok_or({
         if prefix_incomplete {
             VideoIssue::UnsupportedWindow
@@ -640,7 +643,7 @@ fn parse_mp4(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIssu
     Ok(VideoMetadata {
         duration_milliseconds,
         video_tracks: state.video_tracks,
-        profile,
+        container_brand,
     })
 }
 
@@ -1788,7 +1791,7 @@ fn parse_webm(bytes: &[u8], source_bytes: u64) -> Result<VideoMetadata, VideoIss
     Ok(VideoMetadata {
         duration_milliseconds,
         video_tracks: state.video_tracks,
-        profile: String::from("webm"),
+        container_brand: String::from("webm"),
     })
 }
 
@@ -2329,8 +2332,8 @@ fn metadata_json(
 ) -> Result<String, FileMediaProviderFailure> {
     serde_json::to_string(&serde_json::json!({
         "container": kind.reader(),
+        "container_brand": metadata.container_brand,
         "duration_milliseconds": metadata.duration_milliseconds,
-        "profile": metadata.profile,
         "video_tracks": metadata.video_tracks,
     }))
     .map_err(|_| FileMediaProviderFailure::Failed)

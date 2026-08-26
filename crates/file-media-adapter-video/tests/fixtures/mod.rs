@@ -39,7 +39,7 @@ impl FixtureKind {
         }
     }
 
-    pub const fn profile(self) -> &'static str {
+    pub const fn container_brand(self) -> &'static str {
         match self {
             Self::Mp4 => "isom",
             Self::Webm => "webm",
@@ -1351,8 +1351,8 @@ impl VideoFixture {
         self.kind.container()
     }
 
-    pub const fn expected_profile(&self) -> &'static str {
-        self.kind.profile()
+    pub const fn expected_container_brand(&self) -> &'static str {
+        self.kind.container_brand()
     }
 
     pub fn into_source(self) -> Result<MemorySource, Box<dyn Error>> {

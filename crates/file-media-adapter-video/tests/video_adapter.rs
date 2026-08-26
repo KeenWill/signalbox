@@ -144,14 +144,14 @@ async fn generated_mp4_validates_and_reports_metadata() -> Result<(), Box<dyn Er
     let expected_duration = fixture.expected_duration_milliseconds();
     let expected_tracks = fixture.expected_video_tracks();
     let expected_container = fixture.expected_container();
-    let expected_profile = fixture.expected_profile();
+    let expected_container_brand = fixture.expected_container_brand();
     let (inspection, body) = inspect_and_read_metadata(fixture).await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Validated);
     assert_eq!(body["duration_milliseconds"], expected_duration);
     assert_eq!(body["video_tracks"], expected_tracks);
     assert_eq!(body["container"], expected_container);
-    assert_eq!(body["profile"], expected_profile);
+    assert_eq!(body["container_brand"], expected_container_brand);
     Ok(())
 }
 
@@ -161,14 +161,14 @@ async fn generated_webm_validates_and_reports_metadata() -> Result<(), Box<dyn E
     let expected_duration = fixture.expected_duration_milliseconds();
     let expected_tracks = fixture.expected_video_tracks();
     let expected_container = fixture.expected_container();
-    let expected_profile = fixture.expected_profile();
+    let expected_container_brand = fixture.expected_container_brand();
     let (inspection, body) = inspect_and_read_metadata(fixture).await?;
 
     assert_eq!(inspection.status(), FileInspectionStatus::Validated);
     assert_eq!(body["duration_milliseconds"], expected_duration);
     assert_eq!(body["video_tracks"], expected_tracks);
     assert_eq!(body["container"], expected_container);
-    assert_eq!(body["profile"], expected_profile);
+    assert_eq!(body["container_brand"], expected_container_brand);
     Ok(())
 }
 
