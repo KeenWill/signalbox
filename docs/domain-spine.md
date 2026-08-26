@@ -6961,6 +6961,7 @@ impl ScriptedModelCallProvider {
 // impl ModelCallProvider
 ```
 
+```rust
 pub enum AttachmentPreparationFailure {
     TooLarge { maximum_bytes: u64 },
     Missing { digest: BlobDigest },
@@ -6972,6 +6973,7 @@ pub enum ModelCallPreparationErrorStage {
     Capability,
     Attachment,
 }
+```
 
 ## application: tool_loop
 
