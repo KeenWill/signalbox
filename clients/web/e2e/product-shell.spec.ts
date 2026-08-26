@@ -714,7 +714,9 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
       name: 'Imports are unavailable until bootstrap admission succeeds',
     }),
   ).toBeVisible()
-  await expect(page.getByText('Transport unavailable')).toBeVisible()
+  // A refused admission answers with a status, so the shell classifies it as an unavailable
+  // bootstrap rather than as an unreachable transport or a rejected contract.
+  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
   await expect(page.locator('.imports-shell-product')).toHaveCount(0)
   expect(importRequests).toBe(0)
   expect(problems.pageErrors).toEqual([])
@@ -726,8 +728,8 @@ test('mounts Imports after the daemon contract recovers', async ({ page }) => {
   await useDeterministicImportApi(page)
   await page.goto(importsProductFixture.path)
 
-  await expect(page.getByText('Transport unavailable')).toBeVisible()
-  await page.getByRole('button', { name: 'Retry contract' }).click()
+  await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  await page.getByRole('button', { name: 'Retry bootstrap' }).click()
 
   await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
