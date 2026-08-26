@@ -599,6 +599,35 @@ async fn cursor_round_trip_retains_check_completion_generations() -> Result<(), 
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn cursor_payload_size_reports_the_latest_stored_document() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+
+    let absent = store.load_cursor_payload_bytes(&repository).await?;
+    store
+        .commit(
+            &repository,
+            RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
+        )
+        .await?;
+    let reported = store.load_cursor_payload_bytes(&repository).await?;
+    let stored: i64 = sqlx::query_scalar(
+        "SELECT pg_column_size(cursor_payload)::bigint
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(absent, None);
+    assert_eq!(reported, Some(u64::try_from(stored)?));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn pull_request_pages_read_the_current_projection_without_decoding_the_cursor()
 -> Result<(), Box<dyn Error>> {
     let fixture = committed_fixture().await?;

@@ -61,6 +61,9 @@ body,
 body {
   background: var(--canvas);
 }
+.scenario-route {
+  height: 100%;
+}
 button,
 input,
 select {
@@ -68,6 +71,10 @@ select {
 }
 button {
   color: inherit;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
 }
 button:focus-visible,
 input:focus-visible,
@@ -474,22 +481,107 @@ kbd {
 .product-inspector h2 {
   margin: 0.25rem 0 0.55rem;
 }
-.product-inspector dl {
+.selection-inspector-details {
   margin: 1rem 0 0;
 }
-.product-inspector dl div {
+.selection-inspector-details div {
   display: flex;
   justify-content: space-between;
   padding: 0.42rem 0;
   border-bottom: 1px solid var(--border);
   font-size: 0.62rem;
 }
-.product-inspector dd {
+.selection-inspector-details dd {
   min-width: 0;
   margin: 0;
   overflow-wrap: anywhere;
   font-family: ui-monospace, monospace;
   text-align: right;
+}
+.artifact-inspector {
+  display: grid;
+  align-content: start;
+  gap: 0.65rem;
+  min-width: 0;
+}
+.artifact-inspector > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+.artifact-inspector > header > div {
+  display: grid;
+  gap: 0.2rem;
+}
+.artifact-inspector > p {
+  color: var(--text-muted);
+  font-size: 0.64rem;
+  line-height: 1.5;
+}
+.artifact-inspector form {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.artifact-inspector form label {
+  display: grid;
+  gap: 0.25rem;
+  color: var(--text-muted);
+  font-size: 0.61rem;
+}
+.artifact-inspector form label span {
+  font-weight: 400;
+}
+.artifact-inspector form input {
+  width: 100%;
+  min-width: 0;
+  padding: 0.38rem 0.42rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
+  background: var(--canvas);
+  color: var(--text);
+  font:
+    0.62rem ui-monospace,
+    monospace;
+}
+.artifact-inspector form button,
+.artifact-request-error button {
+  width: fit-content;
+  padding: 0.38rem 0.55rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 3px;
+  background: var(--surface-3);
+  font-size: 0.64rem;
+}
+.artifact-capability,
+.artifact-request-error {
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: var(--surface-2);
+  font-size: 0.64rem;
+  line-height: 1.45;
+}
+.artifact-request-error {
+  display: grid;
+  gap: 0.4rem;
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+}
+.artifact-request-error strong {
+  color: var(--danger);
+}
+.artifact-sheet {
+  position: fixed;
+  z-index: 52;
+  inset: 0 0 0 auto;
+  width: min(520px, 100vw);
+  overflow: auto;
+  padding: 1rem;
+  border-left: 1px solid var(--border);
+  background: var(--surface-1);
 }
 .mobile-navigation {
   position: fixed;
