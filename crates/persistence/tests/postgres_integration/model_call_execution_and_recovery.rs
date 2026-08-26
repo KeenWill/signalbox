@@ -1,12 +1,271 @@
 //! Model call execution transactions, startup scan classification, and steering reclassification after restart.
 
-use std::{collections::HashMap, num::NonZeroU32};
+use std::{collections::HashMap, num::NonZeroU32, time::Duration};
 
 use crate::*;
 
 /// Binds a fixture membership priority under the non-zero schema constraint.
 fn nonzero_priority(value: u32) -> NonZeroU32 {
     NonZeroU32::new(value).expect("fixture membership priority is non-zero")
+}
+
+async fn active_credential_pool_fixture(
+    pool: &sqlx::PgPool,
+    seed: u128,
+    pool_name: &str,
+    member_reference: &str,
+) -> Result<(SessionId, TurnId, PostgresModelCallRepository), Box<dyn Error>> {
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 3));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 4)));
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed + 5,
+            seed + 1,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 6,
+                seed + 1,
+                "serialize shared locks",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 7)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 8),
+            starting_frontier: Uuid::from_u128(seed + 9),
+            initial_attempt: Uuid::from_u128(seed + 10),
+        },
+    )
+    .await?;
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one pool fixture target forms a catalog");
+    let policy = CredentialPoolRuntimePolicy::new(
+        pool_name.to_owned(),
+        vec![CredentialPoolRuntimeMember::new(
+            member_reference.to_owned(),
+            nonzero_priority(1),
+        )],
+        signalbox_persistence::model_execution::CredentialPoolRuntimeExhaustion::Fail,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    );
+    let repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("unused-default"),
+    )
+    .with_credential_pools(HashMap::from([(target, policy)]));
+    Ok((session, turn, repository))
+}
+
+async fn lock_outbox_sequence_allocator(
+    pool: &sqlx::PgPool,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT singleton FROM outbox_sequence_state WHERE singleton FOR UPDATE")
+        .execute(&mut *transaction)
+        .await?;
+    Ok(transaction)
+}
+
+async fn credential_action_head_is_available(
+    pool: &sqlx::PgPool,
+    member_reference: &str,
+) -> Result<bool, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    let available: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!("credential_pool_action_head:{member_reference}"))
+            .fetch_one(&mut *transaction)
+            .await?;
+    transaction.rollback().await?;
+    Ok(available)
+}
+
+async fn model_call_outbox_order_guard_is_available(
+    pool: &sqlx::PgPool,
+) -> Result<bool, Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    let available: bool =
+        sqlx::query_scalar("SELECT pg_try_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind("model_call_outbox_order_guard:v1")
+            .fetch_one(&mut *transaction)
+            .await?;
+    transaction.rollback().await?;
+    Ok(available)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn deferred_final_state_validation_claims_are_typed_and_transaction_local()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7730_u128;
+    let (_session, turn, _repository) =
+        active_credential_pool_fixture(&pool, seed, "claim-pool", "claim-member").await?;
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query("SELECT assert_turn_lifecycle_final_state($1)")
+        .bind(turn.into_uuid())
+        .execute(&mut *transaction)
+        .await?;
+    let duplicate_turn_claim: bool =
+        sqlx::query_scalar("SELECT claim_deferred_final_state_validation('turn_lifecycle', $1)")
+            .bind(turn.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+    let distinct_kind_claim: bool =
+        sqlx::query_scalar("SELECT claim_deferred_final_state_validation('model_call', $1)")
+            .bind(turn.into_uuid())
+            .fetch_one(&mut *transaction)
+            .await?;
+    assert!(!duplicate_turn_claim);
+    assert!(distinct_kind_claim);
+    transaction.rollback().await?;
+
+    let renewed_turn_claim: bool =
+        sqlx::query_scalar("SELECT claim_deferred_final_state_validation('turn_lifecycle', $1)")
+            .bind(turn.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    assert!(renewed_turn_claim);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-007 / INV-009 / INV-012: model-call writers acquire one ordering guard,
+/// finish credential action locking, and only then wait for the shared outbox
+/// allocator. Counted activation carries proof that it acquired the same guard
+/// before its earlier activation event.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv007_inv009_inv012_model_call_writers_guard_credential_before_outbox()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7720_u128;
+    let pool_name = "ordered-pool";
+    let member_reference = "ordered-member";
+    let (session, _turn, repository) =
+        active_credential_pool_fixture(&pool, seed, pool_name, member_reference).await?;
+
+    let allocator_holder = lock_outbox_sequence_allocator(&pool).await?;
+    let preparation = tokio::spawn({
+        let repository = repository.clone();
+        async move {
+            repository
+                .prepare_initial_call(
+                    session,
+                    ModelCallId::from_uuid(Uuid::from_u128(seed + 11)),
+                    FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 12)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 13)),
+                    ),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 14)),
+                    |_| {
+                        (
+                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                            TurnId::from_uuid(Uuid::from_u128(seed + 16)),
+                        )
+                    },
+                )
+                .await
+        }
+    });
+    assert!(blocked_backends_reached(&pool, 1).await?);
+    assert!(!model_call_outbox_order_guard_is_available(&pool).await?);
+    assert!(!credential_action_head_is_available(&pool, member_reference).await?);
+    allocator_holder.rollback().await?;
+    let PrepareInitialModelCallOutcome::Checkpointed(prepared_call) = preparation.await?? else {
+        panic!("the released preparation must checkpoint");
+    };
+    assert_eq!(
+        prepared_call,
+        ModelCallId::from_uuid(Uuid::from_u128(seed + 11))
+    );
+
+    let PrepareInitialModelCallOutcome::Ready { request, .. } = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 17)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 18)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 19)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 20)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 22)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the committed call must reload");
+    };
+    let AuthorizeModelCallOutcome::Authorized(authorized) = repository
+        .authorize_send(session, request.call().id())
+        .await?
+    else {
+        panic!("the prepared call must authorize");
+    };
+
+    let allocator_holder = lock_outbox_sequence_allocator(&pool).await?;
+    let observation = tokio::spawn({
+        let mut repository = repository.clone();
+        async move {
+            repository
+                .commit_observation(
+                    session,
+                    authorized
+                        .observation_correlation()
+                        .bind_provider_failure_observation_with_retry_after(
+                            ProviderModelCallFailureCause::QuotaExhausted,
+                            ProviderReportedTokenUsage::unreported(),
+                            None,
+                            true,
+                        ),
+                    signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                        failed: FailedModelCallTurnIdentities::new(
+                            SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 23)),
+                            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 24)),
+                        ),
+                        successor_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(seed + 25)),
+                    },
+                    |_| TurnId::from_uuid(Uuid::from_u128(seed + 26)),
+                )
+                .await
+        }
+    });
+    assert!(blocked_backends_reached(&pool, 1).await?);
+    assert!(!model_call_outbox_order_guard_is_available(&pool).await?);
+    assert!(!credential_action_head_is_available(&pool, member_reference).await?);
+    allocator_holder.rollback().await?;
+    let Some(ModelCallObservationCommitOutcome::PoolExhausted(_)) = observation.await?? else {
+        panic!("the sole unavailable member must exhaust its pool");
+    };
+
+    pool.close().await;
+    drop(container);
+    Ok(())
 }
 
 /// Reproduces #771: a quota failure on member A with `switch_now` must commit
@@ -1013,6 +1272,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             },
         )]),
         InProcessAttemptDispatchGate::default(),
+        None,
     );
 
     assert_eq!(
@@ -1101,7 +1361,7 @@ async fn s02_inv014_inv015_application_service_completes_scripted_reply()
             value: assistant_text,
         }
     );
-    let (_, _, _, _, _, provider, _, _, _) = service.into_parts();
+    let (_, _, _, _, _, provider, _, _, _, _) = service.into_parts();
     assert_eq!(provider.capability_preparation_count(), 1);
     assert_eq!(provider.interaction_count(), 1);
     let messages = provider
@@ -1552,7 +1812,7 @@ fn automatic_recovery_status(snapshot: &ProcessTranscriptSnapshot) -> (u32, bool
 }
 
 async fn spend_automatic_reconciliation_budget(
-    repository: &PostgresModelCallReconciliationRepository,
+    repository: &PostgresAutomaticReconciliationRepository,
     pool: &PgPool,
 ) -> Result<(), Box<dyn Error>> {
     for expected_attempt in 1_u32..=5 {
@@ -1562,11 +1822,11 @@ async fn spend_automatic_reconciliation_budget(
         repository
             .record_failure(
                 batch.claimed()[0],
-                ModelCallReconciliationFailureKind::Infrastructure,
+                AutomaticReconciliationFailureKind::Infrastructure,
             )
             .await?;
         sqlx::query(
-            "UPDATE automatic_model_call_reconciliation
+            "UPDATE automatic_reconciliation
                 SET next_attempt_at = statement_timestamp()
               WHERE turn_id = $1
                 AND attempt_count < 5",
@@ -1583,26 +1843,49 @@ async fn spend_automatic_reconciliation_budget(
 /// ambiguous model-call wait without rewriting the call's unknown outcome.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_automatic_model_call_reconciliation_records_the_operator_transition()
--> Result<(), Box<dyn Error>> {
+async fn s04_automatic_reconciliation_records_the_operator_transition() -> Result<(), Box<dyn Error>>
+{
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xC100).await?;
-    let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone()).with_policy(
+        Some(5),
+        Some(Duration::ZERO),
+        Some(Duration::ZERO),
+    );
+    let steering = AcceptedInputId::from_uuid(Uuid::from_u128(0xC300));
+    let steering_outcome = SubmitInputRepository::new(pool.clone())
+        .handle(
+            SubmitInput::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(0xC301)),
+                parked.session,
+                UserContent::try_text(String::from("steering retained by automatic recovery"))
+                    .expect("fixture steering content is admitted"),
+                DeliveryRequest::NextSafePoint {
+                    expected_active_turn: parked.turn,
+                },
+            ),
+            steering,
+            None,
+        )
+        .await?;
 
     let batch = repository.claim_due().await?;
     let claimed = batch.claimed()[0];
     let outcome = repository.reconcile(claimed).await?;
+    let unchargeable = GoalRepository::new(pool.clone())
+        .unchargeable_automatic_resume_turns(parked.session, &[parked.turn])
+        .await?;
     let durable: (String, String, String, i32, i64) = sqlx::query_as(
         "SELECT lifecycle.state_kind,
                 lifecycle.terminal_disposition_kind,
                 recovery.state_kind,
                 recovery.attempt_count,
                 (SELECT count(*)
-                   FROM automatic_model_call_reconciliation_attempt AS attempt
+                   FROM automatic_reconciliation_attempt AS attempt
                   WHERE attempt.turn_id = recovery.turn_id
                     AND attempt.outcome_kind = 'reconciled')
            FROM turn_lifecycle AS lifecycle
-           JOIN automatic_model_call_reconciliation AS recovery
+           JOIN automatic_reconciliation AS recovery
              ON recovery.turn_id = lifecycle.turn_id
           WHERE lifecycle.turn_id = $1",
     )
@@ -1622,9 +1905,13 @@ async fn s04_automatic_model_call_reconciliation_records_the_operator_transition
     assert_eq!(batch.exhausted(), &[]);
     assert_eq!(claimed.session(), parked.session);
     assert_eq!(claimed.turn(), parked.turn);
-    assert_eq!(claimed.call(), parked.call);
+    assert_eq!(
+        claimed.operation(),
+        AutomaticReconciliationOperation::ModelCall(parked.call)
+    );
     assert_eq!(claimed.attempt().get(), 1);
-    assert_eq!(outcome, ModelCallReconciliationOutcome::Reconciled);
+    assert_eq!(outcome, AutomaticReconciliationOutcome::Reconciled);
+    assert_eq!(unchargeable.as_ref(), &[parked.turn]);
     assert_eq!(
         durable,
         (
@@ -1636,7 +1923,109 @@ async fn s04_automatic_model_call_reconciliation_records_the_operator_transition
         )
     );
     assert_eq!(ambiguous_call, ("terminal".into(), "ambiguous".into()));
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(parked.session)
+        .await?
+        .expect("the automatically reconciled terminal turn remains readable");
+    assert!(matches!(
+        transcript.turns()[0].state(),
+        ProcessTurnState::ReconciliationRequired { .. }
+    ));
+    assert!(matches!(
+        steering_outcome,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+    let successor: Uuid = sqlx::query_scalar(
+        "SELECT origin_turn_id
+           FROM accepted_input
+          WHERE accepted_input_id = $1
+            AND disposition_kind = 'reclassified_as_turn_origin'",
+    )
+    .bind(steering.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let activated = activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: parked.session.into_uuid(),
+            origin_entry: Uuid::from_u128(0xC302),
+            starting_frontier: Uuid::from_u128(0xC303),
+            initial_attempt: Uuid::from_u128(0xC304),
+        },
+    )
+    .await?;
+    assert_eq!(activated.turn().into_uuid(), successor);
 
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S04: PostgreSQL, rather than a dropped client future, ends a recovery
+/// transaction that cannot reach the commit-ordered outbox allocator. The
+/// failed attempt therefore leaves no backend queued behind that allocator.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s04_automatic_reconciliation_server_bound_releases_its_database_work()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let parked = park_restart_ambiguity(&pool, 0xC500).await?;
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
+    let batch = repository.claim_due().await?;
+    let claimed = batch.claimed()[0];
+    let mut allocator_holder = pool.begin().await?;
+    let _: bool = sqlx::query_scalar(
+        "SELECT singleton
+           FROM outbox_sequence_state
+          WHERE singleton
+          FOR UPDATE",
+    )
+    .fetch_one(&mut *allocator_holder)
+    .await?;
+    let bounded_repository = repository.clone();
+    let started = tokio::time::Instant::now();
+    let reconciliation = tokio::spawn(async move { bounded_repository.reconcile(claimed).await });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // The probe counts blocked backends rather than one statement's text: the
+    // reconciliation transaction reaches the commit-ordered allocator through a
+    // durable trigger, and `pg_stat_activity` reports the top-level statement
+    // that fired it, not the allocator lock the trigger takes.
+    let waiting_before_timeout: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND wait_event_type = 'Lock'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let error = reconciliation
+        .await?
+        .expect_err("the database-side lock budget ends the blocked recovery");
+    let elapsed = started.elapsed();
+    let waiting_after_timeout: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM pg_stat_activity
+          WHERE datname = current_database()
+            AND wait_event_type = 'Lock'",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(batch.claimed().len(), 1);
+    assert_eq!(claimed.session(), parked.session);
+    assert_eq!(waiting_before_timeout, 1);
+    assert_eq!(
+        error.operator_failure_class(),
+        OperatorFailureClass::Infrastructure {
+            commit_ambiguous: false,
+        }
+    );
+    assert!(elapsed < std::time::Duration::from_secs(5));
+    assert_eq!(waiting_after_timeout, 0);
+
+    allocator_holder.rollback().await?;
     pool.close().await;
     drop(container);
     Ok(())
@@ -1652,9 +2041,8 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xE100;
     let parked = park_restart_ambiguity(&pool, seed).await?;
-    let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
     let batch = repository.claim_due().await?;
-    let claimed = batch.claimed()[0];
     let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x203));
 
     let operator = SubmitInputRepository::new(pool.clone())
@@ -1673,15 +2061,15 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
             Some(successor),
         )
         .await?;
-    let automatic = repository.reconcile(claimed).await?;
+    let automatic = repository.claim_due().await?;
     let durable: (String, String, i64) = sqlx::query_as(
         "SELECT recovery.state_kind,
                 attempt.outcome_kind,
                 (SELECT count(*)
                    FROM turn_reconciliation_required_outbox_event
                   WHERE turn_id = recovery.turn_id)
-           FROM automatic_model_call_reconciliation AS recovery
-           JOIN automatic_model_call_reconciliation_attempt AS attempt
+           FROM automatic_reconciliation AS recovery
+           JOIN automatic_reconciliation_attempt AS attempt
              ON attempt.turn_id = recovery.turn_id
             AND attempt.attempt_ordinal = recovery.attempt_count
           WHERE recovery.turn_id = $1",
@@ -1696,8 +2084,18 @@ async fn s04_operator_reconciliation_supersedes_a_claimed_automatic_attempt()
             SubmitInputAppliedResult::TurnOrigin(_)
         ))
     ));
-    assert_eq!(automatic, ModelCallReconciliationOutcome::Superseded);
+    assert_eq!(batch.claimed().len(), 1);
+    assert_eq!(automatic.claimed(), &[]);
+    assert_eq!(automatic.exhausted(), &[]);
     assert_eq!(durable, ("superseded".into(), "superseded".into(), 1));
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(parked.session)
+        .await?
+        .expect("the operator-reconciled terminal turn remains readable");
+    assert!(matches!(
+        transcript.turns()[0].state(),
+        ProcessTurnState::ReconciliationRequired { .. }
+    ));
 
     pool.close().await;
     drop(container);
@@ -1735,7 +2133,7 @@ async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database(
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xF100).await?;
-    let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
     let batch = repository.claim_due().await?;
     let claimed = batch.claimed()[0];
     let caller_bound = production_reconciliation_caller_bound();
@@ -1759,7 +2157,7 @@ async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database(
     let parked_still: (String, String) = sqlx::query_as(
         "SELECT lifecycle.state_kind, recovery.state_kind
            FROM turn_lifecycle AS lifecycle
-           JOIN automatic_model_call_reconciliation AS recovery
+           JOIN automatic_reconciliation AS recovery
              ON recovery.turn_id = lifecycle.turn_id
           WHERE lifecycle.turn_id = $1",
     )
@@ -1781,7 +2179,7 @@ async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database(
     );
     assert_eq!(
         contended.failure_kind(),
-        ModelCallReconciliationFailureKind::Infrastructure
+        AutomaticReconciliationFailureKind::Infrastructure
     );
     assert!(matches!(
         contended.operator_failure_class(),
@@ -1800,7 +2198,7 @@ async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database(
          wait took {waited:?} of {caller_bound:?}"
     );
     assert_eq!(parked_still, ("active".into(), "attempting".into()));
-    assert_eq!(retried, ModelCallReconciliationOutcome::Reconciled);
+    assert_eq!(retried, AutomaticReconciliationOutcome::Reconciled);
 
     pool.close().await;
     drop(container);
@@ -1813,7 +2211,7 @@ async fn s04_a_contended_automatic_attempt_gives_the_row_up_inside_the_database(
 /// derives it, so raising either one cannot leave this test asserting against a
 /// pairing the daemon does not run.
 fn production_reconciliation_caller_bound() -> std::time::Duration {
-    RECONCILIATION_LOCK_WAIT * 5
+    reconciliation_deadline(None)
 }
 
 /// Returns the commit ambiguity and driver failure a database-class error carries.
@@ -1823,10 +2221,10 @@ fn production_reconciliation_caller_bound() -> std::time::Duration {
 /// asserts about it, stay at the call site.
 #[track_caller]
 fn reconciliation_database_failure(
-    error: &ModelCallReconciliationRepositoryError,
+    error: &AutomaticReconciliationRepositoryError,
 ) -> (bool, &sqlx::Error) {
     match error {
-        ModelCallReconciliationRepositoryError::Database {
+        AutomaticReconciliationRepositoryError::Database {
             commit_ambiguous,
             source,
         } => (*commit_ambiguous, source),
@@ -1851,7 +2249,7 @@ async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let parked = park_restart_ambiguity(&pool, 0xF200).await?;
-    let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
     let batch = repository.claim_due().await?;
     let claimed = batch.claimed()[0];
     let caller_bound = production_reconciliation_caller_bound();
@@ -1859,7 +2257,7 @@ async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
     let mut holder = pool.begin().await?;
     sqlx::query(
         "SELECT turn_id
-           FROM automatic_model_call_reconciliation_attempt
+           FROM automatic_reconciliation_attempt
           WHERE turn_id = $1 AND attempt_ordinal = $2
           FOR UPDATE",
     )
@@ -1870,7 +2268,7 @@ async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
     let started = std::time::Instant::now();
     let contended = tokio::time::timeout(
         caller_bound,
-        repository.record_failure(claimed, ModelCallReconciliationFailureKind::Infrastructure),
+        repository.record_failure(claimed, AutomaticReconciliationFailureKind::Infrastructure),
     )
     .await
     .expect("the database budget expires before the production caller bound")
@@ -1878,12 +2276,12 @@ async fn s04_a_contended_failure_record_gives_the_row_up_inside_the_database()
     let waited = started.elapsed();
     holder.rollback().await?;
     let recorded = repository
-        .record_failure(claimed, ModelCallReconciliationFailureKind::Infrastructure)
+        .record_failure(claimed, AutomaticReconciliationFailureKind::Infrastructure)
         .await;
     let settled: (String, String) = sqlx::query_as(
         "SELECT attempt.outcome_kind, recovery.state_kind
-           FROM automatic_model_call_reconciliation_attempt AS attempt
-           JOIN automatic_model_call_reconciliation AS recovery
+           FROM automatic_reconciliation_attempt AS attempt
+           JOIN automatic_reconciliation AS recovery
              ON recovery.turn_id = attempt.turn_id
           WHERE attempt.turn_id = $1 AND attempt.attempt_ordinal = $2",
     )
@@ -1953,7 +2351,7 @@ async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_b
         .max_connections(1)
         .connect_with(local_test_connection_options(&database_url)?)
         .await?;
-    let repository = PostgresModelCallReconciliationRepository::new(single.clone());
+    let repository = PostgresAutomaticReconciliationRepository::new(single.clone());
     let batch = repository.claim_due().await?;
     let claimed = batch.claimed()[0];
 
@@ -1967,7 +2365,7 @@ async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_b
     let parked_still: (String, String) = sqlx::query_as(
         "SELECT lifecycle.state_kind, recovery.state_kind
            FROM turn_lifecycle AS lifecycle
-           JOIN automatic_model_call_reconciliation AS recovery
+           JOIN automatic_reconciliation AS recovery
              ON recovery.turn_id = lifecycle.turn_id
           WHERE lifecycle.turn_id = $1",
     )
@@ -1988,7 +2386,7 @@ async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_b
     );
     assert_eq!(
         starved.failure_kind(),
-        ModelCallReconciliationFailureKind::Infrastructure
+        AutomaticReconciliationFailureKind::Infrastructure
     );
     assert!(
         matches!(
@@ -2008,7 +2406,7 @@ async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_b
         ("active".into(), "attempting".into()),
         "an attempt that never reached a connection wrote nothing"
     );
-    assert_eq!(retried, ModelCallReconciliationOutcome::Reconciled);
+    assert_eq!(retried, AutomaticReconciliationOutcome::Reconciled);
 
     single.close().await;
     pool.close().await;
@@ -2018,13 +2416,21 @@ async fn s04_an_exhausted_pool_ends_the_automatic_attempt_before_a_transaction_b
 
 /// S04 / S10: infrastructure failures spend the exact automatic budget; only
 /// then does the still-active ambiguity become a visible operator park.
+/// S04 / S10: infrastructure failures spend the exact automatic budget; the
+/// visible operator park can still be interrupted without leaving its durable
+/// automatic record inconsistent with the terminal turn and queued successor.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let parked = park_restart_ambiguity(&pool, 0xD100).await?;
-    let repository = PostgresModelCallReconciliationRepository::new(pool.clone());
+    let seed = 0xD100;
+    let parked = park_restart_ambiguity(&pool, seed).await?;
+    let repository = PostgresAutomaticReconciliationRepository::new(pool.clone()).with_policy(
+        Some(5),
+        Some(Duration::ZERO),
+        Some(Duration::ZERO),
+    );
     spend_automatic_reconciliation_budget(&repository, &pool).await?;
 
     let exhaustion = repository.claim_due().await?;
@@ -2035,7 +2441,7 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
     let attempt_history: (i64, i64) = sqlx::query_as(
         "SELECT count(*),
                 count(*) FILTER (WHERE outcome_kind = 'infrastructure_failure')
-           FROM automatic_model_call_reconciliation_attempt
+           FROM automatic_reconciliation_attempt
           WHERE turn_id = $1",
     )
     .bind(parked.turn.into_uuid())
@@ -2046,9 +2452,67 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
     assert_eq!(exhaustion.exhausted().len(), 1);
     assert_eq!(exhaustion.exhausted()[0].session(), parked.session);
     assert_eq!(exhaustion.exhausted()[0].turn(), parked.turn);
-    assert_eq!(exhaustion.exhausted()[0].call(), parked.call);
+    assert_eq!(
+        exhaustion.exhausted()[0].operation(),
+        AutomaticReconciliationOperation::ModelCall(parked.call)
+    );
     assert_eq!(automatic_recovery_status(&snapshot), (5, true));
     assert_eq!(attempt_history, (5, 5));
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 0x203));
+    let operator = SubmitInputRepository::new(pool.clone())
+        .handle(
+            input_with_delivery(
+                seed + 0x200,
+                seed + 1,
+                "operator recovers an exhausted automatic reconciliation",
+                DeliveryRequest::Interrupt {
+                    expected_active_turn: parked.turn,
+                    descendant_scope: DescendantTerminationScope::ParentAlone,
+                    configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+                },
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x202)),
+            Some(successor),
+        )
+        .await?;
+    let transcript = ProcessReadRepository::new(pool.clone())
+        .read_transcript(parked.session)
+        .await?
+        .expect("the operator-reconciled exhausted park remains readable");
+    let preview = StartEligibleTurnRepository::new(pool.clone())
+        .preview(
+            parked.session,
+            AcceptedInputTurnActivationIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x204)),
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x205)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x206)),
+                TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x207)),
+            ),
+        )
+        .await?
+        .expect("the operator-created successor remains eligible");
+    let durable: (String, i32) = sqlx::query_as(
+        "SELECT state_kind, attempt_count
+           FROM automatic_reconciliation
+          WHERE turn_id = $1",
+    )
+    .bind(parked.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(matches!(
+        operator,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    assert!(matches!(
+        transcript.turns()[0].state(),
+        ProcessTurnState::ReconciliationRequired { .. }
+    ));
+    assert_eq!(preview.prepared().turn().turn(), successor);
+    assert_eq!(durable, ("superseded".into(), 5));
 
     pool.close().await;
     drop(container);
@@ -2837,210 +3301,6 @@ async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pend
     Ok(())
 }
 
-/// S04 / S08 / INV-016 / INV-053: reclassification rejects missing settings
-/// for a post-cutover source, while a genuine pre-evidence source can still
-/// reclassify pending steering and leave the successor legacy-null.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_s08_inv016_inv053_legacy_turn_reclassifies_steering_without_settings()
--> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let seed = 0x38b0;
-    let (fixture, repository, authorized) = authorize_checkpointed_model_call(&pool, seed).await?;
-    let steering_input = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 30));
-    SubmitInputRepository::new(pool.clone())
-        .handle(
-            SubmitInput::new(
-                DurableCommandId::from_uuid(Uuid::from_u128(seed + 31)),
-                fixture.session,
-                UserContent::try_text(String::from("legacy source steering"))
-                    .expect("fixture steering content is admitted"),
-                DeliveryRequest::NextSafePoint {
-                    expected_active_turn: fixture.turn,
-                },
-            ),
-            steering_input,
-            None,
-        )
-        .await?;
-
-    sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event DISABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-    sqlx::query(
-        "DELETE FROM turn_model_settings_resolved_outbox_event
-          WHERE accepted_input_id IN (
-                SELECT accepted_input_id
-                  FROM turn_model_settings_resolved
-                 WHERE turn_id = $1
-          )",
-    )
-    .bind(fixture.turn.into_uuid())
-    .execute(&pool)
-    .await?;
-    sqlx::query("ALTER TABLE turn_model_settings_resolved DISABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-    let deleted = sqlx::query("DELETE FROM turn_model_settings_resolved WHERE turn_id = $1")
-        .bind(fixture.turn.into_uuid())
-        .execute(&pool)
-        .await?;
-    assert_eq!(deleted.rows_affected(), 1);
-    sqlx::query("ALTER TABLE turn_model_settings_resolved ENABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event ENABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
-
-    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 32));
-    let missing_settings = repository
-        .apply_terminal_observation(
-            fixture.session,
-            authorized
-                .observation_correlation()
-                .bind_terminal_observation(ModelCallTerminalObservation::Refused),
-            ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(
-                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 33)),
-            )),
-            |_| successor,
-        )
-        .await;
-    assert!(
-        matches!(
-            &missing_settings,
-            Err(ModelCallRepositoryError::Corruption(
-                ModelCallCorruption::Scheduling(SubmitInputCorruption::Missing(
-                    "turn model settings evidence"
-                ))
-            ))
-        ),
-        "unexpected missing-settings outcome: {missing_settings:?}"
-    );
-
-    sqlx::query("ALTER TABLE durable_command DISABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE submit_input_command DISABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE queued_input_origin DISABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    let registry_downgrade = sqlx::query(
-        "UPDATE durable_command
-            SET storage_version = 1
-          WHERE command_id = $1",
-    )
-    .bind(Uuid::from_u128(seed + 8))
-    .execute(&pool)
-    .await?;
-    let command_downgrade = sqlx::query(
-        "UPDATE submit_input_command
-            SET storage_version = 1
-          WHERE command_id = $1",
-    )
-    .bind(Uuid::from_u128(seed + 8))
-    .execute(&pool)
-    .await?;
-    let legacy_root = sqlx::query(
-        "UPDATE queued_input_origin
-            SET model_settings_evidence_required = FALSE
-          WHERE turn_id = $1",
-    )
-    .bind(fixture.turn.into_uuid())
-    .execute(&pool)
-    .await?;
-    assert_eq!(registry_downgrade.rows_affected(), 1);
-    assert_eq!(command_downgrade.rows_affected(), 1);
-    assert_eq!(legacy_root.rows_affected(), 1);
-    sqlx::query("ALTER TABLE queued_input_origin ENABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE submit_input_command ENABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-    sqlx::query("ALTER TABLE durable_command ENABLE TRIGGER ALL")
-        .execute(&pool)
-        .await?;
-
-    let outcome = repository
-        .apply_terminal_observation(
-            fixture.session,
-            authorized
-                .observation_correlation()
-                .bind_terminal_observation(ModelCallTerminalObservation::Refused),
-            ModelCallTerminalIdentities::Refused(RefusedModelCallTurnIdentities::new(
-                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 33)),
-            )),
-            |accepted| {
-                assert_eq!(accepted, steering_input);
-                successor
-            },
-        )
-        .await?;
-    assert_refused_reclassified_successor(&outcome, successor);
-
-    let evidence_cutover: Vec<(Uuid, bool)> = sqlx::query_as(
-        "SELECT turn.turn_id, configuration_origin.model_settings_evidence_required
-           FROM turn_lifecycle AS turn
-           JOIN LATERAL (
-                WITH RECURSIVE configuration_chain AS (
-                    SELECT queued.*
-                      FROM queued_input_origin AS queued
-                     WHERE queued.turn_id = turn.turn_id
-                       AND queued.session_id = turn.session_id
-                    UNION
-                    SELECT source.*
-                      FROM configuration_chain AS current
-                      JOIN queued_input_origin AS source
-                        ON source.turn_id = current.source_configuration_turn_id
-                       AND source.session_id = current.session_id
-                )
-                SELECT *
-                  FROM configuration_chain
-                 WHERE source_configuration_turn_id IS NULL
-           ) AS configuration_origin ON TRUE
-          WHERE turn.turn_id IN ($1, $2)
-          ORDER BY turn.acceptance_position",
-    )
-    .bind(fixture.turn.into_uuid())
-    .bind(successor.into_uuid())
-    .fetch_all(&pool)
-    .await?;
-    assert_eq!(
-        evidence_cutover,
-        vec![
-            (fixture.turn.into_uuid(), false),
-            (successor.into_uuid(), false),
-        ]
-    );
-
-    let successor_evidence: (i64, i64) = sqlx::query_as(
-        "SELECT
-            (SELECT count(*) FROM turn_model_settings_resolved
-              WHERE accepted_input_id = $1 AND turn_id = $2),
-            (SELECT count(*) FROM turn_model_settings_resolved_outbox_event
-              WHERE accepted_input_id = $1)",
-    )
-    .bind(steering_input.into_uuid())
-    .bind(successor.into_uuid())
-    .fetch_one(&pool)
-    .await?;
-    assert_eq!(successor_evidence, (0, 0));
-    let snapshot = ProcessReadRepository::new(pool.clone())
-        .read_transcript(fixture.session)
-        .await?
-        .expect("the legacy-compatible transcript remains readable");
-    assert_eq!(snapshot.turns().len(), 2);
-    assert_eq!(snapshot.turns()[1].turn(), successor);
-    assert_eq!(snapshot.turns()[1].model_settings(), None);
-
-    pool.close().await;
-    drop(container);
-    Ok(())
-}
-
 /// S08 / S21 / INV-006 / INV-014 / INV-032 / INV-036: immutable target
 /// resolution failure creates no targetless call, reclassifies the complete
 /// pending steering prefix, and atomically closes the prepared attempt and turn
@@ -3249,14 +3509,7 @@ async fn s08_s21_inv006_inv014_inv032_inv036_target_unavailable_reclassifies_ste
 async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = unmigrated_postgres().await?;
-    let mut connection = pool.acquire().await?;
-    connection
-        .ensure_migrations_table("_sqlx_migrations")
-        .await?;
-    for migration in MIGRATOR.iter().take(3) {
-        connection.apply("_sqlx_migrations", migration).await?;
-    }
-    drop(connection);
+    apply_migrations_before(&pool, 202607180004).await?;
 
     let mut transaction = pool.begin().await?;
     sqlx::raw_sql(
@@ -3355,14 +3608,27 @@ async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
 
     migrate(&pool).await?;
 
-    let backfilled: (i64, String, i64, i64, i64, bool) = sqlx::query_as(
+    let backfilled: (i64, String, i64, i64, i64, bool, i64, i64, bool) = sqlx::query_as(
         "SELECT
             (SELECT count(*) FROM session_scheduler WHERE session_id = $1),
             turn.state_kind,
             (SELECT count(*) FROM semantic_transcript_entry),
             (SELECT count(*) FROM context_frontier),
             (SELECT count(*) FROM turn_attempt),
-            typed.result_actual_active_turn_id IS NULL
+            typed.result_actual_active_turn_id IS NULL,
+            (SELECT count(*)
+               FROM submit_input_command_content_part AS part
+              WHERE part.command_id = typed.command_id
+                AND part.position = 0
+                AND part.part_kind = 'text'
+                AND part.text_value = 'queued before migration'),
+            (SELECT count(*)
+               FROM accepted_input_content_part AS part
+              WHERE part.accepted_input_id = accepted.accepted_input_id
+                AND part.position = 0
+                AND part.part_kind = 'text'
+                AND part.text_value = 'queued before migration'),
+            typed.storage_version = 3
          FROM turn_lifecycle AS turn
          JOIN accepted_input AS accepted
            ON accepted.accepted_input_id = turn.origin_accepted_input_id
@@ -3374,7 +3640,10 @@ async fn inv007_inv009_turn_storage_migration_backfills_existing_queued_work()
     .bind(Uuid::from_u128(0xa0000000000070008000000000000401))
     .fetch_one(&pool)
     .await?;
-    assert_eq!(backfilled, (1, "queued".to_owned(), 0, 0, 0, true));
+    assert_eq!(
+        backfilled,
+        (1, "queued".to_owned(), 0, 0, 0, true, 1, 1, true)
+    );
 
     pool.close().await;
     drop(container);

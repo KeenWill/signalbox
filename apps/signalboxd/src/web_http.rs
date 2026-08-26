@@ -87,9 +87,12 @@ const TEXT_CONTENT_TYPE: &str = "text/plain";
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
 const HTTP_DEFAULT_PORT: u16 = 80;
 const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+// numeric-bound: guard - prevents an unbounded caller-supplied filename from reaching a response header
 const MAX_DISPLAY_FILENAME_BYTES: usize = 1024;
 const BLOB_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+// numeric-bound: guard - prevents concurrent blob reads from exhausting process memory and store handles
 const MAX_CONCURRENT_WEB_BLOB_READS: usize = 4;
+// numeric-bound: guard - prevents a wedged blob store from holding a read permit forever
 const BLOB_RESPONSE_TIMEOUT_SECONDS: u64 = 120;
 
 #[derive(Clone, Debug)]
@@ -259,6 +262,7 @@ impl WebHttpRuntime {
     ) -> Result<Self, WebHttpRuntimeError> {
         let snapshot_reader_budget = super::process_runtime::shared_snapshot_reader_budget(
             pool.options().get_max_connections(),
+            Some(&model_configuration),
         )
         .ok_or(WebHttpRuntimeError::Bind)?;
         Self::bind_with_snapshot_reader_budget(
@@ -377,7 +381,10 @@ pub fn production_router(
     model_configuration: Option<HubModelConfiguration>,
 ) -> Router {
     let snapshot_reader_budget = pool.as_ref().and_then(|pool| {
-        super::process_runtime::shared_snapshot_reader_budget(pool.options().get_max_connections())
+        super::process_runtime::shared_snapshot_reader_budget(
+            pool.options().get_max_connections(),
+            model_configuration.as_ref(),
+        )
     });
     production_router_with_budget(
         asset_root,

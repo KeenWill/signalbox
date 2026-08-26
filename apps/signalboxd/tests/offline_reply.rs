@@ -4,6 +4,8 @@
     reason = "the standalone integration test uses assertion panics and explicit fixture expectations"
 )]
 
+mod support;
+
 use std::{error::Error, process::Command, time::Duration};
 
 use signalbox_application::{
@@ -33,7 +35,7 @@ use signalbox_model_runtime::{
 };
 use signalbox_persistence::{
     create_session::CreateSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository},
     goal_turn::GoalTurnCandidates,
@@ -45,7 +47,7 @@ use signalbox_persistence::{
 };
 use signalbox_test_bin::test_bin_path;
 use signalboxd::{
-    ActivatedTurnPass, FatalExecutionSupervisor, HubModelConfiguration,
+    ActivatedTurnPass, FatalExecutionSupervisor, GoalModeNumericBounds,
     PostgresGoalPassDisposition, PostgresProviderModelExecution,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions, types::Uuid};
@@ -144,7 +146,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -361,7 +363,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
             usage: TokenUsage::unreported(),
         },
     )));
-    let provider = RuntimeModelCallProvider::new(runtime, runtime_models);
+    let provider = RuntimeModelCallProvider::new(runtime, runtime_models, None);
     let credential_reference = ModelCallCredentialReference::new("scripted-test");
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
@@ -372,6 +374,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         )
         .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor)
         .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
@@ -407,7 +410,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
 
     let transcript = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
         "SELECT entry.payload_kind,
-                accepted.content_text,
+                accepted_part.text_value,
                 entry.assistant_text_value
            FROM turn_lifecycle AS lifecycle
            JOIN context_frontier_member AS member
@@ -419,6 +422,10 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
            LEFT JOIN accepted_input AS accepted
              ON accepted.session_id = entry.source_session_id
             AND accepted.accepted_input_id = entry.origin_accepted_input_id
+           LEFT JOIN accepted_input_content_part AS accepted_part
+             ON accepted_part.accepted_input_id = accepted.accepted_input_id
+            AND accepted_part.position = 0
+            AND accepted_part.part_kind = 'text'
           WHERE lifecycle.session_id = $1
             AND lifecycle.turn_id = $2
           ORDER BY member.member_position",
@@ -526,7 +533,7 @@ async fn s01_s02_inv014_inv015_runtime_bridge_persists_scripted_assistant_reply(
 async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_retry()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let configuration = HubModelConfiguration::parse(GOAL_MODEL_CONFIGURATION)?;
+    let configuration = support::parse_model_configuration(GOAL_MODEL_CONFIGURATION)?;
     let selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x2001));
     let mut create = CreateSessionService::new(
         UuidV7SessionIdGenerator,
@@ -563,7 +570,7 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
     let tool_dispatch_gate = InProcessToolDispatchGate::default();
     let runtime = ScriptedModel::following([goal_completion_script(), goal_refusal_script()]);
     let provider =
-        RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog());
+        RuntimeModelCallProvider::new(runtime.clone(), configuration.runtime_model_catalog(), None);
     let credential_reference = ModelCallCredentialReference::new("scripted-goal-test");
     let (execution, fatal_execution) = FatalExecutionSupervisor::new(
         PostgresProviderModelExecution::new(
@@ -574,6 +581,7 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
             ),
             InProcessAttemptDispatchGate::default(),
             provider,
+            None,
         )
         .with_tool_loop(tool_dispatch_gate, NoToolCatalog, UnexpectedToolExecutor)
         .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
@@ -591,7 +599,12 @@ async fn s_goal_inv048_success_continues_and_unsuccessful_turn_blocks_without_re
     );
     let pass = GoalAwareEligibilityPass::new(
         activated_pass,
-        PostgresGoalPassDisposition::new(pool.clone(), configuration, nudge),
+        PostgresGoalPassDisposition::new(
+            pool.clone(),
+            configuration,
+            nudge,
+            GoalModeNumericBounds::new(None, None, None, None),
+        ),
     );
     let mut scheduler = SchedulerLoop::new(work_source, pass);
     let observation_pool = pool.clone();
