@@ -421,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn blob_read_validator_rejects_noncanonical_and_oversize_lengths() {
+    fn blob_read_validator_rejects_a_noncanonical_decimal_length() {
         let digest = BlobDigest::digest(b"attached bytes");
         let validator = BlobValidator {
             mode: BlobToolMode::Read,
@@ -431,11 +431,22 @@ mod tests {
         let leading_zero = arguments(&format!(
             r#"{{"digest":"{digest}","offset_bytes":"0","length_bytes":"01"}}"#
         ));
+
+        assert!(validator.validate(&leading_zero).is_err());
+    }
+
+    #[test]
+    fn blob_read_validator_rejects_a_length_above_the_byte_ceiling() {
+        let digest = BlobDigest::digest(b"attached bytes");
+        let validator = BlobValidator {
+            mode: BlobToolMode::Read,
+            detail: ToolExecutionErrorDetail::try_new(String::from(INVALID_ARGUMENTS))
+                .expect("the static detail is valid"),
+        };
         let oversize = arguments(&format!(
             r#"{{"digest":"{digest}","offset_bytes":"0","length_bytes":"524289"}}"#
         ));
 
-        assert!(validator.validate(&leading_zero).is_err());
         assert!(validator.validate(&oversize).is_err());
     }
 
@@ -472,6 +483,18 @@ mod tests {
         assert_eq!(metadata.effect_class(), ToolEffectClass::EffectFree);
         assert_eq!(read.permission_default(), ToolPermissionDefault::Auto);
         assert_eq!(read.effect_class(), ToolEffectClass::ExternalEffect);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blob_read_declaration_rejects_empty_arguments() -> Result<(), Box<dyn Error>> {
+        let tools = BlobTools::try_new(
+            BlobCatalogRepository::new(sqlx::PgPool::connect_lazy("postgres://localhost/test")?),
+            None,
+        )?;
+        let definitions = tools.catalog.definitions();
+        let read = declaration(definitions.as_ref(), BLOB_READ_NAME)?;
+
         assert!(matches!(
             tools
                 .catalog

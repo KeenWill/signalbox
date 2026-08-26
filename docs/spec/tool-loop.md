@@ -1062,14 +1062,15 @@ proposal-ordered results for that batch are coalesced into the immediately
 following user-role message. Every provider-visible failure is this compact
 provider-neutral JSON object: `{"error":{"detail":D,"kind":K}}`. `D` is the
 admitted executor detail, admitted user denial reason, or JSON null; `K` is
-exactly `unknown_tool`, `invalid_arguments`, `execution_failed`,
-`result_too_large`, `crash_lost`, `denied`, or `closed_by_turn_end`. Execution
-failures select their stored error kind and detail, denial selects `denied` and
-its reason, and terminal closure selects `closed_by_turn_end` with null detail.
-`K` stays closed as written; a family whose failures do not fit it maps into it
-rather than extending it, and may fix `D` to its own closed token vocabulary so
-the projection stays machine-readable. **Committed unimplemented
-functionality.** The instruction family is the one such mapping so far, fixed by
+exactly `unknown_tool`, `invalid_arguments`, `preauthorization_rejected`,
+`execution_failed`, `result_too_large`, `crash_lost`, `denied`, or
+`closed_by_turn_end`. Execution failures select their stored error kind and
+detail, denial selects `denied` and its reason, and terminal closure selects
+`closed_by_turn_end` with null detail. `K` stays closed as written; a family
+whose failures do not fit it maps into it rather than extending it, and may fix
+`D` to its own closed token vocabulary so the projection stays machine-readable.
+**Committed unimplemented functionality.** The instruction family is the one
+such mapping so far, fixed by
 [workspace instructions](workspace-instructions.md#enumeration-preview-and-admission):
 its four execution-stage failures select `execution_failed` with `D` set to
 exactly one closed reason token and no other text, while its two pre-approval
