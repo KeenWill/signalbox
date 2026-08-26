@@ -1,4 +1,6 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
+// The shared fixture is the single copy kept aligned with WebContractBootstrap::current();
+// readBootstrap now rejects any bootstrap whose limits contradict it.
 import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
 import { useDeterministicImportApi } from './import-api-fixture'
 

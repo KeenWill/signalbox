@@ -36,6 +36,9 @@ const streamTransport = (
     readBootstrap: async () => {
       throw new Error('unused bootstrap read')
     },
+    readBlobDescriptor: async () => {
+      throw new Error('unused blob descriptor read')
+    },
     readAttention: async () => {
       throw new Error('unused attention read')
     },

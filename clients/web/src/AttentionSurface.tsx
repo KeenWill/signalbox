@@ -209,7 +209,7 @@ export function AttentionSurface({
             <h2>Attention could not be read</h2>
             <p>
               {attention.error instanceof ProductRequestError
-                ? `${attention.error.code}: ${attention.error.message}`
+                ? `${attention.error.response.error.code}: ${attention.error.message}`
                 : 'The response did not match the generated web contract.'}
             </p>
             <button ref={errorFocus} type="button" onClick={retryAttention}>
