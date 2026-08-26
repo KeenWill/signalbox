@@ -325,19 +325,19 @@ impl ReportedUsageCompaction {
                 operation.request().model_settings().effective().fast_mode(),
             )
             .ok_or(ReportedUsageCompactionError::ContextWindowUnavailable(turn))?;
+        // The preview's starting frontier is never committed, so it names the
+        // model-visible input it would send rather than an identity no durable
+        // membership resolves.
         let reported = self
             .model_calls
-            .latest_reported_usage(
-                session,
-                target,
-                operation.request().call().frontier().snapshot(),
-            )
+            .latest_reported_usage(session, target, prospective.prospective_input())
             .await
             .map_err(|source| ReportedUsageCompactionError::Model { turn, source })?;
         let reported_requires_compaction = reported.is_some_and(|reported| {
             reported_usage_requires_compaction(
                 reported.usage(),
                 reported.input_includes_cache_tokens(),
+                reported.input_is_retained(),
                 reported.output_is_retained(),
                 reported.projected_unreported_content_bytes(),
                 u64::from(definition.max_output_tokens()),

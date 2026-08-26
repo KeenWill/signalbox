@@ -168,9 +168,15 @@ fn configured_usage_limit_excess(
 /// prospective request. A completed call's output also becomes part of that
 /// next input; output reported by another terminal disposition did not become
 /// assistant transcript and is excluded from the lower bound.
+///
+/// A dedicated compaction call's reported input is likewise excluded: it counts
+/// the source text the summary replaced, which the next request no longer
+/// carries. What that call retains is its summary output plus the unsummarized
+/// content the projected-content allowance measures.
 pub(crate) fn reported_usage_requires_compaction(
     usage: ProviderReportedTokenUsage,
     input_includes_cache_tokens: bool,
+    input_is_retained: bool,
     output_is_retained: bool,
     projected_unreported_content_bytes: u64,
     max_output_tokens: u64,
@@ -186,6 +192,7 @@ pub(crate) fn reported_usage_requires_compaction(
             .saturating_add(usage.cache_creation_input_tokens().unwrap_or(0))
             .saturating_add(usage.cache_read_input_tokens().unwrap_or(0))
     };
+    let input_tokens = if input_is_retained { input_tokens } else { 0 };
     input_tokens
         .saturating_add(if output_is_retained {
             usage.output_tokens().unwrap_or(0)
@@ -494,7 +501,7 @@ mod tests {
             .with_output_tokens(Some(5));
 
         assert!(reported_usage_requires_compaction(
-            usage, true, true, 0, 16, 100
+            usage, true, true, true, 0, 16, 100
         ));
     }
 
@@ -506,10 +513,10 @@ mod tests {
             .with_cache_read_input_tokens(Some(20));
 
         assert!(!reported_usage_requires_compaction(
-            usage, true, true, 0, 15, 100
+            usage, true, true, true, 0, 15, 100
         ));
         assert!(reported_usage_requires_compaction(
-            usage, false, true, 0, 16, 100
+            usage, false, true, true, 0, 16, 100
         ));
     }
 
@@ -518,7 +525,7 @@ mod tests {
         let usage = ProviderReportedTokenUsage::unreported().with_output_tokens(Some(100));
 
         assert!(!reported_usage_requires_compaction(
-            usage, true, true, 0, 100, 100
+            usage, true, true, true, 0, 100, 100
         ));
     }
 
@@ -529,10 +536,31 @@ mod tests {
             .with_output_tokens(Some(10));
 
         assert!(!reported_usage_requires_compaction(
-            usage, true, false, 0, 11, 100
+            usage, true, true, false, 0, 11, 100
         ));
         assert!(reported_usage_requires_compaction(
-            usage, true, true, 0, 11, 100
+            usage, true, true, true, 0, 11, 100
+        ));
+    }
+
+    #[test]
+    fn post_compaction_baseline_excludes_the_summarized_away_source() {
+        // A dedicated compaction reports the pre-compaction source text it
+        // summarized as input and the retained summary as output. That source is
+        // exactly the material the summary removed from model visibility, so
+        // only the summary and the retained content bound the next call.
+        let compaction_usage = ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(90))
+            .with_output_tokens(Some(5));
+
+        assert!(!reported_usage_requires_compaction(
+            compaction_usage,
+            true,
+            false,
+            true,
+            4,
+            10,
+            100
         ));
     }
 
@@ -543,10 +571,10 @@ mod tests {
             .with_output_tokens(Some(5));
 
         assert!(!reported_usage_requires_compaction(
-            usage, true, true, 0, 10, 100
+            usage, true, true, true, 0, 10, 100
         ));
         assert!(reported_usage_requires_compaction(
-            usage, true, true, 26, 10, 100
+            usage, true, true, true, 26, 10, 100
         ));
     }
 
