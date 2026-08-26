@@ -25,6 +25,7 @@ use crate::{BlobStorageClass, BlobStorageConfiguration};
 
 // numeric-bound: guard - prevents a wedged S3 namespace-prepare or multipart-lifecycle probe from blocking daemon startup forever
 const S3_STARTUP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+// numeric-bound: guard - prevents unbounded concurrent blob reads from exhausting process memory and store handles
 pub(crate) const MAX_CONCURRENT_BLOB_READS: usize = 16;
 
 /// Configured stores, semantic write routes, and private upload staging.
