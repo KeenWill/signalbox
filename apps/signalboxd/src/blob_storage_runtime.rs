@@ -1,18 +1,19 @@
 //! Startup composition for the durable blob-store registry.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     fmt, io,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
-use signalbox_blob_store::{BlobStore, BlobStoreName};
+use signalbox_blob_store::{BlobStore, BlobStoreError, BlobStoreName};
 use signalbox_blob_store_filesystem::{
     FilesystemBlobStaging, FilesystemBlobStore, FilesystemBlobStoreConstructionError,
     FilesystemNamespaceIdentity, NamespaceBindingState, OpenedFilesystemBlobRoot,
 };
+use signalbox_blob_store_s3::{S3BlobStore, S3BlobStoreConstructionError, S3NamespaceBindingState};
 use signalbox_persistence::blob::{
     BlobCatalogRepository, BlobCatalogRepositoryError, BlobStoreBindingRecord,
 };
@@ -20,6 +21,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{BlobStorageClass, BlobStorageConfiguration};
+
+// numeric-bound: guard - prevents a wedged S3 namespace-prepare or multipart-lifecycle probe from blocking daemon startup forever
+const S3_STARTUP_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Configured stores, semantic write routes, and private upload staging.
 pub struct BlobStoreRegistry {
@@ -74,29 +78,45 @@ impl BlobStoreRegistry {
             return Err(BlobStoreRegistryError::ConfigurationRequired);
         };
         validate_recorded_bindings(configuration, &recorded)?;
-        if configuration
-            .stores()
-            .any(|(_, store)| store.s3().is_some())
-        {
-            return Err(BlobStoreRegistryError::UnsupportedStoreKind);
-        }
+        validate_s3_locators(configuration)?;
 
         let staging_root = open_blob_root(
             configuration.staging_directory().to_path_buf(),
             require_local_backing,
         )?;
         let mut opened_stores = Vec::new();
+        let mut s3_stores = Vec::new();
+        let mut bindings_to_register = BTreeSet::new();
         for (name, configured) in configuration.stores() {
-            let root = configured
-                .filesystem_root()
-                .ok_or(BlobStoreRegistryError::UnsupportedStoreKind)?;
-            let state = if recorded.iter().any(|binding| binding.store() == name) {
-                NamespaceBindingState::Recorded
+            let recorded_binding = recorded.iter().any(|binding| binding.store() == name);
+            let routed = is_routed(configuration, name);
+            if let Some(root) = configured.filesystem_root() {
+                let state = if recorded_binding {
+                    NamespaceBindingState::Recorded
+                } else {
+                    NamespaceBindingState::New
+                };
+                let opened = open_blob_root(root.to_path_buf(), require_local_backing)?;
+                opened_stores.push((name.clone(), configured.namespace_id(), state, opened));
             } else {
-                NamespaceBindingState::New
-            };
-            let opened = open_blob_root(root.to_path_buf(), require_local_backing)?;
-            opened_stores.push((name.clone(), configured.namespace_id(), state, opened));
+                let (endpoint, region, bucket, credentials_file) = configured
+                    .s3()
+                    .ok_or(BlobStoreRegistryError::InvalidStoreConfiguration)?;
+                let store = S3BlobStore::try_new_bound(
+                    endpoint.clone(),
+                    region,
+                    bucket,
+                    credentials_file.to_path_buf(),
+                    format!("{}\n", configured.namespace_id()),
+                )?;
+                s3_stores.push((
+                    name.clone(),
+                    configured.namespace_id(),
+                    recorded_binding,
+                    routed,
+                    store,
+                ));
+            }
         }
         let staging_identity = OpenedNamespace::from(staging_root.identity());
         let identities = opened_stores
@@ -109,11 +129,37 @@ impl BlobStoreRegistry {
         let mut namespace_ids = BTreeMap::new();
         for (name, namespace_id, state, opened) in opened_stores {
             let (store, _) = FilesystemBlobStore::from_opened_bound(opened, namespace_id, state)?;
+            bindings_to_register.insert(name.clone());
+            namespace_ids.insert(name.clone(), namespace_id);
+            stores.insert(name, Arc::new(store));
+        }
+
+        let s3_deadline = tokio::time::Instant::now() + S3_STARTUP_DEADLINE;
+        for (name, namespace_id, recorded_binding, routed, store) in s3_stores {
+            if routed {
+                let state = if recorded_binding {
+                    S3NamespaceBindingState::Recorded
+                } else {
+                    S3NamespaceBindingState::New
+                };
+                tokio::time::timeout_at(s3_deadline, Box::pin(store.prepare_namespace(state)))
+                    .await
+                    .map_err(|_| BlobStoreRegistryError::S3StartupDeadline)??;
+                tokio::time::timeout_at(s3_deadline, Box::pin(store.verify_multipart_lifecycle()))
+                    .await
+                    .map_err(|_| BlobStoreRegistryError::S3StartupDeadline)??;
+            }
+            if routed || recorded_binding {
+                bindings_to_register.insert(name.clone());
+            }
             namespace_ids.insert(name.clone(), namespace_id);
             stores.insert(name, Arc::new(store));
         }
 
         for (name, configured) in configuration.stores() {
+            if !bindings_to_register.contains(name) {
+                continue;
+            }
             repository
                 .register_store_binding(BlobStoreBindingRecord::new(
                     name.clone(),
@@ -201,6 +247,30 @@ fn open_blob_root(
     OpenedFilesystemBlobRoot::open(root)
 }
 
+/// Reports whether any semantic write route currently selects this store.
+///
+/// The parsed route map is the authority, so a store named only by a storage
+/// class added later still authenticates its namespace and proves its
+/// lifecycle at startup.
+fn is_routed(configuration: &BlobStorageConfiguration, name: &BlobStoreName) -> bool {
+    configuration.routed_stores().any(|routed| routed == name)
+}
+
+fn validate_s3_locators(
+    configuration: &BlobStorageConfiguration,
+) -> Result<(), BlobStoreRegistryError> {
+    let mut locators = BTreeSet::new();
+    for (_, store) in configuration.stores() {
+        let Some((endpoint, _, bucket, _)) = store.s3() else {
+            continue;
+        };
+        if !locators.insert((endpoint.as_str(), bucket)) {
+            return Err(BlobStoreRegistryError::PhysicalNamespaceAlias);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 struct OpenedNamespace {
     canonical_path: PathBuf,
@@ -278,8 +348,8 @@ pub enum BlobStoreRegistryError {
     RecordedStoreMissing,
     /// A recorded store name is paired with another namespace UUID.
     RecordedNamespaceMismatch,
-    /// This child does not yet compose the declared adapter kind.
-    UnsupportedStoreKind,
+    /// A parsed store entry could not be narrowed to one supported kind.
+    InvalidStoreConfiguration,
     /// Two configured names resolve to one physical filesystem namespace.
     PhysicalNamespaceAlias,
     /// One filesystem store root contains another.
@@ -290,6 +360,12 @@ pub enum BlobStoreRegistryError {
     Catalog(BlobCatalogRepositoryError),
     /// A filesystem namespace could not be authenticated or prepared.
     Filesystem(FilesystemBlobStoreConstructionError),
+    /// An S3 adapter could not be constructed without backend access.
+    S3Construction(S3BlobStoreConstructionError),
+    /// Routed S3 namespace or lifecycle authentication failed.
+    S3(Box<BlobStoreError>),
+    /// The aggregate routed-S3 startup deadline expired.
+    S3StartupDeadline,
 }
 
 impl fmt::Display for BlobStoreRegistryError {
@@ -302,14 +378,17 @@ impl fmt::Display for BlobStoreRegistryError {
             Self::RecordedNamespaceMismatch => {
                 "blob storage configuration disagrees with a recorded namespace"
             }
-            Self::UnsupportedStoreKind => {
-                "blob storage configuration names an adapter not composed by this child"
+            Self::InvalidStoreConfiguration => {
+                "blob storage configuration has no supported adapter kind"
             }
             Self::PhysicalNamespaceAlias => "blob store names resolve to one physical namespace",
             Self::NestedStoreRoots => "blob filesystem store roots overlap",
             Self::StagingStoreOverlap => "blob staging and store roots overlap",
             Self::Catalog(_) => "blob catalog startup reconciliation failed",
             Self::Filesystem(_) => "blob filesystem startup reconciliation failed",
+            Self::S3Construction(_) => "blob S3 adapter construction failed",
+            Self::S3(_) => "blob S3 startup reconciliation failed",
+            Self::S3StartupDeadline => "blob S3 startup reconciliation exceeded its deadline",
         })
     }
 }
@@ -319,13 +398,16 @@ impl Error for BlobStoreRegistryError {
         match self {
             Self::Catalog(source) => Some(source),
             Self::Filesystem(source) => Some(source),
+            Self::S3Construction(source) => Some(source),
+            Self::S3(source) => Some(source.as_ref()),
             Self::ConfigurationRequired
             | Self::RecordedStoreMissing
             | Self::RecordedNamespaceMismatch
-            | Self::UnsupportedStoreKind
+            | Self::InvalidStoreConfiguration
             | Self::PhysicalNamespaceAlias
             | Self::NestedStoreRoots
-            | Self::StagingStoreOverlap => None,
+            | Self::StagingStoreOverlap
+            | Self::S3StartupDeadline => None,
         }
     }
 }
@@ -342,11 +424,23 @@ impl From<FilesystemBlobStoreConstructionError> for BlobStoreRegistryError {
     }
 }
 
+impl From<S3BlobStoreConstructionError> for BlobStoreRegistryError {
+    fn from(source: S3BlobStoreConstructionError) -> Self {
+        Self::S3Construction(source)
+    }
+}
+
+impl From<BlobStoreError> for BlobStoreRegistryError {
+    fn from(source: BlobStoreError) -> Self {
+        Self::S3(Box::new(source))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BlobStoreRegistryError, OpenedNamespace, paths_overlap, validate_physical_namespaces,
-        validate_recorded_bindings,
+        validate_recorded_bindings, validate_s3_locators,
     };
     use crate::BlobStorageConfiguration;
     use signalbox_blob_store::BlobStoreName;
@@ -372,8 +466,42 @@ imported_source = "primary"
 generated_artifact = "primary"
 "#;
 
+    const ALIASED_S3_CONFIGURATION: &str = r#"
+[blob_storage]
+version = 1
+staging_directory = "/staging"
+max_blob_bytes = 2
+[[blob_storage.stores]]
+name = "primary"
+namespace_id = "5a100001-0000-4000-8000-000000000001"
+kind = "s3"
+endpoint = "https://objects.example.test"
+region = "fixture-region"
+bucket = "fixture-bucket"
+credentials_file = "/run/credentials/s3-primary"
+[[blob_storage.stores]]
+name = "secondary"
+namespace_id = "5a100001-0000-4000-8000-000000000002"
+kind = "s3"
+endpoint = "https://objects.example.test:443/"
+region = "another-region"
+bucket = "fixture-bucket"
+credentials_file = "/run/credentials/s3-secondary"
+[blob_storage.routes]
+user_attachment = "primary"
+tool_artifact = "primary"
+imported_source = "primary"
+generated_artifact = "primary"
+"#;
+
     fn configuration() -> Result<BlobStorageConfiguration, Box<dyn Error>> {
         let document = DocumentMut::from_str(CONFIGURATION)?;
+        BlobStorageConfiguration::parse(document.get("blob_storage"), 1)?
+            .ok_or_else(|| io::Error::other("the fixture enables blob storage").into())
+    }
+
+    fn aliased_s3_configuration() -> Result<BlobStorageConfiguration, Box<dyn Error>> {
+        let document = DocumentMut::from_str(ALIASED_S3_CONFIGURATION)?;
         BlobStorageConfiguration::parse(document.get("blob_storage"), 1)?
             .ok_or_else(|| io::Error::other("the fixture enables blob storage").into())
     }
@@ -404,6 +532,17 @@ generated_artifact = "primary"
             device_inode: (device, inode),
             physical_path: physical_path.into(),
         }
+    }
+
+    #[test]
+    fn canonical_s3_locator_rejects_default_port_aliases() -> Result<(), Box<dyn Error>> {
+        let configuration = aliased_s3_configuration()?;
+
+        assert!(matches!(
+            validate_s3_locators(&configuration),
+            Err(BlobStoreRegistryError::PhysicalNamespaceAlias)
+        ));
+        Ok(())
     }
 
     #[test]

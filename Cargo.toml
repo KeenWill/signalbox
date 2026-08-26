@@ -8,6 +8,7 @@ members = [
     "crates/approval-judge-eval",
     "crates/blob-store",
     "crates/blob-store-filesystem",
+    "crates/blob-store-s3",
     "crates/egress-transport",
     "crates/conversation-import-claude-code",
     "crates/conversation-import-codex",

@@ -113,7 +113,9 @@ pub(crate) async fn read_blob_chunk(
             Err(error) => match error.kind() {
                 BlobStoreFailureKind::NotFound => saw_missing = true,
                 BlobStoreFailureKind::VerificationFailed => saw_corrupt = true,
-                BlobStoreFailureKind::Unavailable => saw_unavailable = true,
+                BlobStoreFailureKind::PublicationAmbiguous | BlobStoreFailureKind::Unavailable => {
+                    saw_unavailable = true;
+                }
             },
         }
     }
@@ -172,7 +174,9 @@ pub(crate) async fn open_recorded_blob_verified(
             Err(error) => match error.kind() {
                 BlobStoreFailureKind::NotFound => saw_missing = true,
                 BlobStoreFailureKind::VerificationFailed => saw_corrupt = true,
-                BlobStoreFailureKind::Unavailable => saw_unavailable = true,
+                BlobStoreFailureKind::PublicationAmbiguous | BlobStoreFailureKind::Unavailable => {
+                    saw_unavailable = true;
+                }
             },
         }
     }

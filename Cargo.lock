@@ -2246,6 +2246,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "instant-xml"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a2cad967c3b727c000ebfdcd14974539e8c6f59e1d044c8034179df2c6fe250"
+dependencies = [
+ "instant-xml-macros",
+ "thiserror",
+ "xmlparser",
+]
+
+[[package]]
+name = "instant-xml-macros"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac3c2e6cbd6e0579ee53a8290fc0015a438cfff0139c8359d5891cae130815d7"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
 name = "inventory"
 version = "0.3.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3642,6 +3665,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-s3"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2412ec048709e6a8ee4ee1505313bce003f6b8b27fc41a97e30615223c7ed592"
+dependencies = [
+ "hmac",
+ "instant-xml",
+ "jiff",
+ "percent-encoding",
+ "sha2 0.11.0",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "rusty_mp3"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4058,6 +4096,31 @@ dependencies = [
  "tempfile",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "signalbox-blob-store-s3"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "http-body",
+ "instant-xml",
+ "jiff",
+ "reqwest",
+ "rustix 1.1.4",
+ "rustls",
+ "rusty-s3",
+ "serde",
+ "sha2 0.11.0",
+ "signalbox-blob-store",
+ "signalbox-domain",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "url",
+ "zeroize",
 ]
 
 [[package]]
@@ -4713,6 +4776,7 @@ dependencies = [
  "signalbox-application",
  "signalbox-blob-store",
  "signalbox-blob-store-filesystem",
+ "signalbox-blob-store-s3",
  "signalbox-conversation-import-claude-code",
  "signalbox-conversation-import-codex",
  "signalbox-domain",
@@ -6423,6 +6487,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "xmlparser"
+version = "0.13.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66fee0b777b0f5ac1c69bb06d361268faafa61cd4682ae064a171c16c433e9e4"
+
+[[package]]
 name = "yoke"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6491,6 +6561,20 @@ name = "zeroize"
 version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e13c156562582aa81c60cb29407084cdb54c4164760106ab78e6c5b0858cf64e"
+dependencies = [
+ "zeroize_derive",
+]
+
+[[package]]
+name = "zeroize_derive"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c50655cbb0fe3fc43170059e702f1ce5e19b84cec58dc87b037a09935c2f328"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
 
 [[package]]
 name = "zerotrie"
