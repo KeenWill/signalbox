@@ -11,13 +11,14 @@ use signalbox_file_media_runtime::{
     DeclaredMediaType, FileDigest, FileInspection, FileMediaCeilings, FileMediaFailure,
     FileMediaProcessor, FileMediaProcessorFuture, FileMediaProviderDeclaration,
     FileMediaProviderReadRequest, FileMediaProviderValidationRequest, FileMediaRegistry,
-    FileReadInput, FileReadRequest, FileReaderName, FileReaderProviderName, FileReaderRevision,
-    FileUse, InspectionRequest, MAX_VALIDATION_RANGES, MAX_VALIDATION_SOURCE_BYTES, NeverCancelled,
-    ProbeDeclaration, ProbeDeclarationInput, ProbeStrength, ProcessorFailure, ProcessorIsolation,
-    ProcessorProbeOutput, ProcessorReadOutput, ProcessorValidationOutput, ReadAccessPattern,
-    ReadViewBounds, ReadViewDeclaration, ReadViewName, ReaderDeclaration, ReaderDeclarationInput,
-    ReaderIdentity, ReasonCode, SourceReadError, SourceReadFuture, StreamingTextFallback,
-    ValidationDeclaration, ValidationEvidence, VerifiedBlobSource,
+    FileReadInput, FileReadRequest, FileReadResult, FileReaderName, FileReaderProviderName,
+    FileReaderRevision, FileUse, InspectionRequest, MAX_VALIDATION_RANGES,
+    MAX_VALIDATION_SOURCE_BYTES, NeverCancelled, ProbeDeclaration, ProbeDeclarationInput,
+    ProbeStrength, ProcessorFailure, ProcessorIsolation, ProcessorProbeOutput, ProcessorReadOutput,
+    ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
+    ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
+    SourceReadError, SourceReadFuture, StreamingTextFallback, ValidationDeclaration,
+    ValidationEvidence, VerifiedBlobSource,
 };
 
 const SYNTHETIC_MEDIA_TYPE: &str = "application/x-signalbox-synthetic";
@@ -79,6 +80,7 @@ enum ValidationBehavior {
 #[derive(Clone, Copy)]
 enum ReadBehavior {
     Text,
+    TextRequiringSourceBytes(u64),
     InvalidViewArguments,
     SourceTooLarge,
     OversizedText,
@@ -173,7 +175,7 @@ impl FileMediaProcessor for SyntheticProcessor {
     fn read<'a>(
         &'a self,
         _reader: &'a ReaderIdentity,
-        _request: FileMediaProviderReadRequest,
+        request: FileMediaProviderReadRequest,
         _source: &'a dyn VerifiedBlobSource,
         _cancellation: &'a dyn CancellationSignal,
     ) -> FileMediaProcessorFuture<'a, ProcessorReadOutput> {
@@ -184,6 +186,16 @@ impl FileMediaProcessor for SyntheticProcessor {
                     truncated: false,
                     cursor: None,
                 },
+                ReadBehavior::TextRequiringSourceBytes(source_bytes) => {
+                    if request.maximum_source_bytes != source_bytes {
+                        return Err(ProcessorFailure::Failed.into());
+                    }
+                    ProcessorReadOutput::Text {
+                        body: String::from("synthetic admitted text"),
+                        truncated: false,
+                        cursor: None,
+                    }
+                }
                 ReadBehavior::InvalidViewArguments => ProcessorReadOutput::InvalidViewArguments,
                 ReadBehavior::SourceTooLarge => ProcessorReadOutput::SourceTooLarge {
                     maximum_bytes: 1_024,
@@ -1603,6 +1615,39 @@ fn lowered_global_validation_envelope_clamps_reader_request() {
     let outcome = inspect(&registry, &processor, &source, SYNTHETIC_MEDIA_TYPE);
 
     assert!(matches!(outcome, Ok(FileInspection::Validated { .. })));
+}
+
+/// The read request names the prefix validation covered, so a reader whose declared
+/// validation envelope is below the deployment ceiling is told the smaller number.
+#[test]
+fn reader_validation_envelope_clamps_registry_read_request() {
+    let source = MemorySource::synthetic();
+    let ceilings = FileMediaCeilings::version_one();
+    let registry = registry_with_view_validation_and_ceilings(
+        text_view(),
+        ValidationDeclaration::new(32, 2),
+        ceilings,
+    )
+    .expect("reader validation envelope is within compiled ceilings");
+    assert!(ceilings.validation_source_bytes > 32);
+    let processor = SyntheticProcessor {
+        validation: ValidationBehavior::ValidWithEnvelope {
+            source_bytes: 32,
+            ranges: 2,
+        },
+        read: ReadBehavior::TextRequiringSourceBytes(32),
+    };
+    let request = FileReadRequest {
+        inspection: inspection_request(&source, SYNTHETIC_MEDIA_TYPE),
+        view: ReadViewName::try_new(TEXT_VIEW_NAME).expect("fixture view name is valid"),
+        input: FileReadInput::Initial {
+            options: serde_json::json!({}),
+        },
+    };
+
+    let outcome = block_on_ready(registry.read(&processor, request, &source, &NeverCancelled));
+
+    assert!(matches!(outcome, Ok(FileReadResult::Text { .. })));
 }
 
 fn bounded_text_view(access: ReadAccessPattern, source_bytes: u64) -> ReadViewDeclaration {

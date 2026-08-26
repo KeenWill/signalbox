@@ -620,7 +620,15 @@ impl FileMediaRegistry {
                     detected_media_type: validated.detected_media_type().clone(),
                     validation: validated.validation(),
                     metadata: validated.metadata().clone(),
-                    maximum_source_bytes: self.ceilings.validation_source_bytes,
+                    // The field names the prefix validation actually covered, so it
+                    // carries the same clamp `validate_candidate` applied. The
+                    // deployment ceiling alone would overstate that prefix for a
+                    // reader whose declared validation envelope is smaller, and an
+                    // adapter honoring it could interpret bytes validation never saw.
+                    maximum_source_bytes: self
+                        .ceilings
+                        .validation_source_bytes
+                        .min(reader.validation().source_bytes()),
                     view: request.view,
                     input: request.input,
                     maximum_image_axis: self.ceilings.image_axis,
