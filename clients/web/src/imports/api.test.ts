@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { webContractBootstrapFixture as admittedBootstrap } from '../product.fixture'
 import {
   HttpImportApi,
   ImportDescriptorCorrelationError,
@@ -96,6 +97,64 @@ describe('HttpImportApi correlation', () => {
     await api.list({ limit: 1 })
 
     expect(bootstrapValidation).toHaveBeenCalledTimes(2)
+  })
+
+  it('reuses the product admission of an already validated bootstrap', async () => {
+    let now = 1_000
+    const bootstrapValidation = vi.fn<() => Promise<void>>().mockResolvedValue(undefined)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              items: [],
+              next_cursor: null,
+              search_correlation: null,
+              exact_source_session_id_sha256: null,
+            }),
+          ),
+      ),
+    )
+    const api = HttpImportApi.withAdmittedBootstrap(
+      admittedBootstrap,
+      bootstrapValidation,
+      () => now,
+    )
+
+    await api.list({ limit: 1 })
+    expect(bootstrapValidation).not.toHaveBeenCalled()
+    now += 30_000
+    await api.list({ limit: 1 })
+
+    expect(bootstrapValidation).toHaveBeenCalledTimes(1)
+  })
+
+  it('reapplies full bootstrap admission when an admitted bootstrap expires', async () => {
+    let now = 1_000
+    const catalogResponse = () =>
+      new Response(
+        JSON.stringify({
+          items: [],
+          next_cursor: null,
+          search_correlation: null,
+          exact_source_session_id_sha256: null,
+        }),
+      )
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(catalogResponse())
+      .mockResolvedValueOnce(new Response(JSON.stringify(admittedBootstrap)))
+      .mockResolvedValueOnce(catalogResponse())
+    vi.stubGlobal('fetch', fetch)
+    const api = HttpImportApi.withAdmittedBootstrap(admittedBootstrap, undefined, () => now)
+
+    await api.list({ limit: 1 })
+    now += 30_000
+    await api.list({ limit: 1 })
+
+    expect(fetch).toHaveBeenCalledTimes(3)
+    expect(fetch.mock.calls[1]?.[0]).toBe('/api/bootstrap')
   })
 
   it('rejects a declared oversized catalog response before parsing it', async () => {
