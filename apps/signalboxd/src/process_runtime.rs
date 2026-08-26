@@ -240,7 +240,9 @@ use crate::telemetry::{ModelMetricDisposition, TelemetryMetrics, TurnMetricOutco
 use crate::{
     BlobStoreRegistry, FatalRecoveryReporter, HubModelConfiguration, LocalProcessListener,
     LocalSocketError, SessionTemplateConfiguration,
-    blob_read_runtime::{BlobReadError, read_blob_chunk, read_blob_entry, read_blob_metadata},
+    blob_read_runtime::{
+        BLOB_READ_TIMEOUT, BlobReadError, read_blob_chunk, read_blob_entry, read_blob_metadata,
+    },
     blob_upload_runtime::{
         BeginBlobUploadOutcome, BlobUploadError, PendingBlobUpload, begin_blob_upload,
     },
@@ -265,11 +267,9 @@ const GENERAL_BUFFERED_INBOUND_FRAMES: usize =
 const MAX_IMPORT_ADMISSION_WAITERS: usize = GENERAL_BUFFERED_INBOUND_FRAMES;
 const MAX_CONCURRENT_REVIEW_COMMANDS: usize = 1;
 /// Hard safety ceiling limiting aggregate range-buffer and spool memory.
-const MAX_CONCURRENT_BLOB_READS: usize = 16;
+const MAX_CONCURRENT_BLOB_READS: usize = crate::blob_storage_runtime::MAX_CONCURRENT_BLOB_READS;
 const BULK_INGEST_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const BULK_INGEST_SESSION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
-/// Hard safety ceiling bounding store latency and retained read capacity.
-const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 
@@ -660,6 +660,10 @@ async fn serve_connections(
     let snapshot_reader_budget = dependencies
         .snapshot_reader_budget
         .ok_or(ProcessRuntimeError::InsufficientPoolCapacity)?;
+    let blob_read_budget = dependencies.blob_store_registry.as_ref().map_or_else(
+        || Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS)),
+        |registry| registry.read_budget(),
+    );
     let services = ConnectionServices {
         recovery_reporter: dependencies.recovery_reporter,
         pool: dependencies.pool,
@@ -672,7 +676,7 @@ async fn serve_connections(
         inbound_frame_budgets: InboundFrameBudgets::new(),
         import_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_IMPORTS)),
         import_waiter_budget: Arc::new(Semaphore::new(MAX_IMPORT_ADMISSION_WAITERS)),
-        blob_read_budget: blob_read_budget(),
+        blob_read_budget,
         review_command_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_REVIEW_COMMANDS)),
         snapshot_reader_budget,
         blob_store_registry: dependencies.blob_store_registry,
@@ -1199,10 +1203,6 @@ async fn acquire_import_waiter_permit(
 
 fn try_acquire_blob_read_permit(budget: Arc<Semaphore>) -> Option<OwnedSemaphorePermit> {
     budget.try_acquire_owned().ok()
-}
-
-fn blob_read_budget() -> Arc<Semaphore> {
-    Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS))
 }
 
 async fn acquire_review_command_permit(
@@ -6192,6 +6192,9 @@ where
             })
         }
         BlobUploadError::Unavailable => ProtocolError::without_detail(ErrorCode::Unavailable),
+        BlobUploadError::PublicationAmbiguous => {
+            ProtocolError::without_detail(ErrorCode::PublicationAmbiguous)
+        }
         BlobUploadError::CommitAmbiguous => {
             ProtocolError::without_detail(ErrorCode::CommitAmbiguous)
         }
@@ -16314,7 +16317,7 @@ mod tests {
         acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
         acquire_review_command_permit, acquire_review_command_permit_while_buffered,
         acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
-        blob_read_budget, blob_upload_begin_preflight, bounded_rendered_compaction_boundary,
+        blob_upload_begin_preflight, bounded_rendered_compaction_boundary,
         canonical_review_request_digest, claude_conversion_failure_disposition,
         codex_conversion_failure_disposition, consume_snapshot_queued_update,
         context_compaction_failure_disposition, execute_import, foreground_peer_activity,
@@ -17141,7 +17144,7 @@ mod tests {
     /// process-wide capacity.
     #[test]
     fn inv060_blob_read_admission_has_fixed_nonwaiting_capacity() -> Result<(), Box<dyn Error>> {
-        let budget = blob_read_budget();
+        let budget = Arc::new(Semaphore::new(MAX_CONCURRENT_BLOB_READS));
         let held = Arc::clone(&budget)
             .try_acquire_many_owned(u32::try_from(MAX_CONCURRENT_BLOB_READS)?)
             .map_err(io::Error::other)?;

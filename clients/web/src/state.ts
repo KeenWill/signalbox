@@ -96,6 +96,9 @@ const appSlice = createSlice({
       state.paneSizes = action.payload
       state.activitySequence += 1
     },
+    paneSizesPreviewed(state, action: { payload: BrowserPreferences['paneSizes'] }) {
+      state.paneSizes = action.payload
+    },
     preferencesReset(state) {
       Object.assign(state, createDefaultBrowserPreferences())
       state.activitySequence += 1

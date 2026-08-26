@@ -11,11 +11,18 @@ export const webContractBootstrapFixture = {
     import_discovery: true,
     imported_continuations: true,
     bounded_session_timeline: true,
+    bounded_lexical_search: true,
+    bounded_usage_cost: true,
   },
   limits: {
     max_json_body_bytes: 65_536,
     max_ndjson_item_bytes: 65_536,
     max_timeline_window_items: 256,
     max_timeline_window_bytes: 65_536,
+    max_search_query_bytes: 512,
+    max_search_page_items: 100,
+    max_search_snippet_bytes: 512,
+    max_usage_aggregate_groups: 256,
+    max_usage_call_page_items: 100,
   },
 } as const

@@ -4,14 +4,14 @@
 //! catalog policy, mints every durable identity candidate, keeps executor work
 //! outside transactions, and submits only correlated evidence to persistence.
 
-use std::{collections::BTreeMap, error::Error, fmt, future::Future, sync::Arc};
+use std::{collections::BTreeMap, error::Error, fmt, future::Future, num::NonZeroU64, sync::Arc};
 
 use crate::{
     ClassifyOperatorFailure, DecideToolRequestTransaction, InProcessToolDispatchGate,
     InProcessToolDispatchPermit, OperatorFailureClass, OverrideDeniedToolRequestTransaction,
     PrepareToolContinuationOutcome, RetainedToolAttemptObservationStatus,
-    ToolAttemptAuthorizationStatus, ToolContinuationIdentities, ToolCrashClosureIdentities,
-    ToolExecutionTransaction,
+    ToolAttemptAuthorizationOutcome, ToolAttemptAuthorizationStatus, ToolContinuationIdentities,
+    ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 #[cfg(test)]
 use signalbox_domain::AcceptedInputId;
@@ -170,6 +170,14 @@ pub trait ToolArgumentValidator: Send + Sync {
     /// Checks exact normalized JSON against the declaration's argument type.
     fn validate(&self, arguments: &NormalizedToolArguments)
     -> Result<(), ToolExecutionErrorDetail>;
+
+    /// Derives any durable resource charge required before dispatch authority.
+    fn preauthorization(
+        &self,
+        _arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolExecutionErrorDetail> {
+        Ok(ToolPreauthorization::Unmetered)
+    }
 }
 
 impl<Validate> ToolArgumentValidator for Validate
@@ -182,6 +190,25 @@ where
     ) -> Result<(), ToolExecutionErrorDetail> {
         self(arguments)
     }
+}
+
+/// Pure catalog-derived resource admission supplied to durable authorization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolPreauthorization {
+    /// No additional durable resource charge applies.
+    Unmetered,
+    /// One metadata request must prove the digest was visible in the frontier.
+    BlobMetadata {
+        /// Exact digest requested by the logical tool request.
+        digest: signalbox_domain::BlobDigest,
+    },
+    /// One generic blob read charges its decoded byte length once by request.
+    BlobRead {
+        /// Exact digest requested by the logical tool request.
+        digest: signalbox_domain::BlobDigest,
+        /// Positive decoded bytes requested by the exact logical tool request.
+        decoded_bytes: NonZeroU64,
+    },
 }
 
 /// One compiled declaration plus its non-effecting argument validator.
@@ -271,6 +298,15 @@ pub trait ToolCatalog: Send + Sync {
         name: &ToolName,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolCatalogValidationFailure>;
+
+    /// Derives a typed durable admission charge after argument validation.
+    fn preauthorization(
+        &self,
+        _name: &ToolName,
+        _arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolCatalogValidationFailure> {
+        Ok(ToolPreauthorization::Unmetered)
+    }
 }
 
 impl ToolCatalog for CompiledToolCatalog {
@@ -302,6 +338,22 @@ impl ToolCatalog for CompiledToolCatalog {
                 detail: Some(detail),
             }
         })
+    }
+
+    fn preauthorization(
+        &self,
+        name: &ToolName,
+        arguments: &NormalizedToolArguments,
+    ) -> Result<ToolPreauthorization, ToolCatalogValidationFailure> {
+        let tool = self
+            .tools
+            .get(name)
+            .ok_or(ToolCatalogValidationFailure::UnknownTool)?;
+        tool.validator
+            .preauthorization(arguments)
+            .map_err(|detail| ToolCatalogValidationFailure::InvalidArguments {
+                detail: Some(detail),
+            })
     }
 }
 
@@ -1499,13 +1551,60 @@ where
                 ended,
             )));
         }
+        let preauthorization = match self
+            .catalog
+            .preauthorization(request.name(), request.arguments())
+        {
+            Ok(preauthorization) => preauthorization,
+            Err(ToolCatalogValidationFailure::UnknownTool) => {
+                return Err(ToolExecutionServiceError::CatalogDrift);
+            }
+            Err(ToolCatalogValidationFailure::InvalidArguments { detail }) => {
+                let ended = self
+                    .transaction
+                    .commit_preflight_error(
+                        prepared.session(),
+                        prepared.turn(),
+                        prepared.attempt(),
+                        ToolExecutionError::new(ToolExecutionErrorKind::InvalidArguments, detail),
+                    )
+                    .await
+                    .map_err(ToolExecutionServiceError::PreflightCommit)?;
+                return Ok(ToolExecutionServiceOutcome::PreflightFailed(Box::new(
+                    ended,
+                )));
+            }
+        };
         let definition = definition.ok_or(ToolExecutionServiceError::CatalogDrift)?;
         let authorized = match self
             .transaction
-            .authorize_attempt(prepared.session(), prepared.turn(), prepared.attempt())
+            .authorize_attempt(
+                prepared.session(),
+                prepared.turn(),
+                prepared.attempt(),
+                preauthorization,
+            )
             .await
         {
-            Ok(authorized) => authorized,
+            Ok(ToolAttemptAuthorizationOutcome::Authorized(authorized)) => *authorized,
+            Ok(ToolAttemptAuthorizationOutcome::PreauthorizationRejected { detail }) => {
+                let ended = self
+                    .transaction
+                    .commit_preflight_error(
+                        prepared.session(),
+                        prepared.turn(),
+                        prepared.attempt(),
+                        ToolExecutionError::new(
+                            ToolExecutionErrorKind::PreauthorizationRejected,
+                            Some(detail),
+                        ),
+                    )
+                    .await
+                    .map_err(ToolExecutionServiceError::PreflightCommit)?;
+                return Ok(ToolExecutionServiceOutcome::PreflightFailed(Box::new(
+                    ended,
+                )));
+            }
             Err(error)
                 if matches!(
                     error.operator_failure_class(),
@@ -2455,7 +2554,8 @@ mod tests {
             _session: SessionId,
             _turn: TurnId,
             attempt: ToolAttemptId,
-        ) -> Result<ToolDispatchAuthority, Self::Error> {
+            _preauthorization: ToolPreauthorization,
+        ) -> Result<ToolAttemptAuthorizationOutcome, Self::Error> {
             self.events.lock().expect("event lock").push("authorize");
             if self.ambiguous_authorization {
                 self.authorization_committed = true;
@@ -2463,6 +2563,8 @@ mod tests {
             }
             self.batch
                 .authorize_dispatch(attempt)
+                .map(Box::new)
+                .map(ToolAttemptAuthorizationOutcome::Authorized)
                 .map_err(|_| FakeError::Ordinary)
         }
 

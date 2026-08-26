@@ -77,6 +77,14 @@ export const scenarios = [
     tableTotal: 120,
   },
   {
+    id: 'search-usage',
+    title: 'Search and usage',
+    description: 'Unloaded lexical hits and labeled model-call evidence at scale.',
+    connection: 'connected',
+    timelineTotal: 1_000_000,
+    tableTotal: 240,
+  },
+  {
     id: 'large-table',
     title: 'Million-row fleet',
     description: 'A virtualized operator table over a million logical rows.',
