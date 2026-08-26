@@ -33,7 +33,10 @@ const attentionFixture = {
       state: 'blocked',
     },
     {
-      action: 'restore_runner',
+      // Contract v2 carries no `restore_runner` action and requires a
+      // `runner_lost` summary to state a null action, so the fixture states
+      // the loss through `state` alone.
+      action: null,
       current_turn_id: null,
       goal_block: null,
       judge: { actionable: '0', completed: '12', escalated: '1', failed: '1' },
