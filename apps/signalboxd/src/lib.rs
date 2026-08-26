@@ -40,7 +40,6 @@ use signalbox_persistence::approval_judge::{
 use signalbox_persistence::model_execution::{
     ModelCallRepositoryError, PostgresModelCallRepository,
 };
-use signalbox_persistence::startup::PostgresStartupScanRepository;
 use signalbox_persistence::tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError};
 use signalbox_persistence::turn_liveness::{
     PostgresTurnLivenessRepository, TurnLivenessPersistenceBounds, TurnLivenessRepositoryError,
@@ -1866,42 +1865,51 @@ async fn recover_expired_scheduler_pass(
 /// durable work that window owns, and abandoning them leaves the session's
 /// compaction boundary busy: every queued turn is then closed before dispatch
 /// until a daemon restart runs the startup scan. This spends the same bounded
-/// attempts the turn handoff does on that scan's own per-session transaction,
+/// attempts the turn handoff does on the scan's own compaction classification,
 /// which reconstitutes the exact durable shape under the session scheduler lock
-/// and classifies a prepared call `known_failed` and an issued one `ambiguous`.
+/// and classifies a prepared call `known_failed` and an issued one `ambiguous`,
+/// carrying the same layered database budgets the turn handoff installs.
 ///
-/// The pass future is dropped the moment its bound expires, so nothing is still
-/// driving that compaction when this runs. Recovering the whole session rather
-/// than the compaction alone is deliberate: the transaction is the one startup
-/// already uses, and by this point the pass has held its slot past the
-/// occupancy ceiling with nothing else able to reach the session.
+/// The pass future is dropped the moment its bound expires, but that is not on
+/// its own authority to recover the session: the pass released its admission
+/// slot at expiry and this handoff waits between attempts, so a later
+/// eligibility sweep can have activated a healthy successor turn by the time a
+/// transaction opens. Recovery is therefore correlated with the evidence that
+/// justifies it — a compaction still holding the session's boundary — and a
+/// session holding none is left exactly as found, whatever else it is running.
 async fn recover_expired_pre_activation_compaction(
     recovery: SchedulerPassOccupancyRecovery,
     session: SessionId,
 ) {
     let policy = recovery.policy;
-    let repository = PostgresStartupScanRepository::new(recovery.pool.clone());
+    let repository =
+        PostgresTurnLivenessRepository::new(recovery.pool.clone(), recovery.persistence_bounds);
     let mut attempt = 1_u32;
     while policy.attempts.is_none_or(|limit| attempt <= limit) {
-        let mut ids = UuidV7StartupScanIdGenerator;
-        let identities = signalbox_domain::AcceptedInputTurnFailureIdentities::new(
-            SemanticTranscriptEntryId::from_uuid(uuid::Uuid::now_v7()),
-            ContextFrontierId::from_uuid(uuid::Uuid::now_v7()),
-        );
         match optional_timeout(
             policy.attempt_bound,
-            repository.recover(session, identities, &mut ids),
+            repository.recover_abandoned_compaction(session),
         )
         .await
         {
-            Ok(Ok(outcome)) => {
+            Ok(Ok(None)) => {
+                recovery.nudge(session);
+                tracing::warn!(
+                    cause_code = "scheduler_pass_compaction_already_settled",
+                    session_id = %session.as_uuid(),
+                    attempt,
+                    "scheduler pass expired around its pre-activation compaction, which left no unterminalized durable work; the session was not otherwise recovered"
+                );
+                return;
+            }
+            Ok(Ok(Some(outcome))) => {
                 recovery.nudge(session);
                 tracing::warn!(
                     cause_code = "scheduler_pass_compaction_recovered",
                     session_id = %session.as_uuid(),
                     attempt,
                     recovery_outcome = ?outcome,
-                    "scheduler pass expired inside its pre-activation compaction; its session was reconciled under the scheduler lock"
+                    "scheduler pass expired inside its pre-activation compaction; that compaction was terminalized under the scheduler lock"
                 );
                 return;
             }

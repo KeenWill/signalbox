@@ -311,6 +311,58 @@ impl PostgresTurnLivenessRepository {
         }
     }
 
+    /// Recovers the compaction an expired pre-activation pass left behind.
+    ///
+    /// The budgets are the pair the slot-held sibling installs, in the same
+    /// order and for the same reason: a caller's wall-clock deadline cannot
+    /// cancel a statement already waiting in the backend, so abandoning the
+    /// future would leave that wait running on a checked-out pooled connection.
+    /// Bounding the acquisition and both lock waits server-side is what makes
+    /// the caller's deadline a backstop rather than the only bound.
+    ///
+    /// `Ok(None)` means the session held no unterminalized compaction — the
+    /// pass expired inside the read-only preflight, or its compaction committed
+    /// before the future was dropped — and nothing was touched.
+    pub async fn recover_abandoned_compaction(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<StartupScanSessionOutcome>, TurnLivenessRepositoryError> {
+        let mut transaction = optional_timeout(self.bounds.acquire_wait, self.pool.begin())
+            .await
+            .unwrap_or(Err(sqlx::Error::PoolTimedOut))
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+            .bind(postgres_lock_timeout(self.bounds.lock_wait))
+            .execute(&mut *transaction)
+            .await
+            .map_err(TurnLivenessRepositoryError::terminalization)?;
+        let recovered = crate::startup::recover_abandoned_compaction_in_transaction(
+            &mut transaction,
+            session,
+            self.bounds.write_lock_wait,
+        )
+        .await
+        .map_err(TurnLivenessRepositoryError::from)?;
+        match recovered {
+            None => {
+                transaction
+                    .rollback()
+                    .await
+                    .map_err(TurnLivenessRepositoryError::terminalization)?;
+                Ok(None)
+            }
+            Some(outcome) => {
+                transaction.commit().await.map_err(|error| {
+                    TurnLivenessRepositoryError::TerminalizationDatabase {
+                        commit_ambiguous: crate::commit_failure_is_ambiguous(&error),
+                        source: error,
+                    }
+                })?;
+                Ok(Some(outcome))
+            }
+        }
+    }
+
     /// Terminalizes one observed-stale turn as failed under the session locks.
     ///
     /// The observation is revalidated inside the transaction, so a turn that

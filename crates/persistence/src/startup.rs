@@ -391,6 +391,43 @@ fn startup_recovery_created_ambiguous_wait(outcome: &StartupScanSessionOutcome) 
     }
 }
 
+/// Recovers only the compaction an expired pre-activation pass abandoned.
+///
+/// [`recover_in_transaction`] falls through to whichever turn is active when a
+/// session holds no unterminalized compaction, which is correct for a startup
+/// scan: nothing else is running yet. The expiry handoff has no such
+/// guarantee. It runs detached, its pass released the admission slot the moment
+/// the bound expired, and it waits between attempts, so a later eligibility
+/// sweep can activate a healthy successor turn before this transaction opens.
+/// Falling through would then terminalize that successor. Reporting `None`
+/// instead keeps recovery correlated with the evidence that justifies it — a
+/// compaction still holding the session boundary — and leaves every other
+/// shape to the watchdog that owns it.
+pub(crate) async fn recover_abandoned_compaction_in_transaction(
+    connection: &mut PgConnection,
+    requested_session: SessionId,
+    write_lock_wait: Option<Duration>,
+) -> Result<Option<StartupScanSessionOutcome>, StartupScanRepositoryError> {
+    let (session_exists, scheduler_session, active_turn) =
+        sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
+            crate::lock_inventory::STARTUP_RECOVERY,
+        )
+        .bind(session_id_to_uuid(requested_session))
+        .fetch_one(&mut *connection)
+        .await?;
+    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
+        .bind(crate::turn_liveness::postgres_lock_timeout(write_lock_wait))
+        .execute(&mut *connection)
+        .await?;
+    if scheduler_session.is_none() {
+        if session_exists {
+            return Err(StartupScanCorruption::Missing("session scheduler row").into());
+        }
+        return Ok(None);
+    }
+    recover_context_compaction(connection, requested_session, active_turn).await
+}
+
 pub(crate) async fn recover_observed_slot_held_in_transaction<Generator>(
     connection: &mut PgConnection,
     candidate: StaleTurnCandidate,
