@@ -87,10 +87,20 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
     "external_agent_memory_import",
     "goals",
     "guardian_approval",
+    // The registry gate for the CLI's guardian extension — the subsystem whose
+    // two wired gates, immediately above and below, are already disabled: it
+    // installs review contributors that spawn their own model exchanges. The
+    // pinned release reads this name nowhere, so disabling it changes nothing
+    // today; classifying an unwired name in that subsystem as behavior would
+    // instead make the release that wires it a silent capability gain.
+    "guardian_ext",
     "guardianv2",
     "hooks",
     "image_generation",
     "in_app_browser",
+    "in_app_chat",
+    "in_app_dictation",
+    "in_app_local_automation",
     // The CLI's own update check and update flow: it reaches package-registry
     // hosts unrelated to the model exchange and can replace the executable
     // whose version this adapter pins. Its machinery lives in the interactive
@@ -109,6 +119,7 @@ pub const DISABLED_CODEX_CLI_CAPABILITY_FEATURES: &[&str] = &[
     "remote_plugin",
     "request_permissions_tool",
     "shell_snapshot",
+    "shell_snapshot_v2",
     "shell_tool",
     "skill_mcp_dependency_install",
     "skill_search",
