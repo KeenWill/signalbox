@@ -513,8 +513,16 @@ pub struct UsageCallEvidence {
     pub session: SessionId,
     /// Resolved provider/model target.
     pub model: ResolvedProviderTarget,
-    /// Bounded non-secret credential-profile projection label.
+    /// Bounded non-secret credential-profile projection label safe for
+    /// browser partitioning.
     pub credential_profile: UsageCredentialProfileLabel,
+    /// Non-secret canonical credential-profile reference needed for cost
+    /// labeling.
+    ///
+    /// Bounded by [`max_usage_credential_profile_utf8_bytes`]; absent when the
+    /// canonical reference exceeds that ceiling and therefore cannot name a
+    /// configured profile or derive a configured cost.
+    pub credential_reference: Option<String>,
     /// Reported or estimated provenance.
     pub provenance: UsageProvenance,
     /// Meaning of the input-token axis.
@@ -653,6 +661,13 @@ pub struct UsageAggregateKey {
     /// Bounded non-secret credential-profile projection label used as the cost
     /// dimension.
     pub credential_profile: UsageCredentialProfileLabel,
+    /// Non-secret canonical credential-profile reference needed for cost
+    /// labeling.
+    ///
+    /// Bounded by [`max_usage_credential_profile_utf8_bytes`]; absent when the
+    /// canonical reference exceeds that ceiling and therefore cannot name a
+    /// configured profile or derive a configured cost.
+    pub credential_reference: Option<String>,
     /// Reported or estimated provenance.
     pub provenance: UsageProvenance,
     /// Meaning of the input-token axis.
@@ -1086,6 +1101,7 @@ mod tests {
             )),
             credential_profile: UsageCredentialProfileLabel::new("exact:profile-one".to_owned())
                 .expect("fixture label is bounded and discriminated"),
+            credential_reference: Some("profile-one".to_owned()),
             provenance: UsageProvenance::Reported,
             input_semantics: UsageInputTokenSemantics::CacheExclusive,
             coverage: UsageTokenCoverage {
@@ -1253,6 +1269,7 @@ mod tests {
             )),
             credential_profile: UsageCredentialProfileLabel::new("exact:profile-one".to_owned())
                 .expect("fixture label is bounded and discriminated"),
+            credential_reference: Some("profile-one".to_owned()),
             provenance: UsageProvenance::Reported,
             input_semantics: UsageInputTokenSemantics::CacheInclusive,
             tokens: UsageTokenAxes {
@@ -1356,6 +1373,7 @@ mod tests {
             )),
             credential_profile: UsageCredentialProfileLabel::new("exact:profile-one".to_owned())
                 .expect("fixture label is bounded and discriminated"),
+            credential_reference: Some("profile-one".to_owned()),
             provenance: UsageProvenance::Reported,
             input_semantics: UsageInputTokenSemantics::CacheInclusive,
             tokens: UsageTokenAxes {

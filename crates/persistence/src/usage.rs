@@ -10,6 +10,7 @@ use signalbox_application::{
     UsageCallScope, UsageCredentialProfileLabel, UsageInputTokenSemantics, UsageProvenance,
     UsageQuery, UsageReader, UsageTimestampMicros, UsageTokenAxes, UsageTokenCoverage,
     UsageTokenPresence, max_usage_aggregate_calls, max_usage_aggregate_groups,
+    max_usage_credential_profile_utf8_bytes,
 };
 use signalbox_domain::{
     ModelCallId, ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId,
@@ -137,6 +138,13 @@ fn selection_statement(filters: &QueryBindings) -> StatementBuilder {
     builder
 }
 
+// Canonical references are unbounded, so neither query may copy a
+// reconstructed reference into per-call rows. Both resolve the oversized
+// mapping through the bounded profile label and transfer a reference only when
+// it fits the configured-profile ceiling: a longer reference can never name a
+// configured profile, so it derives no cost and is reported as over-ceiling
+// instead of being materialized. The aggregate resolves each emitted group's
+// reference exactly once, after grouping and the group ceiling.
 fn aggregate_sql(
     where_clause: &str,
     source_probe: usize,
@@ -158,44 +166,68 @@ WITH candidate_calls AS MATERIALIZED (
      LIMIT ${source_limit}
 ), bounded_state AS (
     SELECT count(*) > ${source_limit} AS calls_truncated FROM candidate_calls
+), grouped AS (
+    SELECT call_kind, resolved_provider_model_identity_id,
+           credential_profile_label,
+           usage_provenance_kind, usage_input_includes_cache_tokens,
+           input_tokens IS NOT NULL AS has_input,
+           output_tokens IS NOT NULL AS has_output,
+           cache_creation_input_tokens IS NOT NULL AS has_cache_creation,
+           cache_read_input_tokens IS NOT NULL AS has_cache_read,
+           count(*) AS call_count,
+           sum(input_tokens) AS input_tokens,
+           sum(output_tokens) AS output_tokens,
+           sum(cache_creation_input_tokens) AS cache_creation_input_tokens,
+           sum(cache_read_input_tokens) AS cache_read_input_tokens,
+           usage_input_includes_cache_tokens IS NOT NULL
+           AND bool_and(
+               usage_input_includes_cache_tokens IS DISTINCT FROM true
+               OR (
+                   input_tokens IS NOT NULL
+                   AND cache_creation_input_tokens IS NOT NULL
+                   AND cache_read_input_tokens IS NOT NULL
+                   AND input_tokens >= cache_creation_input_tokens + cache_read_input_tokens
+               )
+           ) AS cache_normalization_safe,
+           bounded_state.calls_truncated
+      FROM bounded_calls
+     CROSS JOIN bounded_state
+     GROUP BY call_kind, resolved_provider_model_identity_id,
+              credential_profile_label, usage_provenance_kind,
+              usage_input_includes_cache_tokens,
+              input_tokens IS NOT NULL, output_tokens IS NOT NULL,
+              cache_creation_input_tokens IS NOT NULL,
+              cache_read_input_tokens IS NOT NULL, bounded_state.calls_truncated
+     ORDER BY call_kind, resolved_provider_model_identity_id,
+              credential_profile_label, usage_provenance_kind,
+              usage_input_includes_cache_tokens NULLS FIRST,
+              has_input, has_output, has_cache_creation, has_cache_read
+     LIMIT ${group_probe}
 )
 SELECT call_kind, resolved_provider_model_identity_id,
-       credential_profile_label AS credential_reference,
+       credential_profile_label,
        usage_provenance_kind, usage_input_includes_cache_tokens,
-       input_tokens IS NOT NULL AS has_input,
-       output_tokens IS NOT NULL AS has_output,
-       cache_creation_input_tokens IS NOT NULL AS has_cache_creation,
-       cache_read_input_tokens IS NOT NULL AS has_cache_read,
-       count(*) AS call_count,
-       sum(input_tokens) AS input_tokens,
-       sum(output_tokens) AS output_tokens,
-       sum(cache_creation_input_tokens) AS cache_creation_input_tokens,
-       sum(cache_read_input_tokens) AS cache_read_input_tokens,
-       usage_input_includes_cache_tokens IS NOT NULL
-       AND bool_and(
-           usage_input_includes_cache_tokens IS DISTINCT FROM true
-           OR (
-               input_tokens IS NOT NULL
-               AND cache_creation_input_tokens IS NOT NULL
-               AND cache_read_input_tokens IS NOT NULL
-               AND input_tokens >= cache_creation_input_tokens + cache_read_input_tokens
-           )
-       ) AS cache_normalization_safe,
-       bounded_state.calls_truncated
-  FROM bounded_calls
- CROSS JOIN bounded_state
- GROUP BY call_kind, resolved_provider_model_identity_id,
+       has_input, has_output, has_cache_creation, has_cache_read,
+       call_count, input_tokens, output_tokens,
+       cache_creation_input_tokens, cache_read_input_tokens,
+       cache_normalization_safe, calls_truncated,
+       CASE
+           WHEN credential_profile_label LIKE 'exact:%'
+               THEN substring(credential_profile_label FROM 7)
+           WHEN octet_length(oversized_profile.exact_reference) <= 256
+               THEN oversized_profile.exact_reference
+           ELSE NULL
+       END AS credential_reference,
+       COALESCE(octet_length(oversized_profile.exact_reference) > 256, false)
+           AS credential_reference_over_ceiling
+  FROM grouped
+  LEFT JOIN web_usage_oversized_profile_identity AS oversized_profile
+    ON credential_profile_label NOT LIKE 'exact:%'
+   AND oversized_profile.profile_id::text = substring(credential_profile_label FROM 8)
+ ORDER BY call_kind, resolved_provider_model_identity_id,
           credential_profile_label, usage_provenance_kind,
-          usage_input_includes_cache_tokens,
-          input_tokens IS NOT NULL, output_tokens IS NOT NULL,
-          cache_creation_input_tokens IS NOT NULL,
-          cache_read_input_tokens IS NOT NULL, bounded_state.calls_truncated
- ORDER BY call_kind, resolved_provider_model_identity_id, credential_profile_label,
-          usage_provenance_kind, usage_input_includes_cache_tokens NULLS FIRST,
-          input_tokens IS NOT NULL, output_tokens IS NOT NULL,
-          cache_creation_input_tokens IS NOT NULL,
-          cache_read_input_tokens IS NOT NULL
- LIMIT ${group_probe}"
+          usage_input_includes_cache_tokens NULLS FIRST,
+          has_input, has_output, has_cache_creation, has_cache_read"
     )
 }
 
@@ -206,11 +238,23 @@ fn calls_newest_sql(where_clause: &str, page_probe: usize) -> String {
         "
 SELECT model_call_id, call_kind, session_id, turn_id,
        resolved_provider_model_identity_id,
-       credential_profile_label AS credential_reference,
+       credential_profile_label,
+       CASE
+           WHEN credential_profile_label LIKE 'exact:%'
+               THEN substring(credential_profile_label FROM 7)
+           WHEN octet_length(oversized_profile.exact_reference) <= 256
+               THEN oversized_profile.exact_reference
+           ELSE NULL
+       END AS credential_reference,
+       COALESCE(octet_length(oversized_profile.exact_reference) > 256, false)
+           AS credential_reference_over_ceiling,
        usage_provenance_kind, usage_input_includes_cache_tokens,
        input_tokens, output_tokens,
        cache_creation_input_tokens, cache_read_input_tokens, recorded_at
   FROM web_usage_call_projection
+  LEFT JOIN web_usage_oversized_profile_identity AS oversized_profile
+    ON credential_profile_label NOT LIKE 'exact:%'
+   AND oversized_profile.profile_id::text = substring(credential_profile_label FROM 8)
  WHERE {where_clause}
  ORDER BY recorded_at DESC, model_call_id DESC
  LIMIT ${page_probe}"
@@ -416,6 +460,12 @@ fn timestamp_to_offset(
         .map_err(|_| UsageProjectionCorruption::Invalid("timestamp"))
 }
 
+/// Reports whether one application timestamp can cross this adapter boundary.
+#[must_use]
+pub fn usage_timestamp_is_representable(timestamp: UsageTimestampMicros) -> bool {
+    timestamp_to_offset(timestamp).is_ok()
+}
+
 fn decode_call_page(
     rows: Vec<PgRow>,
     limit: UsageCallPageLimit,
@@ -436,6 +486,7 @@ fn decode_call_page(
 
 fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
     let credential_profile = decode_credential_profile(&row)?;
+    let credential_reference = decode_credential_reference(&row)?;
     let call_kind = decode_call_kind(row.try_get("call_kind")?)?;
     let turn = row
         .try_get::<Option<Uuid>, _>("turn_id")?
@@ -455,6 +506,7 @@ fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
         session: SessionId::from_uuid(row.try_get("session_id")?),
         model: decode_model(&row)?,
         credential_profile,
+        credential_reference,
         provenance: decode_provenance(row.try_get("usage_provenance_kind")?)?,
         input_semantics: decode_input_semantics(row.try_get("usage_input_includes_cache_tokens")?),
         tokens: decode_tokens(&row)?,
@@ -464,12 +516,14 @@ fn decode_call(row: PgRow) -> Result<UsageCallEvidence, UsageRepositoryError> {
 
 fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryError> {
     let credential_profile = decode_credential_profile(&row)?;
+    let credential_reference = decode_credential_reference(&row)?;
     let call_count = u64::try_from(row.try_get::<i64, _>("call_count")?)
         .map_err(|_| UsageProjectionCorruption::Invalid("call count"))?;
     let key = UsageAggregateKey {
         call_kind: decode_call_kind(row.try_get("call_kind")?)?,
         model: decode_model(&row)?,
         credential_profile,
+        credential_reference,
         provenance: decode_provenance(row.try_get("usage_provenance_kind")?)?,
         input_semantics: decode_input_semantics(row.try_get("usage_input_includes_cache_tokens")?),
         coverage: UsageTokenCoverage {
@@ -491,9 +545,36 @@ fn decode_aggregate(row: PgRow) -> Result<UsageAggregateGroup, UsageRepositoryEr
 fn decode_credential_profile(
     row: &PgRow,
 ) -> Result<UsageCredentialProfileLabel, UsageRepositoryError> {
-    let credential_profile: String = row.try_get("credential_reference")?;
+    let credential_profile: String = row.try_get("credential_profile_label")?;
     UsageCredentialProfileLabel::new(credential_profile)
         .map_err(|_| UsageProjectionCorruption::Invalid("credential profile").into())
+}
+
+/// Decodes the ceiling-bounded credential reference used for cost derivation.
+///
+/// The queries reconstruct a reference only when it fits
+/// [`max_usage_credential_profile_utf8_bytes`]; a longer canonical reference
+/// can never name a configured profile, so it is reported as over-ceiling
+/// (`None`) instead of being copied out of the mapping. A null reference
+/// without the over-ceiling marker means the projected label points at no
+/// mapping row, which is corruption and fails closed.
+fn decode_credential_reference(row: &PgRow) -> Result<Option<String>, UsageRepositoryError> {
+    match row.try_get::<Option<String>, _>("credential_reference")? {
+        Some(reference)
+            if !reference.is_empty()
+                && reference.len() <= usize::from(max_usage_credential_profile_utf8_bytes()) =>
+        {
+            Ok(Some(reference))
+        }
+        Some(_) => Err(UsageProjectionCorruption::Invalid("credential profile").into()),
+        None => {
+            if row.try_get::<bool, _>("credential_reference_over_ceiling")? {
+                Ok(None)
+            } else {
+                Err(UsageProjectionCorruption::Invalid("credential profile").into())
+            }
+        }
+    }
 }
 
 const fn decode_cache_normalization(safe: bool) -> UsageCacheNormalization {
@@ -627,6 +708,19 @@ mod tests {
         assert_eq!(decoded, timestamp);
     }
 
+    #[test]
+    fn timestamp_representability_admits_the_application_maximum() {
+        let timestamp = UsageTimestampMicros::new(253_402_300_799_999_999)
+            .expect("the application timestamp maximum is admitted");
+
+        assert!(usage_timestamp_is_representable(timestamp));
+        assert_eq!(
+            decode_timestamp(timestamp_to_offset(timestamp).expect("maximum timestamp converts"))
+                .expect("maximum timestamp decodes"),
+            timestamp
+        );
+    }
+
     fn selection_fixture() -> QueryBindings {
         QueryBindings {
             from: None,
@@ -672,5 +766,46 @@ mod tests {
             "turn_id = $1\n       AND EXISTS (SELECT 1 FROM turn_lifecycle \
              WHERE turn_id = $1 AND session_id = $2)"
         );
+    }
+
+    #[test]
+    fn usage_queries_retain_raw_and_bounded_profile_projections() {
+        let aggregate = aggregate_sql("true", 1, 2, 3);
+        let calls = calls_newest_sql("true", 1);
+
+        assert!(aggregate.contains("oversized_profile.exact_reference"));
+        assert!(aggregate.contains("substring(credential_profile_label FROM 7)"));
+        assert!(calls.contains("oversized_profile.exact_reference"));
+        assert!(calls.contains("substring(credential_profile_label FROM 7)"));
+    }
+
+    #[test]
+    fn usage_queries_bound_reconstructed_references_to_the_profile_ceiling() {
+        let ceiling_guard = format!(
+            "octet_length(oversized_profile.exact_reference) <= {}",
+            max_usage_credential_profile_utf8_bytes()
+        );
+        let over_ceiling_marker = format!(
+            "COALESCE(octet_length(oversized_profile.exact_reference) > {}, false)",
+            max_usage_credential_profile_utf8_bytes()
+        );
+        let aggregate = aggregate_sql("true", 1, 2, 3);
+        let calls = calls_newest_sql("true", 1);
+
+        assert!(aggregate.contains(&ceiling_guard));
+        assert!(aggregate.contains(&over_ceiling_marker));
+        assert!(calls.contains(&ceiling_guard));
+        assert!(calls.contains(&over_ceiling_marker));
+    }
+
+    #[test]
+    fn usage_aggregate_resolves_references_only_after_grouping() {
+        let aggregate = aggregate_sql("true", 1, 2, 3);
+        let (grouping, reference_join) = aggregate
+            .split_once("GROUP BY")
+            .expect("the aggregate query groups bounded calls");
+
+        assert!(!grouping.contains("oversized_profile"));
+        assert!(reference_join.contains("LEFT JOIN web_usage_oversized_profile_identity"));
     }
 }

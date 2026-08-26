@@ -1,6 +1,6 @@
 # Usage evidence
 
-This contract is verified against PR #1137 (`agent/web-usage-cost`).
+This contract is verified against PR #1138 (`agent/web-usage-http`).
 
 ## Canonical evidence
 
@@ -21,19 +21,25 @@ collide, and the discriminators keep mapped identities disjoint from literal
 names. A bounded digest lookup serializes each mapping bucket, while exact
 comparison resolves digest collisions without indexing or bounding the canonical
 reference. The exact reference is retained once in that mapping and is not
-copied into each projected call; reads and aggregates use only its bounded,
-collision-free profile label. Each physical token axis is either absent or an
-exact integer in the `u64` domain. Aggregate token sums use `u128`, so every sum
-admitted by the bounded source-call ceiling remains exact. Every projected
-column must correlate with the canonical terminal call record: an insertion
-guard rejects any row — including one from maintenance SQL — whose kind
-contradicts the call's immutable global identity, whose source call is not
-terminal, or whose ownership or evidence payload contradicts that terminal
-record, because the append-only projection would otherwise misclassify,
-misattribute, or fabricate canonical evidence permanently — or occupy the
-primary key a later terminalization needs. The stored label column likewise
-admits only the discriminated `exact:`/`mapped:` forms, so an unreadable label
-cannot become a permanent append-only row that fails matching reads closed.
+copied into each projected call. Reads expose only the bounded, collision-free
+profile label, while server-side configured-cost derivation reconstructs the
+exact reference from that label and mapping. Reconstruction is itself bounded by
+the 256-byte configured-profile ceiling: a longer canonical reference can never
+name a configured profile, so reads report it as unpriceable instead of copying
+it out of the mapping, and the aggregate resolves each emitted group's reference
+exactly once, after grouping and the group ceiling, never per candidate call.
+Each physical token axis is either absent or an exact integer in the `u64`
+domain. Aggregate token sums use `u128`, so every sum admitted by the bounded
+source-call ceiling remains exact. Every projected column must correlate with
+the canonical terminal call record: an insertion guard rejects any row —
+including one from maintenance SQL — whose kind contradicts the call's immutable
+global identity, whose source call is not terminal, or whose ownership or
+evidence payload contradicts that terminal record, because the append-only
+projection would otherwise misclassify, misattribute, or fabricate canonical
+evidence permanently — or occupy the primary key a later terminalization needs.
+The stored label column likewise admits only the discriminated
+`exact:`/`mapped:` forms, so an unreadable label cannot become a permanent
+append-only row that fails matching reads closed.
 
 ## Compatibility grouping
 
@@ -117,9 +123,25 @@ would force a large range to be scanned and filtered before the bounded detail
 or aggregate limit applies — and an optional-predicate statement shared across
 shapes would let a generic plan discard those ordered paths entirely.
 
-## Open edges
+## Browser/API presentation and configured cost
 
-Committed unimplemented functionality: configured currency rates and browser/API
-presentation will consume these compatibility groups in later slices. No current
-surface provides either capability; this contract supplies only exact bounded
-evidence and the compatibility boundary those later surfaces must preserve.
+`GET /api/usage/summary` exposes at most 256 compatibility groups and
+`GET /api/usage/calls` exposes at most 100 newest-first calls. Both accept the
+selection and time filters above, including all three closed call-kind
+spellings: `model_call`, `approval_judge`, and `context_compaction`. Malformed
+bounds, closed values, UUIDs, or partial cursors are application errors. Summary
+groups and individual calls both carry the bounded profile label, so a call can
+be associated with the profile-partitioned group that represents it.
+
+Dollar cost is not stored in the projection. Signalboxd reconstructs the exact
+non-secret credential reference from the bounded profile label when it fits the
+configured-profile ceiling, then derives cost at read time from
+configuration-owned target rates; an over-ceiling reference derives unavailable
+configuration. Independently reported axes remain priceable when cache
+normalization is incomplete; only a contradictory cache-inclusive breakdown is
+invalid. A derived amount prices every reported axis exactly: when any reported
+axis cannot be represented by exact decimal arithmetic, the whole cost is
+unavailable rather than an understated partial total. Each derived amount
+carries its rate version and `real` or `metered_equivalent` label. Unavailable
+cost carries one closed reason: no token evidence, unknown input semantics,
+incomplete cache axes, invalid cache breakdown, or unavailable configuration.

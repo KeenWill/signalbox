@@ -387,7 +387,7 @@ async fn usage_half_open_time_range_excludes_earlier_evidence() -> Result<(), Bo
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn incomplete_cache_inclusive_aggregates_are_not_normalization_safe()
+async fn incomplete_cache_inclusive_aggregates_preserve_independent_axes()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0x95_100;
@@ -1060,6 +1060,179 @@ async fn usage_projection_retains_only_bounded_credential_identity() -> Result<(
     .fetch_one(&pool)
     .await?;
     assert!(!projection_retains_exact_reference);
+
+    let fixture = terminal_reported_usage_call(
+        &pool,
+        0x95_900,
+        ProviderReportedTokenUsage::unreported().with_input_tokens(Some(FIRST_INPUT_TOKENS)),
+    )
+    .await?;
+    let repository = UsageRepository::new(pool.clone());
+    let page = repository.calls(call_query(1, None)).await?;
+    let report = repository.aggregate(all_usage_query()).await?;
+
+    assert_eq!(page.calls()[0].call, fixture.call);
+    assert_eq!(
+        page.calls()[0].credential_reference.as_deref(),
+        Some(model_credential_reference().as_str())
+    );
+    assert_eq!(
+        report.groups()[0].key().credential_reference.as_deref(),
+        Some(model_credential_reference().as_str())
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Drives one session-level compaction call terminal with the supplied
+/// credential reference so the canonical trigger projects exactly that text.
+/// The projection cannot be written directly: the source-correlation guard
+/// fails any row without a matching terminal canonical record closed.
+async fn terminal_compaction_call_with_reference(
+    pool: &PgPool,
+    seed: u128,
+    reference: &str,
+) -> Result<SessionId, Box<dyn Error>> {
+    let fixture = terminal_reported_usage_call(
+        pool,
+        seed,
+        ProviderReportedTokenUsage::unreported().with_input_tokens(Some(FIRST_INPUT_TOKENS)),
+    )
+    .await?;
+    let source_frontier = Uuid::from_u128(seed + 0x80);
+    sqlx::query(
+        "INSERT INTO context_frontier
+            (owning_session_id, context_frontier_id, member_count)
+         VALUES ($1, $2, 0)",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(source_frontier)
+    .execute(pool)
+    .await?;
+    let call = Uuid::from_u128(seed + 0x81);
+    sqlx::query(
+        "INSERT INTO context_compaction_model_call
+            (model_call_id, session_id, direct_model_selection_id,
+             resolved_provider_model_identity_id, source_frontier_id,
+             credential_reference, usage_input_includes_cache_tokens, state_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, false, 'prepared')",
+    )
+    .bind(call)
+    .bind(fixture.session.into_uuid())
+    .bind(Uuid::from_u128(seed + 0x82))
+    .bind(Uuid::from_u128(seed + 0x83))
+    .bind(source_frontier)
+    .bind(reference)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE context_compaction_model_call
+         SET state_kind = 'in_flight'
+         WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "UPDATE context_compaction_model_call
+         SET state_kind = 'terminal', terminal_disposition_kind = 'completed',
+             input_tokens = 11, output_tokens = 5
+         WHERE model_call_id = $1",
+    )
+    .bind(call)
+    .execute(pool)
+    .await?;
+    Ok(fixture.session)
+}
+
+fn compaction_scope_query(session: SessionId) -> UsageQuery {
+    UsageQuery {
+        time: UsageTimeRange::all(),
+        selection: UsageSelection {
+            session: Some(session),
+            turn: None,
+            model: None,
+            provenance: None,
+            call_kind: Some(signalbox_application::UsageCallKind::ContextCompaction),
+        },
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn usage_reads_reconstruct_a_mapped_reference_within_the_profile_ceiling()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    // 251 bytes: above the 250-byte exact-label bound, within the 256-byte
+    // configured-profile ceiling, so reads reconstruct it from the mapping.
+    let reference = "r".repeat(251);
+    let session = terminal_compaction_call_with_reference(&pool, 0x95_a00, &reference).await?;
+    let repository = UsageRepository::new(pool.clone());
+    let page = repository
+        .calls(UsageCallQuery {
+            scope: compaction_scope_query(session),
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(1).expect("fixture page limit fits"),
+            after: None,
+        })
+        .await?;
+    let report = repository
+        .aggregate(compaction_scope_query(session))
+        .await?;
+
+    assert!(
+        page.calls()[0]
+            .credential_profile
+            .as_str()
+            .starts_with("mapped:")
+    );
+    assert_eq!(
+        page.calls()[0].credential_reference.as_deref(),
+        Some(reference.as_str())
+    );
+    assert_eq!(
+        report.groups()[0].key().credential_reference.as_deref(),
+        Some(reference.as_str())
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn usage_reads_report_an_over_ceiling_reference_instead_of_materializing_it()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    // 257 bytes: beyond the 256-byte configured-profile ceiling, so no
+    // configured profile can match and reads never copy the reference out of
+    // the mapping.
+    let reference = "s".repeat(257);
+    let session = terminal_compaction_call_with_reference(&pool, 0x95_b00, &reference).await?;
+    let repository = UsageRepository::new(pool.clone());
+    let page = repository
+        .calls(UsageCallQuery {
+            scope: compaction_scope_query(session),
+            order: UsageCallOrder::NewestFirst,
+            limit: UsageCallPageLimit::new(1).expect("fixture page limit fits"),
+            after: None,
+        })
+        .await?;
+    let report = repository
+        .aggregate(compaction_scope_query(session))
+        .await?;
+
+    assert!(
+        page.calls()[0]
+            .credential_profile
+            .as_str()
+            .starts_with("mapped:")
+    );
+    assert_eq!(page.calls()[0].credential_reference, None);
+    assert_eq!(report.groups()[0].key().credential_reference, None);
 
     pool.close().await;
     drop(container);

@@ -1902,7 +1902,59 @@ impl HubModelConfiguration {
             ProcessModelCallInputTokenSemantics::CacheExclusive => input.tokens,
         };
         let amount_usd = fold_reported_cost([
-            (input_tokens, rates.input),
+            (input_tokens.map(u128::from), rates.input),
+            (output_tokens.map(u128::from), rates.output),
+            (
+                cache_creation_input_tokens.map(u128::from),
+                rates.cache_creation_input,
+            ),
+            (
+                cache_read_input_tokens.map(u128::from),
+                rates.cache_read_input,
+            ),
+        ])?;
+        Some(DerivedModelCallCost {
+            amount_usd,
+            rate_version: Arc::clone(&rates.version),
+            billing_kind,
+        })
+    }
+
+    /// Derives a labeled USD figure from widened aggregate token totals.
+    ///
+    /// Every reported axis must price exactly; when any reported axis cannot
+    /// be represented by exact decimal arithmetic, the whole derivation is
+    /// absent rather than an understated partial total.
+    pub(crate) fn derive_usage_aggregate_cost(
+        &self,
+        target: ResolvedProviderTarget,
+        profile: &str,
+        semantics: ProcessModelCallInputTokenSemantics,
+        token_axes: [Option<u128>; 4],
+    ) -> Option<DerivedModelCallCost> {
+        let [
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        ] = token_axes;
+        let rates = self.billing_rates.get(&target)?;
+        let billing_kind = self.credential_profiles.get(profile)?.billing_kind();
+        let ordinary_input_tokens = match semantics {
+            ProcessModelCallInputTokenSemantics::CacheInclusive => match (
+                input_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+            ) {
+                (Some(total), Some(cache_creation), Some(cache_read)) => {
+                    Some(total.checked_sub(cache_creation.checked_add(cache_read)?)?)
+                }
+                _ => None,
+            },
+            ProcessModelCallInputTokenSemantics::CacheExclusive => input_tokens,
+        };
+        let amount_usd = fold_reported_cost([
+            (ordinary_input_tokens, rates.input),
             (output_tokens, rates.output),
             (cache_creation_input_tokens, rates.cache_creation_input),
             (cache_read_input_tokens, rates.cache_read_input),
@@ -3079,7 +3131,7 @@ fn validated_rate_version(value: &str) -> Result<Arc<str>, HubModelConfiguration
     }
 }
 
-fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
+fn fold_reported_cost(axes: [(Option<u128>, Decimal); 4]) -> Option<Decimal> {
     const TOKENS_PER_MILLION: u64 = 1_000_000;
     let mut amount = Decimal::ZERO;
     let mut reported = false;
@@ -3104,14 +3156,17 @@ fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
     reported.then(|| amount.normalize())
 }
 
-fn exact_rate_token_product(rate: Decimal, tokens: u64) -> Option<Decimal> {
+fn exact_rate_token_product(rate: Decimal, tokens: u128) -> Option<Decimal> {
+    if tokens > u128::try_from(Decimal::MAX.mantissa()).ok()? {
+        return None;
+    }
     let product = rate.checked_mul(Decimal::from(tokens))?;
     let scale_loss = rate.scale().checked_sub(product.scale())?;
     if scale_loss == 0 {
         return Some(product);
     }
     let mut rate_mantissa = u128::try_from(rate.mantissa()).ok()?;
-    let mut token_mantissa = u128::from(tokens);
+    let mut token_mantissa = tokens;
     for _ in 0..scale_loss {
         divide_product_factor(&mut rate_mantissa, &mut token_mantissa, 2)?;
         divide_product_factor(&mut rate_mantissa, &mut token_mantissa, 5)?;
@@ -4389,7 +4444,7 @@ async fn read_bounded_credential_file(path: &Path, maximum_bytes: usize) -> io::
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         collections::HashSet,
         net::SocketAddr,
@@ -4510,7 +4565,7 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const EAGER_WATCH_HEAD_PATTERN: &str = "^agent/.+$";
     const WATCH_TEMPLATE: &str = "merge-forward";
     const REGISTERED_INSTRUCTION_ROOT: &str = "/srv/signalbox/instruction-library";
-    const CONFIGURATION: &str = r#"
+    pub(crate) const CONFIGURATION: &str = r#"
 version = 1
 
 [numeric_bounds]
@@ -6463,6 +6518,36 @@ cool_off_seconds = {}
             .expect("fixture quotient is representable");
 
         assert_eq!(cost.amount_usd(), expected);
+    }
+
+    #[test]
+    fn widened_usage_aggregate_cost_prices_totals_above_u64() {
+        let configuration =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+        let cost = configuration
+            .derive_usage_aggregate_cost(
+                configured_target(&configuration),
+                "anthropic-primary",
+                ProcessModelCallInputTokenSemantics::CacheExclusive,
+                [None, Some(u128::from(u64::MAX) + 1), None, None],
+            )
+            .expect("the widened output total is exactly priceable");
+
+        assert!(cost.amount_usd() > Decimal::ZERO);
+    }
+
+    #[test]
+    fn widened_usage_aggregate_cost_fails_whole_when_one_reported_axis_is_unpriceable() {
+        let configuration =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+        let cost = configuration.derive_usage_aggregate_cost(
+            configured_target(&configuration),
+            "anthropic-primary",
+            ProcessModelCallInputTokenSemantics::CacheExclusive,
+            [Some(u128::MAX), Some(1_000_000), None, None],
+        );
+
+        assert_eq!(cost, None, "an unpriceable input axis must not be dropped");
     }
 
     #[test]

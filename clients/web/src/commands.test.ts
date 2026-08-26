@@ -78,6 +78,8 @@ describe('command registry', () => {
       artifactPreviewIds: [],
       artifactOriginalIds: [],
       focusTimeline: () => undefined,
+      searchAvailable: false,
+      focusSearch: () => undefined,
     })
 
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])

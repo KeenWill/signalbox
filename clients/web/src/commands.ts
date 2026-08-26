@@ -13,6 +13,8 @@ export interface CommandContext {
   sessionId?: string
   timelineWindowAvailable?: boolean
   focusTimeline: () => void
+  searchAvailable?: boolean
+  focusSearch?: () => void
   importEntryIds?: readonly string[]
   selectedImportEntry?: string | null
   requestedImportEntry?: string
@@ -235,6 +237,15 @@ export const commandRegistry = [
     bindings: [],
     available: always,
     run: (context) => context.dispatch(actions.overlaySet('navigation')),
+  },
+  {
+    id: 'search.focus',
+    title: 'Focus lexical search',
+    description: 'Move directly to the bounded canonical-evidence search field.',
+    category: 'Navigate',
+    bindings: [{ label: 'Mod+Shift+F', registration: { kind: 'hotkey', hotkey: 'Mod+Shift+F' } }],
+    available: (context) => context.searchAvailable === true,
+    run: (context) => context.focusSearch?.(),
   },
   {
     id: 'surface.escape',
