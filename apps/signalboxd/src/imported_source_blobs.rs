@@ -20,6 +20,7 @@ use tokio::{io::AsyncReadExt, sync::Semaphore, time::timeout};
 use crate::{BlobStorageClass, BlobStoreRegistry};
 
 const VERIFICATION_BUFFER_BYTES: usize = 64 * 1024;
+// numeric-bound: guard - prevents a stalled imported-blob read traversal from blocking its caller forever
 const READ_TRAVERSAL_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Deployment adapter joining imported aggregates to immutable blob stores.
