@@ -155,17 +155,6 @@ impl PostgresEligibilitySweep {
                 UNION
                 SELECT active.session_id
                   FROM turn_lifecycle AS active
-                  JOIN model_call AS prepared
-                    ON prepared.session_id = active.session_id
-                   AND prepared.turn_id = active.turn_id
-                   AND prepared.turn_attempt_id = active.current_attempt_id
-                 WHERE active.state_kind = 'active'
-                   AND NOT active.delegation_runtime_terminal
-                   AND prepared.state_kind = 'prepared'
-                 GROUP BY active.session_id
-                UNION
-                SELECT active.session_id
-                  FROM turn_lifecycle AS active
                  WHERE active.state_kind = 'active'
                    AND NOT active.delegation_runtime_terminal
                    AND EXISTS (
