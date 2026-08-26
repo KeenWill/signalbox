@@ -402,6 +402,15 @@ impl RepoWatchWebhookProjection {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchWebhookDisposition {
     Projected,
+    /// This delivery took ownership of a primary-mode cursor commit.
+    ///
+    /// Recorded before the cursor write the two-step handoff performs, so it
+    /// names no resulting generation — the generation a delivery reached is
+    /// carried by `repo_watch_event.cursor_generation` on the rows it wrote.
+    /// It is the repository's durable evidence of primary intake even when the
+    /// applied observation derived no event at all, which is why the parity
+    /// view reads it rather than the first webhook-produced row.
+    Committed,
     DuplicateState,
     Superseded,
     Ignored,
@@ -859,6 +868,29 @@ impl PostgresRepoWatchWebhookStore {
         )
         .fetch_one(&self.pool)
         .await?)
+    }
+
+    /// How many event projections one delivery recorded.
+    ///
+    /// Primary mode records none, because its own commit is the durable row a
+    /// parity projection would otherwise stand in for. A test asserting that
+    /// reads the count through this repository rather than naming the table.
+    #[cfg(feature = "test-support")]
+    pub async fn recorded_event_projection_count(
+        &self,
+        key: RepoWatchWebhookDeliveryKey,
+    ) -> Result<u64, RepoWatchWebhookStoreError> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*)
+               FROM repo_watch_webhook_projection
+              WHERE hook_id = $1 AND delivery_id = $2 AND projection_kind = 'event'",
+        )
+        .bind(Decimal::from(key.hook_id.get()))
+        .bind(key.delivery_id)
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(count)
+            .map_err(|_| RepoWatchWebhookStorageCorruption::InvalidReceiptSequence.into())
     }
 
     pub async fn record_terminal(

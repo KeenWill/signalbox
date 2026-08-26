@@ -55,9 +55,9 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
     facts: ['review discovery reads'],
   },
   imports: {
-    kind: 'committed-unimplemented',
+    kind: 'server-backed',
     owningTrack: '#995 discovery reads',
-    facts: ['import discovery reads'],
+    facts: ['keyset import catalog pages', 'bounded imported-entry windows'],
   },
   usage: {
     kind: 'committed-unimplemented',

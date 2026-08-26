@@ -200,6 +200,55 @@
   grid-template-columns: minmax(220px, 1.2fr) minmax(230px, 0.8fr);
 }
 
+.artifact-placeholder-layout {
+  display: grid;
+  min-height: 156px;
+  grid-template-columns: minmax(220px, 1.2fr) minmax(230px, 0.8fr);
+}
+
+.artifact-document-placeholder {
+  display: grid;
+  min-width: 0;
+  place-content: center;
+  justify-items: center;
+  gap: 0.35rem;
+  padding: 1rem;
+  border-right: 1px solid var(--border);
+  text-align: center;
+  background:
+    repeating-linear-gradient(-45deg, transparent 0 9px, #8793a00a 9px 18px), var(--canvas);
+}
+
+.artifact-document-placeholder > svg {
+  width: 30px;
+  height: 30px;
+  color: var(--accent);
+}
+
+.artifact-document-placeholder strong {
+  font-size: 0.68rem;
+}
+
+.artifact-document-placeholder p {
+  max-width: 46ch;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.61rem;
+  line-height: 1.45;
+}
+
+.media-placeholder > svg {
+  color: var(--warning);
+}
+
+.artifact-provenance-count {
+  align-self: center;
+  color: var(--text-muted);
+  font:
+    0.58rem ui-monospace,
+    monospace;
+}
+
 .artifact-visual {
   display: grid;
   min-height: 190px;
@@ -308,9 +357,211 @@
   box-shadow: inset 3px 0 var(--warning);
 }
 
+.attachment-workbench {
+  display: grid;
+  min-height: 0;
+  grid-template-rows: 56px auto minmax(0, 1fr);
+  background: var(--surface-2);
+}
+
+.attachment-bound {
+  color: var(--text-muted);
+  font:
+    0.58rem ui-monospace,
+    monospace;
+}
+
+.attachment-layout {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(250px, 0.72fr) minmax(420px, 1.28fr);
+  overflow: hidden;
+}
+
+.attachment-columns {
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  background: var(--surface-1);
+}
+
+.attachment-surface {
+  border-bottom: 1px solid var(--border);
+}
+
+.attachment-surface > header,
+.attachment-preview > header {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 0.65rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-3);
+}
+
+.attachment-surface > header div {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.attachment-surface > header svg {
+  width: 13px;
+  color: var(--accent);
+}
+
+.attachment-surface > header strong,
+.attachment-preview > header strong {
+  font-size: 0.63rem;
+}
+
+.attachment-surface > header span {
+  color: var(--text-muted);
+  font:
+    0.55rem ui-monospace,
+    monospace;
+}
+
+.attachment-surface ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.attachment-surface li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  border-bottom: 1px solid var(--border);
+}
+
+.attachment-surface li:last-child {
+  border-bottom: 0;
+}
+
+.attachment-select {
+  display: grid;
+  min-width: 0;
+  gap: 0.14rem;
+  padding: 0.52rem 0.65rem;
+  border: 0;
+  color: var(--text);
+  text-align: left;
+  background: transparent;
+  cursor: pointer;
+}
+
+.attachment-select[aria-pressed="true"] {
+  box-shadow: inset 3px 0 var(--accent);
+  background: var(--selection);
+}
+
+.attachment-select .attachment-name {
+  overflow: hidden;
+  font-size: 0.63rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-select small {
+  color: var(--text-muted);
+  font:
+    0.54rem ui-monospace,
+    monospace;
+}
+
+.attachment-remove {
+  display: grid;
+  width: 34px;
+  place-items: center;
+  border: 0;
+  border-left: 1px solid var(--border);
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.attachment-remove svg {
+  width: 13px;
+}
+
+.attachment-select:focus-visible,
+.attachment-remove:focus-visible {
+  z-index: 1;
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.attachment-preview {
+  min-width: 0;
+  overflow: auto;
+}
+
+.attachment-preview .artifact-row {
+  grid-template-columns: 1fr;
+}
+
+.attachment-preview .artifact-heading {
+  border-right: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.attachment-empty {
+  margin: 0;
+  padding: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.61rem;
+}
+
+.attachment-missing {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.55rem;
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warning);
+  background: var(--surface-1);
+}
+
+.attachment-missing > svg {
+  width: 16px;
+  min-width: 16px;
+  color: var(--warning);
+}
+
+.attachment-missing strong {
+  font-size: 0.62rem;
+}
+
+.attachment-missing p {
+  margin: 0.2rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.58rem;
+  line-height: 1.45;
+}
+
 @media (max-width: 760px) {
   .artifact-panel {
     grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .attachment-workbench {
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  .attachment-layout {
+    display: block;
+    overflow: auto;
+  }
+
+  .attachment-columns {
+    overflow: visible;
+    border-right: 0;
+  }
+
+  .attachment-preview {
+    overflow: visible;
   }
 
   .artifact-panel-heading {
@@ -334,6 +585,15 @@
 
   .artifact-image-layout {
     grid-template-columns: 1fr;
+  }
+
+  .artifact-placeholder-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .artifact-document-placeholder {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
   }
 
   .artifact-visual {
