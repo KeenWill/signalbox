@@ -11,6 +11,7 @@ import {
   decodeWebContractExample,
   decodeWebImportListPage,
   decodeWebSearchPage,
+  decodeWebSessionCatalogSnapshot,
   decodeWebSessionTimelineDescriptor,
   decodeWebSessionTimelineWindow,
 } from "../../../clients/web/src/generated/web-contract.mjs";
@@ -1218,17 +1219,12 @@ test("generated error decoder preserves the transport application boundary", () 
 function attentionSummary(overrides = {}) {
   return {
     session_id: "00000000-0000-0000-0000-000000000001",
-    title_summary: null,
-    title_truncated: false,
-    archived: false,
     current_turn_id: null,
-    active_turn_count: "0",
-    queued_turn_count: "0",
     state: "idle",
     action: null,
     goal_block: null,
     judge: { actionable: "0", completed: "0", escalated: "0", failed: "0" },
-    last_activity: { unix_microseconds: "1", kind: "session" },
+    last_activity: { unix_milliseconds: "0", kind: "session" },
     ...overrides,
   };
 }
@@ -1236,10 +1232,8 @@ function attentionSummary(overrides = {}) {
 function attentionSnapshot(overrides = {}) {
   return {
     cursor: "1",
-    total: "1",
-    sort: "last_activity_descending",
     summaries: [attentionSummary()],
-    continuation: null,
+    continuation_after_session_id: null,
     ...overrides,
   };
 }
@@ -1277,19 +1271,17 @@ test("generated stream decoder rejects a missing blocked action", () => {
   );
 });
 
-test("generated snapshot decoder requires nullable catalog fields", () => {
+test("generated snapshot decoder treats omitted optional fields as null", () => {
   const withoutAction = attentionSummary();
   delete withoutAction.action;
   const withoutCurrentTurn = attentionSummary();
   delete withoutCurrentTurn.current_turn_id;
 
-  assert.throws(
+  assert.doesNotThrow(
     () => decodeWebAttentionSnapshot(attentionSnapshot({ summaries: [withoutAction] })),
-    /action must be present/,
   );
-  assert.throws(
+  assert.doesNotThrow(
     () => decodeWebAttentionSnapshot(attentionSnapshot({ summaries: [withoutCurrentTurn] })),
-    /current_turn_id must be present/,
   );
 });
 
@@ -1312,14 +1304,12 @@ test("generated snapshot decoder admits sequence-reader states", () => {
     summaries: [attentionSummary({
       state: "awaiting_tool_recovery",
       current_turn_id: "00000000-0000-0000-0000-000000000002",
-      active_turn_count: "1",
     })],
   })));
   assert.doesNotThrow(() => decodeWebAttentionSnapshot(attentionSnapshot({
     summaries: [attentionSummary({
       state: "awaiting_approval",
       current_turn_id: "00000000-0000-0000-0000-000000000002",
-      active_turn_count: "1",
     })],
   })));
 });
@@ -1351,19 +1341,14 @@ test("generated snapshot decoder rejects the removed restore action", () => {
 
 test("generated snapshot decoder rejects a mismatched continuation", () => {
   assert.throws(() => decodeWebAttentionSnapshot(attentionSnapshot({
-    continuation: {
-      kind: "last_activity",
-      unix_microseconds: "2",
-      session_id: "00000000-0000-0000-0000-000000000001",
-    },
-  })), /continuation\.unix_microseconds must be the activity timestamp/);
+    continuation_after_session_id: "00000000-0000-0000-0000-000000000002",
+  })), /continuation_after_session_id must be the last returned session identity/);
 });
 
-test("generated decoder enforces catalog bounds and stream policy", () => {
+test("generated attention decoder enforces collection bounds", () => {
   assert.throws(
     () => decodeWebAttentionSnapshot(attentionSnapshot({
       summaries: Array.from({ length: 33 }, () => attentionSummary()),
-      total: "33",
     })),
     /at most 32 items/,
   );
@@ -1375,14 +1360,109 @@ test("generated decoder enforces catalog bounds and stream policy", () => {
     }),
     /one recognized variant/,
   );
+});
+
+function catalogSummary(overrides = {}) {
+  return {
+    session_id: "00000000-0000-0000-0000-000000000001",
+    title_summary: null,
+    title_truncated: false,
+    archived: false,
+    current_turn_id: null,
+    active_turn_count: "0",
+    queued_turn_count: "0",
+    state: "idle",
+    action: null,
+    goal_block: null,
+    judge: { actionable: "0", completed: "0", escalated: "0", failed: "0" },
+    last_activity: { unix_microseconds: "1", kind: "session" },
+    ...overrides,
+  };
+}
+
+function catalogSnapshot(overrides = {}) {
+  return {
+    cursor: "1",
+    total: "1",
+    sort: "last_activity_descending",
+    summaries: [catalogSummary()],
+    continuation: null,
+    ...overrides,
+  };
+}
+
+test("generated catalog decoder requires explicit nullable boundaries", () => {
+  const withoutAction = catalogSummary();
+  delete withoutAction.action;
+  const withoutCurrentTurn = catalogSummary();
+  delete withoutCurrentTurn.current_turn_id;
+  const withoutContinuation = catalogSnapshot();
+  delete withoutContinuation.continuation;
+
   assert.throws(
-    () => decodeWebAttentionStreamEvent({
-      kind: "snapshot",
-      snapshot: attentionSnapshot({
-        summaries: [attentionSummary({ archived: true })],
-      }),
-    }),
-    /archived must be false on the hot attention stream/,
+    () => decodeWebSessionCatalogSnapshot(catalogSnapshot({ summaries: [withoutAction] })),
+    /action must be present/,
+  );
+  assert.throws(
+    () => decodeWebSessionCatalogSnapshot(catalogSnapshot({ summaries: [withoutCurrentTurn] })),
+    /current_turn_id must be present/,
+  );
+  assert.throws(
+    () => decodeWebSessionCatalogSnapshot(withoutContinuation),
+    /continuation must be present/,
+  );
+});
+
+test("generated catalog decoder enforces order, continuation, and totals", () => {
+  assert.throws(
+    () => decodeWebSessionCatalogSnapshot(catalogSnapshot({ total: "0" })),
+    /total must be at least the number of returned summaries/,
+  );
+  assert.throws(
+    () => decodeWebSessionCatalogSnapshot(catalogSnapshot({
+      continuation: {
+        kind: "last_activity",
+        unix_microseconds: "2",
+        session_id: "00000000-0000-0000-0000-000000000001",
+      },
+    })),
+    /continuation\.unix_microseconds must be the activity timestamp/,
+  );
+  assert.throws(
+    () => decodeWebSessionCatalogSnapshot(catalogSnapshot({
+      sort: "session_identity_ascending",
+      continuation: {
+        kind: "last_activity",
+        unix_microseconds: "1",
+        session_id: "00000000-0000-0000-0000-000000000001",
+      },
+    })),
+    /continuation required by sort session_identity_ascending/,
+  );
+});
+
+test("generated catalog decoder enforces bounded rows and typed state evidence", () => {
+  assert.throws(
+    () => decodeWebSessionCatalogSnapshot(catalogSnapshot({
+      total: "33",
+      summaries: Array.from({ length: 33 }, () => catalogSummary()),
+    })),
+    /at most 32 items/,
+  );
+  assert.throws(
+    () => decodeWebSessionCatalogSnapshot(catalogSnapshot({
+      summaries: [catalogSummary({ title_truncated: true })],
+    })),
+    /title_truncated must be false when title_summary is null/,
+  );
+  assert.doesNotThrow(
+    () => decodeWebSessionCatalogSnapshot(catalogSnapshot({
+      summaries: [catalogSummary({
+        state: "awaiting_tool_recovery",
+        current_turn_id: "00000000-0000-0000-0000-000000000002",
+        active_turn_count: "1",
+      })],
+    })),
   );
 });
 

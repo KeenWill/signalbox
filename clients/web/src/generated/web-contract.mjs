@@ -75,12 +75,13 @@ const schemas = {
           "kind": {
             "$ref": "#/$defs/WebAttentionActivityKind"
           },
-          "unix_microseconds": {
-            "$ref": "#/$defs/WebU64"
+          "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           }
         },
         "required": [
-          "unix_microseconds",
+          "unix_milliseconds",
           "kind"
         ],
         "type": "object"
@@ -108,7 +109,8 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "generation": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "need_summary": {
             "description": "At most 128 Unicode scalar values; exact text is in session detail.",
@@ -130,16 +132,20 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "actionable": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "completed": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "escalated": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "failed": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           }
         },
         "required": [
@@ -149,13 +155,6 @@ const schemas = {
           "failed"
         ],
         "type": "object"
-      },
-      "WebAttentionSort": {
-        "enum": [
-          "last_activity_descending",
-          "session_identity_ascending"
-        ],
-        "type": "string"
       },
       "WebAttentionState": {
         "enum": [
@@ -184,22 +183,11 @@ const schemas = {
               }
             ]
           },
-          "active_turn_count": {
-            "$ref": "#/$defs/WebU64"
-          },
-          "archived": {
-            "type": "boolean"
-          },
           "current_turn_id": {
-            "anyOf": [
-              {
-                "description": "Checked canonical UUID used for browser-visible non-session identities.",
-                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
             ]
           },
           "goal_block": {
@@ -218,109 +206,36 @@ const schemas = {
           "last_activity": {
             "$ref": "#/$defs/WebAttentionActivity"
           },
-          "queued_turn_count": {
-            "$ref": "#/$defs/WebU64"
-          },
           "session_id": {
-            "$ref": "#/$defs/WebSessionId"
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
           },
           "state": {
             "$ref": "#/$defs/WebAttentionState"
-          },
-          "title_summary": {
-            "maxLength": 128,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "title_truncated": {
-            "type": "boolean"
           }
         },
         "required": [
           "session_id",
-          "title_summary",
-          "title_truncated",
-          "archived",
-          "current_turn_id",
-          "active_turn_count",
-          "queued_turn_count",
           "state",
-          "action",
           "judge",
           "last_activity"
         ],
         "type": "object"
-      },
-      "WebSessionId": {
-        "description": "Checked canonical UUID used for browser-visible session identities.",
-        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-        "type": "string"
-      },
-      "WebU64": {
-        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
-        "pattern": "^(0|[1-9][0-9]*)$",
-        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
     "additionalProperties": false,
     "properties": {
-      "continuation": {
-        "anyOf": [
-          {
-            "oneOf": [
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "kind": {
-                    "const": "last_activity",
-                    "type": "string"
-                  },
-                  "session_id": {
-                    "$ref": "#/$defs/WebSessionId"
-                  },
-                  "unix_microseconds": {
-                    "$ref": "#/$defs/WebU64"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "unix_microseconds",
-                  "session_id"
-                ],
-                "type": "object"
-              },
-              {
-                "additionalProperties": false,
-                "properties": {
-                  "kind": {
-                    "const": "session_identity",
-                    "type": "string"
-                  },
-                  "session_id": {
-                    "$ref": "#/$defs/WebSessionId"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "session_id"
-                ],
-                "type": "object"
-              }
-            ]
-          },
-          {
-            "type": "null"
-          }
+      "continuation_after_session_id": {
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": [
+          "string",
+          "null"
         ]
       },
       "cursor": {
-        "$ref": "#/$defs/WebU64"
-      },
-      "sort": {
-        "$ref": "#/$defs/WebAttentionSort"
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
       },
       "summaries": {
         "items": {
@@ -328,17 +243,11 @@ const schemas = {
         },
         "maxItems": 32,
         "type": "array"
-      },
-      "total": {
-        "$ref": "#/$defs/WebU64"
       }
     },
     "required": [
       "cursor",
-      "total",
-      "sort",
-      "summaries",
-      "continuation"
+      "summaries"
     ],
     "title": "WebAttentionSnapshot",
     "type": "object"
@@ -359,12 +268,13 @@ const schemas = {
           "kind": {
             "$ref": "#/$defs/WebAttentionActivityKind"
           },
-          "unix_microseconds": {
-            "$ref": "#/$defs/WebU64"
+          "unix_milliseconds": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           }
         },
         "required": [
-          "unix_microseconds",
+          "unix_milliseconds",
           "kind"
         ],
         "type": "object"
@@ -392,7 +302,8 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "generation": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "need_summary": {
             "description": "At most 128 Unicode scalar values; exact text is in session detail.",
@@ -414,16 +325,20 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "actionable": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "completed": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "escalated": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "failed": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           }
         },
         "required": [
@@ -437,60 +352,16 @@ const schemas = {
       "WebAttentionSnapshot": {
         "additionalProperties": false,
         "properties": {
-          "continuation": {
-            "anyOf": [
-              {
-                "oneOf": [
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "kind": {
-                        "const": "last_activity",
-                        "type": "string"
-                      },
-                      "session_id": {
-                        "$ref": "#/$defs/WebSessionId"
-                      },
-                      "unix_microseconds": {
-                        "$ref": "#/$defs/WebU64"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "unix_microseconds",
-                      "session_id"
-                    ],
-                    "type": "object"
-                  },
-                  {
-                    "additionalProperties": false,
-                    "properties": {
-                      "kind": {
-                        "const": "session_identity",
-                        "type": "string"
-                      },
-                      "session_id": {
-                        "$ref": "#/$defs/WebSessionId"
-                      }
-                    },
-                    "required": [
-                      "kind",
-                      "session_id"
-                    ],
-                    "type": "object"
-                  }
-                ]
-              },
-              {
-                "type": "null"
-              }
+          "continuation_after_session_id": {
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
             ]
           },
           "cursor": {
-            "$ref": "#/$defs/WebU64"
-          },
-          "sort": {
-            "$ref": "#/$defs/WebAttentionSort"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "summaries": {
             "items": {
@@ -498,26 +369,13 @@ const schemas = {
             },
             "maxItems": 32,
             "type": "array"
-          },
-          "total": {
-            "$ref": "#/$defs/WebU64"
           }
         },
         "required": [
           "cursor",
-          "total",
-          "sort",
-          "summaries",
-          "continuation"
+          "summaries"
         ],
         "type": "object"
-      },
-      "WebAttentionSort": {
-        "enum": [
-          "last_activity_descending",
-          "session_identity_ascending"
-        ],
-        "type": "string"
       },
       "WebAttentionState": {
         "enum": [
@@ -546,22 +404,11 @@ const schemas = {
               }
             ]
           },
-          "active_turn_count": {
-            "$ref": "#/$defs/WebU64"
-          },
-          "archived": {
-            "type": "boolean"
-          },
           "current_turn_id": {
-            "anyOf": [
-              {
-                "description": "Checked canonical UUID used for browser-visible non-session identities.",
-                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": [
+              "string",
+              "null"
             ]
           },
           "goal_block": {
@@ -580,50 +427,21 @@ const schemas = {
           "last_activity": {
             "$ref": "#/$defs/WebAttentionActivity"
           },
-          "queued_turn_count": {
-            "$ref": "#/$defs/WebU64"
-          },
           "session_id": {
-            "$ref": "#/$defs/WebSessionId"
+            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+            "type": "string"
           },
           "state": {
             "$ref": "#/$defs/WebAttentionState"
-          },
-          "title_summary": {
-            "maxLength": 128,
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "title_truncated": {
-            "type": "boolean"
           }
         },
         "required": [
           "session_id",
-          "title_summary",
-          "title_truncated",
-          "archived",
-          "current_turn_id",
-          "active_turn_count",
-          "queued_turn_count",
           "state",
-          "action",
           "judge",
           "last_activity"
         ],
         "type": "object"
-      },
-      "WebSessionId": {
-        "description": "Checked canonical UUID used for browser-visible session identities.",
-        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-        "type": "string"
-      },
-      "WebU64": {
-        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
-        "pattern": "^(0|[1-9][0-9]*)$",
-        "type": "string"
       }
     },
     "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -649,7 +467,8 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "cursor": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "kind": {
             "const": "update",
@@ -660,7 +479,6 @@ const schemas = {
               "$ref": "#/$defs/WebAttentionSummary"
             },
             "maxItems": 32,
-            "minItems": 1,
             "type": "array"
           }
         },
@@ -675,7 +493,8 @@ const schemas = {
         "additionalProperties": false,
         "properties": {
           "cursor": {
-            "$ref": "#/$defs/WebU64"
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
           },
           "kind": {
             "const": "resync_required",
@@ -2379,6 +2198,295 @@ const schemas = {
     "title": "WebSearchPage",
     "type": "object"
   },
+  "WebSessionCatalogSnapshot": {
+    "$defs": {
+      "WebAttentionAction": {
+        "enum": [
+          "provide_goal_need",
+          "decide_approval",
+          "reconcile_turn"
+        ],
+        "type": "string"
+      },
+      "WebAttentionActivityKind": {
+        "enum": [
+          "session",
+          "turn",
+          "goal",
+          "approval_judge",
+          "runner"
+        ],
+        "type": "string"
+      },
+      "WebAttentionBlockedReason": {
+        "enum": [
+          "user_input_required",
+          "external_change_required",
+          "authorization_required",
+          "execution_failure"
+        ],
+        "type": "string"
+      },
+      "WebAttentionGoalBlock": {
+        "additionalProperties": false,
+        "properties": {
+          "generation": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "need_summary": {
+            "description": "At most 128 Unicode scalar values; exact text is in session detail.",
+            "maxLength": 128,
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/$defs/WebAttentionBlockedReason"
+          }
+        },
+        "required": [
+          "generation",
+          "reason",
+          "need_summary"
+        ],
+        "type": "object"
+      },
+      "WebAttentionJudgeFacts": {
+        "additionalProperties": false,
+        "properties": {
+          "actionable": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "completed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "escalated": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          },
+          "failed": {
+            "pattern": "^(0|[1-9][0-9]*)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "actionable",
+          "completed",
+          "escalated",
+          "failed"
+        ],
+        "type": "object"
+      },
+      "WebAttentionState": {
+        "enum": [
+          "active",
+          "queued",
+          "blocked",
+          "awaiting_approval",
+          "ambiguous",
+          "awaiting_tool_recovery",
+          "awaiting_reconciliation",
+          "runner_lost",
+          "idle"
+        ],
+        "type": "string"
+      },
+      "WebSessionCatalogActivity": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "$ref": "#/$defs/WebAttentionActivityKind"
+          },
+          "unix_microseconds": {
+            "$ref": "#/$defs/WebU64"
+          }
+        },
+        "required": [
+          "unix_microseconds",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "WebSessionCatalogSort": {
+        "enum": [
+          "last_activity_descending",
+          "session_identity_ascending"
+        ],
+        "type": "string"
+      },
+      "WebSessionCatalogSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionAction"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "active_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "archived": {
+            "type": "boolean"
+          },
+          "current_turn_id": {
+            "anyOf": [
+              {
+                "description": "Checked canonical UUID used for browser-visible non-session identities.",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "goal_block": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/WebAttentionGoalBlock"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "judge": {
+            "$ref": "#/$defs/WebAttentionJudgeFacts"
+          },
+          "last_activity": {
+            "$ref": "#/$defs/WebSessionCatalogActivity"
+          },
+          "queued_turn_count": {
+            "$ref": "#/$defs/WebU64"
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "state": {
+            "$ref": "#/$defs/WebAttentionState"
+          },
+          "title_summary": {
+            "maxLength": 128,
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title_truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "session_id",
+          "title_summary",
+          "title_truncated",
+          "archived",
+          "current_turn_id",
+          "active_turn_count",
+          "queued_turn_count",
+          "state",
+          "action",
+          "judge",
+          "last_activity"
+        ],
+        "type": "object"
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "properties": {
+      "continuation": {
+        "anyOf": [
+          {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "last_activity",
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "$ref": "#/$defs/WebSessionId"
+                  },
+                  "unix_microseconds": {
+                    "$ref": "#/$defs/WebU64"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "unix_microseconds",
+                  "session_id"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "kind": {
+                    "const": "session_identity",
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "$ref": "#/$defs/WebSessionId"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "session_id"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "cursor": {
+        "$ref": "#/$defs/WebU64"
+      },
+      "sort": {
+        "$ref": "#/$defs/WebSessionCatalogSort"
+      },
+      "summaries": {
+        "items": {
+          "$ref": "#/$defs/WebSessionCatalogSummary"
+        },
+        "maxItems": 32,
+        "type": "array"
+      },
+      "total": {
+        "$ref": "#/$defs/WebU64"
+      }
+    },
+    "required": [
+      "cursor",
+      "total",
+      "sort",
+      "summaries",
+      "continuation"
+    ],
+    "title": "WebSessionCatalogSnapshot",
+    "type": "object"
+  },
   "WebSessionTimelineDescriptor": {
     "$defs": {
       "WebSessionId": {
@@ -2850,6 +2958,10 @@ function assertAttentionSummary(summary, path) {
       `consistent with attention state ${JSON.stringify(summary.state)}`,
     );
   }
+}
+
+function assertSessionCatalogSummary(summary, path) {
+  assertAttentionSummary(summary, path);
   const turnBacked = [
     "active",
     "queued",
@@ -2896,6 +3008,22 @@ function assertAttentionSummaries(summaries, path) {
 
 function assertAttentionSnapshot(snapshot, path) {
   assertAttentionSummaries(snapshot.summaries, `${path}.summaries`);
+  const continuation = snapshot.continuation_after_session_id ?? null;
+  if (continuation !== null) {
+    const last = snapshot.summaries.at(-1);
+    if (last === undefined || continuation !== last.session_id) {
+      fail(
+        `${path}.continuation_after_session_id`,
+        "the last returned session identity",
+      );
+    }
+  }
+}
+
+function assertSessionCatalogSnapshot(snapshot, path) {
+  snapshot.summaries.forEach((summary, index) =>
+    assertSessionCatalogSummary(summary, `${path}.summaries[${index}]`),
+  );
   for (let index = 1; index < snapshot.summaries.length; index += 1) {
     const previous = snapshot.summaries[index - 1];
     const current = snapshot.summaries[index];
@@ -2945,14 +3073,6 @@ function assertAttentionSnapshot(snapshot, path) {
       );
     }
   }
-}
-
-function assertUnarchivedSummaries(summaries, path) {
-  summaries.forEach((summary, index) => {
-    if (summary.archived) {
-      fail(`${path}[${index}].archived`, "false on the hot attention stream");
-    }
-  });
 }
 
 function assertCanonicalU64(value, path) {
@@ -3334,21 +3454,20 @@ export function decodeWebAttentionStreamEvent(value) {
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
   if (value.kind === "snapshot") {
     assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
-    if (value.snapshot.sort !== "last_activity_descending") {
-      fail("attention_event.snapshot.sort", "the fixed hot-page activity sort");
-    }
-    assertUnarchivedSummaries(value.snapshot.summaries, "attention_event.snapshot.summaries");
   } else if (value.kind === "update") {
     assertAttentionSummaries(value.summaries, "attention_event.summaries");
-    assertUnarchivedSummaries(value.summaries, "attention_event.summaries");
-    const identities = new Set();
-    for (const summary of value.summaries) {
-      if (identities.has(summary.session_id)) {
-        fail("attention_event.summaries", "at most one replacement per session");
-      }
-      identities.add(summary.session_id);
-    }
   }
+  return value;
+}
+
+export function decodeWebSessionCatalogSnapshot(value) {
+  assertSchema(
+    schemas.WebSessionCatalogSnapshot,
+    schemas.WebSessionCatalogSnapshot,
+    value,
+    "session_catalog_snapshot",
+  );
+  assertSessionCatalogSnapshot(value, "session_catalog_snapshot");
   return value;
 }
 

@@ -1048,7 +1048,8 @@ pub enum WebAttentionActivityKind {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionGoalBlock {
-    pub generation: WebU64,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub generation: String,
     pub reason: WebAttentionBlockedReason,
     /// At most 128 Unicode scalar values; exact text is in session detail.
     #[schemars(length(max = 128))]
@@ -1058,22 +1059,83 @@ pub struct WebAttentionGoalBlock {
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionJudgeFacts {
-    pub actionable: WebU64,
-    pub completed: WebU64,
-    pub escalated: WebU64,
-    pub failed: WebU64,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub actionable: String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub completed: String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub escalated: String,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub failed: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionActivity {
-    pub unix_microseconds: WebU64,
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub unix_milliseconds: String,
     pub kind: WebAttentionActivityKind,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WebAttentionSummary {
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub session_id: String,
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub current_turn_id: Option<String>,
+    pub state: WebAttentionState,
+    pub action: Option<WebAttentionAction>,
+    pub goal_block: Option<WebAttentionGoalBlock>,
+    pub judge: WebAttentionJudgeFacts,
+    pub last_activity: WebAttentionActivity,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebAttentionSnapshot {
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+    pub cursor: String,
+    #[schemars(length(max = 32))]
+    pub summaries: Vec<WebAttentionSummary>,
+    #[schemars(regex(
+        pattern = r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    ))]
+    pub continuation_after_session_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebAttentionStreamEvent {
+    Snapshot {
+        snapshot: WebAttentionSnapshot,
+    },
+    Update {
+        #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+        cursor: String,
+        #[schemars(length(max = 32))]
+        summaries: Vec<WebAttentionSummary>,
+    },
+    ResyncRequired {
+        #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)$"))]
+        cursor: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionCatalogActivity {
+    pub unix_microseconds: WebU64,
+    pub kind: WebAttentionActivityKind,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSessionCatalogSummary {
     pub session_id: WebSessionId,
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required, schema_with = "nullable_title_summary_schema")]
@@ -1091,19 +1153,19 @@ pub struct WebAttentionSummary {
     pub action: Option<WebAttentionAction>,
     pub goal_block: Option<WebAttentionGoalBlock>,
     pub judge: WebAttentionJudgeFacts,
-    pub last_activity: WebAttentionActivity,
+    pub last_activity: WebSessionCatalogActivity,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum WebAttentionSort {
+pub enum WebSessionCatalogSort {
     LastActivityDescending,
     SessionIdentityAscending,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WebAttentionContinuation {
+pub enum WebSessionCatalogContinuation {
     LastActivity {
         unix_microseconds: WebU64,
         session_id: WebSessionId,
@@ -1115,31 +1177,15 @@ pub enum WebAttentionContinuation {
 
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct WebAttentionSnapshot {
+pub struct WebSessionCatalogSnapshot {
     pub cursor: WebU64,
     pub total: WebU64,
-    pub sort: WebAttentionSort,
+    pub sort: WebSessionCatalogSort,
     #[schemars(length(max = 32))]
-    pub summaries: Vec<WebAttentionSummary>,
+    pub summaries: Vec<WebSessionCatalogSummary>,
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
-    pub continuation: Option<WebAttentionContinuation>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum WebAttentionStreamEvent {
-    Snapshot {
-        snapshot: WebAttentionSnapshot,
-    },
-    Update {
-        cursor: WebU64,
-        #[schemars(length(min = 1, max = 32))]
-        summaries: Vec<WebAttentionSummary>,
-    },
-    ResyncRequired {
-        cursor: WebU64,
-    },
+    pub continuation: Option<WebSessionCatalogContinuation>,
 }
 
 /// One generated file and its repository-relative destination.
@@ -1217,22 +1263,17 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
     make_property_nullable(&mut timeline_window_schema, "continuation_before")?;
     make_property_nullable(&mut timeline_window_schema, "continuation_after")?;
 
-    let mut attention_snapshot_schema =
+    let attention_snapshot_schema =
         canonical_schema(schemars::schema_for!(WebAttentionSnapshot).to_value());
-    make_property_nullable(&mut attention_snapshot_schema, "continuation")?;
-    make_pointer_nullable(
-        &mut attention_snapshot_schema,
-        "/$defs/WebAttentionSummary/properties/current_turn_id",
-    )?;
-    let mut attention_event_schema =
+    let attention_event_schema =
         canonical_schema(schemars::schema_for!(WebAttentionStreamEvent).to_value());
+
+    let mut session_catalog_schema =
+        canonical_schema(schemars::schema_for!(WebSessionCatalogSnapshot).to_value());
+    make_property_nullable(&mut session_catalog_schema, "continuation")?;
     make_pointer_nullable(
-        &mut attention_event_schema,
-        "/$defs/WebAttentionSnapshot/properties/continuation",
-    )?;
-    make_pointer_nullable(
-        &mut attention_event_schema,
-        "/$defs/WebAttentionSummary/properties/current_turn_id",
+        &mut session_catalog_schema,
+        "/$defs/WebSessionCatalogSummary/properties/current_turn_id",
     )?;
 
     let mut search_page_schema = schemars::schema_for!(WebSearchPage).to_value();
@@ -1282,6 +1323,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             name: "WebAttentionStreamEvent",
             decoder: "decodeWebAttentionStreamEvent",
             schema: attention_event_schema,
+        },
+        ContractSchema {
+            name: "WebSessionCatalogSnapshot",
+            decoder: "decodeWebSessionCatalogSnapshot",
+            schema: session_catalog_schema,
         },
         ContractSchema {
             name: "WebImportListRequest",
@@ -1585,6 +1631,10 @@ function assertAttentionSummary(summary, path) {{
       `consistent with attention state ${{JSON.stringify(summary.state)}}`,
     );
   }}
+}}
+
+function assertSessionCatalogSummary(summary, path) {{
+  assertAttentionSummary(summary, path);
   const turnBacked = [
     "active",
     "queued",
@@ -1631,6 +1681,22 @@ function assertAttentionSummaries(summaries, path) {{
 
 function assertAttentionSnapshot(snapshot, path) {{
   assertAttentionSummaries(snapshot.summaries, `${{path}}.summaries`);
+  const continuation = snapshot.continuation_after_session_id ?? null;
+  if (continuation !== null) {{
+    const last = snapshot.summaries.at(-1);
+    if (last === undefined || continuation !== last.session_id) {{
+      fail(
+        `${{path}}.continuation_after_session_id`,
+        "the last returned session identity",
+      );
+    }}
+  }}
+}}
+
+function assertSessionCatalogSnapshot(snapshot, path) {{
+  snapshot.summaries.forEach((summary, index) =>
+    assertSessionCatalogSummary(summary, `${{path}}.summaries[${{index}}]`),
+  );
   for (let index = 1; index < snapshot.summaries.length; index += 1) {{
     const previous = snapshot.summaries[index - 1];
     const current = snapshot.summaries[index];
@@ -1680,14 +1746,6 @@ function assertAttentionSnapshot(snapshot, path) {{
       );
     }}
   }}
-}}
-
-function assertUnarchivedSummaries(summaries, path) {{
-  summaries.forEach((summary, index) => {{
-    if (summary.archived) {{
-      fail(`${{path}}[${{index}}].archived`, "false on the hot attention stream");
-    }}
-  }});
 }}
 
 function assertCanonicalU64(value, path) {{
@@ -2069,21 +2127,20 @@ export function decodeWebAttentionStreamEvent(value) {{
   assertSchema(schemas.WebAttentionStreamEvent, schemas.WebAttentionStreamEvent, value, "attention_event");
   if (value.kind === "snapshot") {{
     assertAttentionSnapshot(value.snapshot, "attention_event.snapshot");
-    if (value.snapshot.sort !== "last_activity_descending") {{
-      fail("attention_event.snapshot.sort", "the fixed hot-page activity sort");
-    }}
-    assertUnarchivedSummaries(value.snapshot.summaries, "attention_event.snapshot.summaries");
   }} else if (value.kind === "update") {{
     assertAttentionSummaries(value.summaries, "attention_event.summaries");
-    assertUnarchivedSummaries(value.summaries, "attention_event.summaries");
-    const identities = new Set();
-    for (const summary of value.summaries) {{
-      if (identities.has(summary.session_id)) {{
-        fail("attention_event.summaries", "at most one replacement per session");
-      }}
-      identities.add(summary.session_id);
-    }}
   }}
+  return value;
+}}
+
+export function decodeWebSessionCatalogSnapshot(value) {{
+  assertSchema(
+    schemas.WebSessionCatalogSnapshot,
+    schemas.WebSessionCatalogSnapshot,
+    value,
+    "session_catalog_snapshot",
+  );
+  assertSessionCatalogSnapshot(value, "session_catalog_snapshot");
   return value;
 }}
 
@@ -2191,6 +2248,7 @@ export function decodeWebSearchPage(value) {{
             "WebBlobDescriptor"
                 | "WebAttentionSnapshot"
                 | "WebAttentionStreamEvent"
+                | "WebSessionCatalogSnapshot"
                 | "WebSearchPage"
         ) {
             continue;

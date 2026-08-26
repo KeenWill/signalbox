@@ -13,7 +13,7 @@ export type WebAttentionAction = "provide_goal_need" | "decide_approval" | "reco
 
 export type WebAttentionActivity = {
   readonly kind: WebAttentionActivityKind;
-  readonly unix_microseconds: WebU64;
+  readonly unix_milliseconds: string;
 };
 
 export type WebAttentionActivityKind = "session" | "turn" | "goal" | "approval_judge" | "runner";
@@ -21,35 +21,28 @@ export type WebAttentionActivityKind = "session" | "turn" | "goal" | "approval_j
 export type WebAttentionBlockedReason = "user_input_required" | "external_change_required" | "authorization_required" | "execution_failure";
 
 export type WebAttentionGoalBlock = {
-  readonly generation: WebU64;
+  readonly generation: string;
   readonly need_summary: string;
   readonly reason: WebAttentionBlockedReason;
 };
 
 export type WebAttentionJudgeFacts = {
-  readonly actionable: WebU64;
-  readonly completed: WebU64;
-  readonly escalated: WebU64;
-  readonly failed: WebU64;
+  readonly actionable: string;
+  readonly completed: string;
+  readonly escalated: string;
+  readonly failed: string;
 };
-
-export type WebAttentionSort = "last_activity_descending" | "session_identity_ascending";
 
 export type WebAttentionState = "active" | "queued" | "blocked" | "awaiting_approval" | "ambiguous" | "awaiting_tool_recovery" | "awaiting_reconciliation" | "runner_lost" | "idle";
 
 export type WebAttentionSummary = {
-  readonly action: WebAttentionAction | null;
-  readonly active_turn_count: WebU64;
-  readonly archived: boolean;
-  readonly current_turn_id: string | null;
+  readonly action?: WebAttentionAction | null;
+  readonly current_turn_id?: string | null;
   readonly goal_block?: WebAttentionGoalBlock | null;
   readonly judge: WebAttentionJudgeFacts;
   readonly last_activity: WebAttentionActivity;
-  readonly queued_turn_count: WebU64;
-  readonly session_id: WebSessionId;
+  readonly session_id: string;
   readonly state: WebAttentionState;
-  readonly title_summary: string | null;
-  readonly title_truncated: boolean;
 };
 
 export type WebBlobAvailableView = {
@@ -242,6 +235,28 @@ export type WebSearchResultSource = {
   readonly kind: "derived_artifact";
 };
 
+export type WebSessionCatalogActivity = {
+  readonly kind: WebAttentionActivityKind;
+  readonly unix_microseconds: WebU64;
+};
+
+export type WebSessionCatalogSort = "last_activity_descending" | "session_identity_ascending";
+
+export type WebSessionCatalogSummary = {
+  readonly action: WebAttentionAction | null;
+  readonly active_turn_count: WebU64;
+  readonly archived: boolean;
+  readonly current_turn_id: string | null;
+  readonly goal_block?: WebAttentionGoalBlock | null;
+  readonly judge: WebAttentionJudgeFacts;
+  readonly last_activity: WebSessionCatalogActivity;
+  readonly queued_turn_count: WebU64;
+  readonly session_id: WebSessionId;
+  readonly state: WebAttentionState;
+  readonly title_summary: string | null;
+  readonly title_truncated: boolean;
+};
+
 export type WebSessionId = string;
 
 export type WebSessionTimelineEventKind = "session_created" | "session_model_settings_changed" | "turn_model_settings_resolved" | "input_accepted" | "goal_turn_retired" | "turn_activated" | "turn_failed" | "model_call_transition" | "tool_batch_transition" | "tool_approval_decided" | "context_compacted" | "turn_completed" | "turn_refused" | "turn_cancelled" | "turn_reconciliation_required" | "runner_state_transition" | "delegation_update" | "delegation_wake";
@@ -320,6 +335,24 @@ export type WebSessionTimelineWindow = {
 };
 
 export type WebAttentionSnapshot = {
+  readonly continuation_after_session_id?: string | null;
+  readonly cursor: string;
+  readonly summaries: ReadonlyArray<WebAttentionSummary>;
+};
+
+export type WebAttentionStreamEvent = {
+  readonly kind: "snapshot";
+  readonly snapshot: WebAttentionSnapshot;
+} | {
+  readonly cursor: string;
+  readonly kind: "update";
+  readonly summaries: ReadonlyArray<WebAttentionSummary>;
+} | {
+  readonly cursor: string;
+  readonly kind: "resync_required";
+};
+
+export type WebSessionCatalogSnapshot = {
   readonly continuation: {
   readonly kind: "last_activity";
   readonly session_id: WebSessionId;
@@ -329,21 +362,9 @@ export type WebAttentionSnapshot = {
   readonly session_id: WebSessionId;
 } | null;
   readonly cursor: WebU64;
-  readonly sort: WebAttentionSort;
-  readonly summaries: ReadonlyArray<WebAttentionSummary>;
+  readonly sort: WebSessionCatalogSort;
+  readonly summaries: ReadonlyArray<WebSessionCatalogSummary>;
   readonly total: WebU64;
-};
-
-export type WebAttentionStreamEvent = {
-  readonly kind: "snapshot";
-  readonly snapshot: WebAttentionSnapshot;
-} | {
-  readonly cursor: WebU64;
-  readonly kind: "update";
-  readonly summaries: ReadonlyArray<WebAttentionSummary>;
-} | {
-  readonly cursor: WebU64;
-  readonly kind: "resync_required";
 };
 
 export type WebImportListRequest = {
@@ -417,6 +438,7 @@ export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTi
 export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;
 export function decodeWebAttentionSnapshot(value: unknown): WebAttentionSnapshot;
 export function decodeWebAttentionStreamEvent(value: unknown): WebAttentionStreamEvent;
+export function decodeWebSessionCatalogSnapshot(value: unknown): WebSessionCatalogSnapshot;
 export function decodeWebImportListRequest(value: unknown): WebImportListRequest;
 export function decodeWebImportListPage(value: unknown): WebImportListPage;
 export function decodeWebImportDescriptor(value: unknown): WebImportDescriptor;

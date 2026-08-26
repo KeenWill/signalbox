@@ -100,6 +100,26 @@ async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
             .expect("the exact-identity search is bounded"),
         )
         .await?;
+    sqlx::query(
+        "INSERT INTO operator_attention_change (session_id, fact_kind, recorded_at)
+         SELECT session_id, 'session', TIMESTAMPTZ '2026-08-26 12:00:00+00'
+           FROM session",
+    )
+    .execute(&pool)
+    .await?;
+    let activity_first = repository.snapshot(AttentionQuery::hot_page()).await?;
+    let activity_second = repository
+        .snapshot(
+            AttentionQuery::try_new(
+                None,
+                Vec::new(),
+                false,
+                AttentionSort::LastActivityDescending,
+                activity_first.continuation.clone(),
+            )
+            .expect("the activity continuation is bounded"),
+        )
+        .await?;
 
     assert_eq!(
         first.summaries.len(),
@@ -144,6 +164,18 @@ async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
     );
     assert_eq!(searched.total, 1);
     assert_eq!(searched.summaries[0].session, searched_session);
+    assert_eq!(
+        activity_first.summaries.len(),
+        usize::from(max_attention_snapshot_items())
+    );
+    assert_eq!(
+        activity_second.summaries.len(),
+        usize::from(max_attention_snapshot_items())
+    );
+    assert!(
+        activity_first.summaries.last().unwrap().session
+            < activity_second.summaries[0].session
+    );
     assert_eq!(
         first.summaries.len()
             + second.summaries.len()
