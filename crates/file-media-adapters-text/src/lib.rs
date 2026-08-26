@@ -15,7 +15,7 @@ use signalbox_file_media_runtime::{
     ProbeDeclarationInput, ProcessorFailure, ProcessorProbeOutput, ProcessorReadOutput,
     ProcessorValidationOutput, ReadAccessPattern, ReadViewBounds, ReadViewDeclaration,
     ReadViewName, ReaderDeclaration, ReaderDeclarationInput, ReaderIdentity, ReasonCode,
-    StreamingTextFallback, VerifiedBlobSource,
+    StreamingTextFallback, ValidationDeclaration, VerifiedBlobSource,
 };
 
 const PROVIDER_NAME: &str = "signalbox_text";
@@ -175,6 +175,7 @@ fn reader(input: ReaderInput<'_>) -> Result<ReaderDeclaration, Box<dyn Error + S
             range_count: 0,
             cumulative_bytes: PROBE_PREFIX_BYTES,
         }),
+        validation: ValidationDeclaration::new(MAX_TEXT_FAMILY_BYTES, 1),
         views: vec![input.view],
         reason_codes,
         streaming_text_fallback: input.fallback,

@@ -21,7 +21,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use signalbox_application::{
-    EligibilityNudge, InProcessEligibilityNudge, RepoWatchBranchHead,
+    EligibilityNudge, EligibilityNudgeOutcome, InProcessEligibilityNudge, RepoWatchBranchHead,
     RepoWatchCheckCompletionGeneration, RepoWatchCheckRunObservation,
     RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
     RepoWatchConvergenceAssessmentInput, RepoWatchDifferFailureKind, RepoWatchDispatchService,
@@ -1074,6 +1074,34 @@ struct RepositoryWatchTaskContext {
     webhook_work: Option<watch::Receiver<()>>,
     webhook_nudge: Option<Arc<watch::Sender<()>>>,
     payload_purge: WebhookPayloadPurgeSchedule,
+}
+
+fn record_dispatch_start_nudge_outcome(
+    repository: &RepositorySlug,
+    session: signalbox_domain::SessionId,
+    outcome: EligibilityNudgeOutcome,
+) {
+    match outcome {
+        EligibilityNudgeOutcome::Enqueued => {}
+        EligibilityNudgeOutcome::Coalesced => tracing::info!(
+            repository = %repository.as_str(),
+            session_id = %session.as_uuid(),
+            cause_code = "repository_watch_dispatch_start_nudge_coalesced",
+            "repository-watch dispatch-start nudge was coalesced"
+        ),
+        EligibilityNudgeOutcome::DroppedAtCapacity => tracing::warn!(
+            repository = %repository.as_str(),
+            session_id = %session.as_uuid(),
+            cause_code = "repository_watch_dispatch_start_nudge_capacity",
+            "repository-watch dispatch-start nudge was not enqueued"
+        ),
+        EligibilityNudgeOutcome::WorkSourceClosed => tracing::warn!(
+            repository = %repository.as_str(),
+            session_id = %session.as_uuid(),
+            cause_code = "repository_watch_dispatch_start_nudge_closed",
+            "repository-watch dispatch-start nudge was not enqueued"
+        ),
+    }
 }
 
 impl RepositoryWatchTask {
@@ -2810,6 +2838,40 @@ impl RepositoryWatchTask {
     }
 
     async fn process_cutoffs(&self) -> Result<(), RepositoryWatchAttemptError> {
+        const MAX_EXPIRED_START_LEASES_PER_ATTEMPT: usize = 32;
+        for _ in 0..MAX_EXPIRED_START_LEASES_PER_ATTEMPT {
+            match self
+                .dispatch_store
+                .process_next_expired_start_lease(&self.repository, || {
+                    DurableCommandId::from_uuid(uuid::Uuid::now_v7())
+                })
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(RepoWatchDispatchRepositoryError::GoalCutoff(
+                    error @ signalbox_persistence::goal::GoalRepositoryError::Corruption(_),
+                )) => {
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = "repository_watch_expired_start_lease_corruption",
+                        error = %error,
+                        "repository-watch expired start lease quarantined a corrupt goal; cutoff processing continues"
+                    );
+                    continue;
+                }
+                Err(error @ RepoWatchDispatchRepositoryError::Corruption(_)) => {
+                    tracing::error!(
+                        repository = %self.repository.as_str(),
+                        cause_code = "repository_watch_expired_start_lease_corruption",
+                        error = %error,
+                        "repository-watch expired start lease quarantined corrupt storage; cutoff processing continues"
+                    );
+                    continue;
+                }
+                Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
+            }
+        }
         loop {
             match self
                 .dispatch_store
@@ -2869,6 +2931,14 @@ impl RepositoryWatchTask {
     }
 
     async fn process_dispatches(&mut self) -> Result<(), RepositoryWatchAttemptError> {
+        let unstarted = self
+            .dispatch_store
+            .load_unstarted_dispatch_sessions(&self.repository)
+            .await
+            .map_err(|_| RepositoryWatchAttemptError::Persistence)?;
+        for session in unstarted {
+            self.nudge_dispatch_start(session);
+        }
         for rule in &self.rules {
             while let Some(event) = self
                 .dispatch_store
@@ -2956,7 +3026,7 @@ impl RepositoryWatchTask {
             RepoWatchRuleEvaluationOutcome::Dispatched { sessions, .. }
             | RepoWatchRuleEvaluationOutcome::Replayed { sessions, .. } => {
                 for session in sessions {
-                    let _ = self.eligibility_nudge.nudge(*session);
+                    self.nudge_dispatch_start(*session);
                 }
             }
             RepoWatchRuleEvaluationOutcome::NotMatched
@@ -2966,6 +3036,11 @@ impl RepositoryWatchTask {
             | RepoWatchRuleEvaluationOutcome::Occupied
             | RepoWatchRuleEvaluationOutcome::Cooldown => {}
         }
+    }
+
+    fn nudge_dispatch_start(&self, session: signalbox_domain::SessionId) {
+        let outcome = self.eligibility_nudge.nudge_dispatch_start(session);
+        record_dispatch_start_nudge_outcome(&self.repository, session, outcome);
     }
 
     /// Loads the durable baseline and performs the read-only provider sweep.
@@ -7103,11 +7178,12 @@ mod tests {
         WorkflowResponse, await_poll_or_interrupt, derive_repo_watch_events, dispatch_context_json,
         inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
         normalize_checks_outcome, normalize_pull_request_context, object_id,
-        observe_webhook_work_before_drain, owed_dispatch_context_json_parts, rule_activation_error,
-        run_until_shutdown, supervise_repository_tasks, targeted_pull_requests,
+        observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
+        record_dispatch_start_nudge_outcome, rule_activation_error, run_until_shutdown,
+        supervise_repository_tasks, targeted_pull_requests,
     };
     use signalbox_application::{
-        InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
+        EligibilityNudgeOutcome, InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
         RepoWatchTargetedRefreshV1,
     };
     use signalbox_domain::{
@@ -10373,6 +10449,43 @@ mod tests {
         );
         assert!(!webhook_disposition_exists(&webhook_store, unservable.key()).await?);
         assert!(webhook_disposition_exists(&webhook_store, behind_it.key()).await?);
+        Ok(())
+    }
+
+    #[test]
+    fn inv069_non_enqueued_repo_watch_nudges_are_recorded() -> Result<(), Box<dyn Error>> {
+        let repository = RepositorySlug::try_new(WATCHED_REPOSITORY.to_owned())?;
+        let session = signalbox_domain::SessionId::from_uuid(Uuid::from_u128(0x69));
+        let captured = CapturedLog::default();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .with_writer(captured.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            record_dispatch_start_nudge_outcome(
+                &repository,
+                session,
+                EligibilityNudgeOutcome::Coalesced,
+            );
+            record_dispatch_start_nudge_outcome(
+                &repository,
+                session,
+                EligibilityNudgeOutcome::DroppedAtCapacity,
+            );
+            record_dispatch_start_nudge_outcome(
+                &repository,
+                session,
+                EligibilityNudgeOutcome::WorkSourceClosed,
+            );
+        });
+        let telemetry = captured.text();
+
+        assert!(telemetry.contains("repository_watch_dispatch_start_nudge_coalesced"));
+        assert!(telemetry.contains("repository_watch_dispatch_start_nudge_capacity"));
+        assert!(telemetry.contains("repository_watch_dispatch_start_nudge_closed"));
         Ok(())
     }
 

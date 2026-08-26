@@ -29,13 +29,15 @@ completion generations are verified against PR #541
 (`fix/check-run-updated-at`). Eager merge-forward dispatch is verified against
 PR #886 (`agent/eager-merge-forward`). Requeue after non-converged dispatch
 termination is verified against PR #894
-(`agent/dispatch-requeue-on-invalidation`). Exact-head convergence assessment
-and cutoff are verified against this PR (`agent/dispatch-autonomy-convergence`).
-The dispatch attempt budget, the delay between attempts, the parked state, and
-both ways out of it are verified against PR #980
-(`agent/dispatch-retry-budget`). Safe rule revision admission and configuration
-diagnostics are verified against PR #863 (`agent/repo-watch-rule-robustness`).
-The source-independent event occurrence identity, its durable frontier, the
+(`agent/dispatch-requeue-on-invalidation`). Safe rule revision admission and
+configuration diagnostics are verified against PR #863
+(`agent/repo-watch-rule-robustness`). Bounded dispatch-start leases, priority
+nudges, expiry retirement, and nudge outcome telemetry are verified against this
+PR (`agent/dispatch-start-lease`). Exact-head convergence assessment and cutoff
+are verified against PR #832 (`agent/dispatch-autonomy-convergence`). The
+dispatch attempt budget, the delay between attempts, the parked state, and both
+ways out of it are verified against PR #980 (`agent/dispatch-retry-budget`). The
+source-independent event occurrence identity, its durable frontier, the
 commit-time coalescing of a restated occurrence, and the storage migration are
 verified against PR #870 (`agent/repo-watch-content-identity`). The
 authenticated webhook intake, its ingress ceilings, shadow projection, parity
@@ -764,6 +766,33 @@ ownership across the gap between a completed goal turn and its durably queued
 continuation. Goal blocking, achievement, or user stop rechecks release after
 pursuit ends. The append-only dispatch records identify the sessions responsible
 for the PR; no mutable assignment flag replaces them.
+
+**Implemented behavior.** Every dispatched action admits an immutable durable
+start lease in the same transaction as its session and initial turn. The
+production ceiling is five minutes and is enforced both by the stored
+timestamp-shape constraint and by a code path that may lower but never raise the
+limit; it is not deployment configuration. Any durable `model_call` row for the
+session is first-call evidence and ends the start obligation without rewriting
+the lease. Repository reconciliation loads the oldest bounded set of unexpired
+leases without that evidence and reissues priority nudges, including after
+restart. Equal pending nudges coalesce by session. Repo-watch records every
+coalesced, capacity-dropped, or closed-source outcome with a closed cause code
+instead of discarding it.
+
+**Implemented behavior.** An expired lease without model-call evidence is
+retired under the repository and session locks. The transaction rechecks call
+evidence after taking the session and scheduler locks, then applies the ordinary
+parent-only stop when the commissioned generation-one goal is still current and
+appends an immutable lease-expiration record. A successor generation is never
+stopped for its predecessor's lease; its expiration record carries no goal
+command identity, recording that retirement occurred without a stop. The
+existing deferred goal-termination authority creates or joins the latest-state
+dispatch obligation before releasing every now-releasable singleton batch;
+sibling actions retain a multi-action batch until its ordinary release predicate
+holds. The obligation therefore survives capacity loss and becomes eligible for
+normal current-state redispatch rather than leaving the pull request assigned to
+a session that never started (INV-069). If model-call evidence wins the race,
+expiry changes no lifecycle state.
 
 **Implemented behavior.** Each obligation lineage carries a durable count of
 consecutive dispatches that ended without meeting it. Any requeue increments the
