@@ -56,7 +56,9 @@ Webhook preemption of slow complete reconciliation is verified against PR #926
 (`agent/webhook-projection-preemption-review`). The finite cutoff and dispatch
 reconciliation quanta ahead of and after a webhook drain are verified against
 this PR (`agent/daemon-live-bounded-repo-reconciliation`). Repeatable preemption
-while durable drain pages remain is verified against this PR
+of convergence-cutoff backlogs is verified against this PR
+(`agent/repo-watch-cursor-drain-baselines`). Repeatable preemption while durable
+drain pages remain is verified against this PR
 (`agent/daemon-live-repeatable-webhook-preemption`). The progressing-drain work
 budget and continuation wake are verified against this PR
 (`agent/daemon-live-webhook-progress-budget`). Merged-pull-request cursor
@@ -204,11 +206,12 @@ once a page observes no remainder, it leaves no continuation wake and the
 complete poll proceeds. A drain retry in backoff suppresses admission preemption
 until its deadline, and that retry deadline can itself interrupt the provider
 sweep. The original cycle start remains the cadence anchor. Each leading or
-trailing lifecycle-cutoff phase and rule-or-obligation dispatch phase settles at
-most 16 durable records before returning to the webhook-aware scheduler.
-Reaching that ceiling re-arms the repository wake, so durable remainder is
-revisited without letting a sustained reconciliation backlog indefinitely delay
-webhook work.
+trailing lifecycle- or convergence-cutoff phase and rule-or-obligation dispatch
+phase settles at most 16 durable records before returning to the webhook-aware
+scheduler. A cutoff whose goal is corrupt counts as settled because the cutoff
+itself was durably dispositioned while that goal was quarantined. Reaching that
+ceiling re-arms the repository wake, so durable remainder is revisited without
+letting a sustained reconciliation backlog indefinitely delay webhook work.
 
 **Implemented behavior.** One attempt fetches up to eight open pull requests
 concurrently. The fetch sequence within a single pull request stays ordered, and

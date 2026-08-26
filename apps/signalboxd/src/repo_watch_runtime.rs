@@ -3416,11 +3416,16 @@ impl RepositoryWatchTask {
                         error = %error,
                         "repository-watch lifecycle cutoff quarantined a corrupt goal; dispatch processing continues"
                     );
+                    processed = processed.saturating_add(1);
+                    if self.yield_after_reconciliation_quantum("lifecycle_cutoff", processed) {
+                        return Ok(());
+                    }
                     continue;
                 }
                 Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
             }
         }
+        let mut processed = 0_usize;
         loop {
             match self
                 .dispatch_store
@@ -3429,7 +3434,12 @@ impl RepositoryWatchTask {
                 })
                 .await
             {
-                Ok(true) => {}
+                Ok(true) => {
+                    processed = processed.saturating_add(1);
+                    if self.yield_after_reconciliation_quantum("convergence_cutoff", processed) {
+                        return Ok(());
+                    }
+                }
                 Ok(false) => break,
                 Err(RepoWatchDispatchRepositoryError::GoalCutoff(
                     error @ signalbox_persistence::goal::GoalRepositoryError::Corruption(_),
@@ -3440,6 +3450,10 @@ impl RepositoryWatchTask {
                         error = %error,
                         "repository-watch convergence cutoff quarantined a corrupt goal; dispatch processing continues"
                     );
+                    processed = processed.saturating_add(1);
+                    if self.yield_after_reconciliation_quantum("convergence_cutoff", processed) {
+                        return Ok(());
+                    }
                     continue;
                 }
                 Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
