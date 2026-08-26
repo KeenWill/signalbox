@@ -1804,13 +1804,21 @@ mod tests {
         ));
     }
 
+    /// A ceiling small enough to read the gate's arithmetic off directly. It
+    /// is this test's own number, deliberately not the configured one.
+    const FIXTURE_RECONCILIATION_CEILING: usize = 2;
+
     /// The same gate still admits work while no stop has been requested, so
     /// the preemption narrows nothing an ordinary scan does.
     #[test]
     fn a_clear_shutdown_admits_the_next_reconciliation_within_the_ceiling() {
         let (_sender, shutdown) = tokio::sync::watch::channel(false);
 
-        assert!(batch_admits_another_reconciliation(&shutdown, 0, Some(64)));
+        assert!(batch_admits_another_reconciliation(
+            &shutdown,
+            FIXTURE_RECONCILIATION_CEILING - 1,
+            Some(FIXTURE_RECONCILIATION_CEILING)
+        ));
     }
 
     /// The ceiling still ends the batch on its own once no stop is pending.
@@ -1820,8 +1828,8 @@ mod tests {
 
         assert!(!batch_admits_another_reconciliation(
             &shutdown,
-            64,
-            Some(64)
+            FIXTURE_RECONCILIATION_CEILING,
+            Some(FIXTURE_RECONCILIATION_CEILING)
         ));
     }
 
