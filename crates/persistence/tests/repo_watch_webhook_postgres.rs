@@ -17,7 +17,7 @@ use signalbox_application::{
 };
 use signalbox_domain::{CommitSha, PullRequestNumber, RepoWatchEventKindNameV1, RepositorySlug};
 use signalbox_persistence::{
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
@@ -69,7 +69,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -544,15 +544,14 @@ async fn oldest_pending_receipt_is_read_without_its_payload() -> Result<(), Box<
     Ok(())
 }
 
-/// The monitor reads the oldest pending delivery, so a delivery reaching
-/// terminal state has to hand that position to the next one and the last one
-/// has to leave nothing pending at all.
+/// The transactional pending inventory, rather than disposition-history scans,
+/// advances the monitor and page reads as deliveries reach terminal state.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn the_oldest_pending_receipt_advances_as_deliveries_reach_terminal_state()
 -> Result<(), Box<dyn Error>> {
     let (_container, pool) = migrated_postgres().await?;
-    let store = PostgresRepoWatchWebhookStore::new(pool);
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
     let oldest = delivery_key(0x411);
     let newer = delivery_key(0x412);
     admit_fixture(&store, oldest).await?;
@@ -568,6 +567,13 @@ async fn the_oldest_pending_receipt_advances_as_deliveries_reach_terminal_state(
     store
         .record_terminal(oldest, &projected_request(Vec::new())?)
         .await?;
+
+    sqlx::query(
+        "ALTER TABLE repo_watch_webhook_disposition
+         RENAME TO repo_watch_webhook_disposition_hidden",
+    )
+    .execute(&pool)
+    .await?;
     assert_eq!(
         store
             .load_oldest_pending_receipt(&repository()?)
@@ -575,6 +581,19 @@ async fn the_oldest_pending_receipt_advances_as_deliveries_reach_terminal_state(
             .map(|pending| pending.key()),
         Some(newer)
     );
+    assert_eq!(
+        store
+            .load_pending(&repository()?, pending_page_size(), None)
+            .await?[0]
+            .key(),
+        newer
+    );
+    sqlx::query(
+        "ALTER TABLE repo_watch_webhook_disposition_hidden
+         RENAME TO repo_watch_webhook_disposition",
+    )
+    .execute(&pool)
+    .await?;
 
     store
         .record_terminal(newer, &projected_request(Vec::new())?)
@@ -584,6 +603,70 @@ async fn the_oldest_pending_receipt_advances_as_deliveries_reach_terminal_state(
         store.load_oldest_pending_receipt(&repository()?).await?,
         None
     );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn pending_inventory_changes_only_with_admission_and_disposition()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x413);
+    admit_fixture(&store, key).await?;
+
+    let pending_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_webhook_pending
+          WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(key.hook_id().get()))
+    .bind(key.delivery_id())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(pending_count, 1);
+
+    let update_error = sqlx::query(
+        "UPDATE repo_watch_webhook_pending
+            SET repository = $1
+          WHERE hook_id = $2 AND delivery_id = $3",
+    )
+    .bind(OTHER_REPOSITORY)
+    .bind(Decimal::from(key.hook_id().get()))
+    .bind(key.delivery_id())
+    .execute(&pool)
+    .await
+    .expect_err("pending inventory rejects updates");
+    assert!(update_error.to_string().contains("cannot be updated"));
+
+    let delete_error = sqlx::query(
+        "DELETE FROM repo_watch_webhook_pending
+          WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(key.hook_id().get()))
+    .bind(key.delivery_id())
+    .execute(&pool)
+    .await
+    .expect_err("pending inventory rejects deletion before disposition");
+    assert!(
+        delete_error
+            .to_string()
+            .contains("retires only with its disposition")
+    );
+
+    store
+        .record_terminal(key, &projected_request(Vec::new())?)
+        .await?;
+    let terminal_pending_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM repo_watch_webhook_pending
+          WHERE hook_id = $1 AND delivery_id = $2",
+    )
+    .bind(Decimal::from(key.hook_id().get()))
+    .bind(key.delivery_id())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal_pending_count, 0);
     Ok(())
 }
 

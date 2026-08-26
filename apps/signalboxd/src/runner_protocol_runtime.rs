@@ -2026,7 +2026,7 @@ mod tests {
     };
     use signalbox_persistence::{
         create_session::CreateSessionRepository,
-        disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+        disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
         disposable_test_container_labels, local_test_connection_options, migrate,
         runner_protocol::{RunnerConnectionCause, RunnerConnectionState},
         session_credentials::{SessionCredentialPin, SessionModelCredential},
@@ -2272,7 +2272,10 @@ mod tests {
             .with_password(DATABASE_PASSWORD)
             .with_db_name(DATABASE_NAME)
             .with_cmd(disposable_postgres_server_args())
-            .with_mount(disposable_postgres_state_tmpfs())
+            .with_mount(
+                disposable_postgres_state_tmpfs_from_example()
+                    .expect("checked-in example provides the test database bound"),
+            )
             .with_tag(POSTGRES_IMAGE_TAG)
             .with_labels(disposable_test_container_labels())
             .start()

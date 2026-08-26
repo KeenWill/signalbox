@@ -231,7 +231,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            af2d01a4beb4b7d7db060ab43dd89087b5032ed5c4e323296c2ad23e4a22f448
+            09620879011e0dd0ec0a8136ab25aa6f59d4f991366db4f66edf4f4da35c8299
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -383,6 +383,7 @@ jobs:
           sudo sh -c 'echo +pids +memory > /sys/fs/cgroup/signalbox-file-media-ci/cgroup.subtree_control'
           sudo chown -R "$USER" /sys/fs/cgroup/signalbox-file-media-ci
       - name: Cache Rust dependencies
+        id: rust-cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
@@ -393,6 +394,13 @@ jobs:
           cache-targets: false
           shared-key: rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # A prefix restore can retain a native build-script fingerprint after its
+      # static archive was omitted from the cache, making Cargo skip the script
+      # and then fail at link time. Keep registry downloads but rebuild target
+      # artifacts whenever the dependency key is not an exact match.
+      - name: Discard target artifacts from a prefix cache restore
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: cargo clean
       - name: Run tests
         env:
           SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"

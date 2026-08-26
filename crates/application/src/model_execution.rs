@@ -15,17 +15,12 @@ use std::{
     time::Duration,
 };
 
-// With the runtime's ten-minute exchange deadline, 256 rounds can already hold
-// one progressing turn in provider work for 42 hours 40 minutes and repeat a
-// full-context spend 256 times. Further work is a latency and spend runaway.
-// numeric-bound: ceiling - protects against multi-day latency and repeated provider spend
-const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 256;
-
-// The round ceiling alone does not bound memory: it multiplies against the
-// 32-request batch bound and the 1 MiB argument and result bounds, so 256
-// rounds would admit 16 GiB of retained argument and result text where 32
-// rounds admitted 2 GiB. Retained content is therefore bounded on its own
-// terms, independently of the round ceiling. One maximal round retains 32
+// The configured automatic tool-round ceiling alone does not bound memory: it
+// multiplies against the 32-request batch bound and the 1 MiB argument and
+// result bounds, so a 256-round deployment would admit 16 GiB of retained
+// argument and result text where 32 rounds admitted 2 GiB. Retained content is
+// therefore bounded on its own terms, independently of the round ceiling — and
+// of whether a deployment configured one at all. One maximal round retains 32
 // requests times 1 MiB of arguments plus 1 MiB of results, so this admits four
 // maximal rounds while leaving the round ceiling operative for the
 // kilobyte-scale results real executors return. It bounds every kind of content
@@ -34,11 +29,11 @@ const MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN: usize = 256;
 // blind to it would be multiplied by the same round count it is meant to
 // contain. It also sits far above any provider context window, so it cannot
 // refuse a turn a provider would accept.
-// numeric-bound: ceiling - protects daemon memory against multiplicative retained frontier content
+// numeric-bound: guard - prevents retained frontier content from exhausting daemon memory as rounds multiply
 const MAX_RETAINED_FRONTIER_CONTENT_BYTES: usize = 256 * 1024 * 1024;
 
 // Worst-case compact JSON for maximum checked metadata, u64 length, and digest.
-// numeric-bound: ceiling - protects provider-request memory from oversized attachment stubs
+// numeric-bound: guard - prevents a stub the retained-content sum excludes from growing unbounded
 const MAX_RENDERED_ATTACHMENT_STUB_BYTES: usize = 2_304;
 
 use signalbox_domain::{
@@ -1747,6 +1742,7 @@ pub struct ModelCallExecutionService<
     gate: Gate,
     catalog: Arc<dyn ToolCatalog>,
     retained_state: Option<RetainedModelCallExecutionState>,
+    max_automatic_tool_rounds_per_turn: Option<usize>,
     retained_frontier_content_limit: usize,
 }
 
@@ -1754,6 +1750,10 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
     ModelCallExecutionService<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
 {
     /// Composes every purpose-specific effect role.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the service keeps each effect role and the required deployment policy explicit"
+    )]
     pub fn new(
         ids: Ids,
         prepare: Prepare,
@@ -1762,6 +1762,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         observation: Observation,
         provider: Provider,
         gate: Gate,
+        max_automatic_tool_rounds_per_turn: Option<usize>,
     ) -> Self {
         Self {
             ids,
@@ -1773,6 +1774,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             gate,
             catalog: Arc::new(NoToolCatalog),
             retained_state: None,
+            max_automatic_tool_rounds_per_turn,
             retained_frontier_content_limit: MAX_RETAINED_FRONTIER_CONTENT_BYTES,
         }
     }
@@ -1805,6 +1807,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         gate: Gate,
         catalog: Arc<dyn ToolCatalog>,
         retained_state: Option<RetainedModelCallExecutionState>,
+        max_automatic_tool_rounds_per_turn: Option<usize>,
     ) -> Self {
         Self {
             ids,
@@ -1816,6 +1819,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             gate,
             catalog,
             retained_state,
+            max_automatic_tool_rounds_per_turn,
             retained_frontier_content_limit: MAX_RETAINED_FRONTIER_CONTENT_BYTES,
         }
     }
@@ -1837,6 +1841,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
         Gate,
         Arc<dyn ToolCatalog>,
         Option<RetainedModelCallExecutionState>,
+        Option<usize>,
     ) {
         (
             self.ids,
@@ -1848,6 +1853,7 @@ impl<Ids, Prepare, Failure, Authorization, Observation, Provider, Gate>
             self.gate,
             self.catalog,
             self.retained_state,
+            self.max_automatic_tool_rounds_per_turn,
         )
     }
 
@@ -2168,13 +2174,19 @@ where
             }
             Err(error) => return Err(ModelCallExecutionError::Render(error)),
         };
+        // A deployment that configures no automatic tool-round ceiling leaves the
+        // loop bounded by the retained-content ceiling above and by the turn's
+        // own liveness watchdogs, so an absent limit admits the round rather than
+        // substituting one the operator did not ask for.
         let observed_tool_rounds = automatic_tool_round_count(turn, operation.messages());
-        if observed_tool_rounds >= MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN {
+        if let Some(tool_round_limit) = self.max_automatic_tool_rounds_per_turn
+            && observed_tool_rounds >= tool_round_limit
+        {
             tracing::warn!(
                 session_id = %session.as_uuid(),
                 turn_id = %turn.as_uuid(),
                 model_call_id = %call.into_uuid(),
-                tool_round_limit = MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN,
+                tool_round_limit,
                 observed_tool_rounds,
                 "automatic tool-round limit reached"
             );
@@ -2623,6 +2635,9 @@ where
             .filter_map(|part| match part {
                 AssistantResponsePart::Text(_) => None,
                 AssistantResponsePart::ToolCall(proposal) => {
+                    if proposal.is_suppressed() {
+                        return Some(InitialToolApproval::RuntimeSafetyDeny);
+                    }
                     let definition = advertised_tools
                         .iter()
                         .find(|definition| definition.name() == proposal.name());
@@ -2804,6 +2819,11 @@ fn report_turn_terminalization(
         "turn terminalized"
     );
 }
+/// Counts one turn's distinct automatic tool rounds in a rendered frontier.
+///
+/// The count is the quantity a deployment's configured ceiling is compared
+/// against; the comparison itself stays at the checkpoint that owns the
+/// configured limit.
 fn automatic_tool_round_count(turn: TurnId, messages: &[ModelConversationMessage]) -> usize {
     messages
         .iter()
@@ -4751,6 +4771,7 @@ mod tests {
             UnusedObservation,
             UnusedProvider,
             InProcessAttemptDispatchGate::default(),
+            None,
         )
         .with_tool_catalog(catalog);
         let advertised_tools = service.catalog.definitions();
@@ -4859,6 +4880,7 @@ mod tests {
             UnusedObservation,
             UnusedProvider,
             InProcessAttemptDispatchGate::default(),
+            None,
         )
         .with_tool_catalog(catalog);
         let observation = tool_response();
@@ -4940,6 +4962,47 @@ mod tests {
                 identity(41, ContextFrontierId::from_uuid),
             ),
             "lifecycle-dependent candidates receive a disjoint identity inventory"
+        );
+    }
+
+    /// S10 / INV-020 / INV-035: a credential-suppressed proposal bypasses the
+    /// advertised execution policy and receives an automatic safety denial.
+    #[test]
+    fn s10_inv020_inv035_suppressed_proposal_forces_runtime_safety_denial() {
+        let service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: VecDeque::new(),
+                calls: 0,
+            },
+            UnusedFailure,
+            UnusedAuthorization,
+            UnusedObservation,
+            UnusedProvider,
+            InProcessAttemptDispatchGate::default(),
+            None,
+        );
+        let response = signalbox_domain::ToolUsingAssistantResponse::try_from_parts(vec![
+            signalbox_domain::AssistantResponsePart::ToolCall(
+                signalbox_domain::ToolCallProposal::suppressed(
+                    signalbox_domain::ToolName::try_new(String::from("sandboxed_exec"))
+                        .expect("fixture tool name is valid"),
+                ),
+            ),
+        ])
+        .expect("suppressed proposal remains one bounded logical request");
+        let observation = ModelCallTerminalObservation::CompletedWithTools { response };
+
+        assert_eq!(
+            service
+                .tool_approvals(
+                    &observation,
+                    DangerousToolAutoApproval::ApproveAll,
+                    &[],
+                    &[]
+                )
+                .as_ref(),
+            [InitialToolApproval::RuntimeSafetyDeny]
         );
     }
     /// S28 / INV-038 / INV-039: attested imported text keeps its exact
@@ -5685,6 +5748,7 @@ mod tests {
             UnusedObservation,
             UnusedProvider,
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         assert_eq!(
             service
@@ -5717,6 +5781,7 @@ mod tests {
             UnusedObservation,
             UnusedProvider,
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         assert_eq!(
             service
@@ -5746,6 +5811,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -5790,6 +5856,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
             InProcessAttemptDispatchGate::default(),
+            None,
         )
         .with_tool_catalog(catalog);
 
@@ -5835,6 +5902,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         assert_eq!(
             service
@@ -5860,6 +5928,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityCancelled]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         assert_eq!(
             promptless_service
@@ -5897,6 +5966,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -5918,8 +5988,18 @@ mod tests {
             })
         );
 
-        let (ids, prepare, failure, authorization, observation, provider, gate, catalog, retained) =
-            service.into_parts();
+        let (
+            ids,
+            prepare,
+            failure,
+            authorization,
+            observation,
+            provider,
+            gate,
+            catalog,
+            retained,
+            tool_round_limit,
+        ) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 0);
@@ -5934,6 +6014,7 @@ mod tests {
             gate,
             catalog,
             retained,
+            tool_round_limit,
         );
         assert!(matches!(
             resumed.execute(identity(99, SessionId::from_uuid)).await,
@@ -5941,7 +6022,7 @@ mod tests {
                 FakeError::Infrastructure
             ))
         ));
-        let (_, prepare, failure, _, _, provider, _, _, retained) = resumed.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = resumed.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 2);
         assert_eq!(failure.reread_calls, 1);
@@ -5990,6 +6071,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -5999,7 +6081,7 @@ mod tests {
                 .expect("the capability failure commits"),
             ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(failed))
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         // The failure must belong to the prepared turn's own session *and*
@@ -6045,6 +6127,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -6054,7 +6137,7 @@ mod tests {
                 .expect("the retried capability failure commits"),
             ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(failed))
         );
-        let (_, _, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, _, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(failure.calls, 2);
         // Both attempts must address the prepared call — agreeing only with
         // each other would still pass if the service handed the same stale or
@@ -6096,8 +6179,9 @@ mod tests {
     /// capability failure.
     #[tokio::test]
     async fn s15_inv071_tool_round_limit_fires_before_provider_entry() {
+        const CONFIGURED_TOOL_ROUND_LIMIT: usize = 7;
         let (request, tool_entries, failed) =
-            tool_round_saturated_fixture(MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN);
+            tool_round_saturated_fixture(CONFIGURED_TOOL_ROUND_LIMIT);
         let session = request.session();
         // Captured before the request moves into the fake: the committed
         // terminalization has to name *this* saturated call.
@@ -6117,6 +6201,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([]),
             InProcessAttemptDispatchGate::default(),
+            Some(CONFIGURED_TOOL_ROUND_LIMIT),
         );
         let captured = CapturedTelemetry::default();
         let subscriber = tracing_subscriber::fmt()
@@ -6139,7 +6224,7 @@ mod tests {
                 .contains("terminal_outcome=\"tool_round_limit_reached\""),
             "the service terminalization must expose the INV-071 label"
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         // A count alone accepts `fail_prepared` called with an unrelated
@@ -6650,8 +6735,8 @@ mod tests {
     /// spend but not retained memory, which is what this bound supplies.
     #[tokio::test]
     async fn s15_inv071_retained_frontier_content_limit_fires_before_provider_entry() {
-        // Two rounds: far below the round ceiling, so only the retained-content
-        // bound can explain the closure.
+        // Two rounds and no configured round ceiling at all, so only the
+        // retained-content bound can explain the closure.
         let (request, tool_entries, failed) = tool_round_saturated_fixture(2);
         let session = request.session();
         let over_bound_call = request.call().id();
@@ -6670,6 +6755,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([]),
             InProcessAttemptDispatchGate::default(),
+            None,
         )
         .with_retained_frontier_content_limit(0);
         let captured = CapturedTelemetry::default();
@@ -6696,7 +6782,7 @@ mod tests {
             telemetry.contains("terminal_outcome=\"tool_round_limit_reached\""),
             "the service terminalization must expose the INV-071 label"
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.recorded.len(), 1);
@@ -6725,8 +6811,8 @@ mod tests {
     /// already-committed outcome without entering the provider.
     #[tokio::test]
     async fn inv071_tool_round_limit_ambiguous_commit_round_trips_retained_cause() {
-        let (request, tool_entries, _) =
-            tool_round_saturated_fixture(MAX_AUTOMATIC_TOOL_ROUNDS_PER_TURN);
+        const CONFIGURED_TOOL_ROUND_LIMIT: usize = 5;
+        let (request, tool_entries, _) = tool_round_saturated_fixture(CONFIGURED_TOOL_ROUND_LIMIT);
         let session = request.session();
         let turn = request.turn();
         let call = request.call().id();
@@ -6746,6 +6832,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([]),
             InProcessAttemptDispatchGate::default(),
+            Some(CONFIGURED_TOOL_ROUND_LIMIT),
         );
 
         assert!(matches!(
@@ -6773,7 +6860,7 @@ mod tests {
                 .expect("the reread proves the tool-round closure landed"),
             ModelCallExecutionOutcome::ToolRoundLimitAlreadyCommitted(call)
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 1);
@@ -6805,6 +6892,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -6820,7 +6908,7 @@ mod tests {
                 .expect("the cancellation reread is authoritative"),
             ModelCallExecutionOutcome::NoWork
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 1);
@@ -6853,6 +6941,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::CapabilityKnownFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -6868,7 +6957,7 @@ mod tests {
                 .expect("the authoritative reread proves the closure landed"),
             ModelCallExecutionOutcome::CapabilityFailureAlreadyCommitted(call)
         );
-        let (_, prepare, failure, _, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, failure, _, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(failure.calls, 1);
         assert_eq!(failure.reread_calls, 1);
@@ -6901,6 +6990,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -6909,7 +6999,7 @@ mod tests {
                 FakeError::IdentityCollision
             ))
         ));
-        let (_, prepare, _, authorization, _, provider, _, _, retained) = service.into_parts();
+        let (_, prepare, _, authorization, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 0);
@@ -6938,6 +7028,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -6947,7 +7038,7 @@ mod tests {
                 .expect("stale authority is a normal no-send result"),
             ModelCallExecutionOutcome::NoWork
         );
-        let (_, _, _, authorization, _, provider, _, _, retained) = service.into_parts();
+        let (_, _, _, authorization, _, provider, _, _, retained, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(provider.capability_preparation_count(), 1);
         assert_eq!(provider.interaction_count(), 0);
@@ -6976,6 +7067,7 @@ mod tests {
             UnusedObservation,
             ScriptedModelCallProvider::new([ScriptedModelCallStep::InteractionOperatorFailure]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
         let error = service
             .execute(identity(1, SessionId::from_uuid))
@@ -6985,7 +7077,7 @@ mod tests {
             error,
             ModelCallExecutionError::Provider(ScriptedModelCallError::InteractionOperatorFailure)
         ));
-        let (_, prepare, _, authorization, _, provider, _, _, _) = service.into_parts();
+        let (_, prepare, _, authorization, _, provider, _, _, _, _) = service.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
         assert_eq!(provider.capability_preparation_count(), 1);
@@ -7028,6 +7120,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         let error = service
@@ -7065,7 +7158,7 @@ mod tests {
             ModelCallExecutionOutcome::ObservationAlreadyCommitted(call)
         );
         assert!(service.retained_observation().is_none());
-        let (_, _, _, authorization, observation, provider, _, _, _) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _, _, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 0);
         assert_eq!(observation.commit_calls, 2);
@@ -7116,6 +7209,7 @@ mod tests {
                 },
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         let error = service
@@ -7134,7 +7228,7 @@ mod tests {
             retained.observation(),
             &ModelCallTerminalObservation::KnownFailed
         );
-        let (_, _, _, authorization, observation, provider, _, _, _) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _, _, _) = service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 1);
         assert_eq!(observation.commit_calls, 1);
@@ -7174,6 +7268,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert_eq!(
@@ -7183,7 +7278,8 @@ mod tests {
                 .expect("the complete terminal cancellation is authoritative"),
             ModelCallExecutionOutcome::NoWork
         );
-        let (_, _, _, authorization, observation, provider, _, _, retained) = service.into_parts();
+        let (_, _, _, authorization, observation, provider, _, _, retained, _) =
+            service.into_parts();
         assert_eq!(authorization.calls, 1);
         assert_eq!(authorization.reread_calls, 1);
         assert_eq!(observation.commit_calls, 0);
@@ -7234,6 +7330,7 @@ mod tests {
                 },
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -7253,8 +7350,18 @@ mod tests {
             }) if *retained_session == session && **prepared == request
         ));
 
-        let (ids, prepare, failure, authorization, observation, provider, gate, catalog, retained) =
-            service.into_parts();
+        let (
+            ids,
+            prepare,
+            failure,
+            authorization,
+            observation,
+            provider,
+            gate,
+            catalog,
+            retained,
+            tool_round_limit,
+        ) = service.into_parts();
         let mut resumed = ModelCallExecutionService::from_parts(
             ids,
             prepare,
@@ -7265,6 +7372,7 @@ mod tests {
             gate,
             catalog,
             retained,
+            tool_round_limit,
         );
         let error = resumed
             .execute(identity(99, SessionId::from_uuid))
@@ -7282,7 +7390,7 @@ mod tests {
             retained_observation.observation(),
             &ModelCallTerminalObservation::KnownFailed
         );
-        let (_, prepare, _, authorization, observation, provider, _, _, retained) =
+        let (_, prepare, _, authorization, observation, provider, _, _, retained, _) =
             resumed.into_parts();
         assert_eq!(prepare.calls, 1);
         assert_eq!(authorization.calls, 1);
@@ -7336,6 +7444,7 @@ mod tests {
                 ModelCallTerminalObservation::KnownFailed,
             )]),
             InProcessAttemptDispatchGate::default(),
+            None,
         );
 
         assert!(matches!(
@@ -7353,7 +7462,8 @@ mod tests {
             })
         ));
 
-        let (_, prepare, _, authorization, observation, provider, _, _, _) = service.into_parts();
+        let (_, prepare, _, authorization, observation, provider, _, _, _, _) =
+            service.into_parts();
         assert_eq!(prepare.calls, 2);
         assert_eq!(authorization.calls, 2);
         assert_eq!(authorization.reread_calls, 2);
@@ -7395,6 +7505,7 @@ mod tests {
                 interaction_count: 0,
             },
             gate,
+            None,
         );
         {
             let execution = service.execute(session);
@@ -7417,7 +7528,7 @@ mod tests {
                 Err(ModelCallExecutionError::Provider(FakeError::Infrastructure))
             ));
         }
-        let (_, _, _, _, _, provider, _, _, _) = service.into_parts();
+        let (_, _, _, _, _, provider, _, _, _, _) = service.into_parts();
         assert_eq!(provider.interaction_count, 1);
     }
 
