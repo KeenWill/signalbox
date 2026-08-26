@@ -11,7 +11,9 @@ capabilities and production adapter are verified against this PR
 (`agent/web-discovery-reads`). Contract version two and its blob routes are
 verified against this PR (`agent/web-blob-delivery`). The fleet-attention
 snapshot and monitor stream are verified against this PR
-(`agent/web-attention-projections`). The bounded lexical-search route and
+(`agent/web-attention-projections`). The bounded session catalog route and its
+loopback authority placement are verified against this PR
+(`agent/web-session-catalog-follow`). The bounded lexical-search route and
 generated DTOs are verified against this PR (`agent/web-search-usage`). The
 dedicated browser usage/cost routes and generated DTOs are verified against this
 PR (`agent/web-usage-http`). The repository-watch browser projection and
@@ -214,8 +216,8 @@ daemon does not emit permissive CORS headers and adds no account, login,
 bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
 listener therefore rejects non-loopback binds; any future remote deployment
 requires an explicit authentication and transport-security design first.
-Unauthenticated session reads — the session descriptor, the session timeline,
-the bounded lexical search, the bounded usage summary and usage-call detail, the
+Unauthenticated session reads — the session catalog, session descriptor, session
+timeline, bounded lexical search, bounded usage summary and usage-call detail,
 operator attention snapshot and its follow stream, and the blob descriptor and
 content routes — additionally require a loopback `Host` authority: `localhost`
 or an IPv4 or IPv6 loopback address, with an optional port. Another authority

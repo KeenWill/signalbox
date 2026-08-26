@@ -55,7 +55,9 @@ use signalbox_domain::{
     BlobDerivation, BlobDerivationProducer, BlobDigest, ModelCallId, ProviderModelIdentity,
     ResolvedProviderTarget, SessionId, TurnId,
 };
-use signalbox_persistence::attention::{AttentionRepository, AttentionRepositoryError};
+use signalbox_persistence::attention::{
+    AttentionPage, AttentionRepository, AttentionRepositoryError,
+};
 use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
 use signalbox_persistence::search::{SearchRepository, SearchRepositoryError};
 use signalbox_persistence::session_timeline::{
@@ -585,16 +587,16 @@ async fn session_catalog(State(state): State<WebApiState>, RawQuery(query): RawQ
         Ok(query) => query,
         Err(()) => return invalid_attention_query(),
     };
+    let query = match parse_attention_query(query) {
+        Ok(query) => query,
+        Err(()) => return invalid_attention_query(),
+    };
     let Some(repository) = state.attention else {
         return application_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "attention_projection_unavailable",
             "attention projection is not configured",
         );
-    };
-    let query = match parse_attention_query(query) {
-        Ok(query) => query,
-        Err(()) => return invalid_attention_query(),
     };
     let Some(budget) = state.snapshot_reader_budget else {
         return attention_projection_error(None);
@@ -658,7 +660,7 @@ async fn attention_snapshot(
     let Ok(_permit) = budget.acquire().await else {
         return attention_projection_error(None);
     };
-    match repository.snapshot(query).await {
+    match repository.page(query).await {
         Ok(snapshot) => match attention_snapshot_dto(snapshot) {
             Ok(snapshot) => Json(snapshot).into_response(),
             Err(()) => attention_projection_error(None),
@@ -858,7 +860,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
     };
     let snapshot = match tokio::select! {
         () = wait_for_web_shutdown(&mut shutdown) => return empty_ndjson_response(),
-        snapshot = repository.snapshot(attention_page_query(None)) => snapshot,
+        snapshot = repository.page(attention_page_query(None)) => snapshot,
     } {
         Ok(snapshot) => snapshot,
         Err(error) => return attention_projection_error(Some(error)),
@@ -1068,7 +1070,7 @@ enum AttentionFollowDisposition {
     End,
 }
 
-fn attention_snapshot_dto(snapshot: AttentionSnapshot) -> Result<WebAttentionSnapshot, ()> {
+fn attention_snapshot_dto(snapshot: AttentionPage) -> Result<WebAttentionSnapshot, ()> {
     if snapshot.sort != AttentionSort::SessionIdentityAscending {
         return Err(());
     }
@@ -3394,14 +3396,15 @@ mod tests {
     use signalbox_application::{
         AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
         AttentionContinuation, AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts,
-        AttentionSnapshot, AttentionSort, AttentionState, AttentionSummary, UsageAggregateGroup,
-        UsageAggregateKey, UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallKind,
+        AttentionSort, AttentionState, AttentionSummary, UsageAggregateGroup, UsageAggregateKey,
+        UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallKind,
         UsageCredentialProfileLabel, UsageInputTokenSemantics, UsageProvenance, UsageTokenAxes,
         UsageTokenCoverage, UsageTokenPresence, max_attention_change_items,
         max_attention_goal_summary_characters, max_attention_snapshot_items,
         max_attention_title_characters,
     };
     use signalbox_domain::{ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId};
+    use signalbox_persistence::attention::AttentionPage;
     use signalbox_web_contract::{
         MAX_JSON_BODY_BYTES, MAX_NDJSON_ITEM_BYTES, WebAttentionStreamEvent, WebContractBootstrap,
         WebContractExample, WebUsageCost, WebUsageCostUnavailableReason,
@@ -4183,6 +4186,25 @@ mod tests {
         assert_eq!(body["error"]["code"], "invalid_session_catalog_query");
     }
 
+    #[tokio::test]
+    async fn session_catalog_semantic_rejection_precedes_projection_availability() {
+        let request = Request::get("/api/sessions?sort=unknown")
+            .header(header::HOST, "localhost")
+            .body(Body::empty())
+            .expect("the request is valid");
+        let response = production_router(None, None, None, None, None)
+            .oneshot(request)
+            .await
+            .expect("the production router responds");
+        let status = response.status();
+        let body: serde_json::Value = serde_json::from_slice(&response_body(response).await)
+            .expect("the typed application failure is JSON");
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["kind"], "application");
+        assert_eq!(body["error"]["code"], "invalid_session_catalog_query");
+    }
+
     #[test]
     fn session_catalog_query_decodes_bounded_filters_and_activity_keyset() {
         let raw = concat!(
@@ -4456,9 +4478,8 @@ mod tests {
     fn maximum_attention_snapshot_fits_one_ndjson_item() {
         let summary = maximum_attention_summary();
         let continuation = AttentionContinuation::SessionIdentity(summary.session);
-        let snapshot = attention_snapshot_dto(AttentionSnapshot {
+        let snapshot = attention_snapshot_dto(AttentionPage {
             cursor: AttentionCursor::new(u64::MAX),
-            total: u64::MAX,
             sort: AttentionSort::SessionIdentityAscending,
             summaries: vec![summary; usize::from(max_attention_snapshot_items())],
             continuation: Some(continuation),

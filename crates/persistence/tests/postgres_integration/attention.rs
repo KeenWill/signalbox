@@ -252,6 +252,23 @@ async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
+async fn legacy_attention_page_avoids_the_catalog_total_projection() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    create_attention_session(&pool, 0).await?;
+    create_attention_session(&pool, 1).await?;
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+    let page = repository.page(identity_query(None)).await?;
+
+    assert_eq!(page.summaries.len(), 2);
+    assert_eq!(page.sort, AttentionSort::SessionIdentityAscending);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
 async fn oversized_change_burst_requires_resync() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_attention_session(&pool, 0).await?;
@@ -304,6 +321,38 @@ async fn missing_activity_fact_fails_the_default_catalog_page_closed() -> Result
     let AttentionRepositoryError::Corruption(AttentionCorruption::Missing(_)) = error else {
         panic!("missing activity facts must report projection corruption");
     };
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn mismatched_activity_key_fails_the_catalog_closed() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    create_attention_session(&pool, 0).await?;
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+    let complete = repository.snapshot(AttentionQuery::hot_page()).await?;
+    let session = complete.summaries[0].session;
+    sqlx::query(
+        "UPDATE session_timeline_fact
+            SET attention_activity_recorded_at = attention_activity_recorded_at
+                                             - INTERVAL '1 second'
+          WHERE session_id = $1",
+    )
+    .bind(session.into_uuid())
+    .execute(&pool)
+    .await?;
+    let error = repository
+        .snapshot(AttentionQuery::hot_page())
+        .await
+        .expect_err("a keyset timestamp that differs from the journal is corruption");
+
+    assert!(matches!(
+        error,
+        AttentionRepositoryError::Corruption(AttentionCorruption::Invalid("session activity fact"))
+    ));
 
     pool.close().await;
     drop(container);

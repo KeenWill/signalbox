@@ -72,6 +72,15 @@ impl From<AttentionCorruption> for AttentionRepositoryError {
     }
 }
 
+/// One bounded attention page without the catalog-only exact total.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AttentionPage {
+    pub cursor: AttentionCursor,
+    pub sort: AttentionSort,
+    pub summaries: Vec<AttentionSummary>,
+    pub continuation: Option<AttentionContinuation>,
+}
+
 /// Read-only PostgreSQL implementation of the fleet projection port.
 #[derive(Clone, Debug)]
 pub struct AttentionRepository {
@@ -100,10 +109,40 @@ impl AttentionRepository {
         &self,
         query: AttentionQuery,
     ) -> Result<AttentionSnapshot, AttentionRepositoryError> {
+        let (page, total) = self.read_page(query, true).await?;
+        Ok(AttentionSnapshot {
+            cursor: page.cursor,
+            total,
+            sort: page.sort,
+            summaries: page.summaries,
+            continuation: page.continuation,
+        })
+    }
+
+    /// Reads the bounded legacy attention projection without scanning the
+    /// fleet for the catalog's exact filtered total.
+    pub async fn page(
+        &self,
+        query: AttentionQuery,
+    ) -> Result<AttentionPage, AttentionRepositoryError> {
+        self.read_page(query, false)
+            .await
+            .map(|(page, _total)| page)
+    }
+
+    async fn read_page(
+        &self,
+        query: AttentionQuery,
+        include_total: bool,
+    ) -> Result<(AttentionPage, u64), AttentionRepositoryError> {
         let mut transaction = self.read_transaction().await?;
         let cursor = current_cursor(&mut transaction).await?;
-        verify_fact_completeness(&mut transaction).await?;
-        let total = count_catalog_matches(&mut transaction, &query).await?;
+        let total = if include_total {
+            verify_fact_completeness(&mut transaction).await?;
+            count_catalog_matches(&mut transaction, &query).await?
+        } else {
+            0
+        };
         let mut summaries = load_summaries(
             &mut transaction,
             None,
@@ -121,13 +160,15 @@ impl AttentionRepository {
             })
             .flatten();
         transaction.commit().await?;
-        Ok(AttentionSnapshot {
-            cursor,
+        Ok((
+            AttentionPage {
+                cursor,
+                sort: query.sort(),
+                summaries,
+                continuation,
+            },
             total,
-            sort: query.sort(),
-            summaries,
-            continuation,
-        })
+        ))
     }
 
     pub async fn changes_after(
@@ -666,26 +707,39 @@ fn offset_date_time_from_system_time(
         .map_err(|_| AttentionCorruption::Invalid("catalog continuation timestamp").into())
 }
 
-/// Fails the coherent read closed when any durable session is missing its
-/// indexed timeline/activity fact. The exact count is session-driven, so a
-/// missing projection must not silently shrink the activity-driven page.
+/// Fails the coherent catalog read closed when any durable session is missing
+/// its indexed timeline/activity fact or its projected key disagrees with the
+/// authoritative latest journal row. The exact count is session-driven, so an
+/// incomplete projection must not silently shrink or misorder the page.
 async fn verify_fact_completeness(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> Result<(), AttentionRepositoryError> {
-    let missing = sqlx::query_scalar::<_, i32>(
-        "SELECT 1
-           FROM session
-           LEFT JOIN session_timeline_fact USING (session_id)
-          WHERE session_timeline_fact.session_id IS NULL
-             OR session_timeline_fact.attention_activity_recorded_at IS NULL
+    let incomplete = sqlx::query_scalar::<_, bool>(
+        "SELECT facts.session_id IS NULL
+                OR facts.attention_activity_recorded_at IS NULL
+                OR activity.recorded_at IS NULL AS missing
+           FROM session AS session_row
+           LEFT JOIN session_timeline_fact AS facts USING (session_id)
+           LEFT JOIN LATERAL (
+               SELECT change.recorded_at
+                 FROM operator_attention_change AS change
+                WHERE change.session_id = session_row.session_id
+                ORDER BY change.change_sequence DESC
+                LIMIT 1
+           ) AS activity ON true
+          WHERE facts.session_id IS NULL
+             OR facts.attention_activity_recorded_at IS NULL
+             OR activity.recorded_at IS NULL
+             OR facts.attention_activity_recorded_at IS DISTINCT FROM activity.recorded_at
           LIMIT 1",
     )
     .fetch_optional(&mut **transaction)
     .await?;
-    if missing.is_some() {
-        return Err(AttentionCorruption::Missing("session activity fact").into());
+    match incomplete {
+        Some(true) => Err(AttentionCorruption::Missing("session activity fact").into()),
+        Some(false) => Err(AttentionCorruption::Invalid("session activity fact").into()),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 async fn count_catalog_matches(
@@ -738,6 +792,13 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
         approval_human_authority,
         automatic_resumption_pending,
     );
+    let active_turn_count = required_string(row, "active_turn_count")?
+        .parse()
+        .map_err(|_| AttentionCorruption::Invalid("active turn count"))?;
+    let queued_turn_count = required_string(row, "queued_turn_count")?
+        .parse()
+        .map_err(|_| AttentionCorruption::Invalid("queued turn count"))?;
+    validate_state_counts(state, active_turn_count, queued_turn_count)?;
     let fact_kind = required_string(row, "fact_kind")?;
     let recorded_at = row
         .try_get::<Option<sqlx::types::time::OffsetDateTime>, _>("recorded_at")?
@@ -750,12 +811,8 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
         current_turn: row
             .try_get::<Option<Uuid>, _>("turn_id")?
             .map(TurnId::from_uuid),
-        active_turn_count: required_string(row, "active_turn_count")?
-            .parse()
-            .map_err(|_| AttentionCorruption::Invalid("active turn count"))?,
-        queued_turn_count: required_string(row, "queued_turn_count")?
-            .parse()
-            .map_err(|_| AttentionCorruption::Invalid("queued turn count"))?,
+        active_turn_count,
+        queued_turn_count,
         state,
         action,
         goal_block: decode_goal_block(row, goal_state.as_deref())?,
@@ -770,6 +827,27 @@ fn decode_summary(row: &PgRow) -> Result<AttentionSummary, AttentionRepositoryEr
             kind: decode_activity_kind(&fact_kind)?,
         },
     })
+}
+
+fn validate_state_counts(
+    state: AttentionState,
+    active_turn_count: u64,
+    queued_turn_count: u64,
+) -> Result<(), AttentionRepositoryError> {
+    let active_backed = matches!(
+        state,
+        AttentionState::Active
+            | AttentionState::AwaitingApproval
+            | AttentionState::Ambiguous
+            | AttentionState::AwaitingToolRecovery
+    );
+    if active_backed && active_turn_count == 0 {
+        return Err(AttentionCorruption::Invalid("active turn count").into());
+    }
+    if state == AttentionState::Queued && queued_turn_count == 0 {
+        return Err(AttentionCorruption::Invalid("queued turn count").into());
+    }
+    Ok(())
 }
 
 fn attention_action(
@@ -1014,6 +1092,28 @@ mod tests {
         assert!(matches!(
             error,
             AttentionRepositoryError::Corruption(AttentionCorruption::Invalid("turn state shape"))
+        ));
+    }
+
+    #[test]
+    fn active_state_requires_a_projected_active_turn() {
+        let error = validate_state_counts(AttentionState::Active, 0, 0)
+            .expect_err("an active state with no projected active turn is corrupt");
+
+        assert!(matches!(
+            error,
+            AttentionRepositoryError::Corruption(AttentionCorruption::Invalid("active turn count"))
+        ));
+    }
+
+    #[test]
+    fn queued_state_requires_a_projected_queued_turn() {
+        let error = validate_state_counts(AttentionState::Queued, 0, 0)
+            .expect_err("a queued state with no projected queued turn is corrupt");
+
+        assert!(matches!(
+            error,
+            AttentionRepositoryError::Corruption(AttentionCorruption::Invalid("queued turn count"))
         ));
     }
 
