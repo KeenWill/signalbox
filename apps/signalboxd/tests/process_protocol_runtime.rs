@@ -2815,6 +2815,9 @@ fn start_fleet_scheduler(
             .integer("automatic_reconciliations_per_liveness_scan")
             .flatten()
             .and_then(|value| usize::try_from(value).ok()),
+        bounds
+            .duration("automatic_reconciliation_attempt_bound")
+            .flatten(),
         turn_liveness_persistence_bounds,
     );
     let stale_active_turn_bound = bounds

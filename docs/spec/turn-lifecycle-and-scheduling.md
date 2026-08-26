@@ -15,7 +15,11 @@ occupancy deadlines during that bounded drain is verified against this PR
 (`agent/daemon-live-shutdown-pass-drain`). The sixty-minute occupancy ceiling
 and model-exchange-derived shutdown drain are verified against this PR
 (`agent/daemon-live-runtime-bounds`). Operation-boundary shutdown checkpointing
-is verified against this PR (`agent/daemon-live-shutdown-checkpoint`).
+is verified against this PR (`agent/daemon-live-shutdown-checkpoint`) and
+re-verified, for every committed stage boundary the tool loop reaches, against
+this PR (`agent/fix-liveness-shutdown-recovery`). Shutdown preemption of the
+ambiguous-operation batch and the separated slot-held and reconciliation attempt
+ceilings are verified against the same PR.
 
 The expired-pass recovery lock classification and retry budgets were re-verified
 against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
@@ -636,10 +640,13 @@ ledger and lap.
 
 A slot-held turn whose evidence remains unchanged for thirty minutes is handed
 to the existing startup-recovery transaction under the session scheduler lock.
-Each detached database attempt has a ten-second wall-clock bound. That admits
+Each detached database attempt has its own ten-second wall-clock bound, which is
+not the wider ceiling automatic reconciliation spends below. That admits
 ordinary serialization through the shared outbox frontier after the session lock
 while the sixty-four-turn fair window still bounds how long a fully stalled
-database can delay the next watchdog wake. A timeout is commit-ambiguous and
+database can delay the next watchdog wake — one ceiling shared between the two
+would multiply the wider of them across that window and carry the delay past the
+sixty-minute scheduler-pass ceiling this watchdog backstops. A timeout is commit-ambiguous and
 leaves the unchanged durable evidence due for a later observation. That
 transaction reconstitutes and classifies the exact current durable shape; the
 watchdog invents no parallel terminal transition. This is the outer backstop for
@@ -878,7 +885,10 @@ writes nothing. The attempt's configured wall-clock bound applies as the
 reconciliation deadline outside the uncancellable `BEGIN` stretch, as the last
 resort for a backend that has stopped answering at all; it is raised to a floor
 above the acquisition and lock budgets so it can never undercut them, and
-`COMMIT` is never interrupted. A claimed attempt whose transaction is abandoned
+`COMMIT` is never interrupted. That ceiling is the reconciliation path's own,
+wide enough for the shared outbox and deferred-validation convoy this
+transaction crosses, and separate from the slot-held watchdog's narrower
+recovery bound. A claimed attempt whose transaction is abandoned
 remains durably `attempting` until its recorded deadline makes it classifiable.
 An explicitly recorded fifth failure becomes exhausted on the next watchdog scan
 without waiting out that final ambiguity deadline; the deadline remains
