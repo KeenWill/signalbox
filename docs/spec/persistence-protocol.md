@@ -10,7 +10,10 @@ final-state authority were verified against this PR
 tool-attempt operations is verified against this PR
 (`agent/daemon-live-tool-recovery-reconcile`). The server-enforced
 automatic-reconciliation transaction deadline is verified against this PR
-(`agent/daemon-live-server-bounded-reconciliation`). Recursive-frontier prefix
+(`agent/daemon-live-server-bounded-reconciliation`). Recovery discovery's
+contention with an accepting operator interrupt, and that interrupt's atomic
+supersession of the turn's recovery row, are verified against this PR
+(`agent/fix-liveness-shutdown-recovery`). Recursive-frontier prefix
 validation is verified against this PR
 (`agent/daemon-live-frontier-validation-materialization`). Context-compaction
 evidence validation is verified against this PR
@@ -1492,8 +1495,14 @@ accepted successor carry the exact interrupt proof. The attempt trigger rejects
 every update to an ended attempt.
 
 The periodic daemon also discovers an unstopped model-call or tool-attempt wait
-without an interrupt into the automatic reconciliation tables. A claimed attempt
-records its ordinal before the terminal transaction. Under the scheduler lock,
+without an interrupt into the automatic reconciliation tables. Discovery locks
+each turn it enrols at the strength the accepting interrupt's terminalization
+takes, so the two contend instead of committing a live recovery row beside a
+turn the interrupt terminalized: whichever commits first is what the other sees.
+An accepting interrupt atomically supersedes any `scheduled`, `attempting`, or
+`exhausted` recovery row for the turn it terminalizes, clearing the exhaustion
+timestamp. A claimed attempt records its ordinal before the terminal
+transaction. Under the scheduler lock,
 the adapter reconstitutes the exact ambiguous operation and ended turn attempt,
 derives fresh frontier and pending-steering reclassification identities, and
 persists the existing model-call or proposal-ordered tool
