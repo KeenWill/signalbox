@@ -5262,6 +5262,7 @@ pub struct ApprovedToolRequestError { /* private */ }
 pub enum ToolExecutionErrorKind {
     UnknownTool,
     InvalidArguments,
+    PreauthorizationRejected,
     ExecutionFailed,
     ResultTooLarge,
     CrashLost,
@@ -9670,7 +9671,8 @@ pub trait ToolExecutionTransaction {
         session: SessionId,
         turn: TurnId,
         attempt: ToolAttemptId,
-    ) -> impl Future<Output = Result<ToolDispatchAuthority, Self::Error>> + Send;
+        preauthorization: ToolPreauthorization,
+    ) -> impl Future<Output = Result<ToolAttemptAuthorizationOutcome, Self::Error>> + Send;
     fn reread_ambiguous_authorization(
         &mut self,
         session: SessionId,

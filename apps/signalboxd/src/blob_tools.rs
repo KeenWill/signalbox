@@ -13,7 +13,7 @@ use signalbox_domain::{
     BlobDigest, NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail,
     ToolPermissionDefault,
 };
-use signalbox_persistence::blob::BlobCatalogRepository;
+use signalbox_persistence::{blob::BlobCatalogRepository, tool_loop::MAX_BLOB_READ_TOOL_BYTES};
 use signalbox_tool_contract::{ToolContract, compile_contract_definition};
 use signalbox_tool_schema_derive::ToolSchema;
 use tokio::sync::Semaphore;
@@ -28,8 +28,19 @@ use crate::{
 pub(crate) const BLOB_METADATA_NAME: &str = "blob_metadata";
 pub(crate) const BLOB_READ_NAME: &str = "blob_read";
 pub(crate) const BLOB_TOOL_NAMES: &[&str] = &[BLOB_METADATA_NAME, BLOB_READ_NAME];
-const MAX_READ_BYTES: u64 = 524_288;
 const INVALID_ARGUMENTS: &str = "expected exact canonical blob-read arguments";
+
+/// Which declaration of the family a validator or executor is serving.
+///
+/// The two members select incompatible argument schemas and different durable
+/// preauthorization charges, so the selection stays named at every call site.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlobToolMode {
+    /// `blob_metadata`: one digest, visibility admission, no byte charge.
+    Metadata,
+    /// `blob_read`: digest plus a bounded canonical range, charged by bytes.
+    Read,
+}
 
 #[derive(Debug, Deserialize, ToolSchema)]
 #[serde(deny_unknown_fields)]
@@ -66,7 +77,7 @@ impl ToolContract for ReadContract {
 
 #[derive(Clone, Debug)]
 struct BlobValidator {
-    read: bool,
+    mode: BlobToolMode,
     detail: ToolExecutionErrorDetail,
 }
 
@@ -75,7 +86,7 @@ impl ToolArgumentValidator for BlobValidator {
         &self,
         arguments: &NormalizedToolArguments,
     ) -> Result<(), ToolExecutionErrorDetail> {
-        decode(arguments, self.read)
+        decode(arguments, self.mode)
             .map(|_| ())
             .map_err(|_| self.detail.clone())
     }
@@ -84,7 +95,7 @@ impl ToolArgumentValidator for BlobValidator {
         &self,
         arguments: &NormalizedToolArguments,
     ) -> Result<ToolPreauthorization, ToolExecutionErrorDetail> {
-        match decode(arguments, self.read).map_err(|_| self.detail.clone())? {
+        match decode(arguments, self.mode).map_err(|_| self.detail.clone())? {
             DecodedArguments::Metadata(digest) => Ok(ToolPreauthorization::BlobMetadata { digest }),
             DecodedArguments::Read { digest, length, .. } => Ok(ToolPreauthorization::BlobRead {
                 digest,
@@ -123,11 +134,17 @@ impl BlobTools {
             CompiledTool::new(
                 metadata,
                 BlobValidator {
-                    read: false,
+                    mode: BlobToolMode::Metadata,
                     detail: detail.clone(),
                 },
             ),
-            CompiledTool::new(read, BlobValidator { read: true, detail }),
+            CompiledTool::new(
+                read,
+                BlobValidator {
+                    mode: BlobToolMode::Read,
+                    detail,
+                },
+            ),
         ])
         .map_err(|_| BlobToolConstructionError)?;
         let read_budget = registry.as_ref().map_or_else(
@@ -214,12 +231,12 @@ impl ToolExecutor for BlobToolExecutor {
         &mut self,
         invocation: ToolExecutionInvocation,
     ) -> Result<CorrelatedToolExecutorEvidence, Self::Error> {
-        let read = match invocation.request().name().as_str() {
-            BLOB_METADATA_NAME => false,
-            BLOB_READ_NAME => true,
+        let mode = match invocation.request().name().as_str() {
+            BLOB_METADATA_NAME => BlobToolMode::Metadata,
+            BLOB_READ_NAME => BlobToolMode::Read,
             _ => return Err(BlobToolExecutorError::Infrastructure),
         };
-        let decoded = decode(invocation.request().arguments(), read)
+        let decoded = decode(invocation.request().arguments(), mode)
             .map_err(|_| BlobToolExecutorError::Infrastructure)?;
         let evidence = match decoded {
             DecodedArguments::Metadata(digest) => {
@@ -272,35 +289,38 @@ enum DecodedArguments {
 
 fn decode(
     arguments: &NormalizedToolArguments,
-    read: bool,
+    mode: BlobToolMode,
 ) -> Result<DecodedArguments, BlobToolExecutorError> {
-    if read {
-        let arguments: ReadArguments = serde_json::from_str(arguments.as_str())
-            .map_err(|_| BlobToolExecutorError::Infrastructure)?;
-        let digest = arguments
-            .digest
-            .parse()
-            .map_err(|_| BlobToolExecutorError::Infrastructure)?;
-        let offset =
-            canonical_u64(&arguments.offset_bytes).ok_or(BlobToolExecutorError::Infrastructure)?;
-        let length = canonical_u64(&arguments.length_bytes)
-            .filter(|length| (1..=MAX_READ_BYTES).contains(length))
-            .and_then(NonZeroU64::new)
-            .ok_or(BlobToolExecutorError::Infrastructure)?;
-        Ok(DecodedArguments::Read {
-            digest,
-            offset,
-            length,
-        })
-    } else {
-        let arguments: MetadataArguments = serde_json::from_str(arguments.as_str())
-            .map_err(|_| BlobToolExecutorError::Infrastructure)?;
-        Ok(DecodedArguments::Metadata(
-            arguments
+    match mode {
+        BlobToolMode::Read => {
+            let arguments: ReadArguments = serde_json::from_str(arguments.as_str())
+                .map_err(|_| BlobToolExecutorError::Infrastructure)?;
+            let digest = arguments
                 .digest
                 .parse()
-                .map_err(|_| BlobToolExecutorError::Infrastructure)?,
-        ))
+                .map_err(|_| BlobToolExecutorError::Infrastructure)?;
+            let offset = canonical_u64(&arguments.offset_bytes)
+                .ok_or(BlobToolExecutorError::Infrastructure)?;
+            let length = canonical_u64(&arguments.length_bytes)
+                .filter(|length| (1..=MAX_BLOB_READ_TOOL_BYTES).contains(length))
+                .and_then(NonZeroU64::new)
+                .ok_or(BlobToolExecutorError::Infrastructure)?;
+            Ok(DecodedArguments::Read {
+                digest,
+                offset,
+                length,
+            })
+        }
+        BlobToolMode::Metadata => {
+            let arguments: MetadataArguments = serde_json::from_str(arguments.as_str())
+                .map_err(|_| BlobToolExecutorError::Infrastructure)?;
+            Ok(DecodedArguments::Metadata(
+                arguments
+                    .digest
+                    .parse()
+                    .map_err(|_| BlobToolExecutorError::Infrastructure)?,
+            ))
+        }
     }
 }
 
@@ -345,7 +365,7 @@ fn failed(error: BlobReadError) -> Result<ToolExecutorEvidence, BlobToolExecutor
 
 #[cfg(test)]
 mod tests {
-    use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure};
+    use signalbox_application::{ToolCatalog, ToolCatalogValidationFailure, ToolDefinition};
     use signalbox_domain::ToolResultText;
 
     use super::*;
@@ -355,11 +375,32 @@ mod tests {
             .expect("the fixture is canonical JSON")
     }
 
+    /// Resolves one declaration by name so a test body needs no match arm.
+    fn declaration<'a>(
+        definitions: &'a [ToolDefinition],
+        name: &str,
+    ) -> Result<&'a ToolDefinition, Box<dyn Error>> {
+        definitions
+            .iter()
+            .find(|definition| definition.name().as_str() == name)
+            .ok_or_else(|| Box::<dyn Error>::from(String::from("the family declares this name")))
+    }
+
+    /// Unwraps completed text evidence so a test body needs no match arm.
+    fn completed_text(evidence: ToolExecutorEvidence) -> Result<String, Box<dyn Error>> {
+        match evidence {
+            ToolExecutorEvidence::CompletedText(result) => Ok(result),
+            ToolExecutorEvidence::KnownFailed { .. } | ToolExecutorEvidence::Ambiguous => Err(
+                Box::<dyn Error>::from(String::from("the result helper emits completed text")),
+            ),
+        }
+    }
+
     #[test]
     fn blob_read_validator_derives_the_exact_bounded_charge() {
         let digest = BlobDigest::digest(b"attached bytes");
         let validator = BlobValidator {
-            read: true,
+            mode: BlobToolMode::Read,
             detail: ToolExecutionErrorDetail::try_new(String::from(INVALID_ARGUMENTS))
                 .expect("the static detail is valid"),
         };
@@ -373,7 +414,8 @@ mod tests {
                 .expect("the maximum request is admitted"),
             ToolPreauthorization::BlobRead {
                 digest,
-                decoded_bytes: NonZeroU64::new(MAX_READ_BYTES).expect("the maximum is positive"),
+                decoded_bytes: NonZeroU64::new(MAX_BLOB_READ_TOOL_BYTES)
+                    .expect("the maximum is positive"),
             }
         );
     }
@@ -382,7 +424,7 @@ mod tests {
     fn blob_read_validator_rejects_noncanonical_and_oversize_lengths() {
         let digest = BlobDigest::digest(b"attached bytes");
         let validator = BlobValidator {
-            read: true,
+            mode: BlobToolMode::Read,
             detail: ToolExecutionErrorDetail::try_new(String::from(INVALID_ARGUMENTS))
                 .expect("the static detail is valid"),
         };
@@ -401,7 +443,7 @@ mod tests {
     fn blob_metadata_validator_derives_visibility_admission_without_a_byte_charge() {
         let digest = BlobDigest::digest(b"attached bytes");
         let validator = BlobValidator {
-            read: false,
+            mode: BlobToolMode::Metadata,
             detail: ToolExecutionErrorDetail::try_new(String::from(INVALID_ARGUMENTS))
                 .expect("the static detail is valid"),
         };
@@ -416,24 +458,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blob_tool_catalog_exposes_exact_effect_classes() {
+    async fn blob_tool_catalog_exposes_exact_effect_classes() -> Result<(), Box<dyn Error>> {
         let tools = BlobTools::try_new(
-            BlobCatalogRepository::new(
-                sqlx::PgPool::connect_lazy("postgres://localhost/test")
-                    .expect("the fixture URL parses"),
-            ),
+            BlobCatalogRepository::new(sqlx::PgPool::connect_lazy("postgres://localhost/test")?),
             None,
-        )
-        .expect("the static declarations compile");
+        )?;
         let definitions = tools.catalog.definitions();
-        let [metadata, read] = definitions.as_ref() else {
-            panic!("the blob family has exactly two tools")
-        };
+        let metadata = declaration(definitions.as_ref(), BLOB_METADATA_NAME)?;
+        let read = declaration(definitions.as_ref(), BLOB_READ_NAME)?;
 
-        assert_eq!(metadata.name().as_str(), BLOB_METADATA_NAME);
-        assert_eq!(read.name().as_str(), BLOB_READ_NAME);
+        assert_eq!(definitions.len(), 2);
         assert_eq!(metadata.permission_default(), ToolPermissionDefault::Auto);
         assert_eq!(metadata.effect_class(), ToolEffectClass::EffectFree);
+        assert_eq!(read.permission_default(), ToolPermissionDefault::Auto);
         assert_eq!(read.effect_class(), ToolEffectClass::ExternalEffect);
         assert!(matches!(
             tools
@@ -441,20 +478,19 @@ mod tests {
                 .validate_arguments(read.name(), &arguments("{}")),
             Err(ToolCatalogValidationFailure::InvalidArguments { .. })
         ));
+        Ok(())
     }
 
     #[test]
-    fn maximum_blob_read_result_fits_the_existing_text_result_cap() {
+    fn maximum_blob_read_result_fits_the_existing_text_result_cap() -> Result<(), Box<dyn Error>> {
         let digest = BlobDigest::digest(b"attached bytes");
-        let ToolExecutorEvidence::CompletedText(result) = completed(&ReadResult {
+        let result = completed_text(completed(&ReadResult {
             digest: digest.to_string(),
             offset_bytes: String::from("0"),
-            bytes_base64: STANDARD.encode(vec![0_u8; MAX_READ_BYTES as usize]),
-        })
-        .expect("the bounded result serializes") else {
-            panic!("the result helper emits completed text")
-        };
+            bytes_base64: STANDARD.encode(vec![0_u8; MAX_BLOB_READ_TOOL_BYTES as usize]),
+        })?)?;
 
         assert!(ToolResultText::try_new(result).is_ok());
+        Ok(())
     }
 }

@@ -62,11 +62,36 @@ async fn prepare_confirmed_tool_attempt(
     Ok((fixture, attempt))
 }
 
-/// INV-069: blob-read visibility and decoded-byte charges commit before
+/// One durable `blob_read_tool_charge` projection with its labels preserved.
+#[derive(Debug, sqlx::FromRow)]
+struct StoredBlobReadCharge {
+    blob_digest: Vec<u8>,
+    decoded_byte_count: Decimal,
+    admission: bool,
+}
+
+/// Whether a recorded charge granted the request its decoded bytes.
+#[derive(Debug, Eq, PartialEq)]
+enum BlobReadChargeAdmission {
+    Admitted,
+    Rejected,
+}
+
+impl StoredBlobReadCharge {
+    fn admission(&self) -> BlobReadChargeAdmission {
+        if self.admission {
+            BlobReadChargeAdmission::Admitted
+        } else {
+            BlobReadChargeAdmission::Rejected
+        }
+    }
+}
+
+/// INV-091: blob-read visibility and decoded-byte charges commit before
 /// dispatch authority.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv069_blob_read_preauthorization_is_visible_bounded_and_durable()
+async fn inv091_blob_read_preauthorization_is_visible_bounded_and_durable()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let visible_seed = 0xd000;
@@ -100,8 +125,8 @@ async fn inv069_blob_read_preauthorization_is_visible_bounded_and_durable()
         visible,
         ToolAttemptAuthorizationOutcome::Authorized(_)
     ));
-    let charge: (Vec<u8>, Decimal, bool) = sqlx::query_as(
-        "SELECT blob_digest, decoded_byte_count, admitted
+    let charge: StoredBlobReadCharge = sqlx::query_as(
+        "SELECT blob_digest, decoded_byte_count, admitted AS admission
            FROM blob_read_tool_charge
           WHERE request_id = (
                 SELECT request_id FROM tool_attempt WHERE attempt_id = $1)",
@@ -109,20 +134,23 @@ async fn inv069_blob_read_preauthorization_is_visible_bounded_and_durable()
     .bind(visible_attempt.into_uuid())
     .fetch_one(&pool)
     .await?;
-    assert_eq!(charge.0, visible_digest.as_bytes().as_slice());
-    assert_eq!(charge.1, Decimal::from(visible_decoded_bytes));
-    assert!(charge.2);
+    assert_eq!(charge.blob_digest, visible_digest.as_bytes().as_slice());
+    assert_eq!(
+        charge.decoded_byte_count,
+        Decimal::from(visible_decoded_bytes)
+    );
+    assert_eq!(charge.admission(), BlobReadChargeAdmission::Admitted);
 
     pool.close().await;
     drop(container);
     Ok(())
 }
 
-/// INV-069: an unattached blob-read digest is rejected before dispatch and
+/// INV-091: an unattached blob-read digest is rejected before dispatch and
 /// leaves the durable attempt Prepared.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv069_unattached_blob_read_is_rejected_before_dispatch() -> Result<(), Box<dyn Error>> {
+async fn inv091_unattached_blob_read_is_rejected_before_dispatch() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = PostgresToolLoopRepository::new(pool.clone());
 
