@@ -943,6 +943,7 @@ impl WebhookAttemptPhase {
 #[derive(Debug)]
 enum WebhookCursorSizingError {
     Store(RepoWatchStoreError),
+    Settlement(RepositoryWatchAttemptError),
     TimedOut,
 }
 
@@ -950,6 +951,11 @@ impl fmt::Display for WebhookCursorSizingError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Store(error) => error.fmt(formatter),
+            Self::Settlement(error) => write!(
+                formatter,
+                "retained webhook completion failed ({})",
+                error.cause_code()
+            ),
             Self::TimedOut => write!(
                 formatter,
                 "durable cursor sizing exceeded its {}-second bound",
@@ -963,14 +969,23 @@ async fn load_webhook_attempt_deadlines(
     store: &PostgresRepoWatchStore,
     repository: &RepositorySlug,
 ) -> Result<WebhookAttemptDeadlines, WebhookCursorSizingError> {
-    let cursor_payload_bytes = timeout(
+    timeout(
         WEBHOOK_CURSOR_SIZING_TIMEOUT,
-        store.load_cursor_payload_bytes(repository),
+        load_webhook_attempt_deadlines_unbounded(store, repository),
     )
     .await
     .map_err(|_| WebhookCursorSizingError::TimedOut)?
-    .map_err(WebhookCursorSizingError::Store)?
-    .unwrap_or(0);
+}
+
+async fn load_webhook_attempt_deadlines_unbounded(
+    store: &PostgresRepoWatchStore,
+    repository: &RepositorySlug,
+) -> Result<WebhookAttemptDeadlines, WebhookCursorSizingError> {
+    let cursor_payload_bytes = store
+        .load_cursor_payload_bytes(repository)
+        .await
+        .map_err(WebhookCursorSizingError::Store)?
+        .unwrap_or(0);
     Ok(WebhookAttemptDeadlines::for_cursor_payload(
         cursor_payload_bytes,
     ))
@@ -2189,7 +2204,8 @@ impl RepositoryWatchTask {
         }
     }
 
-    /// Sizes the durable cursor under its own fixed bound.
+    /// Settles any retained cursor commit, then sizes the resulting durable
+    /// cursor under one fixed bound.
     ///
     /// The deadlines this returns are derived from the read, so they cannot
     /// bound it. Without this the sizing read would precede every attempt's
@@ -2197,9 +2213,16 @@ impl RepositoryWatchTask {
     /// repository task — and, through startup's unbounded join, the daemon —
     /// with no deadline to report.
     async fn webhook_attempt_deadlines(
-        &self,
+        &mut self,
     ) -> Result<WebhookAttemptDeadlines, WebhookCursorSizingError> {
-        load_webhook_attempt_deadlines(&self.store, &self.repository).await
+        timeout(WEBHOOK_CURSOR_SIZING_TIMEOUT, async {
+            if let Some(settlement) = self.settle_webhook_targeted_completion().await {
+                settlement.map_err(WebhookCursorSizingError::Settlement)?;
+            }
+            load_webhook_attempt_deadlines_unbounded(&self.store, &self.repository).await
+        })
+        .await
+        .map_err(|_| WebhookCursorSizingError::TimedOut)?
     }
 
     /// Performs the cleanup every cancelled webhook attempt owes its successor.
@@ -11243,6 +11266,34 @@ mod tests {
             WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Persistence)
         );
         assert!(!fixture.task.webhook_drain_timed_out);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn cursor_sizing_settles_a_retained_completion_before_reading_the_cursor()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let mut fixture = webhook_task(&pool).await?;
+        let key = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?.key();
+        fixture.task.webhook_targeted_completion =
+            Some(super::RetainedTargetedWebhookCompletion::new(tokio::spawn(
+                async move { Ok(super::TargetedWebhookCompletion::CursorSuperseded { key }) },
+            )));
+
+        let deadlines = fixture
+            .task
+            .webhook_attempt_deadlines()
+            .await
+            .expect("retained completion settles before cursor sizing");
+
+        assert!(fixture.task.webhook_targeted_completion.is_none());
+        assert_eq!(
+            deadlines,
+            super::load_webhook_attempt_deadlines(&fixture.task.store, &fixture.task.repository)
+                .await
+                .expect("settled cursor can be sized independently")
+        );
         Ok(())
     }
 

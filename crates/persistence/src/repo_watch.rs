@@ -705,19 +705,18 @@ impl PostgresRepoWatchStore {
             .transpose()
     }
 
-    /// Returns the stored byte size of the latest cursor document.
+    /// Returns the logical JSON byte size of the latest cursor document.
     ///
     /// The repository runtime uses this metadata to choose a bounded drain
-    /// deadline before it transfers and decodes the document itself. PostgreSQL
-    /// can answer `pg_column_size` from the stored varlena representation, so
-    /// this does not deserialize the cursor or duplicate its contents in the
-    /// daemon.
+    /// deadline before it transfers and decodes the document itself. Measuring
+    /// the textual JSON representation detoasts the value so PostgreSQL's
+    /// compression cannot make a large decode look like a small cursor.
     pub async fn load_cursor_payload_bytes(
         &self,
         repository: &RepositorySlug,
     ) -> Result<Option<u64>, RepoWatchStoreError> {
         let stored = sqlx::query_scalar::<_, i64>(
-            "SELECT pg_column_size(cursor_payload)::bigint
+            "SELECT octet_length(cursor_payload::text)::bigint
                FROM repo_watch_cursor
               WHERE repository = $1
               ORDER BY generation DESC

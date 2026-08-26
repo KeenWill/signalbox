@@ -68,6 +68,7 @@ const CHECK_RUN_NAME: &str = "required";
 const WORKFLOW_NAME: &str = "required checks";
 const REVIEW_THREAD: &str = "review-thread-1";
 const REACTION_CONTENT: &str = "+1";
+const COMPRESSIBLE_CURSOR_PADDING_BYTES: i32 = 128 * 1024;
 // Distinct from the context's `author` and `head_sha` on purpose. Reusing those
 // would let a decoder that read `author` where it should read `review_reviewer`
 // — or `head_sha` where it should read `review_commit` — still satisfy the
@@ -612,8 +613,33 @@ async fn cursor_payload_size_reports_the_latest_stored_document() -> Result<(), 
             RepoWatchCommitRequest::new(None, candidate(Some(INITIAL_HEAD))?, Vec::new()),
         )
         .await?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("SET session_replication_role = replica")
+        .execute(&mut *connection)
+        .await?;
+    sqlx::query(
+        "UPDATE repo_watch_cursor
+            SET cursor_payload = cursor_payload ||
+                jsonb_build_object('sizing_fixture', repeat('x', $2))
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .bind(COMPRESSIBLE_CURSOR_PADDING_BYTES)
+    .execute(&mut *connection)
+    .await?;
+    sqlx::query("SET session_replication_role = origin")
+        .execute(&mut *connection)
+        .await?;
     let reported = store.load_cursor_payload_bytes(&repository).await?;
-    let stored: i64 = sqlx::query_scalar(
+    let logical: i64 = sqlx::query_scalar(
+        "SELECT octet_length(cursor_payload::text)::bigint
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(repository.as_str())
+    .fetch_one(&pool)
+    .await?;
+    let compressed: i64 = sqlx::query_scalar(
         "SELECT pg_column_size(cursor_payload)::bigint
            FROM repo_watch_cursor
           WHERE repository = $1",
@@ -623,7 +649,8 @@ async fn cursor_payload_size_reports_the_latest_stored_document() -> Result<(), 
     .await?;
 
     assert_eq!(absent, None);
-    assert_eq!(reported, Some(u64::try_from(stored)?));
+    assert_eq!(reported, Some(u64::try_from(logical)?));
+    assert!(compressed < logical);
     Ok(())
 }
 

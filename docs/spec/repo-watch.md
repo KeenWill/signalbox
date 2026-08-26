@@ -60,10 +60,12 @@ while durable drain pages remain is verified against this PR
 (`agent/daemon-live-repeatable-webhook-preemption`). The progressing-drain work
 budget and continuation wake are verified against this PR
 (`agent/daemon-live-webhook-progress-budget`). Merged-pull-request cursor
-compaction and payload-scaled webhook deadlines are verified against this PR
-(`agent/repo-watch-cursor-drain-bounds`). Primary webhook intake, the producer
-each event row records, the parity view's promotion bound, and the frontier
-entry's ownership member are verified against this PR
+compaction and payload-scaled webhook deadlines are verified against PR #1332
+(`agent/repo-watch-cursor-drain-bounds`); post-settlement logical cursor sizing
+and compact comparison baselines are verified against this PR
+(`agent/repo-watch-cursor-drain-baselines`). Primary webhook intake, the
+producer each event row records, the parity view's promotion bound, and the
+frontier entry's ownership member are verified against this PR
 (`agent/webhook-primary-mode`). The approval-judge dispatch fence and unattended
 escalation release described below are verified against this PR
 (`agent/headless-approval-escalation`). The operator-commissioned dispatch fence
@@ -1368,13 +1370,16 @@ progressing drain also yields after the deployment-owned
 last terminal delivery, so a slow but productive page returns before consuming
 the outer deadline and does not enter failure backoff. Configuring that policy
 as `"none"` disables the progress yield; the outer deadline still bounds a stuck
-operation. Before each drain, the runtime reads the stored byte size of the
-latest cursor document without deserializing it. That read derives the deadlines
-below and so cannot be covered by them; it carries its own ten-second bound,
-whose expiry fails the attempt as a persistence failure rather than leaving one
+operation. Before each drain, the runtime first settles any retained targeted
+cursor completion and then reads the logical JSON byte size of the resulting
+latest cursor document without decoding it in the daemon. Measuring the logical
+document rather than PostgreSQL's compressed storage prevents TOAST compression
+from understating decode cost. Settlement and sizing derive the deadlines below
+and so cannot be covered by them; together they carry one ten-second bound,
+whose expiry fails the attempt as a persistence failure rather than leaving an
 unbounded step ahead of every attempt. The outer deadline is the greater of 60
-seconds and 30 seconds per started MiB of stored cursor payload, capped at 15
-minutes. The stall monitor sizes the cursor under the same bound on each
+seconds and 30 seconds per started MiB of logical cursor payload, capped at 15
+minutes. The stall monitor sizes the logical cursor under the same bound on each
 inspection and uses that payload-derived drain deadline as its unchanged-head
 threshold, so a healthy large-cursor attempt is not reported stalled before its
 own deadline. The deadline spans the drain's provider and database work. Expiry
