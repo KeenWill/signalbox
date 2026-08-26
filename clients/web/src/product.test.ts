@@ -718,8 +718,17 @@ describe('product surface availability', () => {
     })
   })
 
+  it('marks the mounted Imports reads as server-backed', () => {
+    expect(productSurfaceStates.imports).toEqual({
+      kind: 'server-backed',
+      owningTrack: '#995 discovery reads',
+      facts: ['keyset import catalog pages', 'bounded imported-entry windows'],
+    })
+  })
+
   it('reports cache ownership only for implemented surfaces', () => {
     expect(productSurfaceCacheLabel('sessions')).toBe('Bounded query')
+    expect(productSurfaceCacheLabel('imports')).toBe('Bounded query')
     expect(productSurfaceCacheLabel('settings')).toBe('Local settings')
     expect(productSurfaceCacheLabel('attention')).toBeNull()
   })

@@ -463,13 +463,19 @@ allowed_origins = [
 # bind_address = "127.0.0.1:3333"
 # path = "/"
 #
+# A repository whose webhook intake is primary may hold the complete sweep to an
+# hourly cadence: the delivery stream carries the mapped set and the poll is the
+# reconciliation backstop. Omitting webhook_mode selects "shadow", where the
+# poll stays the freshness path and the interval stays short. A present value
+# that is not "shadow" or "primary", of any TOML type, fails startup.
 # [[repository_watch.repositories]]
 # repository = "namespace/project"
-# poll_interval_seconds = 60
+# poll_interval_seconds = 3600
 # credential_file = "/run/credentials/repository-watch-namespace-project"
 # convergence_pull_requests = [892]
 # webhook_hook_id = 123456789
 # webhook_secret_file = "/etc/signalbox/github-webhook-secret"
+# webhook_mode = "primary"
 #
 # [[repository_watch.rules]]
 # id = "merge-forward-on-base-advance"
