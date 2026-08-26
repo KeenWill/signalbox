@@ -27,6 +27,9 @@ against this PR (`agent/daemon-live-current-compaction-validation-scope`).
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
 
+The immutable blob-derivation family and migration inventory are verified
+against this PR (`agent/web-blob-delivery`).
+
 The restore-safety search-path pin on check-reachable functions, and the lexical
 catalogue test holding it, were verified against this PR
 (`agent/daemon-live-restore-call-lexing`).
@@ -182,7 +185,7 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — one hundred twenty-six files, `202607180001`
+`crates/persistence/migrations/` — one hundred twenty-seven files, `202607180001`
 through `202608251000` — embedded by `sqlx::migrate!` as the static `MIGRATOR`
 and applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations`
 ledger records applied files with checksums (the integration tests read the
@@ -317,6 +320,9 @@ Implemented table families (across the forward-only migrations):
   exact append-only representation, idempotency, and completeness rules are
   owned by [conversation-import](conversation-import.md);
 - `accepted_input`, `queued_input_origin`, `turn_lifecycle`, `turn_attempt`;
+- `blob_derivation` and its ordered input and output satellites, whose complete
+  immutable provenance and deterministic-key convergence are owned by
+  [blob storage](blob-storage.md#browser-delivery-views-and-derivations);
 - `instruction_discovery`, including its limit version, consumed counts, and
   completeness bit, plus its ordered roots, candidates, and findings;
   `registered_instruction_bundle`; and `turn_instruction_manifest`, whose

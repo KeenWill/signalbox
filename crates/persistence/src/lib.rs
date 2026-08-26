@@ -13,6 +13,7 @@ pub mod approval_judge;
 pub mod approval_judge_eval;
 pub mod automatic_reconciliation;
 pub mod blob;
+pub mod blob_derivation;
 pub mod commissioned_dispatch;
 pub mod context_compaction;
 pub mod convergence_sweep;

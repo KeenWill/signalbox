@@ -72,6 +72,7 @@ mod single_hub;
 mod telemetry;
 mod turn_liveness_runtime;
 pub mod usage_limits;
+mod web_blob_runtime;
 pub mod web_http;
 mod web_imports;
 mod workspace_instruction_runtime;
@@ -199,6 +200,9 @@ pub use telemetry::{
     TelemetryExportFilter, TelemetryExportLayer, TelemetryMetrics,
 };
 pub use turn_liveness_runtime::{TurnLivenessNumericBounds, TurnLivenessRuntime};
+pub use web_blob_runtime::{
+    WebBlobRuntime, WebImageDerivativeKind, run_web_image_derivative_worker_if_requested,
+};
 pub use workspace_instruction_runtime::{
     WorkspaceInstructionRuntime, WorkspaceInstructionRuntimeError,
 };

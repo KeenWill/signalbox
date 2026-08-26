@@ -8,7 +8,8 @@ bootstrap are verified against this PR (`agent/web-http-transport`). The
 composed bounded session descriptor and historical-window routes are verified
 against this PR (`agent/web-session-timeline`). The version-two imports
 capabilities and production adapter are verified against this PR
-(`agent/web-discovery-reads`).
+(`agent/web-discovery-reads`). Contract version two and its blob routes are
+verified against this PR (`agent/web-blob-delivery`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -206,25 +207,30 @@ daemon does not emit permissive CORS headers and adds no account, login,
 bearer-token, application-session, TLS, proxy, VPN, or ingress machinery. The
 listener therefore rejects non-loopback binds; any future remote deployment
 requires an explicit authentication and transport-security design first.
-Unauthenticated session descriptor and timeline reads additionally require a
-loopback `Host` authority: `localhost` or an IPv4 or IPv6 loopback address, with
-an optional port. Another authority receives a structured `403 Forbidden`
-transport error with code `non_loopback_host_rejected` before session data is
-read.
+Unauthenticated session descriptor, timeline, and blob reads additionally
+require a loopback `Host` authority: `localhost` or an IPv4 or IPv6 loopback
+address, with an optional port. Another authority receives a structured
+`403 Forbidden` transport error with code `non_loopback_host_rejected` before
+session data, blob metadata, or blob bytes are read, and before a descriptor
+read may start image derivation work.
 
 `GET /api/bootstrap` describes the production browser contract. It returns the
 exact contract family `signalbox.web-http`, version `2`, the `bounded_json`,
 `same_origin_json_mutations`, `ndjson_streaming`, `import_discovery`,
 `imported_continuations`, and `bounded_session_timeline` capabilities, the
-effective 65,536-byte JSON-body and NDJSON-item hard ceilings, and the 256-item
-and 65,536-projected-byte timeline ceilings. Version two adds the bounded import
-DTOs and routes owned by
+`immutable_blob_content`, `blob_derivations`, and `image_derivatives`
+capabilities, the effective 65,536-byte JSON-body and NDJSON-item hard ceilings,
+and the 256-item and 65,536-projected-byte timeline ceilings. Version two adds
+the bounded import DTOs and routes owned by
 [conversation import](conversation-import.md#bounded-browser-discovery-and-continuation).
 The generated browser decoder rejects an unknown field, wrong shape, different
 family, or different version rather than interpreting it as the local process
 protocol. No process-protocol frame is a browser DTO. The descriptor and
 historical-window route shapes and semantics are owned by
 [Sessions and the transcript](sessions-and-transcript.md#bounded-browser-session-timeline).
+The descriptor, content, and download routes beneath `/api/blobs/{digest}` are
+the same-origin surface owned by
+[blob storage](blob-storage.md#browser-delivery-views-and-derivations).
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and

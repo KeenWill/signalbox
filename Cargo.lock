@@ -4696,6 +4696,8 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "image",
+ "mime",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
