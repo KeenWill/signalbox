@@ -77,7 +77,15 @@ against this PR (`agent/daemon-convergence-sweep`). Conservative stale
 blocking-review dismissal is verified against this PR
 (`agent/dispatch-autonomy-review-clearance`). The bounded repository-watch
 operator projections are verified against this PR
-(`agent/web-repo-watch-projection`).
+(`agent/web-repo-watch-projection`). The durable record of the last completed
+sweep and the restart scheduling measured from it, the rejection classification
+that separates a provider throttle from a resource-scoped permission rejection,
+the bound on consecutive webhook preemptions of a still-due complete poll, and
+the attempt-deadline cancellation fence with its post-terminal dispatch
+classification are verified against this PR
+(`agent/fix-repo-watch-drain-classifiers`), which supersedes the warm-restart
+poll scheduling previously verified against
+`agent/daemon-live-warm-start-poll-cadence`.
 
 ## Configuration and credential boundary
 

@@ -754,15 +754,17 @@ impl PostgresRepoWatchStore {
     /// Stamped inside that commit's own transaction, so a sweep whose commit is
     /// rolled back — a generation conflict, most of all — leaves the previous
     /// deadline in force rather than deferring the sweep it never performed.
+    /// Called as the last write on each committing path rather than once ahead
+    /// of them: the cursor, event, and assessment writes are the sweep's own
+    /// work, and a stamp taken before them would hand their duration to the next
+    /// restart as elapsed cadence.
     ///
     /// Both paths name `clock_timestamp()` rather than leaning on the column
     /// default. `transaction_timestamp()` is the transaction's *start*, which
-    /// here precedes the wait for the per-repository advisory lock: a sweep that
-    /// queued behind a targeted webhook commit would record a completion time
-    /// from before that wait, and the next restart would count the wait as
-    /// elapsed cadence and bring the following sweep forward by it. A reading
-    /// clock leaves only this transaction's own remaining work unaccounted, and
-    /// that is bounded by the commit itself.
+    /// here precedes both those writes and the wait for the per-repository
+    /// advisory lock — a sweep queues there behind a targeted webhook commit —
+    /// so it would record a completion time from before all of it. A reading
+    /// clock leaves nothing but the commit itself unaccounted.
     async fn record_complete_poll_in_transaction(
         transaction: &mut Transaction<'_, Postgres>,
         repository: &RepositorySlug,
@@ -811,15 +813,6 @@ impl PostgresRepoWatchStore {
             .bind(repository.as_str())
             .execute(&mut *transaction)
             .await?;
-        // Convergence assessments are produced by the complete provider sweep
-        // and by nothing else, so their presence is what identifies this commit
-        // as that sweep. Stamped before the branching below because every path
-        // that commits has completed the sweep — including one that finds the
-        // cursor unchanged, which writes no generation at all and so cannot be
-        // measured from the cursor.
-        if assessments.is_some() {
-            Self::record_complete_poll_in_transaction(&mut transaction, repository).await?;
-        }
         let current = load_cursor_in_transaction(&mut transaction, repository).await?;
         let current_generation = current.as_ref().map(RepoWatchCursor::generation);
         if current_generation != request.expected_generation() {
@@ -840,6 +833,7 @@ impl PostgresRepoWatchStore {
                     assessments,
                 )
                 .await?;
+                Self::record_complete_poll_in_transaction(&mut transaction, repository).await?;
                 commit_repo_watch_transaction(transaction).await?;
             } else {
                 transaction.rollback().await?;
@@ -859,6 +853,7 @@ impl PostgresRepoWatchStore {
                         assessments,
                     )
                     .await?;
+                    Self::record_complete_poll_in_transaction(&mut transaction, repository).await?;
                     commit_repo_watch_transaction(transaction).await?;
                 } else {
                     transaction.rollback().await?;
@@ -921,6 +916,7 @@ impl PostgresRepoWatchStore {
                 assessments,
             )
             .await?;
+            Self::record_complete_poll_in_transaction(&mut transaction, repository).await?;
         }
         commit_repo_watch_transaction(transaction).await?;
         Ok(RepoWatchCommitOutcome::Committed(cursor))
