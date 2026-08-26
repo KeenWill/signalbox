@@ -1180,12 +1180,17 @@ impl LifecycleRule {
 
     /// Reports whether this rule selects every deterministic blob object key.
     ///
+    /// A rule that carries both the legacy `Prefix` and a `Filter` names two
+    /// selections at once, so nothing it states is a proof: the response is not
+    /// a valid lifecycle configuration, and honoring either field alone can
+    /// admit a rule whose real selection is narrower than the blob key prefix.
     /// A rule that narrows by tag, size, or a compound `And` never proves blob
     /// coverage; otherwise the selected prefix must be an ancestor of the blob
     /// key prefix, and an absent filter and prefix is whole-bucket coverage.
     fn covers_every_blob_key(&self) -> bool {
         match (&self.filter, self.prefix.as_deref()) {
-            (Some(filter), _) => {
+            (Some(_), Some(_)) => false,
+            (Some(filter), None) => {
                 filter.tag.is_none()
                     && filter.and.is_none()
                     && filter.object_size_greater_than.is_none()
@@ -1694,6 +1699,28 @@ mod tests {
     fn lifecycle_rejects_a_size_filtered_rule() -> Result<(), Box<dyn Error>> {
         let rule = first_rule(
             r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><ObjectSizeGreaterThan>1024</ObjectSizeGreaterThan></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
+        )?;
+
+        assert!(!LifecycleRule::covers_blobs(&rule));
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_rejects_a_rule_carrying_both_a_legacy_prefix_and_a_filter()
+    -> Result<(), Box<dyn Error>> {
+        let rule = first_rule(
+            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>staging/</Prefix><Filter><Prefix>sha256/</Prefix></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
+        )?;
+
+        assert!(!LifecycleRule::covers_blobs(&rule));
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_rejects_a_whole_bucket_filter_beside_a_narrow_legacy_prefix()
+    -> Result<(), Box<dyn Error>> {
+        let rule = first_rule(
+            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>staging/</Prefix><Filter></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
         )?;
 
         assert!(!LifecycleRule::covers_blobs(&rule));
