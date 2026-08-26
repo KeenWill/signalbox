@@ -121,7 +121,8 @@ pub use fenced_database::{
     reconcile_fenced_pool_floor,
 };
 pub use goal_mode::{
-    GoalModeNumericBounds, PostgresGoalPassDisposition, PostgresGoalPassDispositionError,
+    CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED, GoalModeNumericBounds, PostgresGoalPassDisposition,
+    PostgresGoalPassDispositionError,
 };
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{

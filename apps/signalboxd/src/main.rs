@@ -1516,6 +1516,7 @@ async fn run_hub(
         configured_duration("automatic_resume_base_backoff"),
         configured_duration("automatic_resume_backoff_cap"),
         configured_u32("automatic_resume_attempt_budget")?,
+        configured_u32("automatic_resume_attempt_ceiling")?,
         configured_duration("automatic_resume_startup_retry_delay"),
     );
     let diagnostic_model_identity_limit = configured_usize("diagnostic_model_identity_limit")?;

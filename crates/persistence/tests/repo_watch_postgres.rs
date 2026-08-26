@@ -29,7 +29,9 @@ use signalbox_domain::{
     WorkflowName,
 };
 use signalbox_persistence::{
-    MIGRATOR, disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
+    MIGRATOR,
+    attention::AutomaticResumeAttemptBounds,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
@@ -88,7 +90,8 @@ const REVIEW_COMMENT_ID: u64 = 62;
 /// This operator read turns on the durable pull-request projection, never on
 /// how many automatic resumptions a deployment still owes, so it states the
 /// unbounded automatic-resume budget instead of a number its story never uses.
-const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
+const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
+    AutomaticResumeAttemptBounds::unbounded();
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -655,7 +658,7 @@ async fn pull_request_pages_read_the_current_projection_without_decoding_the_cur
     drop(connection);
 
     let page =
-        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS)
             .pull_requests(fixture.repository.clone(), None)
             .await?;
 

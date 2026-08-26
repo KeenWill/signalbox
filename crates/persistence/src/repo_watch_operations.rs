@@ -28,7 +28,7 @@ use sqlx::{
 };
 
 use crate::{
-    attention::{AttentionRepositoryError, load_summaries},
+    attention::{AttentionRepositoryError, AutomaticResumeAttemptBounds, load_summaries},
     mapping::{
         positive_u64_from_numeric, repo_watch_event_kind_from_str,
         repo_watch_webhook_disposition_from_str,
@@ -125,25 +125,24 @@ impl From<RepoWatchOperationsCorruption> for RepoWatchOperationsError {
 #[derive(Clone, Debug)]
 pub struct PostgresRepoWatchOperations {
     pool: PgPool,
-    automatic_resume_attempt_budget: Option<u32>,
+    automatic_resume_attempts: AutomaticResumeAttemptBounds,
 }
 
 impl PostgresRepoWatchOperations {
     /// Binds the operator projection to the deployment's automatic-resume
-    /// attempt budget.
+    /// attempt limits.
     ///
     /// The pull-request session reads carry the same attention summaries the
-    /// fleet projection serves, so this must be the budget the daemon's resume
-    /// planner applies (`automatic_resume_attempt_budget`); reading a
-    /// different number makes the projection report a session as needing its
-    /// operator while the daemon still owes it resumes, or the reverse. `None`
-    /// is the configured unbounded budget, under which automatic resumption
-    /// never exhausts.
+    /// fleet projection serves, so these are the same limits that projection
+    /// binds.
     #[must_use]
-    pub const fn new(pool: PgPool, automatic_resume_attempt_budget: Option<u32>) -> Self {
+    pub const fn new(
+        pool: PgPool,
+        automatic_resume_attempts: AutomaticResumeAttemptBounds,
+    ) -> Self {
         Self {
             pool,
-            automatic_resume_attempt_budget,
+            automatic_resume_attempts,
         }
     }
 
@@ -376,7 +375,7 @@ impl PostgresRepoWatchOperations {
             &mut transaction,
             Some(&identities),
             None,
-            self.automatic_resume_attempt_budget,
+            self.automatic_resume_attempts,
         )
         .await?;
         let mut summaries = summaries

@@ -4,14 +4,15 @@ use crate::*;
 use signalbox_application::{
     AttentionChanges, AttentionCursor, max_attention_change_items, max_attention_snapshot_items,
 };
-use signalbox_persistence::attention::AttentionRepository;
+use signalbox_persistence::attention::{AttentionRepository, AutomaticResumeAttemptBounds};
 
 const FLEET_SIZE: u128 = 258;
 const FLEET_SEED: u128 = 0xa770_0000;
 /// These reads turn on fleet size and journal length, never on how many
 /// automatic resumptions a deployment still owes, so they state the unbounded
 /// automatic-resume budget instead of a number their story never uses.
-const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
+const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
+    AutomaticResumeAttemptBounds::unbounded();
 
 async fn create_mixed_scale_fleet(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     for offset in 0..FLEET_SIZE {
@@ -45,7 +46,7 @@ fn resync_cursor(changes: AttentionChanges) -> AttentionCursor {
 async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_mixed_scale_fleet(&pool).await?;
-    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
     let first = repository.snapshot(None).await?;
     let second = repository.snapshot(first.continuation_after).await?;
     let third = repository.snapshot(second.continuation_after).await?;
@@ -157,7 +158,7 @@ async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
 async fn oversized_change_burst_requires_resync() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_attention_session(&pool, 0).await?;
-    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
     let first = repository.snapshot(None).await?;
     let changed_session = first.summaries[0].session;
     sqlx::query(

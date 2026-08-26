@@ -8,10 +8,11 @@ constant; the single spelling `"none"` makes that policy unbounded. A
 `not-a-bound` row is a fixed representation fact, and a `test` row exists only
 to bound or size a fixture.
 
-The live-line merge adds one model-exchange policy to the original audit. The
-119 rows partition as 35 guards, 8 derived bounds, 63 configuration policies, 9
-representation facts, and 4 test fixtures. Source locations are maintained with
-the implementation slices that move or delete declarations.
+The live-line merge adds one model-exchange policy to the original audit, and
+the automatic-resume lifetime ceiling one goal policy. The 120 rows partition as
+35 guards, 8 derived bounds, 64 configuration policies, 9 representation facts,
+and 4 test fixtures. Source locations are maintained with the implementation
+slices that move or delete declarations.
 
 The numeric-bound gate accepts only structural guards, values mechanically
 derived from guards, representation facts, and test fixtures from this
@@ -103,6 +104,7 @@ bound in either root fails closed.
 | `config/signalboxd.example.toml:82`  | `AUTOMATIC_RESUME_BASE_BACKOFF`                   | config | `numeric_bounds.automatic_resume_base_backoff`                                       |
 | `config/signalboxd.example.toml:84`  | `AUTOMATIC_RESUME_BACKOFF_CAP`                    | config | `numeric_bounds.automatic_resume_backoff_cap`                                        |
 | `config/signalboxd.example.toml:86`  | `AUTOMATIC_RESUME_ATTEMPT_BUDGET`                 | config | `numeric_bounds.automatic_resume_attempt_budget`                                     |
+| `config/signalboxd.example.toml:98`  | `AUTOMATIC_RESUME_ATTEMPT_CEILING`                | config | `numeric_bounds.automatic_resume_attempt_ceiling`                                    |
 | `config/signalboxd.example.toml:88`  | `AUTOMATIC_RESUME_STARTUP_RETRY_DELAY`            | config | `numeric_bounds.automatic_resume_startup_retry_delay`                                |
 | `config/signalboxd.example.toml:90`  | `POST_KILL_REAP_BOUND`                            | config | `numeric_bounds.post_kill_reap_bound`                                                |
 | `config/signalboxd.example.toml:92`  | `STALE_ACTIVE_TURN_BOUND`                         | config | `numeric_bounds.stale_active_turn_bound`                                             |

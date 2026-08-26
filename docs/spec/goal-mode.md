@@ -25,9 +25,11 @@ reconciliation of pending automatic resumptions is verified against this PR
 its twenty-attempt ceiling are verified against this PR
 (`agent/daemon-live-goal-resume-failure-budget`). Chargeable-failure resume
 guidance is verified against this PR
-(`agent/daemon-live-chargeable-resume-guidance`). Identity and durable-command
-mechanics remain owned by [identity and commands](identity-and-commands.md),
-turn execution by
+(`agent/daemon-live-chargeable-resume-guidance`). Total-attempt backoff pacing,
+the lifetime attempt ceiling, and cause-aware planning on every path that plans
+an execution-failure block are verified against this PR
+(`agent/fix-goal-resume-budget`). Identity and durable-command mechanics remain
+owned by [identity and commands](identity-and-commands.md), turn execution by
 [turn lifecycle and scheduling](turn-lifecycle-and-scheduling.md), tool dispatch
 by [tool loop](tool-loop.md), and framing by
 [process protocol](process-protocol.md). INV-048 is the lifecycle enforcement
@@ -208,32 +210,43 @@ and therefore independently eligible to continue.
 automatic resumption. The daemon derives from the goal event history how many
 consecutive automatic resumptions the current run has already spent: the run is
 the trailing alternation of execution-failure blocks and the resumptions that
-answered them, and every other event ends it. Below the required configured
-chargeable-attempt budget, the appended need text states that automatic
-resumption is scheduled and names the operator repair for a goal still blocked
-once resumption ends, and exactly one resume follows after the required
-configured backoff doubled per attempt already spent, up to its required
-configured cap. At the budget the goal stays blocked, and its need text states
-that automatic resumption is exhausted and states the operator repair. Every
-need text an execution-failure block carries names the operator repair, because
-an armed attempt can also fail to resume by being durably rejected, by losing
-its process, or by never reaching the database, and in each case that text is
-what an operator reads. Resumption does not bypass execution-failure blocking or
-make a failure a silent retry — the block is appended first, and every attempt
-is an ordinary recorded `resumed` event.
+answered them, and every other event ends it. That history yields two counts,
+because one number cannot answer both questions the plan asks: every attempt
+already made is a model call the daemon issued, so the total is what paces the
+next attempt, while only a failure the session caused spends the chargeable
+budget. Below both required configured limits, the appended need text states
+that automatic resumption is scheduled and names the operator repair for a goal
+still blocked once resumption ends, and exactly one resume follows after the
+required configured backoff doubled per attempt already made, up to its required
+configured cap. At either limit the goal stays blocked, and its need text states
+which limit ended the run and states the operator repair. Every need text an
+execution-failure block carries names the operator repair, because an armed
+attempt can also fail to resume by being durably rejected, by losing its
+process, or by never reaching the database, and in each case that text is what
+an operator reads. Resumption does not bypass execution-failure blocking or make
+a failure a silent retry — the block is appended first, and every attempt is an
+ordinary recorded `resumed` event.
 
-A resumed turn does not spend that twenty-attempt goal budget when durable
-evidence attributes its failure outside the session: its exact model-call or
-tool-attempt automatic reconciliation is `reconciled`, whether startup or the
-live watchdog created the wait, or its terminal provider failure is
-`rate_limited`, `overloaded`, or `provider_internal`. The lineage still records
-the ordinary resumed event and execution-failure block, and budget derivation
-associates that resumption with the turn it started before applying the
-exemption. Credential, permission, invalid-request, target, request-size, quota,
-and unrecognized provider failures remain chargeable because they do not prove a
-transient provider-availability condition. Typed records rather than a log line
-remain authority, so deploys, reconciliation deadlines, and transient provider
+A resumed turn does not spend the chargeable goal budget when durable evidence
+attributes its failure outside the session: its exact model-call or tool-attempt
+automatic reconciliation is `reconciled`, whether startup or the live watchdog
+created the wait, or its terminal provider failure is `rate_limited`,
+`overloaded`, or `provider_internal`. The lineage still records the ordinary
+resumed event and execution-failure block, and budget derivation associates that
+resumption with the turn it started before applying the exemption. Credential,
+permission, invalid-request, target, request-size, quota, and unrecognized
+provider failures remain chargeable because they do not prove a transient
+provider-availability condition. Typed records rather than a log line remain
+authority, so deploys, reconciliation deadlines, and transient provider
 availability cannot exhaust work the session did not fail.
+
+That exemption bounds what the operator's budget may be charged, never how long
+a run may continue. A run whose every failure is exempt charges nothing, so the
+budget alone can never end it, and the required configured lifetime ceiling —
+which counts every attempt whatever its evidence proved — is what does. The two
+limits are independent and a run ends at whichever it reaches first. Both are
+also the numbers an operator projection reads to report whether a blocked goal
+is still owed a resume, so the projection and the planner end a run together.
 
 A chargeable failure resumes with fixed guidance to inspect durable state and
 choose a different safe approach before repeating the failed operation, making
@@ -276,12 +289,12 @@ derive one identity, and the second attempt replays it.
 
 **Implemented behavior.** Startup inventories current execution-failure blocks
 whose exact need promises automatic resumption and treats their lost timers as
-immediately due. The inventory excludes exhausted attempts and blocks whose need
-requires an operator, including unattended approval escalations. Inventory
-failure receives three retries at a one-second cadence and then remains a
-visible durable block; individual resume attempts use the ordinary bounded
-reconciliation and derived command identity, so concurrent or repeated startup
-attempts cannot append two resumptions for one block.
+immediately due. The inventory excludes runs either limit has ended and blocks
+whose need requires an operator, including unattended approval escalations.
+Inventory failure receives three retries at a one-second cadence and then
+remains a visible durable block; individual resume attempts use the ordinary
+bounded reconciliation and derived command identity, so concurrent or repeated
+startup attempts cannot append two resumptions for one block.
 
 **Implemented behavior.** Two durable execution-failure classes require an
 operator instead of automatic resumption. The first is the block an unattended
@@ -304,6 +317,16 @@ same proof, so its execution-failure block arms no attempt and tells the
 operator to start a fresh session or reduce the imported context. Every other
 actual execution-failure block still owes the bounded resumption, including one
 appended for a session repository watch created or an operator commissioned.
+
+That typed cause is read wherever an execution-failure block is planned, not
+only on the disposition path that fails the turn. Planning reads the cause for
+the failed turn the block names, deriving that turn from the generation's
+current turn when its caller names none, and a recorded cause decides the plan
+alone. Block provenance cannot reach that conclusion: it says a turn failed,
+never that resuming it could progress. So the block a reconciled still-terminal
+turn appends, and the block an ambiguously acknowledged commit is read back to
+arm, carry the same operator-required need the direct path appends rather than
+resuming into the compaction their own durable evidence already refused.
 
 **Implemented behavior.** A periodic durable sweep includes a pursuing goal
 whose current goal turn is terminal and still owed continuation or blocking. The
