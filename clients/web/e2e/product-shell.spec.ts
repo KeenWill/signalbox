@@ -1138,6 +1138,9 @@ test('closes the phone navigation sheet before entering Scenario studio', async 
 test('retries a transient bootstrap failure without reloading', async ({ page }) => {
   const problems = watchBrowser(page)
   const scenario = await useRecoveringBootstrap(page)
+  // Attention reads start as soon as the retried bootstrap is admitted; serving them
+  // deterministically keeps the staged bootstrap outage the only console error this scenario sees.
+  await useDeterministicAttention(page)
   await page.goto('/attention')
 
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
