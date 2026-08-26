@@ -14,10 +14,10 @@ use crate::{
 };
 
 /// Maximum rows returned by one current repository-watch operations page.
-// numeric-bound: ceiling - caps one operations read's rows and projected bytes
+// numeric-bound: guard - caps one operations read's rows and projected bytes
 const REPO_WATCH_OPERATIONS_PAGE_CEILING: u16 = 64;
 /// Maximum rows returned by one historical repository-watch activity page.
-// numeric-bound: ceiling - caps one historical read's rows and projected bytes
+// numeric-bound: guard - caps one historical read's rows and projected bytes
 const REPO_WATCH_ACTIVITY_PAGE_CEILING: u16 = 100;
 
 #[must_use]
