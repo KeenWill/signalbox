@@ -6,6 +6,7 @@ import {
   decodeWebImportEntryWindow,
   decodeWebImportListPage,
   type WebApiErrorResponse,
+  type WebContractBootstrap,
   type WebImportContinuationRequest,
   type WebImportContinuationResponse,
   type WebImportDescriptor,
@@ -292,6 +293,20 @@ export class HttpImportApi implements ImportApi {
     private readonly bootstrapValidation = validateWebContractBootstrap,
     private readonly now = Date.now,
   ) {}
+
+  // The product shell already admitted this exact bootstrap through the shared transport, so the
+  // first import read reuses that admission instead of issuing a second `/api/bootstrap` request.
+  // The validation lifetime still applies: once it expires, the ordinary path revalidates.
+  static withAdmittedBootstrap(
+    _bootstrap: WebContractBootstrap,
+    bootstrapValidation = validateWebContractBootstrap,
+    now = Date.now,
+  ): HttpImportApi {
+    const api = new HttpImportApi(bootstrapValidation, now)
+    api.bootstrapValidationPromise = Promise.resolve()
+    api.bootstrapValidatedAt = now()
+    return api
+  }
 
   private validateBootstrap(): Promise<void> {
     if (

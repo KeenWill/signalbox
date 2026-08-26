@@ -45,6 +45,7 @@ use std::{
 };
 
 use rust_decimal::Decimal;
+use serde_json::Value;
 use signalbox_application::{
     ApprovalJudgeCompletionIdentities, AttachmentPreparationFailure, AuthorizeModelCallOutcome,
     AuthorizeModelCallTransaction, AutomaticReconciliationFailureKind,
@@ -67,14 +68,15 @@ use signalbox_application::{
 use signalbox_domain::{
     AcceptedInputId, AcceptedInputStartingLineage, AcceptedInputTurnActivationIdentities,
     AcceptedInputTurnFailureIdentities, ActivatedAcceptedInputTurn, ActiveTurnPhase,
-    AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText, AuthorizedModelCall,
-    CancelledModelCallTurnIdentities, CompletedModelCallIdentities, ContextCompactionId,
-    ContextCompactionTokenUsage, ContextFrontierId, CorrelatedModelCallTerminalObservation,
-    CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
-    DecideToolRequestResult, DelegateApprovalRecommendation, DelegationAwaitRequest,
-    DelegationContent, DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest,
-    DelegationWaitMode, DeliveryRequest, DescendantTerminationScope, DirectModelSelection,
-    DurableCommandId, FailedModelCallTurnIdentities, FastMode, FastModeOverlay, FastModeSupport,
+    AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
+    AttachmentDisplayFilename, AuthorizedModelCall, CancelledModelCallTurnIdentities,
+    CompletedModelCallIdentities, ContextCompactionId, ContextCompactionTokenUsage,
+    ContextFrontierId, CorrelatedModelCallTerminalObservation, CreateSession,
+    CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest, DecideToolRequestResult,
+    DelegateApprovalRecommendation, DelegationAwaitRequest, DelegationContent,
+    DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationWaitMode,
+    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
+    FailedModelCallTurnIdentities, FastMode, FastModeOverlay, FastModeSupport,
     FrozenModelSelection, Goal, GoalCommandRejection, GoalCommandResult, GoalModelProvenance,
     GoalReport, GoalStatement, GoalUserAction, GoalUserCommand, GoalUserProvenance,
     InitialToolApproval, ModelAlias, ModelCallId, ModelCallTerminalIdentities,
