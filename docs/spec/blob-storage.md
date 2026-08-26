@@ -35,6 +35,10 @@ The canonical multipart domain algebra and ordered process-protocol vocabulary
 are verified against this implementing change
 (`agent/blob-storage-multipart-algebra`).
 
+Registry-first attachment catalog admission, distinct-digest byte accounting,
+and durable typed rejection replay are verified against this implementing change
+(`agent/blob-storage-attachment-admission`).
+
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
 configuration and routing, the ingest and read lifecycle, the blob wire
