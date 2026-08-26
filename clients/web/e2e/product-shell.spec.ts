@@ -26,6 +26,27 @@ const settingsPreferenceFixture = {
 const useDeterministicBootstrap = (page: Page) =>
   page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
 
+// Playwright matches route handlers most-recently-registered first and retires a `times: 1`
+// handler after its single use, so the transport refuses the first admission and serves the
+// deterministic bootstrap on every retry. The sequence lives here so a test body reads as
+// straight-line code instead of branching on an attempt counter.
+const useBootstrapRecoveringAfterOneOutage = async (page: Page) => {
+  const admission = { attempts: 0 }
+  await page.route('**/api/bootstrap', (route) => {
+    admission.attempts += 1
+    return route.fulfill({ json: bootstrapFixture })
+  })
+  await page.route(
+    '**/api/bootstrap',
+    (route) => {
+      admission.attempts += 1
+      return route.fulfill({ status: 503, body: 'temporarily unavailable' })
+    },
+    { times: 1 },
+  )
+  return admission
+}
+
 const useDeterministicSession = async (
   page: Page,
   shouldFailTimeline: (sessionId: string) => boolean = () => false,
@@ -686,14 +707,7 @@ test('withholds Imports until bootstrap admission succeeds', async ({ page }) =>
 
 test('mounts Imports after the daemon contract recovers', async ({ page }) => {
   const problems = watchBrowser(page)
-  let attempts = 0
-  await page.route('**/api/bootstrap', (route) => {
-    attempts += 1
-    if (attempts === 1) {
-      return route.fulfill({ status: 503, body: 'temporarily unavailable' })
-    }
-    return route.fulfill({ json: bootstrapFixture })
-  })
+  const admission = await useBootstrapRecoveringAfterOneOutage(page)
   await useDeterministicImportApi(page)
   await page.goto(importsProductFixture.path)
 
@@ -702,7 +716,7 @@ test('mounts Imports after the daemon contract recovers', async ({ page }) => {
 
   await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
   await expect(page.getByRole('rowgroup', { name: 'Imported conversation rows' })).toBeVisible()
-  expect(attempts).toBe(2)
+  expect(admission.attempts).toBe(2)
   expect(problems.pageErrors).toEqual([])
 })
 
