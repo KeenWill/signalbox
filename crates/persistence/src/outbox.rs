@@ -1410,30 +1410,10 @@ async fn load_event(
                                     AND result_frontier.member_count =
                                         boundary_frontier.member_count
                                         + round.request_count
-                                    AND NOT EXISTS (
-                                        SELECT 1
-                                          FROM context_frontier_member
-                                               AS boundary_member
-                                          LEFT JOIN context_frontier_member
-                                                    AS result_prefix
-                                            ON result_prefix.owning_session_id =
-                                               event.session_id
-                                           AND result_prefix.context_frontier_id =
-                                               event.frontier_id
-                                           AND result_prefix.member_position =
-                                               boundary_member.member_position
-                                           AND result_prefix.source_session_id =
-                                               boundary_member.source_session_id
-                                           AND result_prefix.semantic_entry_id =
-                                               boundary_member.semantic_entry_id
-                                         WHERE
-                                            boundary_member.owning_session_id =
-                                            event.session_id
-                                           AND
-                                            boundary_member.context_frontier_id =
-                                            round.boundary_frontier_id
-                                           AND
-                                            result_prefix.semantic_entry_id IS NULL
+                                    AND context_frontier_preserves_prefix(
+                                        event.session_id,
+                                        round.boundary_frontier_id,
+                                        event.frontier_id
                                     )
                                     AND NOT EXISTS (
                                         SELECT 1
@@ -2889,6 +2869,23 @@ pub(crate) enum ToolBatchOutboxState {
     Proposed(ContextFrontierId),
     ResultsProjected(ContextFrontierId),
     RecoveryRequired(ToolAttemptId),
+}
+
+/// Acquires the global append allocator at an explicit transaction boundary.
+///
+/// Appending an event takes this row through the header trigger. Model-call
+/// transactions serialize on their ordering guard before either shared lock
+/// class, finish ordinary credential locking first, and call this boundary
+/// immediately before their outbox-bearing writes. Counted activation carries
+/// the same guard while its atomic activation event necessarily allocates
+/// before credential selection.
+pub(crate) async fn lock_sequence_allocator(
+    connection: &mut PgConnection,
+) -> Result<(), sqlx::Error> {
+    let _: bool = sqlx::query_scalar(lock_inventory::OUTBOX_SEQUENCE_ALLOCATOR)
+        .fetch_one(connection)
+        .await?;
+    Ok(())
 }
 
 pub(crate) async fn append(
