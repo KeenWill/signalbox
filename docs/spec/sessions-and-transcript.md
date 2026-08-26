@@ -747,13 +747,15 @@ implemented producers are durable transitions that project their own text as
 they commit: input acceptance, steering acceptance, a terminal model call, a
 tool batch transition, context compaction, and session-metadata installation.
 Context summaries are the implemented transcript-owned derived-text producer.
+Attachment filenames, attachment media metadata, and explicitly derived text
+artifacts are classes the schema admits and a read returns, and no producer in
+the daemon publishes them. The projection performs no implicit attachment
+reading, OCR, text extraction, or model pass.
+
 Publication through the typed projection-writer port is committed unimplemented
-functionality — no present producer calls it, so attachment filenames,
-attachment media metadata, and explicitly derived text artifacts are classes the
-schema admits and a read returns, with nothing in the daemon publishing them
-yet. A producer that adopts the port publishes only text its durable contract
-explicitly supplies, and only after its own source exists. The projection
-performs no implicit attachment reading, OCR, text extraction, or model pass.
+functionality: no present producer calls it. The compatibility constraint is
+that a producer adopting the port publishes only text its durable contract
+explicitly supplies, and only after its own source exists.
 
 Every result carries its session, stable timeline address, typed owning
 session/input/turn transcript entry/tool request/tool attempt/attachment/derived
