@@ -4211,6 +4211,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "signalbox-file-media-adapter-video"
+version = "0.0.0"
+dependencies = [
+ "serde_json",
+ "signalbox-file-media-processor-runtime",
+ "signalbox-file-media-runtime",
+ "tokio",
+]
+
+[[package]]
 name = "signalbox-file-media-adapters-audio"
 version = "0.0.0"
 dependencies = [
