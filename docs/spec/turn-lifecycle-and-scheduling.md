@@ -1,5 +1,9 @@
 # Turn lifecycle and scheduling
 
+The scheduler occupancy ceiling and metrics, daemon-owned ambiguous-call
+reconciliation, and outer slot-held watchdog coverage were verified against this
+PR (`agent/turn-lifecycle-hardening`).
+
 The runner-recovery active-phase algebra, checked persistence reconstitution,
 and preserved interrupt/stop authority were verified against this PR
 (`agent/runner-awaiting-recovery-persistence`). The atomic persistence
@@ -8,7 +12,7 @@ transition into runner recovery was verified against this PR
 resumption of that transition were verified against this PR
 (`agent/runner-loss-daemon-propagation`).
 
-The active-tail predecessor-steering correction was verified against this PR
+The active-tail predecessor-steering correction was verified against PR #826
 (`agent/daemon-ops-overnight`).
 
 The cancelled-turn outbox projection for stopped tool responses with completed
@@ -17,6 +21,10 @@ producing calls was re-verified against this PR
 
 The deployment-owned scheduler pass limit is verified against this PR
 (`agent/scheduler-pass-pause`).
+
+Repository-watch dispatch-start admission, nudge coalescing, and its reserved
+capacity within the unchanged scheduler ceiling are verified against this PR
+(`agent/dispatch-start-lease`).
 
 Tool-attempt reconciliation predecessor replay was verified against this PR
 (`agent/tool-reconciliation-origin-replay`).
@@ -28,8 +36,8 @@ verified against this PR (`agent/turn-liveness-watchdog`).
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
-Prepared-call sweep eligibility and scheduler-capacity relinquishment are
-verified against this implementing change
+Prepared-call sweep eligibility and startup resumption of an unsent prepared
+call are verified against this implementing change
 (`agent/blob-storage-attachment-preparation`).
 
 This page specifies the implemented behavior of turns, turn attempts,
@@ -55,18 +63,18 @@ path and descendant-cascade ordering were verified through this PR
 `crates/domain/src/{turn_lifecycle,turn_attempt,turn_eligibility,`
 `context_frontier,queue_order}.rs`, `crates/application/src/{scheduler,`
 `start_eligible_turn,startup_scan,submit_input}.rs`,
-`crates/persistence/src/{start_eligible_turn,startup,scheduler,`
-`lock_inventory}.rs` and its migrations, and
-`apps/signalboxd/src/{main,process_runtime}.rs`. The `signalboxd`
-composition-root name and that `apps/signalboxd` code home were verified through
-PR #258 (`agent/signalboxd-rename`); the additional daemon-held code-host
-credential path is verified through PR #270 (`agent/tool-batch-tier1`), and the
-Brave Search credential path is verified through PR #433
-(`agent/web-search-wiring`); the user reconciliation decision that releases an
-ambiguity wait, together with the startup scan's separate report of sessions
-holding their slot for that decision, were verified through PR #281
-(`agent/turn-reconciliation-recovery`). The finite startup scan and removal of
-the superseded steering blocker were verified through PR #291
+`crates/persistence/src/{start_eligible_turn,startup,scheduler,turn_liveness,`
+`model_call_reconciliation,lock_inventory}.rs` and its migrations, and
+`apps/signalboxd/src/{main,process_runtime,turn_liveness_runtime,telemetry}.rs`.
+The `signalboxd` composition-root name and that `apps/signalboxd` code home were
+verified through PR #258 (`agent/signalboxd-rename`); the additional daemon-held
+code-host credential path is verified through PR #270
+(`agent/tool-batch-tier1`), and the Brave Search credential path is verified
+through PR #433 (`agent/web-search-wiring`); the user reconciliation decision
+that releases an ambiguity wait, together with the startup scan's separate
+report of sessions holding their slot for that decision, were verified through
+PR #281 (`agent/turn-reconciliation-recovery`). The finite startup scan and
+removal of the superseded steering blocker were verified through PR #291
 (`agent/turn-control-verbs`). INV-tagged tests are the enforcement of record;
 tags below resolve through the generated
 [invariant test index](../invariants.md). Designed lifecycle behavior that has
@@ -387,6 +395,30 @@ The committed turn-start entries, snapshot, start, active slot, and attempt are
 one transaction: no durable state exists in which a start references a missing
 or partial snapshot (INV-040).
 
+**Committed unimplemented functionality — instruction eligibility freeze.** When
+session instruction eligibility is implemented, step 4 also copies the session's
+exact ordered eligibility entries under the same `session_scheduler` lock — the
+authority-qualified pairs whose shape
+[workspace instructions](workspace-instructions.md#eligibility) owns, each
+naming a bundle identity together with the authorizing root the session reaches
+it through, not identities alone — and, after locking the admitted-set head at
+the position and in the mode fixed by the
+[persistence lock protocol](persistence-protocol.md#lock-protocol), snapshots
+the exact retained admitted-set head and every retained admission's
+rendered-bundle row. It inserts the turn-start instruction manifest carrying the
+eligibility hash, admitted-set hash, and those rows in projection order in this
+transaction. The replacement command takes that same scheduler lock and the
+admitted-set lock after it, so a replacement either precedes activation and
+enters the snapshot or follows activation and affects only a later turn. No
+present replacement or nonempty eligibility surface exists; nevertheless, the
+first workspace-instruction slice inserts the one canonical empty manifest in
+this same activation transaction. No post-activation insert is permitted: an
+interrupt or other terminalization may win immediately after activation, and
+every started or terminal turn must already own exactly one turn-start manifest.
+Later nonempty eligibility changes only the copied values and rendered rows, not
+this atomic boundary. A later turn therefore cannot render retained admissions
+that its initial manifest omitted.
+
 Both authoritative repositories — activation and startup recovery — classify
 commit failures (`commit_failure_is_ambiguous`, tested in each): SQLSTATE
 08007/40003 or any non-database error during the commit await surfaces
@@ -405,8 +437,12 @@ the sweep (INV-007).
   origin (`Recorded(Applied(TurnOrigin))` — including user-global replay of an
   already-recorded command, whose transaction rolls back and commits nothing
   new), `SubmitInputService` hands the session to the in-process nudge port. The
-  buffer is bounded (1024); a full buffer or closed source drops only the hint,
+  buffer is bounded (1024) and coalesces equal pending sessions; a
+  dispatch-start nudge upgrades an equal ordinary hint without adding another
+  item. The observable outcomes distinguish enqueue, coalescing, capacity loss,
+  and a closed source. A full buffer or closed source drops only the hint,
   visibly, and never changes the command result.
+
 - **Sweep (backstop).** `PostgresEligibilitySweep` finds four durable shapes: a
   queued turn with no active turn (the activation precondition), an active turn
   whose current model call remains `Prepared`, an active tool round in the
@@ -420,26 +456,75 @@ the sweep (INV-007).
   run immediately. The baseline interval is one second; missed ticks are
   delayed, not burst. A failed sweep is logged with its operator classification
   and retried at the next interval.
+
 - **Loop.** `SchedulerLoop::run_until` spawns at most 16 concurrent per-session
   passes. Every explicit nonzero application bound, including the deployment's
-  configured bound, is capped at that shared admission cap. The loop
-  deduplicates hints for a session already in flight (recording one rerun) and
-  keeps an in-progress sweep read alive across pass completions. A failed or
-  panicked pass is logged and retried by a later hint or sweep; nothing is lost
-  because the rows are the queue. A pass about to perform attachment store I/O
-  first tries the blob contract's separate attachment-preparation permit without
-  waiting. If none is immediately available, the pass relinquishes its
-  scheduler-pass capacity, ends, and leaves only the durable `Prepared` row for
-  a later sweep. After acquiring a permit, its task remains in flight for
-  per-session deduplication but relinquishes the scheduler-pass slot during
-  store I/O; after successful verification it reacquires a slot before send
-  authorization and its guarded transaction revalidates authority. A
-  model-originated `blob_read` uses the same slot handoff after it acquires the
-  blob contract's non-waiting direct-read permit: its physical attempt remains
-  in flight during store traversal, and it reacquires a slot before committing
-  correlated result evidence or crash-loss classification. The independent
-  direct-read admission budget remains fixed, so at most 16 direct reads can
-  wait at that reacquisition point regardless of the scheduler-pass override.
+  configured bound, is capped at that shared admission cap. For a bound above
+  one, one place inside that bound is reserved for a repository-watch dispatch
+  with no model-call evidence, so ordinary recovery and execution passes can
+  occupy at most 15 places under the production bound and cannot consume the
+  start lane. Dispatch-start hints precede ordinary pending hints. The loop
+  coalesces pending hints by session, deduplicates a session already in flight
+  while recording one priority-upgradable rerun, and keeps an in-progress sweep
+  read alive across pass completions. A failed or panicked pass is logged and
+  retried by a later hint or sweep; nothing is lost because the rows are the
+  queue. A pass about to perform attachment store I/O first tries the blob
+  contract's separate attachment-preparation permit without waiting. If none is
+  immediately available, the pass relinquishes its scheduler-pass capacity,
+  ends, and leaves only the durable `Prepared` row for a later sweep. After
+  acquiring a permit, its task remains in flight for per-session deduplication
+  but relinquishes the scheduler-pass slot during store I/O; after successful
+  verification it reacquires a slot before send authorization and its guarded
+  transaction revalidates authority. A model-originated `blob_read` uses the
+  same slot handoff after it acquires the blob contract's non-waiting
+  direct-read permit: its physical attempt remains in flight during store
+  traversal, and it reacquires a slot before committing correlated result
+  evidence or crash-loss classification. The independent direct-read admission
+  budget remains fixed, so at most 16 direct reads can wait at that
+  reacquisition point regardless of the scheduler-pass override. One admitted
+  authoritative pass may occupy its slot for at most fifteen minutes. A checked
+  application bound may lower that compiled ceiling but cannot raise it or admit
+  zero or subsecond values. Expiry invokes a detached daemon recovery handoff
+  before dropping the pass future, then immediately releases the admission slot.
+  The handoff marks the correlated cancellation so fatal supervision does not
+  mistake the scheduler's bounded drop for an unrelated failure, then spends
+  four bounded database attempts, the first immediate and the rest at two-minute
+  intervals, across correlating the turn and recovering it.
+
+  Expiry bounds a pass's tenure, which is not the claim that its turn stopped
+  progressing: one admitted pass drives a whole model/tools loop, including
+  provider retry backoff, so a turn making continuous durable progress can reach
+  the ceiling, and recovery never re-admits the pass it replaced. The handoff
+  therefore imposes the same unchanged-evidence requirement both watchdogs below
+  do and the ceiling by itself lacks. It invokes the existing startup-recovery
+  transaction only for a turn whose evidence — the attempt holding its tenure
+  and the session's turn-progress frontier — stood still between two
+  observations. A turn seen once is not yet settled; a turn whose evidence
+  advanced is nudged instead of recovered, and a session whose slot has passed
+  to another turn ends the handoff.
+
+  A nudge ends the handoff only where a fresh pass can act on it. A running turn
+  still holding a live tool round is resumed by the admitted pass, which then
+  owns it, leaving the outer watchdog's far longer ceiling as its only later
+  judge. A turn that durable progress left running *without* a tool round clears
+  no re-admission predicate — not pass resumption, and not queued-turn
+  activation, which the session's own active turn excludes — so the nudge would
+  admit a pass that does nothing. Such a turn stays under the handoff's
+  remaining observations and is terminalized there once its evidence stands
+  still, rather than being stranded until the outer watchdog. A resumability
+  read that does not settle is treated as a resumption, since no failed read may
+  make a turn terminalizable on this shorter interval while a pass may already
+  be driving it.
+
+  The outer watchdog below remains responsible if those attempts all fail.
+  Stateful pass data, including identity generators, is never cloned per
+  admitted pass; only the detached expiry handler is cloned.
+
+  With Prometheus export enabled, the loop publishes scheduler occupancy and
+  oldest-pass telemetry through the registry owned by
+  [configuration and credentials](configuration-and-credentials.md). Age is
+  calculated at scrape time, so it advances while a pass is stalled even when
+  the scheduler emits no event.
 
 The initial sweep runs as soon as the work source is first polled, seeding the
 scheduler after startup recovery. This recovers a goal disposition when the
@@ -504,15 +589,41 @@ Every conjunct is an absence the candidate query proves for itself, so a shape
 it cannot consult is a shape it does not clear — absent evidence skips the turn
 rather than condemning it.
 
+**The outer slot-held shape.** A second inventory covers an active `running`
+turn whose current attempt is `prepared`, `running`, or `stop_requested` and
+whose durable rows still show a live model call, dedicated compaction call, or
+tool attempt (or the stop request itself). This deliberately complements the
+quiescent operation-absence predicate. It excludes every durable parked phase,
+including `awaiting_tool_approval`: approval remains the judge's surface and
+this watchdog never decides it. The inventory uses the same complete,
+session-keyed paging, progress evidence, repeated-observation ledger, and
+sixty-four-turn fair window as the quiescent inventory, but keeps an independent
+ledger and lap.
+
+A slot-held turn whose evidence remains unchanged for thirty minutes is handed
+to the existing startup-recovery transaction under the session scheduler lock.
+Each detached database attempt has a one-second wall-clock bound, so the
+sixty-four-turn fair window also bounds how long a fully stalled database can
+delay the next watchdog wake. A timeout is commit-ambiguous and leaves the
+unchanged durable evidence due for a later observation. That transaction
+reconstitutes and classifies the exact current durable shape; the watchdog
+invents no parallel terminal transition. This is the outer backstop for
+pass-expiry recovery whose bounded database attempts all failed and for a
+prior-process running turn that survives startup classification. The
+fifteen-minute scheduler-pass ceiling remains the tighter same-process bound.
+
 **Staleness.** No lifecycle table stores an activity timestamp, and this page
 introduces none: a stored clock would be one more thing to keep true. Staleness
 is decided by repeated observation instead. Each pass records, per candidate
 turn, its session's turn-progress frontier — the greatest `event_sequence` the
 session has emitted for an event that a turn's own execution produces — and the
 turn's current attempt. A turn is due only once that evidence has been observed
-unchanged for at least the staleness bound. Any progress at all restarts the
-bound, so a turn that resumed cannot be ended on the strength of its earlier
-silence.
+unchanged for at least the bound governing its watchdog. The composed
+`staleness_bound` governs only the quiescent watchdog; the slot-held watchdog
+always uses the separate thirty-minute hard ceiling so lowering the quiescent
+bound cannot classify live model-call, tool, or stop work as stale early. Any
+progress at all restarts the applicable bound, so a turn that resumed cannot be
+ended on the strength of its earlier silence.
 
 The frontier is the outbox's rather than the transcript's because the outbox
 assigns its sequence in commit order, and every session-scoped transition kind
@@ -617,15 +728,17 @@ slow to finish; it may not stop watching. What deferral does not cost is the
 turn: one left alone had nothing change, so it is observed unchanged and comes
 due again on a later scan, waiting rather than being forgotten.
 
-**Constants.** The staleness bound is a hard safety ceiling of 30 minutes and
-the scan interval is one minute; both are compiled in. The bound the pass runs
-with is supplied at its composition site rather than reloaded from the ceiling,
-so whichever bound decides turns is also the bound the audit line reports. A
-shorter one is constructible only through a checked constructor that refuses
-zero, refuses precision finer than a whole second, and refuses anything above
-the compiled ceiling — the single place the ceiling is enforced as the only
-maximum, and the reason no caller can raise it. signalboxd composes the ceiling
-itself: no operator setting lowers it, and whether one should exist is an
+**Constants.** The staleness hard safety ceiling is 30 minutes and the scan
+interval is one minute; both are compiled in. The quiescent bound is supplied at
+the runtime's composition site rather than reloaded from the ceiling, so the
+bound that decides quiescent turns is also the bound its audit line reports. The
+slot-held watchdog does not use that parameter: it always runs at the separate
+30-minute hard ceiling. A shorter quiescent bound is constructible only through
+a checked constructor that refuses zero, refuses precision finer than a whole
+second, and refuses anything above the compiled ceiling — the single place the
+ceiling is enforced as the only maximum, and the reason no caller can raise it.
+signalboxd composes the ceiling itself: no operator setting lowers it, and
+whether one should exist is an
 [open question](../open-questions.md#turn-lifecycle) it shares with the other
 scheduling cadences.
 
@@ -703,6 +816,53 @@ at the moment its outcome became unknown. The durable record is the ordinary
 `TurnFailed` shape, which has no cause column, so a watchdog-ended turn is not
 durably distinguishable from a restart-recovered one.
 
+**Ambiguous model-call reconciliation.** Every watchdog wake also discovers
+active `awaiting_model_call_recovery` turns and durably claims at most 64 due
+attempts. The recovery row binds the exact session, turn, and ambiguous call;
+each claim inserts a one-based attempt row. Failed attempts end with the typed
+outcome `infrastructure_failure` or `integrity_failure`, and recovery becomes
+due after 120, 240, 480, 960, then 1,800 seconds. If a daemon disappears while
+an attempt is `attempting`, its recorded deadline lets the next daemon classify
+it as an infrastructure failure before continuing. Every inventory or
+application transaction carries three bounds rather than one wall-clock
+deadline, because the daemon abandoning a transaction queues a `ROLLBACK`
+instead of cancelling the statement the backend is running: giving up
+client-side leaves the pooled connection checked out for the full real wait, so
+the database-side budget is the one that must expire first. Reaching a pooled
+connection is bounded at 250 milliseconds, which is safe to abandon because no
+transaction has begun; any one statement then waits at most one second for a
+contended row under a PostgreSQL lock budget, whose expiry is an ordinary
+infrastructure failure that spends an attempt and writes nothing; and a
+five-second whole-transaction deadline sits above both as the last resort for a
+backend that has stopped answering at all. Opening the transaction and
+installing that lock budget are the one stretch no database-side budget covers,
+since the budget is what they install, so they run where the five-second
+deadline cannot cancel them: it abandons the daemon's wait while the pair runs
+to completion and releases its connection through an ordinary rollback. Without
+that the deadline would be the only bound over a `BEGIN` already on the wire,
+which is the strand the three bounds exist to prevent rather than a smaller
+failure. A claimed attempt whose transaction is abandoned remains durably
+`attempting` until its recorded deadline makes it classifiable. An explicitly
+recorded fifth failure becomes exhausted on the next watchdog scan without
+waiting out that final ambiguity deadline; the deadline remains necessary when
+the daemon cannot tell whether the fifth attempt committed.
+
+The automatic budget is five attempts. Each attempt locks the same session
+scheduler row as the operator path, reconstitutes the complete scheduling
+projection, and applies the existing reconciliation-required transition to the
+exact ambiguous call and ended attempt. It neither claims what the provider did
+nor rewrites the ambiguous call, and it reclassifies pending steering through
+the same terminal boundary. A concurrent operator decision or other
+authoritative transition wins by ordinary row locking and records the automatic
+attempt as `superseded`. After five failures, the recovery row becomes
+`exhausted`, the active wait remains unchanged, and the process transcript sets
+`operator_action_required`; only then is the wait an operator park.
+
+Quiescent turns, slot-held turns, and ambiguous-call attempts run on independent
+watchdog loops with the same cadence. A stalled inventory or database operation
+on one surface therefore cannot prevent either of the other two from reaching
+its next bounded attempt.
+
 ## Startup scan and recovery
 
 After configuration and database connection, signalboxd acquires the dedicated
@@ -767,13 +927,14 @@ end (INV-034):
   awaiting a recovery decision. The scan does not count it as recovered and does
   not block startup on it;
   `StartupScanOutcome::awaiting_recovery_decision_sessions` carries those
-  sessions so the completed-phase log names each one instead of leaving the wait
-  indistinguishable from a healed session. The scan that parks a turn itself —
-  the in-flight branch below — reports its session the same way, so the wait is
-  named on the restart that creates it and not only on a later one. The report
-  is scoped to the model-call wait: `AwaitingRecoveryDecision` also carries a
-  tool-attempt ambiguity set, which has no operator surface and stays classified
-  as before, so a reported session always names a decision an operator can make;
+  sessions so the completed-phase log names each one before bounded runtime
+  reconciliation starts instead of leaving the wait indistinguishable from a
+  healed session. The scan that parks a turn itself — the in-flight branch below
+  — reports its session the same way, so the wait is named on the restart that
+  creates it and not only on a later one. The report is scoped to the model-call
+  wait: `AwaitingRecoveryDecision` also carries a tool-attempt ambiguity set,
+  which has no operator surface and stays classified as before, so a reported
+  session always names a decision an operator can make;
 - an approval wait remains parked unchanged, with no fabricated decision or live
   attempt; and
 - a running tool attempt follows its stored effect class: prepared or
@@ -1284,10 +1445,14 @@ edge whose child already has a terminal result records an `AlreadyTerminal`
 disposition for the evaluating command, creates no second terminal result, and
 still traverses the child's outgoing relationships. Child-originated
 cancellation instead carries the child's exact proof-bearing cancelled turn. A
-reconciliation-required turn supplies no terminal child outcome, and the same
-cancelled-turn evidence cannot be selected as a stopped outcome. Detached child
-work stays independently schedulable after the parent's turn or goal has
-terminalized.
+reconciliation-required turn supplies no terminal child outcome while its
+ambiguity stands; the daemon's automatic reconciliation supplies one, sealing
+the child as failed with the `ChildResultUnavailable` reason and the exact
+reconciled child turn in the transaction that commits the terminal transition,
+so an ambiguity the provider can never settle wakes the parent instead of
+holding it. The same cancelled-turn evidence cannot be selected as a stopped
+outcome. Detached child work stays independently schedulable after the parent's
+turn or goal has terminalized.
 
 **SPEC PROPOSAL — immediate descendant terminalization.** A bound `Stop` or
 `Cancel` policy action commits an authoritative logical terminal proof for the
@@ -1332,10 +1497,11 @@ from child transcript state nor depend on process-local wake memory.
 - Startup recovery now classifies model-call evidence (a `Prepared` call closes
   as a known failure; an unstopped in-flight call parks the turn as ambiguous in
   `awaiting_model_call_recovery`), tool-loop evidence, and delegated-result
-  waits. A user reconciliation decision is the only implemented resolution for
-  that park: no automatic resolution exists, because the terminal disposition it
-  produces is proof-bearing and the durable evidence supplies no authority to
-  construct. Resolving the ambiguity itself from provider evidence remains an
+  waits. The model-call park is resolved automatically through the bounded
+  durable attempt protocol above, or by the existing user reconciliation command
+  if it wins the race; the process surface asks for operator action only after
+  the automatic budget is exhausted. Neither path resolves what the provider
+  actually did. Provider-evidence resolution remains an
   [open question](../open-questions.md#turn-lifecycle); the tool-attempt
   ambiguity wait keeps its own operator surface deferred with that question.
 - A turn holding pending steering cannot be ended by the liveness watchdog,

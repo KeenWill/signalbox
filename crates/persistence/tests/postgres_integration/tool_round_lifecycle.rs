@@ -2,7 +2,12 @@
 
 use crate::*;
 
-async fn attach_blob_to_restart_fixture(
+/// Registers one verified replica so a fixture attachment names a catalogued blob.
+///
+/// The attachment part itself travels with the fixture's submit input rather
+/// than being inserted afterwards, because content parts are immutable outside
+/// the transaction that creates their parent.
+async fn register_fixture_blob(
     pool: &PgPool,
     seed: u128,
     digest: BlobDigest,
@@ -17,30 +22,6 @@ async fn attach_blob_to_restart_fixture(
             BlobReplicaRecord::new(store, BlobObjectKey::for_digest(digest)),
         )
         .await?;
-    let mut transaction = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO submit_input_command_content_part
-            (command_id, position, part_kind, blob_digest, attachment_kind,
-             declared_media_type, display_filename)
-         VALUES ($1, 1, 'attachment', $2, 'file',
-                 'application/octet-stream', 'fixture.bin')",
-    )
-    .bind(Uuid::from_u128(seed + 8))
-    .bind(digest.as_bytes().as_slice())
-    .execute(&mut *transaction)
-    .await?;
-    sqlx::query(
-        "INSERT INTO accepted_input_content_part
-            (accepted_input_id, position, part_kind, blob_digest, attachment_kind,
-             declared_media_type, display_filename)
-         VALUES ($1, 1, 'attachment', $2, 'file',
-                 'application/octet-stream', 'fixture.bin')",
-    )
-    .bind(Uuid::from_u128(seed + 9))
-    .bind(digest.as_bytes().as_slice())
-    .execute(&mut *transaction)
-    .await?;
-    transaction.commit().await?;
     Ok(())
 }
 
@@ -48,9 +29,16 @@ async fn prepare_confirmed_tool_attempt(
     pool: &PgPool,
     seed: u128,
     arguments: &str,
+    attachment: Option<BlobDigest>,
 ) -> Result<(RestartModelCallFixture, ToolAttemptId), Box<dyn Error>> {
-    let (fixture, _, _, request) =
-        checkpoint_confirmed_tool_round(pool, seed, "blob_read", arguments).await?;
+    let (fixture, _, _, request) = checkpoint_confirmed_tool_round_with_attachment(
+        pool,
+        seed,
+        "blob_read",
+        arguments,
+        attachment,
+    )
+    .await?;
     let repository = PostgresToolLoopRepository::new(pool.clone());
     repository
         .decide(
@@ -87,9 +75,14 @@ async fn inv069_blob_read_preauthorization_is_visible_bounded_and_durable()
     let visible_arguments = format!(
         r#"{{"digest":"{visible_digest}","offset_bytes":"0","length_bytes":"{visible_decoded_bytes}"}}"#
     );
-    let (visible_fixture, visible_attempt) =
-        prepare_confirmed_tool_attempt(&pool, visible_seed, &visible_arguments).await?;
-    attach_blob_to_restart_fixture(&pool, visible_seed, visible_digest).await?;
+    register_fixture_blob(&pool, visible_seed, visible_digest).await?;
+    let (visible_fixture, visible_attempt) = prepare_confirmed_tool_attempt(
+        &pool,
+        visible_seed,
+        &visible_arguments,
+        Some(visible_digest),
+    )
+    .await?;
     let repository = PostgresToolLoopRepository::new(pool.clone());
     let visible = repository
         .authorize_attempt_with_preauthorization(
@@ -140,7 +133,7 @@ async fn inv069_unattached_blob_read_is_rejected_before_dispatch() -> Result<(),
         r#"{{"digest":"{hidden_digest}","offset_bytes":"0","length_bytes":"{hidden_decoded_bytes}"}}"#
     );
     let (hidden_fixture, hidden_attempt) =
-        prepare_confirmed_tool_attempt(&pool, hidden_seed, &hidden_arguments).await?;
+        prepare_confirmed_tool_attempt(&pool, hidden_seed, &hidden_arguments, None).await?;
     let hidden = repository
         .authorize_attempt_with_preauthorization(
             hidden_fixture.session,
@@ -1323,6 +1316,14 @@ async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection
         ),
         "the confirmed tool round must be parked before the interrupt"
     );
+    assert_eq!(
+        signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository::new(pool.clone())
+            .slot_held_active_turns(None)
+            .await?
+            .candidates(),
+        [],
+        "the slot-held watchdog never treats an approval wait as daemon-owned work"
+    );
 
     let interrupt = input_with_delivery(
         seed + 23,
@@ -1462,6 +1463,7 @@ async fn s07_s10_inv012_inv028_parked_approval_rejection_requires_a_recorded_app
         .fail_prepared_call(
             terminal.session,
             terminal.call,
+            None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(terminal_seed + 14)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(terminal_seed + 15)),
@@ -1809,7 +1811,7 @@ async fn swept_sessions(pool: &PgPool) -> Result<Vec<SessionId>, Box<dyn Error>>
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
     let mut sessions = Vec::new();
     loop {
-        let (page, continuation) = sweep.find_sessions().await?.into_parts();
+        let (page, _dispatch_starts, continuation) = sweep.find_sessions().await?.into_parts();
         sessions.extend(page);
         if !continuation {
             break;

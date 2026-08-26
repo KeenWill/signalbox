@@ -21,17 +21,18 @@ use signalbox_application::{
     EligibilityNudge, ImportConversationError, ImportConversationOutcome,
     ImportConversationService, ImportedConversationConverter, InProcessEligibilityNudge,
     InProcessToolDispatchGate, ListConversationsService, ListSessionMetadataService,
-    LoadSessionMetadataService, OperatorFailureClass, PromptMemberStatement,
-    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
-    ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest, ReplaceSessionMetadataService,
-    ReviewPassCompletionStatus, ReviewWorkflowCommand, ReviewWorkflowCommandOutcome,
-    ReviewWorkflowCommandResult, ReviewWorkflowCommandService, ReviewWorkflowOperation,
-    ReviewWorkflowOperationKind, SessionMetadataListItem, SessionMetadataListQuery,
-    SubmitInputOutcome, SubmitInputRequest, SubmitInputService, SubmitInputTransaction,
-    UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
-    UuidV7CommissionedDispatchIdGenerator, UuidV7CreateSessionFromImportedFrontierIdGenerator,
-    UuidV7ImportedConversationIdGenerator, UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator,
-    UuidV7ToolLoopIdGenerator,
+    LoadSessionMetadataService, OperatorFailureClass, OverrideDeniedToolRequestService,
+    PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
+    ReplaceSessionDefaultsService, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
+    ReplaceSessionMetadataService, ReviewPassCompletionStatus, ReviewWorkflowCommand,
+    ReviewWorkflowCommandOutcome, ReviewWorkflowCommandResult, ReviewWorkflowCommandService,
+    ReviewWorkflowOperation, ReviewWorkflowOperationKind, SessionMetadataListItem,
+    SessionMetadataListQuery, SubmitInputOutcome, SubmitInputRequest, SubmitInputService,
+    SubmitInputTransaction, UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest,
+    UpdateSessionPlacementService, UuidV7CommissionedDispatchIdGenerator,
+    UuidV7CreateSessionFromImportedFrontierIdGenerator, UuidV7ImportedConversationIdGenerator,
+    UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
+    render_model_user_content,
 };
 use signalbox_blob_store::ExpectedBlob;
 use signalbox_conversation_import_claude_code::{
@@ -61,15 +62,17 @@ use signalbox_domain::{
     ModelChangeAdjustment as DomainModelChangeAdjustment, ModelSelectionOverride,
     ModelSelectionRequest, ModelSettingSource as DomainModelSettingSource,
     ModelSettingsOverlay as DomainModelSettingsOverlay,
-    ModelSettingsPrecedence as DomainModelSettingsPrecedence, ParentTerminationCommandSource,
-    PerInputConfigurationChoices, PullRequestNumber, ReasoningLevel as DomainReasoningLevel,
-    ReplaceSessionDefaults as DomainReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
-    ReplaceSessionDefaultsResult, ReplaceSessionMetadataRejectedResult,
-    ReplaceSessionMetadataResult, RepositorySlug, ReviewChangeRequestNumber, ReviewConfidence,
-    ReviewEventOrdinal, ReviewExternalLink, ReviewExternalLinkAssociation,
-    ReviewExternalLinkAttachment, ReviewExternalLinkAttachmentResult, ReviewExternalLinkId,
-    ReviewExternalObjectKind, ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent,
-    ReviewFindingDiffSide, ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
+    ModelSettingsPrecedence as DomainModelSettingsPrecedence, OverrideDeniedToolRequest,
+    OverrideDeniedToolRequestRejectedResult, OverrideDeniedToolRequestResult,
+    ParentTerminationCommandSource, PerInputConfigurationChoices, PullRequestNumber,
+    ReasoningLevel as DomainReasoningLevel, ReplaceSessionDefaults as DomainReplaceSessionDefaults,
+    ReplaceSessionDefaultsRejectedResult, ReplaceSessionDefaultsResult,
+    ReplaceSessionMetadataRejectedResult, ReplaceSessionMetadataResult, RepositorySlug,
+    ReviewChangeRequestNumber, ReviewConfidence, ReviewEventOrdinal, ReviewExternalLink,
+    ReviewExternalLinkAssociation, ReviewExternalLinkAttachment,
+    ReviewExternalLinkAttachmentResult, ReviewExternalLinkId, ReviewExternalObjectKind,
+    ReviewFinding, ReviewFindingConfidenceAxes, ReviewFindingContent, ReviewFindingDiffSide,
+    ReviewFindingEvent, ReviewFindingEventKind, ReviewFindingEventResult,
     ReviewFindingEventResultKind, ReviewFindingId, ReviewFindingLocation,
     ReviewFindingPendingExternalLinkRef, ReviewFindingProposal, ReviewFindingRef,
     ReviewFindingSeverity, ReviewKey, ReviewLineRange, ReviewPass, ReviewPassAcceptedInputEvidence,
@@ -118,6 +121,13 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError},
     goal_turn::GoalTurnCandidates,
     model_execution::{ModelCallRepositoryError, PostgresModelCallRepository},
+    operator_status::{
+        ProcessOperatorStatusConvergenceSeal, ProcessOperatorStatusConvergenceVerdict,
+        ProcessOperatorStatusError, ProcessOperatorStatusHeldSlotBlocker,
+        ProcessOperatorStatusHeldSlotOrigin, ProcessOperatorStatusItem,
+        ProcessOperatorStatusMergeableState, ProcessOperatorStatusRepository,
+        ProcessOperatorStatusReviewDecision, ProcessOperatorStatusSingletonScope,
+    },
     outbox::{
         DispatchedBoundChildAction, DispatchedDelegationOutcome, DispatchedDelegationPolicy,
         DispatchedDelegationProvenance, DispatchedDelegationReason, DispatchedDelegationUpdate,
@@ -178,8 +188,17 @@ use signalbox_process_protocol::{
     ModelChangeAdjustment as WireModelChangeAdjustment, ModelSelection as WireModelSelection,
     ModelSettingSource as WireModelSettingSource, ModelSettingsOverlay as WireModelSettingsOverlay,
     ModelSettingsPrecedence as WireModelSettingsPrecedence,
-    ModelSettingsSnapshot as WireModelSettingsSnapshot, PositiveCanonicalU64, ProtocolVersion,
-    ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
+    ModelSettingsSnapshot as WireModelSettingsSnapshot,
+    OperatorStatusConvergenceSeal as WireOperatorStatusConvergenceSeal,
+    OperatorStatusConvergenceVerdict as WireOperatorStatusConvergenceVerdict,
+    OperatorStatusEndMessage, OperatorStatusHeldSlotBlocker as WireOperatorStatusHeldSlotBlocker,
+    OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
+    OperatorStatusMergeableState as WireOperatorStatusMergeableState, OperatorStatusMessage,
+    OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
+    OperatorStatusQueuedObligationMessage,
+    OperatorStatusReviewDecision as WireOperatorStatusReviewDecision,
+    OperatorStatusSingletonScope as WireOperatorStatusSingletonScope, PositiveCanonicalU64,
+    ProtocolVersion, ReasoningLevel as WireReasoningLevel, RejectionDetail, RequestId,
     ReviewDiffSide as WireReviewDiffSide, ReviewExternalObjectKind as WireReviewExternalObjectKind,
     ReviewFindingEvent as WireReviewFindingEvent, ReviewFindingInput, ReviewFindingSnapshot,
     ReviewFindingStatus as WireReviewFindingStatus, ReviewPassLifecycle, ReviewPassSnapshot,
@@ -895,7 +914,7 @@ async fn serve_connection(
             !active_lifecycle_request,
         )
         .or_else(|| acquired_bulk_ingest_at.map(|started| started + BULK_INGEST_SESSION_TIMEOUT));
-        let request_result = handle_request(
+        let request_result = Box::pin(handle_request(
             &mut reader,
             &mut writer,
             version,
@@ -910,7 +929,7 @@ async fn serve_connection(
             },
             &services,
             shutdown.clone(),
-        );
+        ));
         tokio::select! {
             biased;
             () = wait_for_deadline(operation_deadline) => return Ok(()),
@@ -1066,6 +1085,7 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
         | ClientRequest::ListSessions {}
+        | ClientRequest::ReadOperatorStatus {}
         | ClientRequest::UpdateSessionPlacement { .. }
         | ClientRequest::AttachGoal { .. }
         | ClientRequest::ReadGoal { .. }
@@ -1119,7 +1139,8 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::RecordReviewPublicationOutcomes { .. }
         | ClientRequest::ReadReviewOrchestration { .. }
         | ClientRequest::StopTurn { .. }
-        | ClientRequest::DecideToolRequest { .. } => false,
+        | ClientRequest::DecideToolRequest { .. }
+        | ClientRequest::OverrideDeniedToolRequest { .. } => false,
     }
 }
 fn retain_inbound_frame_permit_during_import_admission(
@@ -1245,6 +1266,7 @@ impl SnapshotReaderAdmission {
     const fn for_request(request: &ClientRequest) -> Self {
         match request {
             ClientRequest::ListSessions {}
+            | ClientRequest::ReadOperatorStatus {}
             | ClientRequest::ReadGoal { .. }
             | ClientRequest::ReadTranscript { .. }
             | ClientRequest::FollowSession { .. }
@@ -1311,7 +1333,8 @@ impl SnapshotReaderAdmission {
             | ClientRequest::RecordReviewRepairOutcomes { .. }
             | ClientRequest::RecordReviewPublicationOutcomes { .. }
             | ClientRequest::StopTurn { .. }
-            | ClientRequest::DecideToolRequest { .. } => Self::NotRequired,
+            | ClientRequest::DecideToolRequest { .. }
+            | ClientRequest::OverrideDeniedToolRequest { .. } => Self::NotRequired,
         }
     }
 }
@@ -1613,6 +1636,19 @@ where
                 return Ok(());
             };
             handle_list_sessions(writer, version, request_id, &services.pool, snapshot_permit).await
+        }
+        ClientRequest::ReadOperatorStatus {} => {
+            let Some(snapshot_permit) = snapshot_permit else {
+                return Ok(());
+            };
+            Box::pin(handle_operator_status(
+                writer,
+                version,
+                request_id,
+                &services.pool,
+                snapshot_permit,
+            ))
+            .await
         }
         ClientRequest::UpdateSessionPlacement {
             command_id,
@@ -2510,6 +2546,22 @@ where
                 decision,
                 &services.pool,
                 &services.eligibility_nudge,
+            )
+            .await
+        }
+        ClientRequest::OverrideDeniedToolRequest {
+            command_id,
+            session_id,
+            tool_request_id,
+        } => {
+            handle_override_denied_tool_request(
+                writer,
+                version,
+                request_id,
+                command_id.into_uuid(),
+                session_id,
+                tool_request_id,
+                &services.pool,
             )
             .await
         }
@@ -7298,6 +7350,9 @@ pub(crate) async fn compact_automatically(
             .map_err(AutomaticContextCompactionError::Repository)?;
             return Err(AutomaticContextCompactionError::Read(error));
         }
+        Err(ContextCompactionRangeLoadError::CatalogUnavailable) => {
+            return Err(AutomaticContextCompactionError::Model);
+        }
         Err(ContextCompactionRangeLoadError::Integrity) => {
             fail_context_compaction_until_resolved(
                 &repository,
@@ -7365,10 +7420,11 @@ async fn load_context_compaction_range(
     {
         return Err(ContextCompactionRangeLoadError::Integrity);
     }
-    let values = entries
-        .iter()
-        .map(context_compaction_entry_value)
-        .collect::<Vec<_>>();
+    let catalog = BlobCatalogRepository::new(pool.clone());
+    let mut values = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        values.push(context_compaction_entry_value(entry, &catalog).await?);
+    }
     serde_json::to_string(&values).map_err(|_| ContextCompactionRangeLoadError::Integrity)
 }
 
@@ -7382,6 +7438,9 @@ where
     loop {
         match load().await {
             Err(ContextCompactionRangeLoadError::Read(ProcessReadError::Database(_))) => {
+                sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await;
+            }
+            Err(ContextCompactionRangeLoadError::CatalogUnavailable) => {
                 sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await;
             }
             result => return result,
@@ -7477,7 +7536,10 @@ fn transcript_entry_reference(
     signalbox_domain::SemanticTranscriptEntryRef::from_source(source_session, entry)
 }
 
-fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json::Value {
+async fn context_compaction_entry_value(
+    entry: &ProcessTranscriptEntry,
+    catalog: &BlobCatalogRepository,
+) -> Result<serde_json::Value, ContextCompactionRangeLoadError> {
     let reference = transcript_entry_reference(entry);
     let source_session_id = reference
         .source_session()
@@ -7485,7 +7547,7 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
         .hyphenated()
         .to_string();
     let entry_id = reference.entry().into_uuid().hyphenated().to_string();
-    match entry {
+    let value = match entry {
         ProcessTranscriptEntry::DelegatedTask {
             entry_index,
             spawning_request,
@@ -7596,15 +7658,42 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
             turn,
             content,
             ..
-        } => serde_json::json!({
-            "position": entry_index + 1,
-            "source_session_id": source_session_id,
-            "entry_id": entry_id,
-            "type": "user",
-            "accepted_input_id": accepted_input.into_uuid().hyphenated().to_string(),
-            "turn_id": turn.into_uuid().hyphenated().to_string(),
-            "content": wire_user_content(content),
-        }),
+        } => {
+            let mut lengths = std::collections::BTreeMap::new();
+            for part in content.parts() {
+                let signalbox_domain::UserContentPart::Attachment { digest, .. } = part else {
+                    continue;
+                };
+                if lengths.contains_key(digest) {
+                    continue;
+                }
+                let catalog_entry = catalog
+                    .find(*digest)
+                    .await
+                    .map_err(map_context_compaction_catalog_error)?
+                    .ok_or(ContextCompactionRangeLoadError::Integrity)?;
+                let length = NonZeroU64::new(catalog_entry.expected().byte_length())
+                    .ok_or(ContextCompactionRangeLoadError::Integrity)?;
+                lengths.insert(*digest, length);
+            }
+            let rendered =
+                render_model_user_content(content.clone(), |digest| lengths.get(&digest).copied())
+                    .map_err(|_| ContextCompactionRangeLoadError::Integrity)?;
+            let rendered_parts = rendered
+                .parts()
+                .iter()
+                .map(|part| part.as_str())
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "position": entry_index + 1,
+                "source_session_id": source_session_id,
+                "entry_id": entry_id,
+                "type": "user",
+                "accepted_input_id": accepted_input.into_uuid().hyphenated().to_string(),
+                "turn_id": turn.into_uuid().hyphenated().to_string(),
+                "content": rendered_parts,
+            })
+        }
         ProcessTranscriptEntry::Assistant {
             entry_index,
             turn,
@@ -7742,6 +7831,21 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
             "source_speaker": imported_source_speaker_label(*source_speaker),
             "content_kind": imported_content_kind_label(*content_kind),
         }),
+    };
+    Ok(value)
+}
+
+fn map_context_compaction_catalog_error(
+    error: signalbox_persistence::blob::BlobCatalogRepositoryError,
+) -> ContextCompactionRangeLoadError {
+    match error {
+        signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_)
+        | signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_) => {
+            ContextCompactionRangeLoadError::CatalogUnavailable
+        }
+        signalbox_persistence::blob::BlobCatalogRepositoryError::Corruption(_) => {
+            ContextCompactionRangeLoadError::Integrity
+        }
     }
 }
 
@@ -7889,6 +7993,15 @@ where
     Writer: AsyncWrite + Unpin,
 {
     match error {
+        ContextCompactionRangeLoadError::CatalogUnavailable => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await
+        }
         ContextCompactionRangeLoadError::Read(error) => {
             if let Err(repository_error) = fail_context_compaction_until_resolved(
                 repository,
@@ -8043,6 +8156,7 @@ where
 #[derive(Debug)]
 enum ContextCompactionRangeLoadError {
     Read(ProcessReadError),
+    CatalogUnavailable,
     Integrity,
 }
 
@@ -8777,6 +8891,18 @@ where
             )
             .await
         }
+        Ok(CommissionDispatchOutcome::TargetBusy { session })
+        | Ok(CommissionDispatchOutcome::TargetCoolingOff { session }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::CommissionTargetBusy {
+                    session_id: wire_uuid(session.into_uuid()),
+                }),
+            )
+            .await
+        }
         Ok(CommissionDispatchOutcome::ConflictingReuse)
         | Err(CommissionedDispatchRepositoryError::SessionCreation(
             CreateSessionRepositoryError::DifferentCommandKind { .. },
@@ -9228,6 +9354,50 @@ where
     write_spooled_file(writer, &mut spool.file).await
 }
 
+async fn handle_operator_status<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    pool: &PgPool,
+    snapshot_permit: OwnedSemaphorePermit,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let spool_result = spool_operator_status(
+        ProcessOperatorStatusRepository::new(pool.clone()),
+        version,
+        request_id,
+    )
+    .await;
+    drop(snapshot_permit);
+    let mut spool = match spool_result {
+        Ok(spool) => spool,
+        Err(OperatorStatusSpoolError::Read(ProcessOperatorStatusError::Database(_))) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await;
+        }
+        Err(OperatorStatusSpoolError::Read(ProcessOperatorStatusError::Corruption(_))) => {
+            return write_error(
+                writer,
+                version,
+                request_id,
+                internal_protocol_error(None, InternalDiagnostic::OperatorStatusCorruption),
+            )
+            .await;
+        }
+        Err(OperatorStatusSpoolError::Spool(error)) => {
+            return write_snapshot_spool_error(writer, version, request_id, error).await;
+        }
+    };
+    write_spooled_file(writer, &mut spool.file).await
+}
+
 async fn handle_list_model_aliases<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -9339,6 +9509,11 @@ struct SessionListSpool {
 
 enum SessionListSpoolError {
     Read(ProcessReadError),
+    Spool(SnapshotSpoolError),
+}
+
+enum OperatorStatusSpoolError {
+    Read(ProcessOperatorStatusError),
     Spool(SnapshotSpoolError),
 }
 
@@ -9459,6 +9634,284 @@ async fn spool_session_summaries(
         .map_err(SnapshotSpoolError::Io)
         .map_err(SessionListSpoolError::Spool)?;
     Ok(SessionListSpool { file })
+}
+
+async fn spool_operator_status(
+    repository: ProcessOperatorStatusRepository,
+    version: ProtocolVersion,
+    request_id: RequestId,
+) -> Result<SessionListSpool, OperatorStatusSpoolError> {
+    let mut reader = repository
+        .open()
+        .await
+        .map_err(OperatorStatusSpoolError::Read)?;
+    let standard_file = tempfile::tempfile()
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    let mut file = tokio::fs::File::from_std(standard_file);
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::Start {})),
+    )
+    .await
+    .map_err(OperatorStatusSpoolError::Spool)?;
+    while let Some(item) = reader
+        .next_item()
+        .await
+        .map_err(OperatorStatusSpoolError::Read)?
+    {
+        write_spool_message(
+            &mut file,
+            version,
+            request_id,
+            wire_operator_status_item(item),
+        )
+        .await
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    }
+    let counts = reader
+        .counts()
+        .ok_or(SnapshotSpoolError::EncodeInvariant)
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    write_spool_message(
+        &mut file,
+        version,
+        request_id,
+        ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::End(Box::new(
+            OperatorStatusEndMessage {
+                held_slot_count: CanonicalU64::new(counts.held_slots()),
+                queued_obligation_count: CanonicalU64::new(counts.queued_obligations()),
+                pull_request_convergence_count: CanonicalU64::new(
+                    counts.pull_request_convergences(),
+                ),
+                pending_stale_review_clearance_count: CanonicalU64::new(
+                    counts.pending_stale_review_clearances(),
+                ),
+            },
+        )))),
+    )
+    .await
+    .map_err(OperatorStatusSpoolError::Spool)?;
+    file.flush()
+        .await
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(SnapshotSpoolError::Io)
+        .map_err(OperatorStatusSpoolError::Spool)?;
+    Ok(SessionListSpool { file })
+}
+
+fn wire_operator_status_item(item: ProcessOperatorStatusItem) -> ServerMessage {
+    match item {
+        ProcessOperatorStatusItem::HeldSlot(item) => {
+            let singleton = item.singleton();
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::HeldSlot(Box::new(
+                OperatorStatusHeldSlotMessage {
+                    dispatch_id: wire_uuid(item.dispatch_id()),
+                    repository: item.repository().to_owned(),
+                    origin: wire_operator_status_held_slot_origin(item.origin()),
+                    rule_id: item.rule_id().to_owned(),
+                    rule_version: CanonicalU64::new(item.rule_version()),
+                    singleton_scope: wire_operator_status_singleton_scope(singleton.scope()),
+                    singleton_repository: singleton.repository().map(str::to_owned),
+                    singleton_pull_request_number: singleton
+                        .pull_request_number()
+                        .map(CanonicalU64::new),
+                    singleton_stack_root_pull_request_number: singleton
+                        .stack_root_pull_request_number()
+                        .map(CanonicalU64::new),
+                    held_for_seconds: CanonicalU64::new(item.held_for_seconds()),
+                    session_ids: item.session_ids().iter().copied().map(wire_uuid).collect(),
+                    blockers: item
+                        .blockers()
+                        .iter()
+                        .copied()
+                        .map(wire_operator_status_blocker)
+                        .collect(),
+                },
+            ))))
+        }
+        ProcessOperatorStatusItem::QueuedObligation(item) => {
+            let singleton = item.singleton();
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::QueuedObligation(
+                Box::new(OperatorStatusQueuedObligationMessage {
+                    obligation_id: wire_uuid(item.obligation_id()),
+                    repository: item.repository().to_owned(),
+                    rule_id: item.rule_id().to_owned(),
+                    rule_version: CanonicalU64::new(item.rule_version()),
+                    singleton_scope: wire_operator_status_singleton_scope(singleton.scope()),
+                    singleton_repository: singleton.repository().map(str::to_owned),
+                    singleton_pull_request_number: singleton
+                        .pull_request_number()
+                        .map(CanonicalU64::new),
+                    singleton_stack_root_pull_request_number: singleton
+                        .stack_root_pull_request_number()
+                        .map(CanonicalU64::new),
+                    first_event_id: wire_uuid(item.first_event_id()),
+                    latest_event_id: wire_uuid(item.latest_event_id()),
+                    matched_event_count: CanonicalU64::new(item.matched_event_count()),
+                    waiting_for_seconds: CanonicalU64::new(item.waiting_for_seconds()),
+                    occupying_dispatch_id: item.occupying_dispatch_id().map(wire_uuid),
+                    occupying_session_ids: item
+                        .occupying_session_ids()
+                        .iter()
+                        .copied()
+                        .map(wire_uuid)
+                        .collect(),
+                    cooldown_remaining_seconds: item
+                        .cooldown_remaining_seconds()
+                        .map(CanonicalU64::new),
+                    cooldown_never_eligible: item.cooldown_never_eligible(),
+                    ready: item.ready(),
+                }),
+            )))
+        }
+        ProcessOperatorStatusItem::PullRequestConvergence(item) => {
+            ServerMessage::OperatorStatus(Box::new(OperatorStatusMessage::PullRequestConvergence(
+                Box::new(OperatorStatusPullRequestConvergenceMessage {
+                    repository: item.repository().to_owned(),
+                    pull_request_number: CanonicalU64::new(item.pull_request_number()),
+                    head_sha: item.head_sha().to_owned(),
+                    base_branch: item.base_branch().to_owned(),
+                    base_revision: item.base_revision().to_owned(),
+                    mergeable_state: wire_operator_status_mergeable_state(item.mergeable_state()),
+                    review_decision: wire_operator_status_review_decision(item.review_decision()),
+                    unresolved_thread_count: CanonicalU64::new(item.unresolved_thread_count()),
+                    gating_check_count: CanonicalU64::new(item.gating_check_count()),
+                    non_green_gating_checks: item.non_green_gating_checks().to_vec(),
+                    verdict: wire_operator_status_verdict(item.verdict()),
+                    seal: item.seal().map(wire_operator_status_seal),
+                    assessed_seconds_ago: CanonicalU64::new(item.assessed_seconds_ago()),
+                }),
+            )))
+        }
+        ProcessOperatorStatusItem::PendingStaleReviewClearance(item) => {
+            ServerMessage::OperatorStatus(Box::new(
+                OperatorStatusMessage::PendingStaleReviewClearance(Box::new(
+                    OperatorStatusPendingStaleReviewClearanceMessage {
+                        repository: item.repository().to_owned(),
+                        pull_request_number: CanonicalU64::new(item.pull_request_number()),
+                        current_head_sha: item.current_head_sha().to_owned(),
+                        review_node_id: item.review_node_id().to_owned(),
+                        reviewer: item.reviewer().to_owned(),
+                        reviewed_head_sha: item.reviewed_head_sha().to_owned(),
+                        pending_for_seconds: CanonicalU64::new(item.pending_for_seconds()),
+                    },
+                )),
+            ))
+        }
+    }
+}
+
+fn wire_operator_status_held_slot_origin(
+    origin: &ProcessOperatorStatusHeldSlotOrigin,
+) -> OperatorStatusHeldSlotOrigin {
+    match origin {
+        ProcessOperatorStatusHeldSlotOrigin::PullRequest { number } => {
+            OperatorStatusHeldSlotOrigin::PullRequest {
+                pull_request_number: CanonicalU64::new(*number),
+            }
+        }
+        ProcessOperatorStatusHeldSlotOrigin::Branch { branch } => {
+            OperatorStatusHeldSlotOrigin::Branch {
+                branch: branch.clone(),
+            }
+        }
+    }
+}
+
+fn wire_operator_status_singleton_scope(
+    scope: ProcessOperatorStatusSingletonScope,
+) -> WireOperatorStatusSingletonScope {
+    match scope {
+        ProcessOperatorStatusSingletonScope::PullRequest => {
+            WireOperatorStatusSingletonScope::PullRequest
+        }
+        ProcessOperatorStatusSingletonScope::Stack => WireOperatorStatusSingletonScope::Stack,
+        ProcessOperatorStatusSingletonScope::Rule => WireOperatorStatusSingletonScope::Rule,
+        ProcessOperatorStatusSingletonScope::Repo => WireOperatorStatusSingletonScope::Repo,
+    }
+}
+
+fn wire_operator_status_blocker(
+    blocker: ProcessOperatorStatusHeldSlotBlocker,
+) -> WireOperatorStatusHeldSlotBlocker {
+    match blocker {
+        ProcessOperatorStatusHeldSlotBlocker::UndeliveredAction => {
+            WireOperatorStatusHeldSlotBlocker::UndeliveredAction
+        }
+        ProcessOperatorStatusHeldSlotBlocker::DeliveryTurnRuntimeRelevant => {
+            WireOperatorStatusHeldSlotBlocker::DeliveryTurnRuntimeRelevant
+        }
+        ProcessOperatorStatusHeldSlotBlocker::LiveRuntimeTurn => {
+            WireOperatorStatusHeldSlotBlocker::LiveRuntimeTurn
+        }
+        ProcessOperatorStatusHeldSlotBlocker::PursuingGoal => {
+            WireOperatorStatusHeldSlotBlocker::PursuingGoal
+        }
+    }
+}
+
+fn wire_operator_status_mergeable_state(
+    state: ProcessOperatorStatusMergeableState,
+) -> WireOperatorStatusMergeableState {
+    match state {
+        ProcessOperatorStatusMergeableState::Mergeable => {
+            WireOperatorStatusMergeableState::Mergeable
+        }
+        ProcessOperatorStatusMergeableState::Conflicting => {
+            WireOperatorStatusMergeableState::Conflicting
+        }
+        ProcessOperatorStatusMergeableState::Unknown => WireOperatorStatusMergeableState::Unknown,
+    }
+}
+
+fn wire_operator_status_review_decision(
+    decision: ProcessOperatorStatusReviewDecision,
+) -> WireOperatorStatusReviewDecision {
+    match decision {
+        ProcessOperatorStatusReviewDecision::None => WireOperatorStatusReviewDecision::None,
+        ProcessOperatorStatusReviewDecision::Approved => WireOperatorStatusReviewDecision::Approved,
+        ProcessOperatorStatusReviewDecision::ReviewRequired => {
+            WireOperatorStatusReviewDecision::ReviewRequired
+        }
+        ProcessOperatorStatusReviewDecision::ChangesRequested => {
+            WireOperatorStatusReviewDecision::ChangesRequested
+        }
+    }
+}
+
+fn wire_operator_status_verdict(
+    verdict: ProcessOperatorStatusConvergenceVerdict,
+) -> WireOperatorStatusConvergenceVerdict {
+    match verdict {
+        ProcessOperatorStatusConvergenceVerdict::NotConverged => {
+            WireOperatorStatusConvergenceVerdict::NotConverged
+        }
+        ProcessOperatorStatusConvergenceVerdict::InternallyConverged => {
+            WireOperatorStatusConvergenceVerdict::InternallyConverged
+        }
+        ProcessOperatorStatusConvergenceVerdict::MergeReady => {
+            WireOperatorStatusConvergenceVerdict::MergeReady
+        }
+    }
+}
+
+fn wire_operator_status_seal(
+    seal: ProcessOperatorStatusConvergenceSeal,
+) -> WireOperatorStatusConvergenceSeal {
+    match seal {
+        ProcessOperatorStatusConvergenceSeal::InternallyConverged => {
+            WireOperatorStatusConvergenceSeal::InternallyConverged
+        }
+        ProcessOperatorStatusConvergenceSeal::MergeReady => {
+            WireOperatorStatusConvergenceSeal::MergeReady
+        }
+    }
 }
 
 struct WireMetadataPageRequest {
@@ -10692,24 +11145,6 @@ impl SubmitInputTransaction for ConfiguredSubmitInputTransaction<'_> {
     }
 }
 
-fn configured_submit_input_repository(
-    pool: &PgPool,
-    model_configuration: &HubModelConfiguration,
-    blob_store_registry: Option<&BlobStoreRegistry>,
-) -> SubmitInputRepository {
-    let repository = SubmitInputRepository::with_model_capabilities(
-        pool.clone(),
-        model_configuration.model_capability_catalog(),
-    );
-    match blob_store_registry {
-        Some(registry) => match NonZeroU64::new(registry.max_blob_bytes()) {
-            Some(maximum) => repository.with_maximum_attachment_bytes(maximum),
-            None => repository,
-        },
-        None => repository,
-    }
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "the closed submit request is kept explicit at this wire-to-application adapter"
@@ -10744,8 +11179,14 @@ where
     };
     let session = SessionId::from_uuid(session_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository =
-        configured_submit_input_repository(pool, model_configuration, blob_store_registry);
+    let repository = SubmitInputRepository::with_model_capabilities(
+        pool.clone(),
+        model_configuration.model_capability_catalog(),
+    );
+    let repository = match blob_store_registry {
+        Some(registry) => repository.with_attachment_maximum_bytes(registry.max_blob_bytes()),
+        None => repository,
+    };
     let expected_version = expected_defaults_version
         .and_then(|version| SessionConfigurationDefaultsVersion::try_from_u64(version.value()));
     let model_settings = domain_model_settings_overlay(model_settings);
@@ -10845,8 +11286,14 @@ where
     let session = SessionId::from_uuid(session_id.into_uuid());
     let expected_active_turn = TurnId::from_uuid(expected_active_turn_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository =
-        configured_submit_input_repository(pool, model_configuration, blob_store_registry);
+    let repository = SubmitInputRepository::with_model_capabilities(
+        pool.clone(),
+        model_configuration.model_capability_catalog(),
+    );
+    let repository = match blob_store_registry {
+        Some(registry) => repository.with_attachment_maximum_bytes(registry.max_blob_bytes()),
+        None => repository,
+    };
     // A command identity that already names durable intent must reach the
     // replay boundary unconditionally (INV-012): the first handling already
     // released the wait, so re-applying the current-state precondition would
@@ -11022,8 +11469,14 @@ where
     let session = SessionId::from_uuid(session_id.into_uuid());
     let expected_active_turn = TurnId::from_uuid(expected_active_turn_id.into_uuid());
     let command_id = DurableCommandId::from_uuid(command_id);
-    let repository =
-        configured_submit_input_repository(pool, model_configuration, blob_store_registry);
+    let repository = SubmitInputRepository::with_model_capabilities(
+        pool.clone(),
+        model_configuration.model_capability_catalog(),
+    );
+    let repository = match blob_store_registry {
+        Some(registry) => repository.with_attachment_maximum_bytes(registry.max_blob_bytes()),
+        None => repository,
+    };
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
@@ -11549,6 +12002,90 @@ fn wire_tool_decision(
         // decision it records carries one; a reason-free denial cannot be
         // projected as this receipt.
         ToolApprovalDecision::Deny { reason: None } => Err(ProcessConnectionError::EncodeInvariant),
+    }
+}
+
+/// Records one user override of a delegate denial through the canonical
+/// override command.
+///
+/// A claimed command identity reaches the durable replay boundary
+/// unconditionally (INV-012). The session is part of the canonical override
+/// payload, so an other-session request is the transaction's recorded
+/// `request_not_in_session` rejection rather than a pre-command refusal, and
+/// every outcome is the recorded result of the canonical command.
+async fn handle_override_denied_tool_request<Writer>(
+    writer: &mut Writer,
+    version: ProtocolVersion,
+    request_id: RequestId,
+    command_id: uuid::Uuid,
+    session_id: CanonicalUuid,
+    tool_request_id: CanonicalUuid,
+    pool: &PgPool,
+) -> Result<(), ProcessConnectionError>
+where
+    Writer: AsyncWrite + Unpin,
+{
+    let session = SessionId::from_uuid(session_id.into_uuid());
+    let request = ToolRequestId::from_uuid(tool_request_id.into_uuid());
+    let command_id = DurableCommandId::from_uuid(command_id);
+    let Ok(command) = OverrideDeniedToolRequest::try_new(command_id, session, request) else {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    };
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let mut service = OverrideDeniedToolRequestService::new(repository);
+    match service.execute(command).await {
+        Ok(prepared) => match prepared.result() {
+            OverrideDeniedToolRequestResult::Applied(applied) => {
+                write_message(
+                    writer,
+                    version,
+                    request_id,
+                    ServerMessage::ToolDenialOverridden {
+                        tool_request_id: wire_uuid(applied.recorded().denied_request().into_uuid()),
+                    },
+                )
+                .await
+            }
+            OverrideDeniedToolRequestResult::Rejected(rejected) => {
+                let detail = match *rejected {
+                    OverrideDeniedToolRequestRejectedResult::RequestNotFound { denied_request } => {
+                        RejectionDetail::ToolRequestNotFound {
+                            tool_request_id: wire_uuid(denied_request.into_uuid()),
+                        }
+                    }
+                    OverrideDeniedToolRequestRejectedResult::RequestNotInSession {
+                        session,
+                        denied_request,
+                    } => RejectionDetail::ToolRequestNotInSession {
+                        session_id: wire_uuid(session.into_uuid()),
+                        tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
+                    OverrideDeniedToolRequestRejectedResult::NotDelegateDenied {
+                        denied_request,
+                    } => RejectionDetail::ToolRequestNotDelegateDenied {
+                        tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
+                    OverrideDeniedToolRequestRejectedResult::NotTerminallyDenied {
+                        denied_request,
+                    } => RejectionDetail::ToolRequestNotTerminallyDenied {
+                        tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
+                    OverrideDeniedToolRequestRejectedResult::AlreadyOverridden {
+                        denied_request,
+                    } => RejectionDetail::ToolDenialAlreadyOverridden {
+                        tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
+                };
+                write_error(writer, version, request_id, ProtocolError::rejected(detail)).await
+            }
+        },
+        Err(error) => write_tool_loop_error(writer, version, request_id, session_id, error).await,
     }
 }
 
@@ -12380,20 +12917,16 @@ where
                 writer,
                 version,
                 request_id,
-                ServerMessage::TranscriptTextEntry {
+                ServerMessage::TranscriptUserEntry {
                     entry_index: CanonicalU64::new(*entry_index),
                     source_session_id: wire_uuid(source_session.into_uuid()),
                     entry_id: wire_uuid(entry.into_uuid()),
-                    entry: TranscriptTextEntry::User {
-                        accepted_input_id: wire_uuid(accepted_input.into_uuid()),
-                        turn_id: wire_uuid(turn.into_uuid()),
-                    },
+                    accepted_input_id: wire_uuid(accepted_input.into_uuid()),
+                    turn_id: wire_uuid(turn.into_uuid()),
+                    content: wire_user_content(content),
                 },
             )
-            .await?;
-            let content = serde_json::to_string(&wire_user_content(content))
-                .map_err(|_| ProcessConnectionError::EncodeInvariant)?;
-            write_content(writer, version, request_id, *entry_index, &content).await
+            .await
         }
         ProcessTranscriptEntry::Assistant {
             entry_index,
@@ -12470,6 +13003,15 @@ where
                                         model_call_id: wire_uuid(call.into_uuid()),
                                     }
                                 }
+                                signalbox_domain::ToolApprovalDecider::UserOverride {
+                                    command,
+                                    denied_request,
+                                } => WireToolApprovalEventDecider::UserOverride {
+                                    command_id: wire_uuid(command.into_uuid()),
+                                    overridden_tool_request_id: wire_uuid(
+                                        denied_request.into_uuid(),
+                                    ),
+                                },
                             },
                             rationale: approval
                                 .rationale()
@@ -12711,18 +13253,17 @@ fn map_rejection(
     rejected: SubmitInputRejectedResult,
 ) -> Result<RejectionDetail, ProcessConnectionError> {
     Ok(match rejected {
-        SubmitInputRejectedResult::BlobNotFound { session: _, digest } => {
+        SubmitInputRejectedResult::AttachmentBlobNotFound { digest } => {
             RejectionDetail::AttachmentBlobNotFound {
-                digest: CanonicalBlobDigest::from_digest(digest),
+                digest: signalbox_process_protocol::CanonicalBlobDigest::from_digest(digest),
             }
         }
-        SubmitInputRejectedResult::AttachmentBytesTooLarge {
-            session: _,
-            maximum_bytes,
-            observed_bytes: _,
-        } => RejectionDetail::AttachmentByteBudgetExceeded {
-            maximum_bytes: CanonicalU64::new(maximum_bytes.get()),
-        },
+        SubmitInputRejectedResult::AttachmentByteBudgetExceeded { maximum_bytes } => {
+            RejectionDetail::AttachmentByteBudgetExceeded {
+                maximum_bytes: PositiveCanonicalU64::try_new(maximum_bytes)
+                    .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
+            }
+        }
         SubmitInputRejectedResult::SessionNotFound { session } => {
             RejectionDetail::SessionNotFound {
                 session_id: wire_uuid(session.into_uuid()),
@@ -13432,9 +13973,15 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
         ProcessTurnState::ActiveAwaitingModelCallRecovery {
             ended_attempt,
             recovery_call,
+            automatic_reconciliation_attempts,
+            operator_action_required,
         } => TurnState::ActiveAwaitingModelCallRecovery {
             ended_attempt_id: wire_uuid(ended_attempt.into_uuid()),
             recovery_model_call_id: wire_uuid(recovery_call.into_uuid()),
+            automatic_reconciliation_attempts: CanonicalU64::new(u64::from(
+                *automatic_reconciliation_attempts,
+            )),
+            operator_action_required: *operator_action_required,
         },
         ProcessTurnState::ActiveAwaitingToolApproval { request } => {
             TurnState::ActiveAwaitingToolApproval {
@@ -13477,12 +14024,24 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                 let model_call_id = wire_uuid(call.call().into_uuid());
                 match call.disposition() {
                     ProcessFailedModelCallDisposition::KnownFailed => {
-                        match call.provider_failure_cause() {
-                            Some(cause) => FailedTerminalModelCall::known_failed_with_cause(
+                        let provider_cause = call.provider_failure_cause();
+                        let attachment_cause = call.attachment_preparation_failure_cause();
+                        debug_assert!(
+                            provider_cause.is_none() || attachment_cause.is_none(),
+                            "process-read validation rejects overlapping failure causes"
+                        );
+                        match (provider_cause, attachment_cause) {
+                            (Some(cause), _) => FailedTerminalModelCall::known_failed_with_cause(
                                 model_call_id,
                                 wire_provider_failure_cause(cause),
                             ),
-                            None => FailedTerminalModelCall::new(
+                            (None, Some(cause)) => {
+                                FailedTerminalModelCall::known_failed_with_cause(
+                                    model_call_id,
+                                    wire_attachment_preparation_failure_cause(cause),
+                                )
+                            }
+                            (None, None) => FailedTerminalModelCall::new(
                                 model_call_id,
                                 FailedModelCallDisposition::KnownFailed,
                             ),
@@ -13493,6 +14052,7 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                             call.provider_failure_cause().is_none(),
                             "process-read validation rejects causes on cancelled model calls"
                         );
+                        debug_assert!(call.attachment_preparation_failure_cause().is_none());
                         FailedTerminalModelCall::new(
                             model_call_id,
                             FailedModelCallDisposition::Cancelled,
@@ -13632,6 +14192,7 @@ enum InternalDiagnostic {
     ToolLoopCorruption,
     ToolLoopInvalidTransition,
     ProcessReadCorruption,
+    OperatorStatusCorruption,
     GoalRepositoryCorruption,
 }
 
@@ -13701,6 +14262,7 @@ impl InternalDiagnostic {
             | Self::SubmitInputModelExecutionCorruption
             | Self::ToolLoopCorruption
             | Self::ProcessReadCorruption
+            | Self::OperatorStatusCorruption
             | Self::GoalRepositoryCorruption => OperatorFailureClass::FailClosedCorruption,
         }
     }
@@ -13778,6 +14340,7 @@ impl InternalDiagnostic {
             Self::ToolLoopCorruption => "tool_loop_corruption",
             Self::ToolLoopInvalidTransition => "tool_loop_invalid_transition",
             Self::ProcessReadCorruption => "process_read_corruption",
+            Self::OperatorStatusCorruption => "operator_status_corruption",
             Self::GoalRepositoryCorruption => "goal_repository_corruption",
         }
     }
@@ -14086,6 +14649,24 @@ fn wire_provider_failure_cause(
     }
 }
 
+fn wire_attachment_preparation_failure_cause(
+    cause: signalbox_persistence::process_read::ProcessAttachmentPreparationFailureCause,
+) -> FailedModelCallCause {
+    use signalbox_persistence::process_read::ProcessAttachmentPreparationFailureCause;
+
+    match cause {
+        ProcessAttachmentPreparationFailureCause::TooLarge => {
+            FailedModelCallCause::AttachmentTooLarge
+        }
+        ProcessAttachmentPreparationFailureCause::Missing => {
+            FailedModelCallCause::AttachmentMissing
+        }
+        ProcessAttachmentPreparationFailureCause::Corrupt => {
+            FailedModelCallCause::AttachmentCorrupt
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_goal_user_command<Writer>(
     writer: &mut Writer,
@@ -14153,6 +14734,19 @@ where
                 version,
                 request_id,
                 ProtocolError::without_detail(ErrorCode::ConflictingReuse),
+            )
+            .await
+        }
+        Ok(GoalCommandHandlingOutcome::TargetBusy {
+            session: blocking_session,
+        }) => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::rejected(RejectionDetail::CommissionTargetBusy {
+                    session_id: CanonicalUuid::from_uuid(blocking_session.into_uuid()),
+                }),
             )
             .await
         }
@@ -14905,6 +15499,13 @@ impl ProcessUpdateEvent {
                             model_call_id: wire_uuid(call.into_uuid()),
                         }
                     }
+                    signalbox_domain::ToolApprovalDecider::UserOverride {
+                        command,
+                        denied_request,
+                    } => WireToolApprovalEventDecider::UserOverride {
+                        command_id: wire_uuid(command.into_uuid()),
+                        overridden_tool_request_id: wire_uuid(denied_request.into_uuid()),
+                    },
                 };
                 SessionEvent::ToolApprovalDecided {
                     turn_id: wire_uuid(turn.into_uuid()),

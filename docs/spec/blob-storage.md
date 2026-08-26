@@ -53,9 +53,8 @@ projection are verified against this implementing change
 (`agent/blob-storage-attachment-rendering`).
 
 Distinct attachment sizing and streamed replica verification, typed
-missing/corrupt closure before send authorization, typed unavailable retry, and
-bounded verification admission, scheduler-capacity handoff, and deadline are
-verified against this implementing change
+missing/corrupt closure before send authorization, and typed unavailable retry
+are verified against this implementing change
 (`agent/blob-storage-attachment-preparation`).
 
 The text-only blob-read family, frontier-derived digest authorization, and
@@ -464,9 +463,7 @@ protocol; an unknown digest or oversized aggregate then commits the typed
 payload and terminal rejection with no accepted-input effect. Equal replay
 returns that rejection and corrected content uses a new command identity.
 Command and accepted-input rows carry mirrored ordered content-part satellites
-under the existing command/effect correlation discipline. The command-side
-satellite retains a pre-admission unknown digest for exact rejection replay;
-only an accepted-side attachment has a catalog foreign key. The wire
+under the existing command/effect correlation discipline, and the wire
 `submit_input`, `reconcile_turn`, and `stop_turn` content fields all become the
 same ordered parts array. The process protocol's version-one in-place editing
 window is why this lands as the canonical shape rather than a compatibility
@@ -477,12 +474,12 @@ both attachment sums equal to zero and bypass blob configuration, catalog, and
 store access. Text-only submission therefore remains available when
 `[blob_storage]` is omitted under the empty-catalog startup rule.
 
-The one-time storage migrations insert exactly one ordinal-zero text part for
-every pre-migration command and accepted-input row, verify one complete ordered
-sequence per parent row, update every `SubmitInput` record to final storage
-version 4, and remove the `content_text` columns. Their inserts are idempotent
-on parent row plus ordinal, disagreement aborts the migration, and runtime code
-accepts only version 4 and reconstructs only the satellites. Command-side and
+The one-time satellite migration inserts exactly one ordinal-zero text part for
+every pre-migration command and accepted-input row, verifies one complete
+ordered sequence per parent row, updates every `SubmitInput` record to storage
+version 3, and removes the `content_text` columns. Its inserts are idempotent on
+parent row plus ordinal, disagreement aborts the migration, and runtime code
+accepts only version 3 and reconstructs only the satellites. Command-side and
 accepted-side parts remain separate mirrored records rather than shared mutable
 authority.
 
@@ -537,20 +534,11 @@ rendered frontier; a catalogued digest outside that set is unauthorized. Results
 use the existing text-only tool-result arm and never enter a provider message as
 image or document media.
 
-Content-type-aware readers are committed unimplemented functionality: no present
-surface provides one, and neither its exact inventory nor the formats it
-supports are decided. The compatibility constraint is that attachment stubs and
-the generic read family remain sufficient to add such readers without
-re-deciding visibility.
-
-Content-interpreting processor isolation is committed unimplemented
-functionality: no present decoder, parser, or renderer surface exists. The
-compatibility constraint is that every future content-interpreting reader
-executes inside strong process isolation and treats input validation as
-best-effort defense in depth. The concrete sandbox mechanism is selected by that
-implementation without weakening this posture. Why: parser hardening is an
-unending surface — a malicious payload exploiting a decoder defect must be
-contained by isolation rather than entrusted to an ever-growing validator.
+The provider-neutral reader model, stable typed-read contracts, and decided
+processor boundary are owned by
+[file and media interpretation](file-and-media.md). Attachment stubs and the
+generic read family remain the visibility and unknown-format substrate for that
+layer.
 
 ## Model-call preparation and modalities
 
@@ -622,8 +610,8 @@ new imports write only blob references.
   and the artifact lifecycle bullets in
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts);
   this page's append-only catalog is the constraint they design against.
-- The content-type-aware read-tool inventory and the concrete isolation
-  mechanism its processors use are recorded in
+- Concrete format adapters and their per-family dependency choices remain
+  deferred with
   [general-purpose artifacts](../open-questions.md#general-purpose-artifacts).
 - How a tool family's admitted result references a blob rather than embedding
   bytes, and rich image/file result-content arms, remain with

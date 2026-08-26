@@ -39,6 +39,7 @@ allow-wildcard-paths = true
 # introduces a new license, in the same pull request that adds it.
 allow = [
   "MIT",
+  "MPL-2.0",
   "Apache-2.0",
   "ISC",
   "BSD-2-Clause",

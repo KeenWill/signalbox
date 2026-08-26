@@ -105,6 +105,37 @@ also require owner rulings:
   [sessions-and-transcript](spec/sessions-and-transcript.md). Blocks those
   extensions. (S02, S17, S28)
 
+### Workspace instructions and skills
+
+The accepted baseline in
+[workspace instructions and skills](spec/workspace-instructions.md) owns greedy
+candidate discovery, typed registration, session/template eligibility,
+deliberate admission, projection rather than transcript append, and exact
+per-turn provenance. The following extensions remain undecided:
+
+- **Discovery invalidation and expansion.** Whether the daemon watches or
+  explicitly rescans roots, which ignore language or depth bound applies,
+  whether and how symbolic links may be followed, and which additional vendor
+  instruction formats become candidates. See the owning
+  [discovery contract](spec/workspace-instructions.md#discovery).
+- **Runner-workspace discovery.** The accepted daemon-local refusal needs a
+  placement-revision-correlated runner operation for greedy discovery, typed
+  findings, and exact source reads before runner-provisioned workspaces can
+  contribute candidates. Blocks workspace discovery for runner-backed sessions;
+  configured daemon roots remain available.
+- **Retrieval and automatic activation.** Search or deterministic ranking over
+  eligible metadata, path-triggered admission, and any template-eager tier need
+  exact recorded trigger and budget contracts. The baseline remains deliberate
+  identity-addressed admission.
+- **Skill resources and rendered-byte externalization.** Addressing and hashing
+  files below a skill bundle, export policy for retained rendered plaintext, and
+  whether a later migration moves version-one admission-row wrapper bytes to
+  content-addressed blob storage remain open.
+- **Whole-bundle unload.** Projection reserves removal at a later turn boundary,
+  but unload authority, tombstone rendering, admitted-set history, and the
+  model-facing operation remain foundation work. See the owning
+  [projection contract](spec/workspace-instructions.md#projection-rather-than-transcript-append).
+
 ## Conversation import
 
 - **Exact mappings for additional source formats.** Older backup formats have no
@@ -145,13 +176,15 @@ also require owner rulings:
   own proof and disposition rules. Later scope. (S07)
 - **Ambiguous provider-call recovery.** A restart-recovered unstopped in-flight
   call parks its turn in the awaiting-recovery wait
-  ([model-call-execution](spec/model-call-execution.md)). A user decision now
-  releases the slot by terminalizing the turn over that exact ambiguity
-  ([process-protocol](spec/process-protocol.md)), but nothing resolves what the
-  provider actually did. The retired design analysis identified adopting a
-  provider request-status API — with its polling posture and evidence classes —
-  as the resolution path; the full analysis is in git history. Later scope.
-  (S02)
+  ([model-call-execution](spec/model-call-execution.md)). The daemon now spends
+  a bounded durable reconciliation budget and automatically releases the slot by
+  terminalizing over that exact ambiguity; an operator decision may win the same
+  race and becomes required only when the budget exhausts
+  ([process-protocol](spec/process-protocol.md)). Neither treatment resolves
+  what the provider actually did. Whether a provider request-status API can
+  replace the conservative ambiguous outcome with trustworthy evidence,
+  including its polling posture and evidence classes, remains undecided. Later
+  scope. (S02)
 - **Operator control of scheduling and liveness cadence.** The scheduler's sweep
   interval, per-session scan gating, fairness between contending sessions, and
   the turn-liveness staleness bound and scan interval are all compiled constants
@@ -275,11 +308,15 @@ https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
 - **Additional effective-configuration categories.** Prompt composition,
   sampling and output-shape parameters beyond the implemented model/session
-  settings contract, instructions, tool enablement/configuration, placement
-  constraints, per-turn resources, and interpreting-policy selections remain
-  unavailable; a future subsystem decision must extend the request,
-  session-default, override, and effective-value algebras together
+  settings contract, tool enablement/configuration, placement constraints,
+  per-turn resources, and interpreting-policy selections remain unavailable; a
+  future subsystem decision must extend the request, session-default, override,
+  and effective-value algebras together
   ([configuration-and-credentials](spec/configuration-and-credentials.md)).
+  Workspace-instruction eligibility is the separate typed selector and
+  allow-list algebra owned by
+  [workspace instructions and skills](spec/workspace-instructions.md#eligibility),
+  so it neither waits on nor satisfies this general configuration question.
   Reasoning level, fast mode, and provider-tagged service tier are owned by
   [model and session settings](spec/model-session-settings.md). Compaction
   threshold, target size, and never-compact/full-context controls remain

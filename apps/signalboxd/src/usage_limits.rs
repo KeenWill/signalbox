@@ -3,8 +3,8 @@
 use std::{collections::HashMap, future::Future};
 
 use signalbox_application::{
-    ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallPreparationErrorStage,
-    ModelCallProvider, OperatorFailureClass, PreparedModelOperation,
+    ClassifyOperatorFailure, ModelCallCapabilityPreparation, ModelCallProvider,
+    OperatorFailureClass, PreparedModelOperation,
 };
 use signalbox_domain::{
     AuthorizedModelCall, CorrelatedModelCallTerminalObservation, FastMode,
@@ -188,15 +188,6 @@ where
     type Capability = UsageLimitedCapability<P::Capability>;
     type Error = UsageLimitedProviderError<P::Error>;
 
-    fn preparation_error_stage(error: &Self::Error) -> ModelCallPreparationErrorStage {
-        match error {
-            UsageLimitedProviderError::Provider(error) => P::preparation_error_stage(error),
-            UsageLimitedProviderError::UnconfiguredTarget => {
-                ModelCallPreparationErrorStage::Capability
-            }
-        }
-    }
-
     async fn prepare_capability<Cancellation>(
         &mut self,
         operation: PreparedModelOperation,
@@ -223,17 +214,11 @@ where
                 ModelCallCapabilityPreparation::Cancelled => {
                     ModelCallCapabilityPreparation::Cancelled
                 }
-                ModelCallCapabilityPreparation::Deferred => {
-                    ModelCallCapabilityPreparation::Deferred
-                }
                 ModelCallCapabilityPreparation::KnownFailure => {
                     ModelCallCapabilityPreparation::KnownFailure
                 }
-                ModelCallCapabilityPreparation::AttachmentKnownFailure(failure) => {
-                    ModelCallCapabilityPreparation::AttachmentKnownFailure(failure)
-                }
-                ModelCallCapabilityPreparation::AttachmentUnavailable(unavailable) => {
-                    ModelCallCapabilityPreparation::AttachmentUnavailable(unavailable)
+                ModelCallCapabilityPreparation::AttachmentFailure(failure) => {
+                    ModelCallCapabilityPreparation::AttachmentFailure(failure)
                 }
             })
     }

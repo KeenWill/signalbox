@@ -87,8 +87,8 @@ pub enum StartupScanSessionOutcome {
         turn: TurnId,
     },
     /// A prior process already ended this turn's tenure and parked it on an
-    /// exact ambiguity set. The scan has nothing left to classify; only an
-    /// user reconciliation decision can release the slot.
+    /// exact ambiguity set. The scan has nothing left to classify; bounded
+    /// runtime reconciliation or an operator decision can release the slot.
     AwaitingRecoveryDecision {
         /// The active turn holding the slot until reconciliation.
         turn: TurnId,
@@ -130,14 +130,15 @@ impl StartupScanOutcome {
         self.recovered_turn_count
     }
 
-    /// Returns every session whose active turn holds the slot awaiting an
-    /// user reconciliation decision.
+    /// Returns every session whose active turn holds the slot awaiting
+    /// bounded runtime reconciliation.
     ///
     /// The scan cannot resolve these turns: their physical tenure has ended
     /// and the exact ambiguity set is durable, whether this scan classified
     /// the issued call or found the wait already parked. They do not block
     /// startup, so they are reported rather than counted as recovered. Only
-    /// waits with an operator surface are reported.
+    /// model-call waits with an automatic and eventual operator surface are
+    /// reported.
     pub fn awaiting_recovery_decision_sessions(&self) -> &[SessionId] {
         &self.awaiting_recovery_decision_sessions
     }
@@ -443,8 +444,8 @@ mod tests {
         assert_eq!(outcome.recovered_turn_count(), 0);
     }
 
-    /// INV-034: a turn parked on a user reconciliation decision is neither
-    /// counted as recovered nor hidden — it is reported and startup proceeds.
+    /// INV-034: a turn parked for bounded reconciliation is neither counted as
+    /// recovered nor hidden — it is reported and startup proceeds.
     #[test]
     fn inv034_reports_awaiting_recovery_decision_without_blocking_startup() {
         let parked = session(1);

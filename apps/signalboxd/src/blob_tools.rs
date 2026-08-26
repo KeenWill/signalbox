@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     OperatorFailureClass, ToolArgumentValidator, ToolExecutionInvocation, ToolExecutor,
-    ToolExecutorEvidence, ToolPreauthorization, relinquish_scheduler_capacity,
+    ToolExecutorEvidence, ToolPreauthorization,
 };
 use signalbox_domain::{
     BlobDigest, NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail,
@@ -240,15 +240,13 @@ impl ToolExecutor for BlobToolExecutor {
                 let Ok(_permit) = Arc::clone(&self.read_budget).try_acquire_owned() else {
                     return Ok(invocation.bind(failed(BlobReadError::Unavailable)?));
                 };
-                let traversal =
-                    relinquish_scheduler_capacity(tokio::time::timeout(BLOB_READ_TIMEOUT, async {
-                        let registry =
-                            self.registry.as_deref().ok_or(BlobReadError::Unavailable)?;
-                        let entry = read_blob_entry(&self.repository, digest).await?;
-                        read_blob_chunk(registry, &entry, offset, length).await
-                    }))
-                    .await
-                    .unwrap_or(Err(BlobReadError::Unavailable));
+                let traversal = tokio::time::timeout(BLOB_READ_TIMEOUT, async {
+                    let registry = self.registry.as_deref().ok_or(BlobReadError::Unavailable)?;
+                    let entry = read_blob_entry(&self.repository, digest).await?;
+                    read_blob_chunk(registry, &entry, offset, length).await
+                })
+                .await
+                .unwrap_or(Err(BlobReadError::Unavailable));
                 match traversal {
                     Ok(bytes) => completed(&ReadResult {
                         digest: digest.to_string(),

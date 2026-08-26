@@ -12,6 +12,7 @@
 mod support;
 
 mod approval_decisions;
+mod convergence_sweep;
 mod delegated_result_rereads;
 mod delegation_schema;
 mod delegation_transactions;
@@ -23,9 +24,13 @@ mod outbox_dispatch_and_process_read;
 mod restart_recovery_and_submit;
 mod session_creation_and_submit;
 mod session_plan;
+mod session_timeline;
 mod tool_round_lifecycle;
 mod turn_activation;
 mod turn_liveness;
+mod workspace_instruction_authority;
+mod workspace_instruction_migration;
+mod workspace_instructions;
 
 use std::{
     collections::{BTreeSet, HashSet, VecDeque},
@@ -40,17 +45,18 @@ use std::{
 use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_application::{
-    ApprovalJudgeCompletionIdentities, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
-    ClassifyOperatorFailure, CommitModelCallObservationTransaction, CompiledTool,
-    CompiledToolCatalog, CorrelatedDurableChildWait, CreateSessionError, CreateSessionOutcome,
-    CreateSessionRequest, CreateSessionService, EligibilityNudge, EligibilityNudgeOutcome,
-    EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
+    ApprovalJudgeCompletionIdentities, AttachmentPreparationFailure, AuthorizeModelCallOutcome,
+    AuthorizeModelCallTransaction, ClassifyOperatorFailure, CommitModelCallObservationTransaction,
+    CompiledTool, CompiledToolCatalog, CorrelatedDurableChildWait, CreateSessionError,
+    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, EligibilityNudge,
+    EligibilityNudgeOutcome, EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
     ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
     ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallObservationCommitOutcome, ModelConversationMessage, OperatorFailureClass,
+    ModelCallObservationCommitOutcome, ModelCallReconciliationFailureKind,
+    ModelCallReconciliationOutcome, ModelConversationMessage, OperatorFailureClass,
     PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
-    ReplaceSessionDefaultsService, RetainedCapabilityFailureStatus,
-    RetainedModelCallObservationStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
+    ReplaceSessionDefaultsService, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
     SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
     StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
@@ -75,10 +81,11 @@ use signalbox_domain::{
     ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
     ModelCallTerminalOutcome, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
     ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence,
-    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments,
+    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments, OverrideDeniedToolRequest,
+    OverrideDeniedToolRequestRejectedResult, OverrideDeniedToolRequestResult,
     PerInputConfigurationChoices, PhysicalCancellationModelCallTurnIdentities,
     PreparedCreateSession, PreparedModelCallRequest, ProviderModelCallFailureCause,
-    ProviderModelIdentity, ProviderReportedTokenUsage, ReasoningLevel,
+    ProviderModelIdentity, ProviderReportedTokenUsage, ReasoningLevel, RecordedUserOverride,
     RefusedModelCallTurnIdentities, ReplaceSessionDefaults, ReplaceSessionDefaultsRejectedResult,
     ReplaceSessionDefaultsResult, ResolvedProviderTarget, SemanticTranscriptEntryId,
     SemanticTranscriptEntryRef, SessionConfigurationDefaults, SessionConfigurationDefaultsVersion,
@@ -89,12 +96,12 @@ use signalbox_domain::{
     SubmitInputAppliedResult, SubmitInputReconstitutionFailure, SubmitInputRejectedResult,
     SubmitInputResult, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalResolution,
     ToolAttemptCrashOutcome, ToolAttemptEnd, ToolAttemptId, ToolAttemptObservation,
-    ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDenialReason,
-    ToolDispatchAuthority, ToolEffectClass, ToolExecutionError, ToolExecutionErrorDetail,
-    ToolExecutionErrorKind, ToolName, ToolPermissionDefault, ToolRequestId,
-    ToolResponsePartIdentity, ToolResultContent, ToolResultText, ToolRoundModelCallIdentities,
-    ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId, TurnConfigurationProvenance,
-    TurnId, UserContent, UserContentPart,
+    ToolBatchExecutionFailure, ToolCallProposal, ToolDecisionRationale, ToolDecisionSource,
+    ToolDenialReason, ToolDispatchAuthority, ToolEffectClass, ToolExecutionError,
+    ToolExecutionErrorDetail, ToolExecutionErrorKind, ToolName, ToolPermissionDefault,
+    ToolRequestId, ToolResponsePartIdentity, ToolResultContent, ToolResultText,
+    ToolRoundModelCallIdentities, ToolUsingAssistantResponse, TranscriptAncestry, TurnAttemptId,
+    TurnConfigurationProvenance, TurnId, UserContent, UserContentPart,
 };
 use signalbox_persistence::{
     MIGRATOR, ModelCredentialFamilyCatalog,
@@ -115,6 +122,10 @@ use signalbox_persistence::{
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
+    model_call_reconciliation::{
+        ModelCallReconciliationRepositoryError, PostgresModelCallReconciliationRepository,
+        RECONCILIATION_ACQUIRE_WAIT, RECONCILIATION_LOCK_WAIT,
+    },
     model_execution::{
         CredentialPoolRuntimeAction, CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
@@ -164,6 +175,7 @@ use signalbox_persistence::{
         SubmitInputRepositoryError,
     },
     tool_loop::{PostgresToolLoopRepository, ToolLoopRepositoryError},
+    workspace_instructions::CountedActivationInstructionEvidence,
 };
 use signalbox_tools_plan::{
     PlanAppendOutcome, PlanAppendRejection, PlanAppendRequest, PlanDependencyCycle, PlanEntryId,
@@ -1810,6 +1822,42 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
     Ok((container, pool, database_url))
 }
 
+async fn record_empty_instruction_manifest(
+    pool: &PgPool,
+    session: SessionId,
+) -> Result<(), Box<dyn Error>> {
+    let turn = TurnId::from_uuid(
+        sqlx::query_scalar::<_, Uuid>(
+            "SELECT turn_id FROM turn_lifecycle WHERE session_id = $1 AND state_kind = 'active'",
+        )
+        .bind(session.into_uuid())
+        .fetch_one(pool)
+        .await?,
+    );
+    let snapshot = signalbox_application::discover_workspace_instructions(Vec::new());
+    let manifest = signalbox_domain::TurnInstructionManifest::empty_turn_start(
+        signalbox_domain::TurnInstructionManifestId::from_uuid(turn.into_uuid()),
+        session,
+        turn,
+    );
+    let outcome =
+        signalbox_persistence::workspace_instructions::WorkspaceInstructionRepository::new(
+            pool.clone(),
+        )
+        .record_turn_start(
+            signalbox_domain::InstructionDiscoveryId::from_uuid(turn.into_uuid()),
+            manifest,
+            &snapshot,
+            || unreachable!("an empty discovery needs no bundle identity"),
+        )
+        .await?;
+    assert!(!matches!(
+        outcome,
+        signalbox_persistence::workspace_instructions::RecordTurnInstructionSnapshotOutcome::TurnUnavailable
+    ));
+    Ok(())
+}
+
 async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>>
 {
     let container = Postgres::default()
@@ -1880,6 +1928,51 @@ async fn postgres_before_approval_event_migration()
     }
     drop(connection);
     Ok((container, pool, database_url))
+}
+
+/// `command_registry`'s inspection query names every registered durable
+/// command's typed table regardless of the database's migration state (see
+/// `crates/persistence/src/command_registry.rs`), so a "before" fixture used
+/// by any path that inspects a durable command must still carry every such
+/// table even though it otherwise predates the migration under test.
+/// `override_denied_tool_request_command` (added by `202608170006`, after
+/// this fixture's boundary) is the only registry table introduced between
+/// this boundary and that migration — no other `COMMAND_KIND_DEFINITIONS`
+/// table is created in `202608140001..202608170006` — so admitting that one
+/// migration alone satisfies the registry while every workspace-instruction
+/// table (created by `202608140001` itself) stays absent, preserving this
+/// fixture's "historical DB" premise.
+const OVERRIDE_DENIED_TOOL_REQUEST_COMMAND_MIGRATION_VERSION: i64 = 202608170006;
+
+async fn postgres_before_workspace_instruction_migration()
+-> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let (container, pool, database_url) = unmigrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR.iter().filter(|migration| {
+        migration.version < 202608140001
+            || migration.version == OVERRIDE_DENIED_TOOL_REQUEST_COMMAND_MIGRATION_VERSION
+    }) {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+    Ok((container, pool, database_url))
+}
+
+async fn apply_workspace_instruction_migration(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR.iter().filter(|migration| {
+        migration.version >= 202608140001
+            && migration.version != OVERRIDE_DENIED_TOOL_REQUEST_COMMAND_MIGRATION_VERSION
+    }) {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    Ok(())
 }
 
 async fn insert_pre_approval_tool_request(
@@ -2114,6 +2207,7 @@ async fn activate_earliest_queued_turn(
     else {
         panic!("the earliest queued origin must activate through the production service");
     };
+    record_empty_instruction_manifest(pool, SessionId::from_uuid(activation.session)).await?;
     match *activated {
         signalbox_domain::ActivatedTurn::Accepted(activated) => Ok(Box::new(activated)),
         signalbox_domain::ActivatedTurn::Delegated(_) => {
@@ -2702,6 +2796,46 @@ fn start_input(
     )
 }
 
+/// Attachment byte ceiling the restart fixture admits, well above its one-byte blob.
+// numeric-bound: tunable - bounds fixture attachment admission
+const FIXTURE_ATTACHMENT_MAXIMUM_BYTES: u64 = 1_024;
+
+/// Builds one submit input whose content optionally carries a blob attachment.
+///
+/// The attachment part travels with the parent command so persistence writes
+/// both in the creating transaction, which content-part immutability requires.
+fn start_input_with_attachment(
+    command: u128,
+    session: u128,
+    content: &str,
+    expected: u64,
+    model: ModelSelectionOverride,
+    attachment: Option<BlobDigest>,
+) -> SubmitInput {
+    let mut parts =
+        vec![UserContentPart::try_text(content.to_owned()).expect("test content is admitted")];
+    if let Some(digest) = attachment {
+        parts.push(UserContentPart::Attachment {
+            digest,
+            kind: AttachmentKind::File,
+            media_type: DeclaredMediaType::try_new(String::from("application/octet-stream"))
+                .expect("the fixture media type is admitted"),
+            display_filename: Some(
+                AttachmentDisplayFilename::try_new(String::from("fixture.bin"))
+                    .expect("the fixture basename is admitted"),
+            ),
+        });
+    }
+    SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(command)),
+        SessionId::from_uuid(Uuid::from_u128(session)),
+        UserContent::try_parts(parts).expect("the fixture parts form admitted content"),
+        DeliveryRequest::StartWhenNoActiveTurn {
+            configuration: input_choices(expected, model),
+        },
+    )
+}
+
 fn input_with_delivery(
     command: u128,
     session: u128,
@@ -3190,6 +3324,15 @@ async fn checkpoint_restart_model_call(
     seed: u128,
     authorize: bool,
 ) -> Result<RestartModelCallFixture, Box<dyn Error>> {
+    checkpoint_restart_model_call_with_attachment(pool, seed, authorize, None).await
+}
+
+async fn checkpoint_restart_model_call_with_attachment(
+    pool: &PgPool,
+    seed: u128,
+    authorize: bool,
+    attachment: Option<BlobDigest>,
+) -> Result<RestartModelCallFixture, Box<dyn Error>> {
     let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
     let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
     let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 3));
@@ -3204,14 +3347,20 @@ async fn checkpoint_restart_model_call(
             ModelSelectionRequest::Direct(selection),
         ))
         .await?;
-    SubmitInputRepository::new(pool.clone())
+    let submit_repository = match attachment {
+        Some(_) => SubmitInputRepository::new(pool.clone())
+            .with_attachment_maximum_bytes(FIXTURE_ATTACHMENT_MAXIMUM_BYTES),
+        None => SubmitInputRepository::new(pool.clone()),
+    };
+    submit_repository
         .handle(
-            start_input(
+            start_input_with_attachment(
                 seed + 8,
                 seed + 1,
                 "restart-classification request",
                 1,
                 ModelSelectionOverride::UseSessionDefault,
+                attachment,
             ),
             AcceptedInputId::from_uuid(Uuid::from_u128(seed + 9)),
             Some(turn),
@@ -3281,7 +3430,23 @@ async fn authorize_checkpointed_model_call(
     ),
     Box<dyn Error>,
 > {
-    let fixture = checkpoint_restart_model_call(pool, seed, false).await?;
+    authorize_checkpointed_model_call_with_attachment(pool, seed, None).await
+}
+
+async fn authorize_checkpointed_model_call_with_attachment(
+    pool: &PgPool,
+    seed: u128,
+    attachment: Option<BlobDigest>,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        AuthorizedModelCall,
+    ),
+    Box<dyn Error>,
+> {
+    let fixture =
+        checkpoint_restart_model_call_with_attachment(pool, seed, false, attachment).await?;
     let selection = signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(seed + 5));
     let provider = ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 6));
     let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
@@ -3385,8 +3550,32 @@ async fn checkpoint_confirmed_tool_round(
     ),
     Box<dyn Error>,
 > {
+    checkpoint_confirmed_tool_round_with_attachment(pool, seed, tool_name, arguments, None).await
+}
+
+async fn checkpoint_confirmed_tool_round_with_attachment(
+    pool: &PgPool,
+    seed: u128,
+    tool_name: &str,
+    arguments: &str,
+    attachment: Option<BlobDigest>,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        CorrelatedModelCallTerminalObservation,
+        signalbox_domain::ToolRequestId,
+    ),
+    Box<dyn Error>,
+> {
     let (fixture, repository, observation, requests) =
-        checkpoint_confirmed_tool_batch(pool, seed, &[(tool_name, arguments)]).await?;
+        checkpoint_confirmed_tool_batch_with_attachment(
+            pool,
+            seed,
+            &[(tool_name, arguments)],
+            attachment,
+        )
+        .await?;
     let [request] = requests.as_slice() else {
         panic!("the single-proposal fixture returns one request")
     };
@@ -3409,6 +3598,30 @@ async fn checkpoint_confirmed_tool_batch(
     checkpoint_tool_batch_with_approval(pool, seed, proposals, InitialToolApproval::Confirm).await
 }
 
+async fn checkpoint_confirmed_tool_batch_with_attachment(
+    pool: &PgPool,
+    seed: u128,
+    proposals: &[(&str, &str)],
+    attachment: Option<BlobDigest>,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        CorrelatedModelCallTerminalObservation,
+        Vec<signalbox_domain::ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
+    checkpoint_tool_batch_with_approval_and_attachment(
+        pool,
+        seed,
+        proposals,
+        InitialToolApproval::Confirm,
+        attachment,
+    )
+    .await
+}
+
 async fn checkpoint_tool_batch_with_approval(
     pool: &PgPool,
     seed: u128,
@@ -3423,8 +3636,33 @@ async fn checkpoint_tool_batch_with_approval(
     ),
     Box<dyn Error>,
 > {
+    checkpoint_tool_batch_with_approval_and_attachment(
+        pool,
+        seed,
+        proposals,
+        initial_approval,
+        None,
+    )
+    .await
+}
+
+async fn checkpoint_tool_batch_with_approval_and_attachment(
+    pool: &PgPool,
+    seed: u128,
+    proposals: &[(&str, &str)],
+    initial_approval: InitialToolApproval,
+    attachment: Option<BlobDigest>,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        CorrelatedModelCallTerminalObservation,
+        Vec<signalbox_domain::ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
     let (fixture, model_repository, authorized) =
-        authorize_checkpointed_model_call(pool, seed).await?;
+        authorize_checkpointed_model_call_with_attachment(pool, seed, attachment).await?;
     let requests = proposals
         .iter()
         .enumerate()
@@ -3555,6 +3793,9 @@ fn assert_goal_command_applied(outcome: GoalCommandHandlingOutcome) {
         }
         GoalCommandHandlingOutcome::ConflictingReuse { command_id } => {
             panic!("the fixture goal command identity is already used: {command_id:?}")
+        }
+        GoalCommandHandlingOutcome::TargetBusy { session } => {
+            panic!("the fixture goal command target is held by session: {session:?}")
         }
         GoalCommandHandlingOutcome::LineageMoved => {
             panic!("the fixture goal command expected a lineage head that had moved")
@@ -4347,6 +4588,7 @@ async fn activate_delegated_result_fixture(
     else {
         return Err("the delegated result fixture activation changed".into());
     };
+    record_empty_instruction_manifest(pool, child).await?;
     Ok((parent, child, child_turn, spawning_request, selection))
 }
 
@@ -4465,6 +4707,7 @@ async fn authorize_delegated_successor_model_call_fixture(
         },
     )
     .await?;
+    record_empty_instruction_manifest(pool, child).await?;
 
     let repository =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
@@ -4770,6 +5013,7 @@ async fn delegated_capability_failure_fixture(
         .fail_prepared_call(
             child,
             call,
+            None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 27)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(seed + 28)),
@@ -4804,9 +5048,9 @@ async fn assert_delegated_capability_reread_rejects_damage(
     assert_eq!(
         fixture
             .repository
-            .reread_capability_failure(fixture.child, fixture.call)
+            .reread_prepared_failure(fixture.child, fixture.call, None)
             .await?,
-        RetainedCapabilityFailureStatus::AlreadyCommitted
+        RetainedPreparedFailureStatus::AlreadyCommitted
     );
     match damage {
         DelegatedCapabilityResultDamage::InitialTask => {
@@ -4907,13 +5151,13 @@ async fn assert_delegated_capability_reread_rejects_damage(
     }
     let error = fixture
         .repository
-        .reread_capability_failure(fixture.child, fixture.call)
+        .reread_prepared_failure(fixture.child, fixture.call, None)
         .await
         .expect_err("damaged delegated delivery cannot authenticate a capability failure");
     assert!(matches!(
         error,
         ModelCallRepositoryError::InvalidTransition(
-            "retained capability failure durable closure is incomplete"
+            "retained prepared failure durable closure is incomplete"
         )
     ));
 
