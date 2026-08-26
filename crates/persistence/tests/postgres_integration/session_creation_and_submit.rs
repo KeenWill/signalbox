@@ -4817,12 +4817,13 @@ async fn inv089_delegated_executing_tool_batch_charges_its_retained_attachment()
             |_| panic!("the delegated fixture has no pending steering to reclassify"),
         )
         .await?;
-    let ModelCallTerminalOutcome::ToolRound(round) = outcome else {
-        panic!("the delegated fixture reaches a tool round")
-    };
     assert!(
-        matches!(round.next_phase(), ActiveTurnPhase::Running { .. }),
-        "an automatically approved batch executes under the running phase"
+        matches!(
+            &outcome,
+            ModelCallTerminalOutcome::ToolRound(round)
+                if matches!(round.next_phase(), ActiveTurnPhase::Running { .. })
+        ),
+        "the delegated fixture reaches a tool round whose automatically approved batch executes under the running phase"
     );
 
     let retained_digest = BlobDigest::digest(b"delegated retained attachment");
