@@ -6441,6 +6441,7 @@ pub struct RepoWatchEventCursor {
 }
 pub enum RepoWatchWebhookDisposition {
     Projected,
+    Committed,
     DuplicateState,
     Superseded,
     Ignored,

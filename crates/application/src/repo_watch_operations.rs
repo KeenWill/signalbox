@@ -224,7 +224,22 @@ impl RepoWatchPullRequestOperations {
                 stale_review_count = stale_review_count.saturating_add(1);
                 continue;
             }
-            current_reviews.insert(review.reviewer(), review.state());
+            // A reviewer's effective state is their latest *opinionated*
+            // review, which is the aggregate the blocking-review contract in
+            // `docs/spec/repo-watch.md` reads. A later comment-only or
+            // dismissed review therefore reports only where that reviewer
+            // holds no opinionated state yet, instead of replacing an approval
+            // or a blocking review the head still carries.
+            match review.state() {
+                Some(ReviewState::Approved | ReviewState::ChangesRequested) => {
+                    current_reviews.insert(review.reviewer(), review.state());
+                }
+                Some(ReviewState::Commented) | None => {
+                    current_reviews
+                        .entry(review.reviewer())
+                        .or_insert(review.state());
+                }
+            }
         }
         let review_decision = if current_reviews
             .values()
@@ -432,6 +447,10 @@ pub struct RepoWatchEventCursor {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RepoWatchWebhookDisposition {
     Projected,
+    /// A primary-mode delivery that took ownership of the cursor commit,
+    /// recorded in place of `Projected` by the delivery whose commit records
+    /// the `webhook` producer.
+    Committed,
     DuplicateState,
     Superseded,
     Ignored,
@@ -512,16 +531,43 @@ mod tests {
         assert_eq!(max_repo_watch_activity_page_items(), 100);
     }
 
-    #[test]
-    fn latest_current_head_review_is_effective_per_reviewer() {
-        let head = CommitSha::try_new(String::from("1111111111111111111111111111111111111111"))
-            .expect("fixture head is valid");
-        let reviewer = RepoWatchAuthorLogin::try_new(String::from("reviewer"))
-            .expect("fixture reviewer is valid");
+    fn fixture_head() -> CommitSha {
+        CommitSha::try_new(String::from("1111111111111111111111111111111111111111"))
+            .expect("fixture head is valid")
+    }
+
+    fn fixture_reviewer() -> RepoWatchAuthorLogin {
+        RepoWatchAuthorLogin::try_new(String::from("reviewer")).expect("fixture reviewer is valid")
+    }
+
+    /// Builds the one reviewer's current-head review sequence in submission
+    /// order so each test body stays straight-line, as
+    /// `docs/agents/testing-style.md` rule 2 requires.
+    fn reviews_by_one_reviewer(
+        states: [Option<ReviewState>; 2],
+    ) -> Vec<RepoWatchReviewObservation> {
+        states
+            .into_iter()
+            .enumerate()
+            .map(|(index, state)| {
+                RepoWatchReviewObservation::new(
+                    GitHubObjectId::new(
+                        NonZeroU64::new(u64::try_from(index).expect("fixture index fits u64") + 1)
+                            .expect("positive review id"),
+                    ),
+                    fixture_reviewer(),
+                    state,
+                    fixture_head(),
+                )
+            })
+            .collect()
+    }
+
+    fn review_decision_for(reviews: Vec<RepoWatchReviewObservation>) -> RepoWatchReviewStatus {
         let state = RepoWatchPullRequestState::try_new(RepoWatchPullRequestStateInput {
             context: PullRequestEventContext::new(PullRequestEventContextInput {
                 number: PullRequestNumber::new(NonZeroU64::new(1).expect("positive number")),
-                head_sha: head.clone(),
+                head_sha: fixture_head(),
                 head_repository: RepositorySlug::try_new(String::from("namespace/repository"))
                     .expect("fixture repository is valid"),
                 base_branch: BranchName::try_new(String::from("main"))
@@ -540,25 +586,12 @@ mod tests {
             mergeable_state: MergeableState::Mergeable,
             completed_check_suites: Vec::new(),
             completed_check_runs: Vec::new(),
-            reviews: vec![
-                RepoWatchReviewObservation::new(
-                    GitHubObjectId::new(NonZeroU64::new(1).expect("positive review id")),
-                    reviewer.clone(),
-                    Some(ReviewState::ChangesRequested),
-                    head.clone(),
-                ),
-                RepoWatchReviewObservation::new(
-                    GitHubObjectId::new(NonZeroU64::new(2).expect("positive review id")),
-                    reviewer,
-                    Some(ReviewState::Approved),
-                    head,
-                ),
-            ],
+            reviews,
             threads: Vec::new(),
             reactions: Vec::new(),
         })
         .expect("fixture state is valid");
-        let projected = RepoWatchPullRequestOperations::from_state(
+        RepoWatchPullRequestOperations::from_state(
             &state,
             RepoWatchPullRequestOperationsFacts {
                 open_parent: None,
@@ -572,8 +605,47 @@ mod tests {
                 queued_obligation_count: 0,
                 commissioned_session_count: 0,
             },
-        );
+        )
+        .review_decision
+    }
 
-        assert_eq!(projected.review_decision, RepoWatchReviewStatus::Approved);
+    #[test]
+    fn latest_current_head_opinionated_review_is_effective_per_reviewer() {
+        let decision = review_decision_for(reviews_by_one_reviewer([
+            Some(ReviewState::ChangesRequested),
+            Some(ReviewState::Approved),
+        ]));
+
+        assert_eq!(decision, RepoWatchReviewStatus::Approved);
+    }
+
+    #[test]
+    fn comment_only_review_does_not_replace_a_reviewer_approval() {
+        let decision = review_decision_for(reviews_by_one_reviewer([
+            Some(ReviewState::Approved),
+            Some(ReviewState::Commented),
+        ]));
+
+        assert_eq!(decision, RepoWatchReviewStatus::Approved);
+    }
+
+    #[test]
+    fn comment_only_review_does_not_replace_a_blocking_review() {
+        let decision = review_decision_for(reviews_by_one_reviewer([
+            Some(ReviewState::ChangesRequested),
+            Some(ReviewState::Commented),
+        ]));
+
+        assert_eq!(decision, RepoWatchReviewStatus::ChangesRequested);
+    }
+
+    #[test]
+    fn comment_only_review_reports_where_no_opinionated_state_exists() {
+        let decision = review_decision_for(reviews_by_one_reviewer([
+            Some(ReviewState::Commented),
+            None,
+        ]));
+
+        assert_eq!(decision, RepoWatchReviewStatus::Commented);
     }
 }
