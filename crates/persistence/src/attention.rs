@@ -262,30 +262,6 @@ WITH RECURSIVE selected AS (
            LEFT(goal.need, $4) AS need_summary
       FROM goal_event AS goal JOIN selected USING (session_id)
      ORDER BY goal.session_id, goal.event_ordinal DESC
-), unchargeable_automatic_resume_failure AS (
-    -- The exact classification `GoalRepository::unchargeable_automatic_resume_turns`
-    -- applies before the daemon's resume planner spends the attempt budget: a
-    -- failure the daemon itself owns is not charged to the operator's ceiling.
-    -- Projecting exhaustion from the raw resume count instead would advertise
-    -- `ProvideGoalNeed` while the planner still owes a delayed resume, letting
-    -- an operator command race it.
-    SELECT lifecycle.session_id, lifecycle.turn_id
-      FROM turn_lifecycle AS lifecycle JOIN selected USING (session_id)
-      LEFT JOIN automatic_reconciliation AS recovery
-        ON recovery.turn_id = lifecycle.turn_id
-       AND recovery.session_id = lifecycle.session_id
-      LEFT JOIN model_call AS terminal_call
-        ON terminal_call.model_call_id = lifecycle.terminal_model_call_id
-       AND terminal_call.turn_id = lifecycle.turn_id
-       AND terminal_call.session_id = lifecycle.session_id
-      LEFT JOIN tool_continuation_context_headroom AS headroom
-        ON headroom.terminal_attempt_id = lifecycle.terminal_attempt_id
-       AND headroom.turn_id = lifecycle.turn_id
-       AND headroom.session_id = lifecycle.session_id
-     WHERE recovery.state_kind = 'reconciled'
-        OR headroom.terminal_attempt_id IS NOT NULL
-        OR terminal_call.terminal_provider_failure_cause IN
-           ('rate_limited', 'overloaded', 'provider_internal')
 ), automatic_resume_lineage AS (
     SELECT goal.session_id, goal.generation, goal.event_ordinal AS head_ordinal,
            goal.scheduler_turn_id AS failed_turn_id, 0::integer AS spent
@@ -328,15 +304,36 @@ WITH RECURSIVE selected AS (
     UNION ALL
     -- Each step charges the attempt that answered the newer block, which is the
     -- failed turn that block names, and carries the older block's turn forward
-    -- for the next step to classify.
+    -- for the next step to classify. The predicate is the exact classification
+    -- `GoalRepository::unchargeable_automatic_resume_turns` applies before the
+    -- resume planner spends the attempt budget: a failure the daemon itself
+    -- owns is not charged to the operator's ceiling. It probes the one named
+    -- turn rather than the session's history, so charging costs no more than
+    -- the lineage walk it rides on.
     SELECT lineage.session_id, lineage.generation, blocked.event_ordinal,
            blocked.scheduler_turn_id,
-           lineage.spent
-           + CASE WHEN unchargeable.turn_id IS NULL THEN 1 ELSE 0 END
+           lineage.spent + CASE WHEN EXISTS (
+               SELECT 1
+                 FROM turn_lifecycle AS lifecycle
+                 LEFT JOIN automatic_reconciliation AS recovery
+                   ON recovery.turn_id = lifecycle.turn_id
+                  AND recovery.session_id = lifecycle.session_id
+                 LEFT JOIN model_call AS terminal_call
+                   ON terminal_call.model_call_id = lifecycle.terminal_model_call_id
+                  AND terminal_call.turn_id = lifecycle.turn_id
+                  AND terminal_call.session_id = lifecycle.session_id
+                 LEFT JOIN tool_continuation_context_headroom AS headroom
+                   ON headroom.terminal_attempt_id = lifecycle.terminal_attempt_id
+                  AND headroom.turn_id = lifecycle.turn_id
+                  AND headroom.session_id = lifecycle.session_id
+                WHERE lifecycle.session_id = lineage.session_id
+                  AND lifecycle.turn_id = lineage.failed_turn_id
+                  AND (recovery.state_kind = 'reconciled'
+                       OR headroom.terminal_attempt_id IS NOT NULL
+                       OR terminal_call.terminal_provider_failure_cause IN
+                          ('rate_limited', 'overloaded', 'provider_internal'))
+           ) THEN 0 ELSE 1 END
       FROM automatic_resume_lineage AS lineage
-      LEFT JOIN unchargeable_automatic_resume_failure AS unchargeable
-        ON unchargeable.session_id = lineage.session_id
-       AND unchargeable.turn_id = lineage.failed_turn_id
       JOIN goal_event AS resumed
         ON resumed.session_id = lineage.session_id
        AND resumed.generation::text = lineage.generation
