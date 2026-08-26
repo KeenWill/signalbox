@@ -55,6 +55,10 @@ verified against this PR (`agent/turn-liveness-watchdog`).
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
+Prepared-call sweep eligibility and startup resumption of an unsent prepared
+call are verified against this implementing change
+(`agent/blob-storage-attachment-preparation`).
+
 This page specifies the implemented behavior of turns, turn attempts,
 eligibility derivation, the scheduler, and startup recovery, as verified against
 the implementing stack through PR #230 (`agent/frontier-scaling`); the
@@ -1543,8 +1547,10 @@ from child transcript state nor depend on process-local wake memory.
   selected-prefix frontier path and does not close that fork question.
 - Continuation safe points after tool results consume pending steering through
   the atomic boundary in [tool-loop](tool-loop.md).
-- Startup recovery now classifies model-call evidence (a `Prepared` call closes
-  as a known failure; an unstopped in-flight call parks the turn as ambiguous in
+- Startup recovery now classifies model-call evidence (a `Prepared` call proves
+  no send authorization existed, so startup validates its stored frontier and
+  leaves the call, attempt, and turn unchanged for the ordinary scheduler to
+  retry; an unstopped in-flight call parks the turn as ambiguous in
   `awaiting_model_call_recovery`), tool-loop evidence, and delegated-result
   waits. The model-call park is resolved automatically through the bounded
   durable attempt protocol above, or by the existing user reconciliation command

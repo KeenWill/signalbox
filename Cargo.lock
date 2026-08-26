@@ -4752,6 +4752,7 @@ name = "signalboxd"
 version = "0.0.0"
 dependencies = [
  "axum",
+ "base64 0.22.1",
  "expect-test",
  "futures-util",
  "git2",
@@ -4790,6 +4791,8 @@ dependencies = [
  "signalbox-process-protocol",
  "signalbox-runner-wire",
  "signalbox-test-bin",
+ "signalbox-tool-contract",
+ "signalbox-tool-schema-derive",
  "signalbox-tools-basic",
  "signalbox-tools-code-host",
  "signalbox-tools-conversations",

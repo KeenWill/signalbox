@@ -1,6 +1,6 @@
 //! Bounded catalog-backed blob reads with no database transaction across store I/O.
 
-use std::{io::Cursor, num::NonZeroU64};
+use std::{io::Cursor, num::NonZeroU64, time::Duration};
 
 use signalbox_blob_store::{BlobStoreFailureKind, MAX_BLOB_RANGE_BYTES};
 use signalbox_domain::BlobDigest;
@@ -10,6 +10,10 @@ use signalbox_persistence::blob::{
 use tokio::io::AsyncReadExt;
 
 use crate::blob_storage_runtime::BlobStoreRegistry;
+
+/// Hard safety ceiling bounding store latency and retained read capacity.
+// numeric-bound: guard - prevents a stalled blob store read from blocking its caller forever
+pub(crate) const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Bounded catalog facts returned without contacting a store.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

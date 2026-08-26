@@ -4279,6 +4279,7 @@ mod tests {
         session: SessionId,
         call: ModelCallId,
         cause: PreparedModelCallFailureCause,
+        attachment_failure: Option<AttachmentPreparationFailure>,
         identities: FailedModelCallTurnIdentities,
     }
 
@@ -4297,7 +4298,7 @@ mod tests {
             session: SessionId,
             call: ModelCallId,
             cause: PreparedModelCallFailureCause,
-            _attachment_failure: Option<AttachmentPreparationFailure>,
+            attachment_failure: Option<AttachmentPreparationFailure>,
             identities: FailedModelCallTurnIdentities,
             _next_reclassified_turn: NextTurn,
         ) -> Result<FailedModelCallTurn, Self::Error>
@@ -4309,6 +4310,7 @@ mod tests {
                 session,
                 call,
                 cause,
+                attachment_failure,
                 identities,
             });
             self.results
@@ -4534,6 +4536,45 @@ mod tests {
             Cancellation: Future<Output = ()> + Send + 'static,
         {
             panic!("unused provider interaction")
+        }
+    }
+
+    #[derive(Debug)]
+    struct AttachmentFailureProvider {
+        failure: AttachmentPreparationFailure,
+        preparation_count: usize,
+    }
+
+    impl ModelCallProvider for AttachmentFailureProvider {
+        type Capability = ();
+        type Error = FakeError;
+
+        async fn prepare_capability<Cancellation>(
+            &mut self,
+            _operation: PreparedModelOperation,
+            _cancellation: Cancellation,
+        ) -> Result<ModelCallCapabilityPreparation<Self::Capability>, Self::Error>
+        where
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
+            self.preparation_count += 1;
+            Ok(ModelCallCapabilityPreparation::AttachmentFailure(
+                self.failure,
+            ))
+        }
+
+        async fn invoke<AcceptancePossible, Cancellation>(
+            &mut self,
+            _authorized: AuthorizedModelCall,
+            _capability: Self::Capability,
+            _acceptance_possible: AcceptancePossible,
+            _cancellation: Cancellation,
+        ) -> Result<CorrelatedModelCallTerminalObservation, Self::Error>
+        where
+            AcceptancePossible: FnOnce() + Send,
+            Cancellation: Future<Output = ()> + Send + 'static,
+        {
+            panic!("attachment failure must prevent provider interaction")
         }
     }
 
@@ -6097,6 +6138,94 @@ mod tests {
             "the committed failure must terminalize the prepared call"
         );
         assert_eq!(provider.interaction_count(), 0);
+        assert!(retained.is_none());
+    }
+
+    /// INV-062: a typed attachment failure terminalizes the prepared call
+    /// before durable send authorization or provider interaction, and the
+    /// exact attachment evidence reaches the guarded failure transaction.
+    #[tokio::test]
+    async fn inv062_attachment_failure_closes_before_durable_authorization() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let failed = failed_turn_fixture();
+        let attachment_failure = AttachmentPreparationFailure::Missing;
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            ScriptedFailure {
+                results: [Ok(failed.clone())].into(),
+                calls: 0,
+                recorded: Vec::new(),
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            AttachmentFailureProvider {
+                failure: attachment_failure,
+                preparation_count: 0,
+            },
+            InProcessAttemptDispatchGate::default(),
+            None,
+        );
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("the typed attachment failure commits before authorization"),
+            ModelCallExecutionOutcome::CapabilityKnownFailure(Box::new(failed))
+        );
+        let (_, _, failure, _, _, provider, _, _, retained, _) = service.into_parts();
+        assert_eq!(failure.calls, 1);
+        let committed = &failure.recorded[0];
+        assert_eq!(
+            committed.cause,
+            PreparedModelCallFailureCause::CapabilityKnownFailure
+        );
+        assert_eq!(committed.attachment_failure, Some(attachment_failure));
+        assert_eq!(provider.preparation_count, 1);
+        assert!(retained.is_none());
+    }
+
+    /// INV-062: unavailable attachment verification leaves the exact call
+    /// prepared without durable failure or send authorization.
+    #[tokio::test]
+    async fn inv062_attachment_unavailable_leaves_prepared_without_authorization() {
+        let (request, _) = prepared_fixture();
+        let session = request.session();
+        let mut service = ModelCallExecutionService::new(
+            FixedIds::baseline(),
+            FakePrepare {
+                outcomes: [Ok(ready(request))].into(),
+                calls: 0,
+            },
+            ScriptedFailure {
+                results: [].into(),
+                calls: 0,
+                recorded: Vec::new(),
+            },
+            UnusedAuthorization,
+            UnusedObservation,
+            AttachmentFailureProvider {
+                failure: AttachmentPreparationFailure::Unavailable,
+                preparation_count: 0,
+            },
+            InProcessAttemptDispatchGate::default(),
+            None,
+        );
+
+        assert_eq!(
+            service
+                .execute(session)
+                .await
+                .expect("unavailable attachment verification is a typed retryable outcome"),
+            ModelCallExecutionOutcome::AttachmentUnavailable
+        );
+        let (_, _, failure, _, _, _, _, _, retained, _) = service.into_parts();
+        assert_eq!(failure.calls, 0);
         assert!(retained.is_none());
     }
 

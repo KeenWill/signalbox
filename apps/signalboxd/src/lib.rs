@@ -50,6 +50,7 @@ mod attachment_preparation_runtime;
 mod blob_read_runtime;
 mod blob_storage_configuration;
 mod blob_storage_runtime;
+mod blob_tools;
 mod blob_upload_runtime;
 mod configuration;
 mod context_guard;
@@ -83,6 +84,9 @@ pub use blob_storage_configuration::{
     BlobStoreConfiguration,
 };
 pub use blob_storage_runtime::{BlobStoreRegistry, BlobStoreRegistryError};
+pub use blob_tools::{
+    BlobToolConstructionError, BlobToolExecutor, BlobToolExecutorError, BlobTools,
+};
 pub use configuration::{
     ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, ConvergenceSweepConfiguration,
     DaemonToolConfiguration, DerivedModelCallCost, FileCredentialAccess, HubModelConfiguration,
