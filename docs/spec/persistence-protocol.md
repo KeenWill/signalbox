@@ -13,8 +13,8 @@ automatic-reconciliation transaction deadline is verified against this PR
 (`agent/daemon-live-server-bounded-reconciliation`). Recovery discovery's
 contention with an accepting operator interrupt, and that interrupt's atomic
 supersession of the turn's recovery row, are verified against this PR
-(`agent/fix-liveness-shutdown-recovery`). Recursive-frontier prefix
-validation is verified against this PR
+(`agent/fix-liveness-shutdown-recovery`). Recursive-frontier prefix validation
+is verified against this PR
 (`agent/daemon-live-frontier-validation-materialization`). Context-compaction
 evidence validation is verified against this PR
 (`agent/daemon-live-context-compaction-validation`). Compaction-leaf selection
@@ -1502,16 +1502,15 @@ turn the interrupt terminalized: whichever commits first is what the other sees.
 An accepting interrupt atomically supersedes any `scheduled`, `attempting`, or
 `exhausted` recovery row for the turn it terminalizes, clearing the exhaustion
 timestamp. A claimed attempt records its ordinal before the terminal
-transaction. Under the scheduler lock,
-the adapter reconstitutes the exact ambiguous operation and ended turn attempt,
-derives fresh frontier and pending-steering reclassification identities, and
-persists the existing model-call or proposal-ordered tool
-`reconciliation_required` lifecycle and outbox shapes. The `reconciled` recovery
-row is the typed authority admitted by the deferred final-state assertion when
-no applied interrupt exists. It asserts nothing about the physical outcome; the
-model call or tool attempt remains `ambiguous`. A lost daemon leaves
-`attempting` durable, which a later claim pass classifies as
-`infrastructure_failure` after its deadline before retrying.
+transaction. Under the scheduler lock, the adapter reconstitutes the exact
+ambiguous operation and ended turn attempt, derives fresh frontier and
+pending-steering reclassification identities, and persists the existing
+model-call or proposal-ordered tool `reconciliation_required` lifecycle and
+outbox shapes. The `reconciled` recovery row is the typed authority admitted by
+the deferred final-state assertion when no applied interrupt exists. It asserts
+nothing about the physical outcome; the model call or tool attempt remains
+`ambiguous`. A lost daemon leaves `attempting` durable, which a later claim pass
+classifies as `infrastructure_failure` after its deadline before retrying.
 
 ## Corruption taxonomy
 

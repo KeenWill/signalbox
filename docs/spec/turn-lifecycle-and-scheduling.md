@@ -19,8 +19,8 @@ is verified against this PR (`agent/daemon-live-shutdown-checkpoint`) and
 re-verified, for every committed stage boundary the tool loop reaches, against
 this PR (`agent/fix-liveness-shutdown-recovery`). Shutdown preemption of the
 ambiguous-operation batch, the separated slot-held and reconciliation attempt
-ceilings, the recovery transaction's write-lock budget, the handoff's
-bounded attempts across correlating and recovering, and expiry recovery for the
+ceilings, the recovery transaction's write-lock budget, the handoff's bounded
+attempts across correlating and recovering, and expiry recovery for the
 pre-activation compaction window are verified against the same PR.
 
 The expired-pass recovery lock classification and retry budgets were re-verified
@@ -652,15 +652,15 @@ ordinary serialization through the shared outbox frontier after the session lock
 while the sixty-four-turn fair window still bounds how long a fully stalled
 database can delay the next watchdog wake — one ceiling shared between the two
 would multiply the wider of them across that window and carry the delay past the
-sixty-minute scheduler-pass ceiling this watchdog backstops. A timeout is commit-ambiguous and
-leaves the unchanged durable evidence due for a later observation. That
-transaction reconstitutes and classifies the exact current durable shape; the
-watchdog invents no parallel terminal transition. This is the outer backstop for
-pass-expiry recovery whose bounded database attempts all failed and for a
-prior-process running turn that survives startup classification. The
-sixty-minute scheduler-pass ceiling is a final same-process safety bound; the
-liveness watchdog remains responsible for reclaiming a wedged pass from
-unchanged durable evidence before that ceiling.
+sixty-minute scheduler-pass ceiling this watchdog backstops. A timeout is
+commit-ambiguous and leaves the unchanged durable evidence due for a later
+observation. That transaction reconstitutes and classifies the exact current
+durable shape; the watchdog invents no parallel terminal transition. This is the
+outer backstop for pass-expiry recovery whose bounded database attempts all
+failed and for a prior-process running turn that survives startup
+classification. The sixty-minute scheduler-pass ceiling is a final same-process
+safety bound; the liveness watchdog remains responsible for reclaiming a wedged
+pass from unchanged durable evidence before that ceiling.
 
 **Staleness.** No lifecycle table stores an activity timestamp, and this page
 introduces none: a stored clock would be one more thing to keep true. Staleness
@@ -897,11 +897,11 @@ above the acquisition and lock budgets so it can never undercut them, and
 `COMMIT` is never interrupted. That ceiling is the reconciliation path's own,
 wide enough for the shared outbox and deferred-validation convoy this
 transaction crosses, and separate from the slot-held watchdog's narrower
-recovery bound. A claimed attempt whose transaction is abandoned
-remains durably `attempting` until its recorded deadline makes it classifiable.
-An explicitly recorded fifth failure becomes exhausted on the next watchdog scan
-without waiting out that final ambiguity deadline; the deadline remains
-necessary when the daemon cannot tell whether the fifth attempt committed.
+recovery bound. A claimed attempt whose transaction is abandoned remains durably
+`attempting` until its recorded deadline makes it classifiable. An explicitly
+recorded fifth failure becomes exhausted on the next watchdog scan without
+waiting out that final ambiguity deadline; the deadline remains necessary when
+the daemon cannot tell whether the fifth attempt committed.
 
 Each inventory, reconciliation, and failure-record stage observes daemon
 shutdown ahead of its deadline. A requested stop therefore ends the batch
