@@ -32,11 +32,12 @@ use signalbox_application::{
     ModelCallInputTokenCount, ModelCallInputTokenCounter, NoToolCatalog, OperatorFailureClass,
     PreparedModelOperation, ReplaceSessionMetadataOutcome, ReplaceSessionMetadataRequest,
     ReplaceSessionMetadataService, RepoWatchConvergenceVerdict, RepoWatchReviewDecision,
-    SchedulerLoop, SchedulerLoopExit, SchedulerPassOccupancyBound, ScriptedModelCallProvider,
-    ScriptedModelCallStep, StaleActiveTurnBound, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartupScanService, TurnLivenessScanInterval,
-    UuidV7ModelCallExecutionIdGenerator, UuidV7StartEligibleTurnIdGenerator,
-    UuidV7StartupScanIdGenerator, scheduler_ordinary_pass_limit,
+    SchedulerLoop, SchedulerLoopExit, SchedulerPassExpiryHandler, SchedulerPassOccupancyBound,
+    ScriptedModelCallProvider, ScriptedModelCallStep, StaleActiveTurnBound,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanService,
+    TurnLivenessScanInterval, UuidV7ModelCallExecutionIdGenerator,
+    UuidV7StartEligibleTurnIdGenerator, UuidV7StartupScanIdGenerator,
+    scheduler_ordinary_pass_limit,
 };
 use signalbox_blob_store::BlobObjectKey;
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
@@ -707,11 +708,41 @@ where
         Pass::failure_turn(error)
     }
 
+    /// Forwards the decorated pass's occupancy handoff.
+    ///
+    /// Every boundary default this decorator leaves in place is a capability it
+    /// silently removes from the pass it wraps, and this one fails invisibly:
+    /// the scheduler still expires the bounded pass, but with no handler it
+    /// cancels the execution without the daemon-owned recovery that records the
+    /// ambiguity park. A bounded occupancy would look enforced while leaving no
+    /// durable evidence that it was.
+    fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>> {
+        self.inner.occupancy_expiry_handler()
+    }
+
     fn run(
         &mut self,
         session: SessionId,
     ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
         let execution = self.inner.run(session);
+        let witness = self.witness.clone();
+        async move {
+            let outcome = execution.await;
+            witness.record_processed_session(session);
+            outcome
+        }
+    }
+
+    /// Forwards the decorated pass's reserved dispatch-start lane.
+    ///
+    /// The boundary default reroutes this to the ordinary pass, which would
+    /// keep the reserved admission lane held across already-active work the
+    /// wrapped pass knows how to release.
+    fn run_dispatch_start(
+        &mut self,
+        session: SessionId,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.inner.run_dispatch_start(session);
         let witness = self.witness.clone();
         async move {
             let outcome = execution.await;
@@ -2440,6 +2471,18 @@ const FLEET_OCCUPANCY_BOUND: Duration = Duration::from_secs(1);
 const FLEET_ASSERTION_BOUND: Duration = Duration::from_secs(2);
 // numeric-bound: tunable - admits contended CI scheduling without weakening assertions
 const FLEET_SETUP_BOUND: Duration = Duration::from_secs(60);
+// numeric-bound: tunable - paces durable settlement reads without hammering the pool
+const FLEET_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// How long daemon-owned recovery may take to park an expired pass's turn.
+///
+/// Recovery does not terminalize on tenure: one admitted pass drives a whole
+/// model and tools loop, so reaching the ceiling is not evidence that the turn
+/// stopped. The turn's durable evidence must stand still across a whole
+/// conservative retry delay before recovery may park it, which makes the park
+/// owed one confirmation cycle after the occupancy bound elapses rather than one
+/// scheduling quantum. This bound is that cycle plus room for a contended read.
+// numeric-bound: ceiling - derived from EXPIRED_PASS_RECOVERY_CONSERVATIVE_RETRY_DELAY
+const FLEET_RECOVERY_CONFIRMATION_BOUND: Duration = Duration::from_secs(180);
 
 struct FleetPrepared {
     correlation: ModelCallId,
@@ -2455,6 +2498,15 @@ struct FleetModelCardinality {
 #[derive(Clone)]
 struct FleetScriptedModel {
     inner: ScriptedModel<ModelCallId>,
+    /// Completions this model owes before it may start hanging.
+    ///
+    /// Occupancy expiry cancels the pass it ends, so a lowered bound is fatal to
+    /// any pass that outlives it, not only to a deliberately hung one. Draining
+    /// the completing calls first is what keeps the hung call the only pass a
+    /// lowered bound can ever expire: a fleet that hung first would still be
+    /// executing its ordinary calls when the bound elapsed, and those cancelled
+    /// passes would never reach the terminal evidence the oracles read.
+    completions_before_hangs: Arc<AtomicUsize>,
     hangs_remaining: Arc<AtomicUsize>,
     in_flight_hangs: Arc<AtomicUsize>,
     completed_calls: Arc<Mutex<Vec<ModelCallId>>>,
@@ -2471,6 +2523,7 @@ impl FleetScriptedModel {
                 ),
                 cardinality.hanging + cardinality.completing,
             )),
+            completions_before_hangs: Arc::new(AtomicUsize::new(cardinality.completing)),
             hangs_remaining: Arc::new(AtomicUsize::new(cardinality.hanging)),
             in_flight_hangs: Arc::new(AtomicUsize::new(0)),
             completed_calls: Arc::new(Mutex::new(Vec::new())),
@@ -2536,12 +2589,20 @@ impl ModelRuntime<ModelCallId> for FleetScriptedModel {
         sink: &mut (dyn ObservationSink<ModelCallId> + Send),
         cancellation: CancellationSignal,
     ) -> TerminalReport<ModelCallId> {
-        let hangs = self
-            .hangs_remaining
+        // Completions are drained before hangs; see `completions_before_hangs`.
+        let completes = self
+            .completions_before_hangs
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
             .is_ok();
+        let hangs = !completes
+            && self
+                .hangs_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok();
         if hangs {
             sink.observe(Observation {
                 correlation: prepared.correlation,
@@ -2567,10 +2628,21 @@ struct CommissionedFleet {
     sessions: Vec<CanonicalUuid>,
 }
 
-async fn commission_fleet(runtime: &RunningRuntime) -> Result<CommissionedFleet, Box<dyn Error>> {
+/// Commissions `session_count` fleet sessions numbered from `first_index`.
+///
+/// The probes that need the whole fleet in one scheduler ask for all of it at
+/// once; the hung-call probe commissions its fault session separately, after a
+/// restart, so the index range keeps every fleet branch name distinct across
+/// both phases of the same database.
+async fn commission_fleet(
+    runtime: &RunningRuntime,
+    first_index: usize,
+    session_count: usize,
+) -> Result<CommissionedFleet, Box<dyn Error>> {
     let mut connection = Connection::connect(runtime.socket()).await?;
-    let mut sessions = Vec::with_capacity(FLEET_SESSION_COUNT);
-    for index in 0..FLEET_SESSION_COUNT {
+    let mut sessions = Vec::with_capacity(session_count);
+    for offset in 0..session_count {
+        let index = first_index + offset;
         connection
             .request(
                 u64::try_from(index + 2)?,
@@ -2623,10 +2695,26 @@ async fn commission_fleet_control(
     Ok(session_id)
 }
 
+/// Whether a fleet scheduler runs the daemon's turn-liveness scan beside it.
+///
+/// The scan's ambiguous-operation watchdog settles parked turns on its own, so
+/// it is a second recovery actor rather than passive observation. A probe whose
+/// subject is that settlement runs it; a probe whose subject is the park the
+/// settlement consumes must not, or the evidence under test is raced away by the
+/// daemon rather than asserted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FleetTurnLiveness {
+    /// Runs the scan, including automatic reconciliation of ambiguous calls.
+    Scanning,
+    /// Leaves the scan out, so nothing but the probe settles a parked turn.
+    Quiescent,
+}
+
 fn start_fleet_scheduler(
     runtime: &mut RunningRuntime,
     model: FleetScriptedModel,
     occupancy_bound: SchedulerPassOccupancyBound,
+    liveness: FleetTurnLiveness,
 ) -> Result<JoinHandle<SchedulerLoopExit>, Box<dyn Error>> {
     let configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
     let provider = RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog())
@@ -2657,19 +2745,27 @@ fn start_fleet_scheduler(
         SchedulerLoop::new(runtime.take_work_source(), pass).with_occupancy_bound(occupancy_bound);
     // The daemon's liveness scan runs beside the pass under test and stops with
     // it, so an aborted or shut-down fleet scheduler never leaves a scan running
-    // against the same pool. The production hard ceiling keeps that scan purely
-    // observational: it cannot terminalize a turn inside a soak window.
-    let turn_liveness = TurnLivenessRuntime::new(
-        runtime.pool.clone(),
-        StaleActiveTurnBound::hard_ceiling(),
-        TurnLivenessScanInterval::baseline(),
-    );
-    let (turn_liveness_shutdown, turn_liveness_receiver) = watch::channel(false);
-    let turn_liveness = tokio::spawn(turn_liveness.run(turn_liveness_receiver));
+    // against the same pool. Its quiescent and slot-held watchdogs stay purely
+    // observational under the production hard ceiling; its ambiguous-operation
+    // watchdog does not, which is why the scan is opt-in per probe.
+    let turn_liveness = match liveness {
+        FleetTurnLiveness::Scanning => {
+            let scan = TurnLivenessRuntime::new(
+                runtime.pool.clone(),
+                StaleActiveTurnBound::hard_ceiling(),
+                TurnLivenessScanInterval::baseline(),
+            );
+            let (scan_shutdown, scan_receiver) = watch::channel(false);
+            Some((scan_shutdown, tokio::spawn(scan.run(scan_receiver))))
+        }
+        FleetTurnLiveness::Quiescent => None,
+    };
     Ok(tokio::spawn(async move {
         let exit = scheduler.run_until(fatal.wait()).await;
-        turn_liveness_shutdown.send_replace(true);
-        let _ = turn_liveness.await;
+        if let Some((scan_shutdown, scan)) = turn_liveness {
+            scan_shutdown.send_replace(true);
+            let _ = scan.await;
+        }
         exit
     }))
 }
@@ -2881,6 +2977,81 @@ async fn wait_for_terminal_turns(
     Ok(())
 }
 
+/// Waits for the hung call's pass to be released and its turn durably parked.
+///
+/// The occupancy bound is what ends that pass, so the park is the first durable
+/// evidence that the bound was enforced rather than merely configured. Waiting
+/// for it rather than sleeping past it is what makes the oracle read a state the
+/// daemon reached, not one the clock allowed.
+///
+/// This wait spans a whole recovery confirmation cycle, so it paces its reads
+/// instead of spinning: an unpaced loop would spend minutes in contention with
+/// the very pool the daemon needs to re-observe the turn and record the park.
+async fn wait_for_ambiguity_park(
+    repository: &FleetSoakCensusRepository,
+    model: &FleetScriptedModel,
+) -> Result<(), Box<dyn Error>> {
+    let observed = timeout(FLEET_RECOVERY_CONFIRMATION_BOUND, async {
+        loop {
+            let model_calls = repository.model_call_ids().await?;
+            let census = repository.census_for(&model_calls).await?;
+            if model.in_flight_hangs() == 0
+                && census.awaiting_model_call_recovery_turns() == 1
+                && census.ambiguous_model_calls() == 1
+            {
+                return Ok::<(), Box<dyn Error>>(());
+            }
+            tokio::time::sleep(FLEET_POLL_INTERVAL).await;
+        }
+    })
+    .await;
+    if observed.is_err() {
+        let model_calls = repository.model_call_ids().await?;
+        let census = repository.census_for(&model_calls).await?;
+        return Err(io::Error::other(format!(
+            "the hung call never reached its ambiguity park: hangs={}, census={census:?}",
+            model.in_flight_hangs()
+        ))
+        .into());
+    }
+    observed.expect("the elapsed outcome was handled above")?;
+    Ok(())
+}
+
+/// Waits for automatic reconciliation to settle every listed ambiguous call.
+///
+/// The replacement daemon resolves each ambiguous operation against durable
+/// evidence, so the park each killed turn lands in is where it waits, not where
+/// it ends. Gating on the settled census rather than on elapsed time keeps the
+/// restart oracle an assertion about recovery instead of about scheduling luck.
+async fn wait_for_settled_turns(
+    repository: &FleetSoakCensusRepository,
+    model_calls: &[ModelCallId],
+) -> Result<(), Box<dyn Error>> {
+    let observed = timeout(FLEET_SETUP_BOUND, async {
+        loop {
+            let census = repository.census_for(model_calls).await?;
+            if census.terminal_turns() == i64::try_from(model_calls.len())?
+                && census.awaiting_model_call_recovery_turns() == 0
+            {
+                return Ok::<(), Box<dyn Error>>(());
+            }
+            tokio::time::sleep(FLEET_POLL_INTERVAL).await;
+        }
+    })
+    .await;
+    if observed.is_err() {
+        let census = repository.census_for(model_calls).await?;
+        return Err(io::Error::other(format!(
+            "automatic reconciliation left {} restarted turns unsettled: census={census:?}",
+            model_calls.len()
+        ))
+        .into());
+    }
+    observed.expect("the elapsed outcome was handled above")?;
+    Ok(())
+}
+
 fn assert_hung_fleet_outcome(
     model: &FleetScriptedModel,
     census: FleetSoakCensus,
@@ -2916,9 +3087,9 @@ fn assert_restarted_fleet_outcome(
     control_model_call: ModelCallId,
 ) -> Result<(), Box<dyn Error>> {
     let replacement_completions = replacement_model.completed_call_ids();
-    if census.active_turns() != i64::try_from(FLEET_SESSION_COUNT)?
-        || census.terminal_turns() != 0
-        || census.awaiting_model_call_recovery_turns() != i64::try_from(FLEET_SESSION_COUNT)?
+    if census.active_turns() != 0
+        || census.terminal_turns() != i64::try_from(FLEET_SESSION_COUNT)?
+        || census.awaiting_model_call_recovery_turns() != 0
         || census.terminal_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
         || census.ambiguous_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
         || original_model.in_flight_hangs() != 0
@@ -2926,7 +3097,7 @@ fn assert_restarted_fleet_outcome(
         || replacement_completions.as_slice() != [control_model_call]
     {
         return Err(io::Error::other(format!(
-            "restart must preserve the ambiguity park after releasing original executions while the replacement scheduler completes only its readiness control: census={census:?}, original_hangs={}, replacement_hangs={}, replacement_completions={replacement_completions:?}, control_model_call={control_model_call:?}",
+            "restart must release every original execution and let automatic reconciliation settle every ambiguous call into a terminal turn, while the replacement scheduler completes only its readiness control: census={census:?}, original_hangs={}, replacement_hangs={}, replacement_completions={replacement_completions:?}, control_model_call={control_model_call:?}",
             original_model.in_flight_hangs(),
             replacement_model.in_flight_hangs()
         ))
@@ -2935,8 +3106,22 @@ fn assert_restarted_fleet_outcome(
     Ok(())
 }
 
-/// Issue #1027: a post-acceptance model hang releases its authoritative pass
-/// and reaches a durable typed ambiguity park inside the occupancy bound.
+/// Issue #1027: a post-acceptance model hang releases its authoritative pass at
+/// the occupancy bound and reaches a durable typed ambiguity park.
+///
+/// The probe runs in two phases against one database because occupancy expiry
+/// cancels the pass it ends. The baseline fleet reaches terminal disposition
+/// first under the production ceiling, so nothing healthy is ever in flight when
+/// the lowered bound is in force; the single fault session commissioned after
+/// the restart is then the only pass that bound can expire, and the ambiguity
+/// park it lands in is attributable to the bound alone.
+///
+/// The park is owed a confirmation cycle, not a scheduling quantum: the bound
+/// releases the pass promptly, but daemon-owned recovery may not terminalize the
+/// turn until its durable evidence has stood still across a whole conservative
+/// retry delay. The scheduler therefore runs without the turn-liveness scan,
+/// whose ambiguous-operation watchdog would settle that park while this probe is
+/// reading it — the restart probe is where that settlement is the subject.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposition()
@@ -2944,29 +3129,54 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     let mut runtime = RunningRuntime::start().await?;
     let mut scheduler = None;
     let scenario = AssertUnwindSafe(async {
-        let fleet = commission_fleet(&runtime).await?;
         let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
         let model = FleetScriptedModel::new(FleetModelCardinality {
             hanging: 1,
             completing: FLEET_SESSION_COUNT - 1,
         });
+        let baseline_fleet = commission_fleet(&runtime, 0, FLEET_SESSION_COUNT - 1).await?;
+        scheduler = Some(start_fleet_scheduler(
+            &mut runtime,
+            model.clone(),
+            SchedulerPassOccupancyBound::hard_ceiling(),
+            FleetTurnLiveness::Quiescent,
+        )?);
+        let completed_calls = wait_for_completed_calls(&model, FLEET_SESSION_COUNT - 1).await?;
+        wait_for_terminal_calls(&census_repository, &completed_calls).await?;
+        wait_for_terminal_turns(&census_repository, &completed_calls).await?;
+        abort_fleet_scheduler(
+            scheduler
+                .take()
+                .expect("the baseline fleet scheduler was installed"),
+        )
+        .await?;
+        // The restart re-installs the eligibility work source a scheduler takes
+        // exactly once, so the fault phase gets its own scheduler rather than a
+        // second bound on the baseline's.
+        runtime.restart().await?;
+
+        let fault_fleet = commission_fleet(&runtime, FLEET_SESSION_COUNT - 1, 1).await?;
         let occupancy_bound = SchedulerPassOccupancyBound::try_lowered(FLEET_OCCUPANCY_BOUND)?;
         scheduler = Some(start_fleet_scheduler(
             &mut runtime,
             model.clone(),
             occupancy_bound,
+            FleetTurnLiveness::Quiescent,
         )?);
         wait_for_hangs(&model, 1).await?;
-        let completed_calls = wait_for_completed_calls(&model, FLEET_SESSION_COUNT - 1).await?;
-        wait_for_terminal_calls(&census_repository, &completed_calls).await?;
-        wait_for_terminal_turns(&census_repository, &completed_calls).await?;
+        wait_for_ambiguity_park(&census_repository, &model).await?;
         let fatal_shutdown = restart_after_fatal_shutdown(&mut scheduler, &mut runtime).await?;
         let model_calls = census_repository.model_call_ids().await?;
         let census = census_repository.census_for(&model_calls).await?;
         assert_eq!(
-            fleet.sessions.len(),
-            FLEET_SESSION_COUNT,
-            "fleet session cardinality mismatch"
+            baseline_fleet.sessions.len(),
+            FLEET_SESSION_COUNT - 1,
+            "baseline fleet session cardinality mismatch"
+        );
+        assert_eq!(
+            fault_fleet.sessions.len(),
+            1,
+            "fault fleet session cardinality mismatch"
         );
         assert_eq!(
             model_calls.len(),
@@ -3015,16 +3225,25 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     }
 }
 
-/// INV-034: killing the daemon with a full fleet after every send leaves each model
-/// call ambiguous. Recovery must release local scheduler ownership while
-/// preserving every turn in the specification-mandated user-decision park.
+/// INV-034: killing the daemon with a full fleet after every send leaves each
+/// model call ambiguous, and recovery must both release local scheduler
+/// ownership and settle every one of those turns.
+///
+/// Each killed turn still lands in the specification-mandated user-decision
+/// park, and every call stays durably recorded as ambiguous — the park is what a
+/// turn waits in, not what it ends in. The replacement daemon's automatic
+/// reconciliation then resolves each ambiguous operation against durable
+/// evidence and terminalizes its turn, so no turn is left parked and none is
+/// silently re-sent: the replacement scheduler completes only its own readiness
+/// control.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), Box<dyn Error>> {
+async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
+-> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut scheduler = None;
     let scenario = AssertUnwindSafe(async {
-        let fleet = commission_fleet(&runtime).await?;
+        let fleet = commission_fleet(&runtime, 0, FLEET_SESSION_COUNT).await?;
         let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
         let hanging_model = FleetScriptedModel::new(FleetModelCardinality {
             hanging: FLEET_SESSION_COUNT,
@@ -3034,6 +3253,7 @@ async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), 
             &mut runtime,
             hanging_model.clone(),
             SchedulerPassOccupancyBound::hard_ceiling(),
+            FleetTurnLiveness::Scanning,
         )?);
         wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
         let pre_kill_model_call_ids = census_repository.model_call_ids().await?;
@@ -3059,12 +3279,17 @@ async fn fleet_soak_kill_restart_preserves_every_ambiguity_park() -> Result<(), 
             &mut runtime,
             replacement_model.clone(),
             SchedulerPassOccupancyBound::hard_ceiling(),
+            FleetTurnLiveness::Scanning,
         )?);
         wait_for_reconciliation(&replacement_reconciliation).await?;
         let control_session = commission_fleet_control(&runtime).await?;
         let control_model_call =
             wait_for_model_call_for_session(&census_repository, control_session).await?;
         wait_for_completed_call(&replacement_model, control_model_call).await?;
+        wait_for_settled_turns(&census_repository, &pre_kill_model_call_ids).await?;
+        // A settled census is read only after the fleet has had a further
+        // uninterrupted window: an extra resume or terminalization arriving late
+        // still has to show up in the straight-line oracle below.
         tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
         let census = census_repository
             .census_for(&pre_kill_model_call_ids)
