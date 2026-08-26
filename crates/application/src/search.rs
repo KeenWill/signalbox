@@ -11,22 +11,35 @@ use signalbox_domain::{
 };
 use uuid::Uuid;
 
-/// Maximum UTF-8 bytes accepted in one product search expression.
+/// Maximum UTF-8 bytes admitted in one product search expression.
+// numeric-bound: guard - prevents one unbounded expression from driving term extraction and index probing without limit
+const SEARCH_QUERY_BYTE_CEILING: usize = 512;
+/// Maximum records admitted in one search page.
+// numeric-bound: guard - prevents one page read from projecting an unbounded result set into a single response
+const SEARCH_PAGE_ITEM_CEILING: u16 = 100;
+/// Maximum UTF-8 bytes retained in one result snippet.
+// numeric-bound: guard - prevents one matched projection from carrying unbounded text into every result of every page
+const SEARCH_SNIPPET_BYTE_CEILING: usize = 512;
+/// Maximum UTF-8 bytes admitted in one explicit artifact projection.
+// numeric-bound: guard - prevents one publisher-supplied artifact from writing unbounded text into the durable lexical projection
+const SEARCH_PROJECTION_TEXT_BYTE_CEILING: usize = 1_048_576;
+
+/// Returns the hard safety ceiling on one product search expression.
 #[must_use]
 pub const fn max_search_query_bytes() -> usize {
-    512
+    SEARCH_QUERY_BYTE_CEILING
 }
 
-/// Maximum records returned by one search page.
+/// Returns the hard safety ceiling on one search page.
 #[must_use]
 pub const fn max_search_page_items() -> u16 {
-    100
+    SEARCH_PAGE_ITEM_CEILING
 }
 
-/// Maximum UTF-8 bytes retained in one result snippet.
+/// Returns the hard safety ceiling on one result snippet.
 #[must_use]
 pub const fn max_search_snippet_bytes() -> usize {
-    512
+    SEARCH_SNIPPET_BYTE_CEILING
 }
 
 /// Maximum highlighted ranges retained for one bounded search result.
@@ -39,10 +52,10 @@ pub const fn max_search_highlights_per_result() -> usize {
     MAX_SEARCH_HIGHLIGHTS_PER_RESULT
 }
 
-/// Maximum UTF-8 bytes accepted in one explicit artifact projection.
+/// Returns the hard safety ceiling on one explicit artifact projection.
 #[must_use]
 pub const fn max_search_projection_text_bytes() -> usize {
-    1_048_576
+    SEARCH_PROJECTION_TEXT_BYTE_CEILING
 }
 
 /// Rejection of product search text before it reaches a strategy adapter.
