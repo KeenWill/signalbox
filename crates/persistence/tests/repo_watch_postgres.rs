@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeSet, HashSet},
     error::Error,
     num::{NonZeroU16, NonZeroU64},
+    time::Duration,
 };
 
 use signalbox_application::{
@@ -1146,6 +1147,69 @@ async fn recorded_complete_poll(pool: &PgPool) -> Result<Option<String>, Box<dyn
     .bind(REPOSITORY)
     .fetch_optional(pool)
     .await?)
+}
+
+/// The cadence stamp measures when the sweep committed, not when its
+/// transaction opened. Those differ by the wait for the per-repository advisory
+/// lock — a sweep can queue behind a targeted webhook commit — and a stamp taken
+/// from the transaction's start hands that wait to the next restart as elapsed
+/// cadence, bringing the following sweep forward by it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_cadence_stamp_excludes_the_wait_for_the_repository_lock() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let mut blocker = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(REPOSITORY)
+        .execute(&mut *blocker)
+        .await?;
+
+    let sweeping = tokio::spawn({
+        let store = store.clone();
+        let repository = repository.clone();
+        async move {
+            store
+                .commit_with_convergence(
+                    &repository,
+                    RepoWatchCommitRequest::new(None, baseline, Vec::new()),
+                    &[],
+                )
+                .await
+        }
+    });
+    // Long enough that a stamp taken from the transaction's start is
+    // unambiguously earlier than the marker below, short enough to stay a
+    // fixture rather than a delay.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let held_until: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
+        .fetch_one(&mut *blocker)
+        .await?;
+    let released: bool = sqlx::query_scalar("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(REPOSITORY)
+        .fetch_one(&mut *blocker)
+        .await?;
+    let swept = sweeping.await??;
+
+    assert!(released, "the fixture releases its deliberate lock");
+    assert!(matches!(swept, RepoWatchCommitOutcome::Committed(_)));
+    let stamped_after_the_wait: bool = sqlx::query_scalar(
+        "SELECT completed_at > $2::timestamptz
+           FROM repo_watch_complete_poll
+          WHERE repository = $1",
+    )
+    .bind(REPOSITORY)
+    .bind(&held_until)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        stamped_after_the_wait,
+        "the stamp is taken once the lock is held, not when the transaction opened"
+    );
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -754,15 +754,24 @@ impl PostgresRepoWatchStore {
     /// Stamped inside that commit's own transaction, so a sweep whose commit is
     /// rolled back — a generation conflict, most of all — leaves the previous
     /// deadline in force rather than deferring the sweep it never performed.
+    ///
+    /// Both paths name `clock_timestamp()` rather than leaning on the column
+    /// default. `transaction_timestamp()` is the transaction's *start*, which
+    /// here precedes the wait for the per-repository advisory lock: a sweep that
+    /// queued behind a targeted webhook commit would record a completion time
+    /// from before that wait, and the next restart would count the wait as
+    /// elapsed cadence and bring the following sweep forward by it. A reading
+    /// clock leaves only this transaction's own remaining work unaccounted, and
+    /// that is bounded by the commit itself.
     async fn record_complete_poll_in_transaction(
         transaction: &mut Transaction<'_, Postgres>,
         repository: &RepositorySlug,
     ) -> Result<(), RepoWatchStoreError> {
         sqlx::query(
-            "INSERT INTO repo_watch_complete_poll (repository)
-             VALUES ($1)
+            "INSERT INTO repo_watch_complete_poll (repository, completed_at)
+             VALUES ($1, clock_timestamp())
              ON CONFLICT (repository)
-             DO UPDATE SET completed_at = transaction_timestamp()",
+             DO UPDATE SET completed_at = clock_timestamp()",
         )
         .bind(repository.as_str())
         .execute(&mut **transaction)

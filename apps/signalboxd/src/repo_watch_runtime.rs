@@ -4820,21 +4820,40 @@ fn rejected_response_error(
 /// amplification the page-stopping predicate exists to prevent. A
 /// permission-scoped rejection carries neither the headers nor the message.
 fn response_is_throttled(headers: &HeaderMap, body: &[u8]) -> bool {
+    headers_report_a_rate_limit(headers) || rejection_reports_a_rate_limit(body)
+}
+
+/// The two header signals, which decide on their own when either is present.
+fn headers_report_a_rate_limit(headers: &HeaderMap) -> bool {
     headers.contains_key(RETRY_AFTER)
         || headers
             .get("x-ratelimit-remaining")
             .and_then(|remaining| remaining.to_str().ok())
             .and_then(|remaining| remaining.trim().parse::<u64>().ok())
             .is_some_and(|remaining| remaining == 0)
-        || rejection_reports_a_rate_limit(body)
+}
+
+/// Whether classifying this rejection still depends on reading its message.
+///
+/// Only the `403` carrying neither header is ambiguous. Every other rejection —
+/// `401`, `429`, a server error, or a `403` a header already named as throttled
+/// — is decided by the status and headers, and reading its body would buy
+/// nothing while a slow-streaming or stalled response held the serialized
+/// repository task to the request timeout, spending the drain deadline during
+/// exactly the outage that produces those statuses.
+fn rejection_needs_its_message(status: StatusCode, headers: &HeaderMap) -> bool {
+    status == StatusCode::FORBIDDEN && !headers_report_a_rate_limit(headers)
 }
 
 /// Whether a rejection's own message names one of the provider's rate limits.
 ///
 /// Read from the typed error envelope rather than by scanning the response
-/// bytes: an unparseable or absent message is not evidence of throttling, so it
-/// leaves the classification to the status and headers exactly as it stood
-/// before the body was consulted.
+/// bytes. A body that was read successfully but carries no message, or none that
+/// parses, is not evidence of throttling and leaves the classification to the
+/// status and headers. A body that could not be read at all never reaches here:
+/// that is a transport failure with a page-stopping meaning of its own, and the
+/// caller reports it rather than reading an empty message as a permission
+/// rejection.
 fn rejection_reports_a_rate_limit(body: &[u8]) -> bool {
     // The provider's two documented spellings for a secondary limit; the older
     // one still appears on the same responses.
@@ -6840,19 +6859,20 @@ impl GitHubRepositoryPoller {
         }
         if response.status() != StatusCode::OK {
             let status = response.status();
-            let headers = response.headers().clone();
+            if !rejection_needs_its_message(status, response.headers()) {
+                return Err(rejected_response_error(status, response.headers(), &[]));
+            }
             // The provider separates a secondary rate limit from a
             // permission-scoped rejection by the message alone when neither
-            // rate-limit header is present, so the rejection is read before it
-            // is classified. It is read under the same ceiling every other body
-            // is; a read this bounded cannot deliver leaves an empty message,
-            // which classifies from the status and headers exactly as it did
-            // before the body was consulted, rather than replacing the
-            // provider's own cause with a transport one.
-            let body = self
-                .read_bounded(resource_kind, response)
-                .await
-                .unwrap_or_default();
+            // rate-limit header is present, so this one rejection is read —
+            // under the same ceiling every other body uses — before it is
+            // classified. A read that fails is reported as the transport failure
+            // it is: that already stops the page, while the permission rejection
+            // an empty body would be read as does not, and continuing to hydrate
+            // later deliveries over a transport that just failed is the
+            // amplification this classification exists to prevent.
+            let headers = response.headers().clone();
+            let body = self.read_bounded(resource_kind, response).await?;
             return Err(rejected_response_error(status, &headers, &body));
         }
         // The cached pair stays in place while this body is read and parsed.
@@ -8016,8 +8036,9 @@ mod tests {
         normalize_checks_outcome, normalize_pull_request_context, object_id,
         observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
         poll_webhook_interrupt, record_dispatch_start_nudge_outcome, rejected_response_error,
-        repository_reconciliation_quantum_exhausted, rule_activation_error, run_until_shutdown,
-        supervise_repository_tasks, targeted_pull_requests,
+        rejection_needs_its_message, repository_reconciliation_quantum_exhausted,
+        rule_activation_error, run_until_shutdown, supervise_repository_tasks,
+        targeted_pull_requests,
     };
     use signalbox_application::{
         EligibilityNudgeOutcome, InProcessEligibilityWorkSource, RepoWatchEventIdentityFrontierV1,
@@ -9179,6 +9200,7 @@ mod tests {
         entity_tag: Option<&'static str>,
         link: Option<&'static str>,
         retry_after: Option<&'static str>,
+        declared_content_length: Option<usize>,
         body: String,
         delay: Duration,
     }
@@ -9194,6 +9216,7 @@ mod tests {
                 entity_tag: Some(ENTITY_TAG),
                 link: None,
                 retry_after: None,
+                declared_content_length: None,
                 body: body.0,
                 delay: Duration::ZERO,
             }
@@ -9209,6 +9232,7 @@ mod tests {
                 entity_tag: Some(ENTITY_TAG),
                 link: Some(NEXT_PAGE_LINK),
                 retry_after: None,
+                declared_content_length: None,
                 body: body.0,
                 delay: Duration::ZERO,
             }
@@ -9224,6 +9248,7 @@ mod tests {
                 entity_tag: Some(ENTITY_TAG),
                 link: None,
                 retry_after: None,
+                declared_content_length: None,
                 body: body.0,
                 delay: Duration::ZERO,
             }
@@ -9239,6 +9264,7 @@ mod tests {
                 entity_tag: None,
                 link: None,
                 retry_after: None,
+                declared_content_length: None,
                 body: String::from("{}"),
                 delay: Duration::ZERO,
             }
@@ -9254,6 +9280,7 @@ mod tests {
                 entity_tag: None,
                 link: None,
                 retry_after: None,
+                declared_content_length: None,
                 body: String::from("{}"),
                 delay: Duration::ZERO,
             }
@@ -9269,6 +9296,7 @@ mod tests {
                 entity_tag: None,
                 link: None,
                 retry_after: None,
+                declared_content_length: None,
                 body: String::new(),
                 delay: Duration::ZERO,
             }
@@ -9289,6 +9317,16 @@ mod tests {
             self
         }
 
+        /// Promises more body than the connection then delivers.
+        ///
+        /// The declared length outruns the bytes written and the socket closes,
+        /// so the client's body stream fails part-way — the transport failure a
+        /// rejection can hit while it is being read for classification.
+        fn truncated(mut self) -> Self {
+            self.declared_content_length = Some(self.body.len() + 1);
+            self
+        }
+
         fn post(target: RequestTarget, body: ResponseBody) -> Self {
             Self {
                 method: "POST",
@@ -9299,6 +9337,7 @@ mod tests {
                 entity_tag: None,
                 link: None,
                 retry_after: None,
+                declared_content_length: None,
                 body: body.0,
                 delay: Duration::ZERO,
             }
@@ -9513,7 +9552,9 @@ mod tests {
             entity_tag,
             link,
             retry_after,
-            response.body.len(),
+            response
+                .declared_content_length
+                .unwrap_or(response.body.len()),
             response.body,
         );
         stream
@@ -11854,6 +11895,75 @@ mod tests {
         Ok(())
     }
 
+    /// A rejection the headers already classify is never read, which is what
+    /// keeps a stalled or broken body from holding the serialized repository
+    /// task to the request timeout during the outage that produced it. The
+    /// scripted response promises a byte it never sends: a drain that read it
+    /// would report that transport failure instead of the throttle the headers
+    /// had already named.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_header_signalled_rejection_is_classified_without_reading_its_body()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let throttled = synchronize_admission(THIRD_WEBHOOK_DELIVERY)?;
+        webhook_store.admit(&throttled).await?;
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::forbidden(RequestTarget(PULL_DETAIL_TARGET.to_owned()))
+                .throttled()
+                .truncated(),
+        ])
+        .await;
+        let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
+
+        let attempt = fixture.task.process_webhook_deliveries().await;
+
+        server.finish().await;
+        assert_eq!(
+            attempt,
+            WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::ProviderUnavailable)
+        );
+        assert!(!webhook_disposition_exists(&webhook_store, throttled.key()).await?);
+        Ok(())
+    }
+
+    /// A headerless `403` is the one rejection whose body has to be read before
+    /// it can be classified, so it is also the one whose read can fail. That
+    /// failure is a transport failure and stops the page: reading it as the
+    /// empty-bodied permission rejection instead would keep hydrating later
+    /// deliveries over a transport that had just broken.
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_rejection_whose_body_fails_mid_read_stops_the_whole_page()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let unreadable = synchronize_admission(THIRD_WEBHOOK_DELIVERY)?;
+        let behind_it = ignored_admission(FIRST_WEBHOOK_DELIVERY)?;
+        webhook_store.admit(&unreadable).await?;
+        webhook_store.admit(&behind_it).await?;
+        let server = ScriptedServer::start(vec![
+            ScriptedResponse::forbidden(RequestTarget(PULL_DETAIL_TARGET.to_owned())).truncated(),
+        ])
+        .await;
+        let mut fixture = webhook_task_against(&pool, server.base_url.clone()).await?;
+
+        let attempt = fixture.task.process_webhook_deliveries().await;
+
+        server.finish().await;
+        assert_eq!(
+            attempt,
+            WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Request)
+        );
+        assert!(!webhook_disposition_exists(&webhook_store, unreadable.key()).await?);
+        assert!(
+            !webhook_disposition_exists(&webhook_store, behind_it.key()).await?,
+            "the page stops rather than hydrating over the failed transport"
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn wedged_webhook_drain_emits_an_error_with_its_cause() -> Result<(), Box<dyn Error>> {
@@ -13202,6 +13312,53 @@ mod tests {
             RepositoryWatchAttemptError::ProviderUnavailable
         );
         assert!(signalled_by_message.stops_webhook_page());
+    }
+
+    /// Only the `403` carrying neither header leaves anything for the message to
+    /// decide. Reading the others would hold the serialized repository task to
+    /// the request timeout on a stalled rejection — during the very outage that
+    /// produces them — for a classification the status already fixed.
+    #[test]
+    fn only_a_headerless_forbidden_rejection_is_read_before_it_is_classified() {
+        let mut retry_after = HeaderMap::new();
+        retry_after.insert(RETRY_AFTER, HeaderValue::from_static("60"));
+        let mut exhausted = HeaderMap::new();
+        exhausted.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+        let mut unexhausted = HeaderMap::new();
+        unexhausted.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
+
+        assert!(rejection_needs_its_message(
+            StatusCode::FORBIDDEN,
+            &HeaderMap::new()
+        ));
+        assert!(rejection_needs_its_message(
+            StatusCode::FORBIDDEN,
+            &unexhausted
+        ));
+        assert!(!rejection_needs_its_message(
+            StatusCode::FORBIDDEN,
+            &retry_after
+        ));
+        assert!(!rejection_needs_its_message(
+            StatusCode::FORBIDDEN,
+            &exhausted
+        ));
+        assert!(!rejection_needs_its_message(
+            StatusCode::TOO_MANY_REQUESTS,
+            &HeaderMap::new()
+        ));
+        assert!(!rejection_needs_its_message(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &HeaderMap::new()
+        ));
+        assert!(!rejection_needs_its_message(
+            StatusCode::UNAUTHORIZED,
+            &HeaderMap::new()
+        ));
+        assert!(!rejection_needs_its_message(
+            StatusCode::NOT_FOUND,
+            &HeaderMap::new()
+        ));
     }
 
     /// The provider's older spelling for the same secondary limit still reaches

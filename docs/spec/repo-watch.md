@@ -1439,17 +1439,22 @@ carries both meanings, and it is read as a throttle only when the provider says
 so through one of the three signals it documents: a `Retry-After` for a
 secondary limit, an exhausted `X-RateLimit-Remaining` for a primary one, or —
 for the secondary limit that carries neither header — a rejection message naming
-that limit. A rejection is therefore read before it is classified, under the
-same byte ceiling as any other body, and a body that cannot be read or parsed
-leaves the classification to the status and headers. Anything else is a
-resource-scoped permission rejection, so a credential that lacks one endpoint's
-scope defers its own receipt rather than stalling the drain at that same receipt
-on every retry. A GraphQL response reports throttling and outage in an error
-envelope under `HTTP 200`; the envelope's error type is what classifies it, with
-the repository-wide types stopping the page and every other type — a
-query-scoped failure or a missing node — deferring only its own receipt. A
-signature-valid delivery whose event or action is outside the mapped set,
-including a broadly subscribed `workflow_job`, is still acknowledged
+that limit. Only that last case is read before it is classified, under the same
+byte ceiling as any other body: every other rejection is settled by its status
+and headers, and reading it would let a stalled response hold the serialized
+repository task to the request timeout during the outage that produced it. A
+body that is read but carries no such message, or none that parses, leaves the
+classification to the status and headers; a body whose read itself fails is
+reported as the transport failure it is, which stops the page on its own terms
+rather than being recorded as the permission rejection an empty body would name.
+Anything else is a resource-scoped permission rejection, so a credential that
+lacks one endpoint's scope defers its own receipt rather than stalling the drain
+at that same receipt on every retry. A GraphQL response reports throttling and
+outage in an error envelope under `HTTP 200`; the envelope's error type is what
+classifies it, with the repository-wide types stopping the page and every other
+type — a query-scoped failure or a missing node — deferring only its own
+receipt. A signature-valid delivery whose event or action is outside the mapped
+set, including a broadly subscribed `workflow_job`, is still acknowledged
 successfully and is cheaply logged and recorded as ignored rather than treated
 as an intake failure. A targeted projection records its terminal disposition and
 exact projections as the durable recovery handoff before its cursor write. If
