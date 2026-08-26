@@ -2,6 +2,14 @@
 -- from canonical transcript, metadata, tool, and derived-artifact authority.
 -- Product queries use plainto_tsquery through the application adapter; this
 -- table's PostgreSQL representation is never part of the browser contract.
+--
+-- This file was renumbered above `202608251000_multipart_user_content.sql`
+-- after that migration merged, so it now installs against the post-multipart
+-- schema: `accepted_input.content_text` no longer exists, and an accepted
+-- input's user text is the ordered `accepted_input_content_part` rows whose
+-- kind is `text`. Every accepted-input and steering-input source below — the
+-- two trigger bodies and the two one-time backfills — therefore reads
+-- `accepted_input_projected_text` instead of that dropped column.
 CREATE FUNCTION web_search_projection_chunks(source_text text)
 RETURNS TABLE (ordinal integer, content_text text)
 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
@@ -11,6 +19,29 @@ SET search_path FROM CURRENT AS $$
       FROM generate_series(
                0, (char_length(source_text) - 1) / 15872
            ) AS chunk(ordinal)
+$$;
+
+-- The searchable user text of one accepted input, after
+-- `202608251000_multipart_user_content.sql` moved that text out of
+-- `accepted_input.content_text` and into ordered content parts. This is the
+-- same source `append_session_timeline_input_bytes` was repaired to read in
+-- that migration: the parts whose kind is `text`, in position order.
+--
+-- The parts join with a newline, exactly as the session-metadata projection
+-- below joins a title, its tags, and its attributes, so no two parts fuse
+-- into a lexeme neither of them contains. Attachment parts carry a digest and
+-- bounded declarations, never projected user text, so they are excluded and
+-- an input made only of attachments composes null. The chunker above is
+-- STRICT, so such an input yields no chunk and contributes no projection row.
+-- Every caller keeps its former shape otherwise — one `user_transcript` row
+-- per chunk, keyed by the same chunk ordinal.
+CREATE FUNCTION accepted_input_projected_text(checked_input uuid)
+RETURNS text LANGUAGE sql STABLE STRICT PARALLEL SAFE
+SET search_path FROM CURRENT AS $$
+    SELECT string_agg(part.text_value, E'\n' ORDER BY part.position)
+      FROM accepted_input_content_part AS part
+     WHERE part.accepted_input_id = checked_input
+       AND part.part_kind = 'text'
 $$;
 
 CREATE TABLE web_search_projection (
@@ -116,7 +147,9 @@ BEGIN
            input.origin_turn_id, 'user_transcript',
            chunk.ordinal, chunk.content_text
       FROM accepted_input AS input
-     CROSS JOIN LATERAL web_search_projection_chunks(input.content_text) AS chunk
+     CROSS JOIN LATERAL web_search_projection_chunks(
+         accepted_input_projected_text(input.accepted_input_id)
+     ) AS chunk
      WHERE input.accepted_input_id = NEW.accepted_input_id
     ON CONFLICT (
         source_kind, source_id, content_class, projection_ordinal
@@ -150,7 +183,9 @@ BEGIN
       JOIN model_call_transition_outbox_event AS event
         ON event.model_call_id = input.consuming_model_call_id
        AND event.call_state_kind = 'prepared'
-     CROSS JOIN LATERAL web_search_projection_chunks(input.content_text) AS chunk
+     CROSS JOIN LATERAL web_search_projection_chunks(
+         accepted_input_projected_text(input.accepted_input_id)
+     ) AS chunk
      WHERE input.accepted_input_id = NEW.origin_accepted_input_id
        AND input.session_id = NEW.source_session_id
        AND input.disposition_kind = 'consumed_as_steering'
@@ -360,7 +395,9 @@ SELECT 'accepted_input', input.accepted_input_id, input.session_id,
   FROM accepted_input AS input
   JOIN input_accepted_outbox_event AS event
     ON event.accepted_input_id = input.accepted_input_id
- CROSS JOIN LATERAL web_search_projection_chunks(input.content_text) AS chunk;
+ CROSS JOIN LATERAL web_search_projection_chunks(
+     accepted_input_projected_text(input.accepted_input_id)
+ ) AS chunk;
 
 INSERT INTO web_search_projection (
     source_kind, source_id, session_id, event_sequence,
@@ -378,7 +415,9 @@ SELECT 'steering_input', input.accepted_input_id, input.session_id,
   JOIN model_call_transition_outbox_event AS event
     ON event.model_call_id = input.consuming_model_call_id
    AND event.call_state_kind = 'prepared'
- CROSS JOIN LATERAL web_search_projection_chunks(input.content_text) AS chunk
+ CROSS JOIN LATERAL web_search_projection_chunks(
+     accepted_input_projected_text(input.accepted_input_id)
+ ) AS chunk
  WHERE entry.payload_kind = 'steering_accepted_input'
    AND input.disposition_kind = 'consumed_as_steering';
 
