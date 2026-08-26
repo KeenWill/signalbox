@@ -437,6 +437,50 @@ where
         }
     }
 
+    /// Reports the resumed turn the wrapped execution found.
+    ///
+    /// The default discards the observation, which would leave the scheduler's
+    /// occupancy handoff without the exact turn a bounded pass was occupying
+    /// whenever instruction preparation wraps the execution. It would then fall
+    /// back to re-admitting the session and never repair that turn, so this
+    /// forwards rather than inherits.
+    ///
+    /// This is the observing primitive, not the shared-observer entry point:
+    /// `resume_active_with_observer` defaults down to it, and that is the route
+    /// `FatalExecutionSupervisor` takes when it wraps this execution, so
+    /// overriding the primitive keeps the observation intact for either caller.
+    fn resume_active_observing<Observe>(
+        &self,
+        session: SessionId,
+        observe: Observe,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static
+    where
+        Observe: FnOnce(TurnId) + Send + 'static,
+    {
+        let execution = self.execution.clone();
+        async move {
+            execution
+                .resume_active_observing(session, observe)
+                .await
+                .map_err(WorkspaceInstructionPreparedExecutionError::Execution)
+        }
+    }
+
+    /// Reports the turn a dispatch-start hint resumed, for the same reason.
+    fn resume_dispatch_start_with_observer(
+        &self,
+        session: SessionId,
+        observe_turn: std::sync::Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.execution.clone();
+        async move {
+            execution
+                .resume_dispatch_start_with_observer(session, observe_turn)
+                .await
+                .map_err(WorkspaceInstructionPreparedExecutionError::Execution)
+        }
+    }
+
     fn active_resume_failure_requires_recovery(error: &Self::Error) -> bool {
         match error {
             WorkspaceInstructionPreparedExecutionError::WorkspaceInstructions(_) => true,
@@ -3195,6 +3239,7 @@ mod tests {
         FreshPassAdmission, JudgeRequestFields, MAX_QUOTED_CONTEXT_BYTES,
         ReportedUsageCompactionError, SchedulerPassOccupancyRecovery, SessionAuthorityContext,
         TokenUsage, TurnLivenessRepositoryError, TurnPassExecutionStage,
+        WorkspaceInstructionPreparedExecution, WorkspaceInstructionRuntime,
         activation_session_matches, classify_expired_pass_observation,
         expired_pass_recovery_retry_delay, matches_exact_slot_held_turn,
         progressing_turn_is_handed_off, reconcile_retained_once, render_dispatch_authority,
@@ -3679,6 +3724,77 @@ mod tests {
         });
 
         observed.notified().await;
+        assert_eq!(
+            recovery
+                .active_turns
+                .lock()
+                .expect("expected-turn lock")
+                .get(&session)
+                .copied(),
+            Some(turn)
+        );
+
+        pass_task.abort();
+        assert!(
+            pass_task
+                .await
+                .expect_err("the blocking pass is cancelled")
+                .is_cancelled()
+        );
+    }
+
+    /// The daemon and the fleet soak both compose instruction preparation
+    /// inside the fatal supervisor, and `ActivatedTurnPass::run` reaches that
+    /// composition through the shared-observer entry point. The supervisor
+    /// forwards it to the generic observing primitive, so a wrapper that
+    /// forwards only the shared-observer entry point is stepped over: the
+    /// primitive's default drops the observer, the occupancy tracker records no
+    /// turn, and an expired pass re-admits the session instead of repairing the
+    /// exact turn it was occupying.
+    #[tokio::test]
+    async fn instruction_prepared_resume_reports_the_turn_through_the_supervisor() {
+        let session = SessionId::from_uuid(Uuid::from_u128(0x71));
+        let turn = TurnId::from_uuid(Uuid::from_u128(0x72));
+        let observed = Arc::new(tokio::sync::Notify::new());
+        let (nudge, _work_source) = InProcessEligibilityWorkSource::new(EmptyEligibilitySweep);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/signalbox")
+            .expect("test database URL is valid");
+        let (execution, _fatal_execution) =
+            FatalExecutionSupervisor::new(WorkspaceInstructionPreparedExecution::new(
+                BlockingObservedResumeExecution {
+                    turn,
+                    observed: Arc::clone(&observed),
+                },
+                WorkspaceInstructionRuntime::new(pool.clone(), None, Vec::new()),
+            ));
+        let pass = ActivatedTurnPass::new(
+            StartEligibleTurnService::new(
+                AdvancingIds::new(),
+                OrderedResumeTransaction {
+                    events: Arc::new(Mutex::new(Vec::new())),
+                },
+            ),
+            execution,
+        )
+        .with_occupancy_recovery(
+            pool,
+            nudge,
+            example_expired_pass_policy(),
+            test_turn_liveness_persistence_bounds(),
+        );
+        let recovery = pass
+            .occupancy_recovery
+            .clone()
+            .expect("occupancy recovery is installed");
+        let pass_task = tokio::spawn(async move {
+            let mut pass = pass;
+            pass.run(session).await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), observed.notified())
+            .await
+            .expect("the wrapped execution observes the resumed turn");
         assert_eq!(
             recovery
                 .active_turns
