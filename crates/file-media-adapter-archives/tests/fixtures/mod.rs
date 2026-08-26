@@ -660,6 +660,24 @@ impl ArchiveFixture {
         })
     }
 
+    /// A central directory whose second record repeats the first record's name. The
+    /// hidden first record is the encrypted one, so a reader that keeps only the last
+    /// record of each name reports a clean inventory for an archive that is not clean.
+    pub fn zip_with_duplicate_central_directory_names() -> Result<Self, Box<dyn Error>> {
+        let mut bytes = zip_bytes(&[
+            ("a.txt", PAYLOAD, ZipEntryKind::File),
+            ("b.txt", PAYLOAD, ZipEntryKind::File),
+        ])?;
+        set_encryption_flags(&mut bytes)?;
+        repeat_first_central_filename(&mut bytes)?;
+        Ok(Self {
+            bytes,
+            media_type: "application/zip",
+            expected_format: "zip",
+            expected_name: "a.txt",
+        })
+    }
+
     pub const fn expected_format(&self) -> &'static str {
         self.expected_format
     }
@@ -671,6 +689,17 @@ impl ArchiveFixture {
     pub fn into_source(self) -> Result<MemorySource, Box<dyn Error>> {
         MemorySource::new(self.bytes, self.media_type)
     }
+}
+
+/// A complete ZIP carried as the payload of a Zstandard skippable frame: one source that
+/// is simultaneously a decoder-valid Zstandard stream and a valid ZIP behind an
+/// eight-byte preamble.
+pub fn zip_inside_zstd_skippable_frame() -> Result<Vec<u8>, Box<dyn Error>> {
+    let archive = zip_bytes(&[("docs/readme.txt", PAYLOAD, ZipEntryKind::File)])?;
+    let mut bytes = b"\x50\x2a\x4d\x18".to_vec();
+    bytes.extend_from_slice(&u32::try_from(archive.len())?.to_le_bytes());
+    bytes.extend_from_slice(&archive);
+    Ok(bytes)
 }
 
 #[derive(Clone, Copy)]
@@ -723,6 +752,41 @@ fn insert_gzip_extra(bytes: &mut Vec<u8>, extra: &[u8]) -> Result<(), Box<dyn Er
     field.extend_from_slice(extra);
     bytes.splice(10..10, field);
     Ok(())
+}
+
+fn repeat_first_central_filename(bytes: &mut [u8]) -> Result<(), Box<dyn Error>> {
+    let first = central_header_offset(bytes, 0)?;
+    let second = central_header_offset(bytes, first + 4)?;
+    let name = central_filename(bytes, first)?;
+    if central_filename(bytes, second)?.len() != name.len() {
+        return Err("duplicate ZIP fixture needs equal-length entry names".into());
+    }
+    bytes
+        .get_mut(second + 46..second + 46 + name.len())
+        .ok_or("ZIP central filename absent")?
+        .copy_from_slice(&name);
+    Ok(())
+}
+
+fn central_header_offset(bytes: &[u8], from: usize) -> Result<usize, Box<dyn Error>> {
+    let position = bytes
+        .get(from..)
+        .ok_or("ZIP fixture omitted central header")?
+        .windows(4)
+        .position(|window| window == b"PK\x01\x02")
+        .ok_or("ZIP fixture omitted central header")?;
+    Ok(from + position)
+}
+
+fn central_filename(bytes: &[u8], header: usize) -> Result<Vec<u8>, Box<dyn Error>> {
+    let length = bytes
+        .get(header + 28..header + 30)
+        .ok_or("ZIP central filename length absent")?;
+    let length = usize::from(u16::from_le_bytes([length[0], length[1]]));
+    Ok(bytes
+        .get(header + 46..header + 46 + length)
+        .ok_or("ZIP central filename absent")?
+        .to_vec())
 }
 
 fn set_encryption_flags(bytes: &mut [u8]) -> Result<(), Box<dyn Error>> {
