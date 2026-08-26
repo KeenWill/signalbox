@@ -1055,6 +1055,7 @@ fn webhook_activity_dto(
             .transpose()?,
         disposition: webhook.disposition.map(|disposition| match disposition {
             RepoWatchWebhookDisposition::Projected => WebRepoWatchWebhookDisposition::Projected,
+            RepoWatchWebhookDisposition::Committed => WebRepoWatchWebhookDisposition::Committed,
             RepoWatchWebhookDisposition::DuplicateState => {
                 WebRepoWatchWebhookDisposition::DuplicateState
             }

@@ -1267,6 +1267,7 @@ pub struct WebRepoWatchPullRequestSessionPage {
 #[serde(rename_all = "snake_case")]
 pub enum WebRepoWatchWebhookDisposition {
     Projected,
+    Committed,
     DuplicateState,
     Superseded,
     Ignored,

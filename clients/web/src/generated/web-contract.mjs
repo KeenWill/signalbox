@@ -1962,6 +1962,7 @@ const schemas = {
       "WebRepoWatchWebhookDisposition": {
         "enum": [
           "projected",
+          "committed",
           "duplicate_state",
           "superseded",
           "ignored",

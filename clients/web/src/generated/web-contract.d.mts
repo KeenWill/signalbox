@@ -394,7 +394,7 @@ export type WebRepoWatchWebhookActivity = {
   readonly received_at_unix_milliseconds: string;
 };
 
-export type WebRepoWatchWebhookDisposition = "projected" | "duplicate_state" | "superseded" | "ignored" | "quarantined";
+export type WebRepoWatchWebhookDisposition = "projected" | "committed" | "duplicate_state" | "superseded" | "ignored" | "quarantined";
 
 export type WebRepoWatchWebhookWindow = {
   readonly projected: string;

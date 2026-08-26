@@ -21,6 +21,15 @@ describe('command registry', () => {
     )
   })
 
+  // The product palette and keyboard help read `productCommandRegistry`, which
+  // replaces every `navigate.` entry, so the corrected description above never
+  // reaches the UI on its own.
+  it('describes Activity the same way in the registry the product reads', () => {
+    expect(
+      productCommandRegistry.find((command) => command.id === 'navigate.activity')?.description,
+    ).toBe('Open bounded repository ingestion and automation reads.')
+  })
+
   it('replaces scenario navigation with product navigation', () => {
     const productCommandIds: readonly string[] = productCommandRegistry.map((command) => command.id)
     expect(productCommandIds.filter((id) => id === 'navigation.open')).toHaveLength(1)
