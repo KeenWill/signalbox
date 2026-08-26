@@ -7330,7 +7330,7 @@ private enum ProcessProjectionFixture {
           "state":{
             "type":"queued",
             "accepted_input_id":"\(firstPendingID)",
-            "content":"\(userText)"
+            "content":[{"type":"text","text":"\(userText)"}]
           }
         }
         """,
@@ -7538,31 +7538,13 @@ private enum ProcessProjectionFixture {
         message: try message(
           """
           {
-            "type":"transcript_text_entry",
+            "type":"transcript_user_entry",
             "entry_index":"0",
             "source_session_id":"\(ProcessDriverFixture.session)",
             "entry_id":"\(ProcessDriverFixture.completionEntry)",
-            "entry":{
-              "type":"user",
-              "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
-              "turn_id":"\(ProcessDriverFixture.turn)"
-            }
-          }
-          """
-        )
-      )
-    )
-    _ = machine.receive(
-      .frame(
-        generation: 1,
-        message: try message(
-          """
-          {
-            "type":"transcript_content",
-            "entry_index":"0",
-            "fragment_index":"0",
-            "final_fragment":true,
-            "content_fragment":"\(userText)"
+            "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
+            "turn_id":"\(ProcessDriverFixture.turn)",
+            "content":[{"type":"text","text":"\(userText)"}]
           }
           """
         )
@@ -10989,7 +10971,7 @@ private enum ProcessProjectionFixture {
           "state":{
             "type":"queued",
             "accepted_input_id":"\(firstPendingID)",
-            "content":"first"
+            "content":[{"type":"text","text":"first"}]
           }
         }
         """,
@@ -11009,7 +10991,7 @@ private enum ProcessProjectionFixture {
           "state":{
             "type":"queued",
             "accepted_input_id":"\(secondPendingID)",
-            "content":"second"
+            "content":[{"type":"text","text":"second"}]
           }
         }
         """,
@@ -11171,7 +11153,7 @@ private enum ProcessProjectionFixture {
         "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
         "turn_id":"\(ProcessDriverFixture.turn)",
         "acceptance_position":"1",
-        "content":"\(ProcessSubmissionFixture.content)"
+        "content":[{"type":"text","text":"\(ProcessSubmissionFixture.content)"}]
       }
       """
     )
@@ -11185,7 +11167,7 @@ private enum ProcessProjectionFixture {
         "accepted_input_id":"\(ProcessSubmissionFixture.acceptedInputID)",
         "turn_id":"\(ProcessSubmissionFixture.acceptedTurnID)",
         "acceptance_position":"1",
-        "content":"\(ProcessSubmissionFixture.content)"
+        "content":[{"type":"text","text":"\(ProcessSubmissionFixture.content)"}]
       }
       """
     )
@@ -11199,7 +11181,7 @@ private enum ProcessProjectionFixture {
         "accepted_input_id":"\(secondPendingID)",
         "turn_id":"\(secondPendingTurn)",
         "acceptance_position":"2",
-        "content":"second"
+        "content":[{"type":"text","text":"second"}]
       }
       """
     )

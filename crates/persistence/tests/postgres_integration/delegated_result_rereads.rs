@@ -1797,7 +1797,7 @@ async fn s03_inv007_inv009_postgres_sweep_reconstructs_only_candidate_sessions()
         .await?;
 
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
-    let (candidates, continuation) = EligibilitySweep::find_sessions(&mut sweep)
+    let (candidates, _dispatch_starts, continuation) = EligibilitySweep::find_sessions(&mut sweep)
         .await?
         .into_parts();
     assert!(!continuation);
@@ -1890,7 +1890,7 @@ async fn s17_inv032_foreground_delegation_result_is_a_durable_sweep_candidate()
     .execute(&pool)
     .await?;
 
-    let (candidates, continuation) = PostgresEligibilitySweep::new(pool.clone())
+    let (candidates, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
         .find_sessions()
         .await?
         .into_parts();
