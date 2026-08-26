@@ -1,7 +1,11 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
-import type { Dispatch, FormEvent, RefObject, SetStateAction } from 'react'
+import { type Dispatch, type FormEvent, type RefObject, type SetStateAction, useMemo } from 'react'
+import type { CommandContext } from './commands'
 import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
+import { selectBoundedOriginalView } from './features/artifacts/artifactScenario'
+import type { ArtifactItem } from './features/artifacts/artifactTypes'
+import type { WebBlobDescriptor } from './generated/web-contract.mjs'
 import {
   type BlobDescriptorInput,
   ProductInputError,
@@ -19,7 +23,6 @@ export interface ArtifactInspectorState {
   mediaType: string
   displayFilename: string
   request: ArtifactRequest | null
-  originalRequested: boolean
 }
 
 export const emptyArtifactInspectorState: ArtifactInspectorState = {
@@ -27,10 +30,22 @@ export const emptyArtifactInspectorState: ArtifactInspectorState = {
   mediaType: '',
   displayFilename: '',
   request: null,
-  originalRequested: false,
 }
 
 const descriptorQueryPrefix = ['production', 'blob-descriptor'] as const
+
+// Project an operator-resolved descriptor into the typed artifact the shared renderer registry
+// consumes. The identity carries the resolution sequence so a re-resolve mounts a fresh renderer
+// with fresh original-load state instead of inheriting the previous resolution's settled state.
+const inspectedArtifact = (descriptor: WebBlobDescriptor, sequence: number): ArtifactItem => {
+  const identity = {
+    id: `product-artifact:${String(sequence)}:${descriptor.digest}`,
+    displayName: descriptor.display_filename[0] ?? descriptor.digest,
+  }
+  return descriptor.declared_media_type.toLowerCase().startsWith('image/')
+    ? { ...identity, kind: 'image', source: { kind: 'signalbox_blob', descriptor } }
+    : { ...identity, kind: 'blob', descriptor }
+}
 
 const errorMessage = (error: Error): string => {
   if (error instanceof ProductInputError) return error.message
@@ -43,12 +58,14 @@ const errorMessage = (error: Error): string => {
 
 export function ArtifactInspector({
   available,
+  commandContext,
   digestInputRef,
   onClose,
   state,
   onStateChange,
 }: {
   available: boolean
+  commandContext: CommandContext
   digestInputRef?: RefObject<HTMLInputElement | null>
   onClose: () => void
   state: ArtifactInspectorState
@@ -68,12 +85,34 @@ export function ArtifactInspector({
     staleTime: Number.POSITIVE_INFINITY,
   })
 
+  const resolved = descriptor.data
+  const sequence = request?.sequence ?? 0
+  const artifact = useMemo(
+    () => (resolved === undefined ? null : inspectedArtifact(resolved, sequence)),
+    [resolved, sequence],
+  )
+  // The registry gates original loading on the invoking context, so the inspector admits exactly
+  // the artifact it resolved, and only when the descriptor proves a bounded original.
+  const rendererContext = useMemo<CommandContext>(
+    () => ({
+      ...commandContext,
+      artifactPreviewIds: artifact === null ? [] : [artifact.id],
+      artifactOriginalIds:
+        artifact !== null &&
+        artifact.kind === 'image' &&
+        artifact.source.kind === 'signalbox_blob' &&
+        selectBoundedOriginalView(artifact.source.descriptor) !== undefined
+          ? [artifact.id]
+          : [],
+    }),
+    [artifact, commandContext],
+  )
+
   const resolveDescriptor = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     queryClient.removeQueries({ queryKey: descriptorQueryPrefix })
     onStateChange({
       ...state,
-      originalRequested: false,
       request: {
         digest,
         mediaType,
@@ -169,24 +208,15 @@ export function ArtifactInspector({
           )}
         </div>
       )}
-      {descriptor.data && (
+      {artifact !== null && (
         <>
           <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-            Resolved artifact {descriptor.data.display_filename[0] ?? descriptor.data.digest}
+            Resolved artifact {artifact.displayName}
           </span>
           <ArtifactRenderer
-            key={`${request?.sequence ?? 0}:${descriptor.data.digest}`}
-            descriptor={descriptor.data}
-            compact
-            originalRequested={state.originalRequested}
-            onOriginalRequested={(digest) =>
-              onStateChange((current) =>
-                current.request?.sequence === request?.sequence &&
-                current.request?.digest === digest
-                  ? { ...current, originalRequested: true }
-                  : current,
-              )
-            }
+            key={artifact.id}
+            artifact={artifact}
+            commandContext={rendererContext}
           />
         </>
       )}

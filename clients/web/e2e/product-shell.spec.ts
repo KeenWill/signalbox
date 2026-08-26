@@ -20,11 +20,14 @@ const useDeterministicBootstrap = (page: Page) =>
   page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
 
 const useRecoveringBootstrap = async (page: Page) => {
-  const state = { unavailable: true }
-  await page.route('**/api/bootstrap', (route) =>
-    state.unavailable ? route.fulfill({ status: 503 }) : route.fulfill({ json: bootstrapFixture }),
-  )
-  return { recover: () => (state.unavailable = false) }
+  const state = { unavailable: true, attempts: 0 }
+  await page.route('**/api/bootstrap', (route) => {
+    state.attempts += 1
+    return state.unavailable
+      ? route.fulfill({ status: 503, body: 'temporarily unavailable' })
+      : route.fulfill({ json: bootstrapFixture })
+  })
+  return { recover: () => (state.unavailable = false), attempts: () => state.attempts }
 }
 
 const useDeterministicSession = async (
@@ -196,22 +199,16 @@ test('leaves focus in place when Escape has no surface to unwind', async ({ page
 
 test('retries a failed product bootstrap after the daemon recovers', async ({ page }) => {
   const problems = watchBrowser(page)
-  let attempts = 0
-  await page.route('**/api/bootstrap', (route) => {
-    attempts += 1
-    if (attempts === 1) {
-      return route.fulfill({ status: 503, body: 'temporarily unavailable' })
-    }
-    return route.fulfill({ json: bootstrapFixture })
-  })
+  const scenario = await useRecoveringBootstrap(page)
   await page.goto('/sessions')
 
   await expect(page.getByText('Bootstrap unavailable')).toBeVisible()
+  scenario.recover()
   await page.getByRole('button', { name: 'Retry bootstrap' }).click()
 
   await expect(page.getByText('Timeline reads available')).toBeVisible()
   await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
-  expect(attempts).toBe(2)
+  expect(scenario.attempts()).toBe(2)
   expect(problems.pageErrors).toEqual([])
   expect(
     problems.consoleErrors.every((message) =>

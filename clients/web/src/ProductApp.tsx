@@ -420,7 +420,10 @@ function ProductToolbar({
   )
 }
 
-const INSPECTOR_SHEET_MEDIA = '(max-width: 1080px)'
+// Must stay identical to the `.product-inspector { display: none }` breakpoint in app.css:
+// a wider composition threshold than the visibility threshold would mount the side pane into a
+// hidden aside and focus a Digest input nobody can see.
+const INSPECTOR_SHEET_MEDIA = '(max-width: 1260px)'
 
 function useNarrowInspector(): boolean {
   const [narrow, setNarrow] = useState(() => window.matchMedia(INSPECTOR_SHEET_MEDIA).matches)
@@ -541,6 +544,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
       focusTimeline: () => timelineRef.current?.focus(),
       openArtifactInspector: artifactAvailable ? () => setArtifactOpen(true) : undefined,
@@ -762,6 +767,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           {artifactOpen && !inspectorInSheet ? (
             <ArtifactInspector
               available={artifactAvailable}
+              commandContext={context}
               digestInputRef={artifactDigestRef}
               onClose={closeArtifactInspector}
               state={artifactInspectorState}
@@ -845,6 +851,7 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             </Dialog.Description>
             <ArtifactInspector
               available={artifactAvailable}
+              commandContext={context}
               digestInputRef={artifactDigestRef}
               onClose={closeArtifactInspector}
               state={artifactInspectorState}

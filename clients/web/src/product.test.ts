@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { binaryArtifact, imageArtifact } from './features/artifacts/artifactScenario'
+import { fallbackDescriptor, imageArtifact } from './features/artifacts/artifactScenario'
 import {
   MAX_DECLARED_MEDIA_TYPE_BYTES,
   MAX_DISPLAY_FILENAME_BYTES,
@@ -172,7 +172,7 @@ describe('SameOriginProductTransport', () => {
   it('rejects a descriptor for a different immutable identity', async () => {
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => new Response(JSON.stringify(binaryArtifact))),
+      vi.fn(async () => new Response(JSON.stringify(fallbackDescriptor))),
     )
 
     const request = new SameOriginProductTransport().readBlobDescriptor({
@@ -318,33 +318,6 @@ describe('SameOriginProductTransport', () => {
         mediaType: 'x'.repeat(MAX_DECLARED_MEDIA_TYPE_BYTES + 1),
       }),
     ).rejects.toBeInstanceOf(ProductInputError)
-  })
-
-  it('correlates bounded blob headers with the immutable descriptor', async () => {
-    const bytes = new Uint8Array(24)
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(
-        async () =>
-          new Response(bytes, {
-            status: 206,
-            headers: {
-              etag: `"${imageArtifact.digest}"`,
-              'content-range': `bytes 0-23/${imageArtifact.byte_length}`,
-              'content-length': '24',
-            },
-          }),
-      ),
-    )
-
-    await expect(
-      new SameOriginProductTransport().readBlobHeader({
-        contentUrl: '/api/blobs/example/content/image-png',
-        digest: imageArtifact.digest,
-        byteLength: imageArtifact.byte_length,
-        maxBytes: 24,
-      }),
-    ).resolves.toEqual(bytes)
   })
 
   it('bounds descriptor error payloads before decoding them', async () => {

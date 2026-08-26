@@ -1,28 +1,142 @@
 import { describe, expect, it } from 'vitest'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
+import { imageViewLabel, registeredArtifactKinds, selectImageView } from './ArtifactRenderer'
 import {
-  derivativeDigest,
-  imageViewLabel,
-  isAnimationSafeImageHeader,
-  isInlineDerivativeByteLengthAdmitted,
-  isInlineOriginalByteLengthAdmitted,
-  isInlineOriginalLengthAdmitted,
-  MAX_INLINE_ORIGINAL_BYTES,
-  MAX_INLINE_ORIGINAL_PIXELS,
-  readImageDimensions,
-  selectImageView,
-} from './ArtifactRenderer'
-import { imageArtifact } from './artifactScenario'
+  artifactOriginalIds,
+  artifactPreviewIds,
+  fetchVerifiedSingleFrameJpeg,
+  INLINE_ORIGINAL_MAX_BYTES,
+  imageArtifact,
+  imageDownloadView,
+  imageOriginalView,
+  imagePreviewView,
+  isSingleFrameJpegBytes,
+  jpegDescriptor,
+  jpegOriginalView,
+  selectBoundedOriginalView,
+} from './artifactScenario'
+import {
+  ARTIFACT_EXPANDED_CHARACTERS,
+  ARTIFACT_PREVIEW_CHARACTERS,
+  boundArtifactText,
+} from './artifactTypes'
+import { admitRemoteMediaUrl } from './remoteMediaPreference'
 
 const download = imageArtifact.available_views[0]
 const browserNative = imageArtifact.available_views[1]
 const preview = imageArtifact.available_views[2]
-if (!download || !browserNative || !preview) {
-  throw new Error('the image artifact fixture must contain download, original, and preview views')
+const previewDerivation = preview?.derivations[0]
+if (!download || !browserNative || !preview || !previewDerivation) {
+  throw new Error(
+    'the image artifact fixture must contain download, original, and preview provenance',
+  )
 }
 
 describe('artifact renderer compatibility', () => {
+  it('derives preview command IDs only from artifacts with omitted preview content', () => {
+    expect(artifactPreviewIds).toEqual(['incident-notes', 'renderer-source'])
+  })
+
+  it('derives original-capable IDs only for reachable bounded single-frame artifacts', () => {
+    expect(artifactOriginalIds).toEqual(['bounded-photo'])
+    expect(selectBoundedOriginalView(imageArtifact)).toBeUndefined()
+    expect(selectBoundedOriginalView(jpegDescriptor)?.kind).toBe('browser_native')
+  })
+
+  it('admits a byte-bounded, decode-proven, inherently single-frame JPEG original', () => {
+    const jpegOriginal = { ...imageOriginalView, media_type: 'image/jpeg' }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: 'image/jpeg',
+      available_views: [imageDownloadView, jpegOriginal, imagePreviewView],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBe(jpegOriginal)
+  })
+
+  it('keeps oversized originals download-only', () => {
+    const oversizedLength = (INLINE_ORIGINAL_MAX_BYTES + 1n).toString()
+    const oversizedOriginal = {
+      ...imageOriginalView,
+      media_type: 'image/jpeg',
+      byte_length: oversizedLength,
+    }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: 'image/jpeg',
+      byte_length: oversizedLength,
+      available_views: [imageDownloadView, oversizedOriginal, imagePreviewView],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+  })
+
+  it('keeps originals without bounded decode provenance download-only', () => {
+    const jpegOriginal = { ...imageOriginalView, media_type: 'image/jpeg' }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: 'image/jpeg',
+      available_views: [imageDownloadView, jpegOriginal],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+  })
+
+  it('requires one exact bounded derivation to bind both input and output', () => {
+    const jpegOriginal = { ...imageOriginalView, media_type: 'image/jpeg' }
+    const unrelatedDigest = `sha256:${'9a'.repeat(32)}`
+    const misleadingPreview = {
+      ...imagePreviewView,
+      derivations: [
+        { ...previewDerivation, input_digests: [unrelatedDigest] },
+        {
+          ...previewDerivation,
+          transformation_name: 'image.thumbnail',
+          input_digests: [imageArtifact.digest],
+        },
+      ],
+    }
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: 'image/jpeg',
+      available_views: [imageDownloadView, jpegOriginal, misleadingPreview],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+  })
+
+  const expectAnimationCapableOriginalStaysDownloadOnly = (mediaType: string) => {
+    const descriptor: WebBlobDescriptor = {
+      ...imageArtifact,
+      declared_media_type: mediaType,
+      available_views: [
+        imageDownloadView,
+        { ...imageOriginalView, media_type: mediaType },
+        imagePreviewView,
+      ],
+    }
+
+    expect(selectBoundedOriginalView(descriptor)).toBeUndefined()
+  }
+
+  it('keeps animation-capable GIF originals download-only without aggregate decode evidence', () => {
+    expectAnimationCapableOriginalStaysDownloadOnly('image/gif')
+  })
+
+  it('keeps animation-capable PNG originals download-only without aggregate decode evidence', () => {
+    expectAnimationCapableOriginalStaysDownloadOnly('image/png')
+  })
+
+  it('keeps animation-capable WebP originals download-only without aggregate decode evidence', () => {
+    expectAnimationCapableOriginalStaysDownloadOnly('image/webp')
+  })
+
+  it('registers the closed text, code, and image renderer set', () => {
+    expect(registeredArtifactKinds).toEqual(['blob', 'code', 'image', 'text'])
+  })
+
   it('selects the admitted view kind without interpreting its MIME string', () => {
+    expect(imagePreviewView.kind).toBe('preview')
     const descriptor: WebBlobDescriptor = {
       ...imageArtifact,
       available_views: [
@@ -54,7 +168,7 @@ describe('artifact renderer compatibility', () => {
           kind: 'download',
           media_type: 'image/png',
           byte_length: imageArtifact.byte_length,
-          content_url: imageArtifact.available_views[0]?.content_url ?? '',
+          content_url: imageDownloadView.content_url,
           derivations: [],
         },
       ],
@@ -64,205 +178,144 @@ describe('artifact renderer compatibility', () => {
   })
 
   it('keeps a browser-native original behind explicit loading', () => {
+    expect(imageOriginalView.kind).toBe('browser_native')
+    expect(imageDownloadView.kind).toBe('download')
     const descriptor: WebBlobDescriptor = {
       ...imageArtifact,
-      available_views: imageArtifact.available_views.filter(
-        (view) => view.kind === 'browser_native' || view.kind === 'download',
-      ),
+      available_views: [imageOriginalView, imageDownloadView],
     }
 
     expect(selectImageView(descriptor)).toBeUndefined()
   })
 
-  it('admits an original at the inline byte ceiling', () => {
-    expect(isInlineOriginalByteLengthAdmitted(String(MAX_INLINE_ORIGINAL_BYTES))).toBe(true)
+  it('bounds the initial text projection by characters', () => {
+    const content = 'x'.repeat(20_000)
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'preview')
+
+    expect(bounded.content).toHaveLength(ARTIFACT_PREVIEW_CHARACTERS)
+    expect(bounded.omittedCharacters).toBe(content.length - ARTIFACT_PREVIEW_CHARACTERS)
   })
 
-  it('rejects an original beyond the inline byte ceiling', () => {
-    expect(isInlineOriginalByteLengthAdmitted(String(MAX_INLINE_ORIGINAL_BYTES + 1))).toBe(false)
+  it('keeps expansion within the larger effective character ceiling', () => {
+    const content = 'x'.repeat(20_000)
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
+
+    expect(bounded.content).toHaveLength(ARTIFACT_EXPANDED_CHARACTERS)
+    expect(bounded.omittedCharacters).toBe(content.length - ARTIFACT_EXPANDED_CHARACTERS)
   })
 
-  it('rejects an automatic derivative beyond the inline byte ceiling', () => {
-    expect(isInlineDerivativeByteLengthAdmitted(String(MAX_INLINE_ORIGINAL_BYTES + 1))).toBe(false)
+  it('counts and truncates Unicode by code point without splitting surrogate pairs', () => {
+    const content = `${'😀'.repeat(ARTIFACT_PREVIEW_CHARACTERS)}z`
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'preview')
+
+    expect(Array.from(bounded.content)).toHaveLength(ARTIFACT_PREVIEW_CHARACTERS)
+    expect(bounded.content.endsWith('😀')).toBe(true)
+    expect(bounded.omittedCharacters).toBe(1)
   })
 
-  it('correlates a derivative URL with one matching output among several', () => {
-    const extraDigest = `sha256:${'a'.repeat(64)}`
-    const multiOutputPreview = {
-      ...preview,
-      derivations: preview.derivations.map((derivation) => ({
-        ...derivation,
-        output_digests: [extraDigest, ...derivation.output_digests],
-      })),
-    }
+  it('bounds the expanded projection by lines and reports the remainder', () => {
+    const content = Array.from({ length: 220 }, (_, index) => `line ${index + 1}`).join('\n')
 
-    expect(derivativeDigest(multiOutputPreview)).toBe(preview.derivations[0]?.output_digests[0])
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
+
+    expect(bounded.content.split('\n')).toHaveLength(200)
+    expect(bounded.omittedLines).toBe(true)
+    expect(bounded.omittedCharacters).toBeGreaterThan(0)
   })
 
-  it('rejects an original whose view length differs from the immutable blob length', () => {
-    expect(isInlineOriginalLengthAdmitted('16777217', '1024')).toBe(false)
+  it('counts bare carriage returns toward the expanded line ceiling', () => {
+    const content = Array.from({ length: 220 }, (_, index) => `line ${index + 1}`).join('\r')
+
+    const bounded = boundArtifactText(content, Array.from(content).length, 'expanded')
+
+    expect(bounded.content.split('\n')).toHaveLength(200)
+    expect(bounded.omittedLines).toBe(true)
+    expect(bounded.omittedCharacters).toBeGreaterThan(0)
   })
 
-  it('reads bounded PNG dimensions for pixel admission', () => {
-    const bytes = new Uint8Array(24)
-    const view = new DataView(bytes.buffer)
-    view.setUint32(0, 0x89504e47)
-    view.setUint32(4, 0x0d0a1a0a)
-    view.setUint32(16, 800)
-    view.setUint32(20, 600)
-
-    expect(readImageDimensions(bytes)).toEqual({ width: 800, height: 600 })
+  it('labels thumbnail capabilities as thumbnails', () => {
+    expect(imageViewLabel('thumbnail')).toBe('Thumbnail')
   })
 
-  it('reads the GIF logical screen for pixel admission', () => {
-    // 640x480 logical screen carrying a smaller 320x240 frame: the browser allocates the screen.
-    const bytes = new Uint8Array([
-      0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x80, 0x02, 0xe0, 0x01, 0x00, 0x00, 0x00, 0x2c, 0x00,
-      0x00, 0x00, 0x00, 0x40, 0x01, 0xf0, 0x00, 0x00,
-    ])
-
-    expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
+  it('recognizes only the JPEG start-of-image signature as single-frame evidence', () => {
+    expect(isSingleFrameJpegBytes(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]))).toBe(true)
+    // GIF89a — animation-capable even when declared image/jpeg.
+    expect(isSingleFrameJpegBytes(new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]))).toBe(false)
+    // PNG signature — APNG shares it, so it proves nothing about frame count.
+    expect(isSingleFrameJpegBytes(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))).toBe(false)
+    // RIFF....WEBP — animation-capable container.
+    expect(isSingleFrameJpegBytes(new Uint8Array([0x52, 0x49, 0x46, 0x46]))).toBe(false)
+    expect(isSingleFrameJpegBytes(new Uint8Array([0xff, 0xd8]))).toBe(false)
+    expect(isSingleFrameJpegBytes(new Uint8Array([]))).toBe(false)
   })
 
-  it('applies the pixel ceiling to an oversized GIF screen behind a tiny frame', () => {
-    // 10000x10000 logical screen with a single 1x1 frame: reporting the frame would let roughly
-    // 100 million pixels past MAX_INLINE_ORIGINAL_PIXELS.
-    const bytes = new Uint8Array([
-      0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x10, 0x27, 0x10, 0x27, 0x00, 0x00, 0x00, 0x2c, 0x00,
-      0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
-    ])
+  it('admits fetched original bytes with the JPEG signature and advertised length', async () => {
+    const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])
+    const view = { ...jpegOriginalView, byte_length: String(jpegBytes.byteLength) }
+    const fetchStub = (async () => new Response(jpegBytes, { status: 200 })) as typeof fetch
 
-    const dimensions = readImageDimensions(bytes)
-    expect(dimensions).toEqual({ width: 10_000, height: 10_000 })
-    expect((dimensions?.width ?? 0) * (dimensions?.height ?? 0)).toBeGreaterThan(
-      MAX_INLINE_ORIGINAL_PIXELS,
+    const blob = await fetchVerifiedSingleFrameJpeg(view, fetchStub)
+
+    expect(blob.size).toBe(jpegBytes.byteLength)
+  })
+
+  it('rejects fetched original bytes whose actual format is animation-capable', async () => {
+    const gifBytes = new Uint8Array([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])
+    const view = { ...jpegOriginalView, byte_length: String(gifBytes.byteLength) }
+    const fetchStub = (async () => new Response(gifBytes, { status: 200 })) as typeof fetch
+
+    await expect(fetchVerifiedSingleFrameJpeg(view, fetchStub)).rejects.toThrow(
+      'original bytes are not a single-frame JPEG stream',
     )
   })
 
-  it('rejects a GIF frame outside its declared logical screen', () => {
-    const bytes = new Uint8Array([
-      0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x2c, 0x00,
-      0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x00,
-    ])
+  it('rejects fetched original bytes that diverge from the advertised length', async () => {
+    const jpegBytes = new Uint8Array([0xff, 0xd8, 0xff, 0xe0])
+    const view = { ...jpegOriginalView, byte_length: String(jpegBytes.byteLength + 1) }
+    const fetchStub = (async () => new Response(jpegBytes, { status: 200 })) as typeof fetch
 
-    expect(readImageDimensions(bytes)).toBeNull()
-  })
-
-  it('reads bounded JPEG dimensions for pixel admission', () => {
-    const bytes = new Uint8Array([
-      0xff, 0xd8, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x01, 0xe0,
-      0x02, 0x80, 0x03, 0x01, 0x11, 0x00, 0xff, 0xd9,
-    ])
-
-    expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
-  })
-
-  it('skips legal JPEG marker fill bytes', () => {
-    const bytes = new Uint8Array([
-      0xff, 0xd8, 0xff, 0xff, 0xe0, 0x00, 0x04, 0x00, 0x00, 0xff, 0xff, 0xc0, 0x00, 0x0b, 0x08,
-      0x01, 0xe0, 0x02, 0x80, 0x03, 0x01, 0x11, 0x00, 0xff, 0xd9,
-    ])
-
-    expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
-  })
-
-  it('skips the standalone JPEG TEM marker', () => {
-    const bytes = new Uint8Array([
-      0xff, 0xd8, 0xff, 0x01, 0xff, 0xc0, 0x00, 0x0b, 0x08, 0x01, 0xe0, 0x02, 0x80, 0x03, 0x01,
-      0x11, 0x00, 0xff, 0xd9,
-    ])
-
-    expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
-  })
-
-  it('admits a valid single-frame GIF and rejects a multi-frame GIF', () => {
-    const header = [0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]
-    const frame = [
-      0x2c, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x02, 0x01, 0x00, 0x00,
-    ]
-    expect(isAnimationSafeImageHeader(new Uint8Array([...header, ...frame, 0x3b]))).toBe(true)
-    expect(isAnimationSafeImageHeader(new Uint8Array([...header, ...frame, ...frame, 0x3b]))).toBe(
-      false,
+    await expect(fetchVerifiedSingleFrameJpeg(view, fetchStub)).rejects.toThrow(
+      'original bytes do not match the advertised byte length',
     )
   })
 
-  it('keeps other animation-capable originals download-only', () => {
-    const animatedWebp = new Uint8Array(30)
-    animatedWebp.set(new TextEncoder().encode('RIFF'), 0)
-    animatedWebp.set(new TextEncoder().encode('WEBP'), 8)
-    animatedWebp.set(new TextEncoder().encode('VP8X'), 12)
-    animatedWebp[20] = 0x02
-    expect(isAnimationSafeImageHeader(animatedWebp)).toBe(false)
-  })
+  it('aborts original bytes that stream past the advertised length', async () => {
+    const oversized = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])
+    const view = { ...jpegOriginalView, byte_length: String(oversized.byteLength - 1) }
+    const fetchStub = (async () => new Response(oversized, { status: 200 })) as typeof fetch
 
-  it('reads PNG chunk tags by byte offset after multibyte metadata', () => {
-    const bytes = new Uint8Array(34)
-    bytes.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
-    const view = new DataView(bytes.buffer)
-    view.setUint32(8, 2)
-    bytes.set(new TextEncoder().encode('tEXt'), 12)
-    bytes.set([0xc3, 0xa9], 16)
-    view.setUint32(22, 0)
-    bytes.set(new TextEncoder().encode('IDAT'), 26)
-
-    expect(isAnimationSafeImageHeader(bytes)).toBe(true)
-  })
-
-  it('reads bounded extended WebP dimensions for pixel admission', () => {
-    const bytes = new Uint8Array(30)
-    bytes.set(new TextEncoder().encode('RIFF'), 0)
-    bytes.set(new TextEncoder().encode('WEBP'), 8)
-    bytes.set(new TextEncoder().encode('VP8X'), 12)
-    bytes.set([0x7f, 0x02, 0x00], 24)
-    bytes.set([0xdf, 0x01, 0x00], 27)
-
-    expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
-  })
-
-  it('reads bounded lossy WebP dimensions for pixel admission', () => {
-    const bytes = new Uint8Array(30)
-    bytes.set(new TextEncoder().encode('RIFF'), 0)
-    bytes.set(new TextEncoder().encode('WEBP'), 8)
-    bytes.set(new TextEncoder().encode('VP8 '), 12)
-    bytes.set([0x9d, 0x01, 0x2a], 23)
-    const view = new DataView(bytes.buffer)
-    view.setUint16(26, 640, true)
-    view.setUint16(28, 480, true)
-
-    expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
-  })
-
-  it('reads bounded lossless WebP dimensions for pixel admission', () => {
-    const bytes = new Uint8Array(25)
-    bytes.set(new TextEncoder().encode('RIFF'), 0)
-    bytes.set(new TextEncoder().encode('WEBP'), 8)
-    bytes.set(new TextEncoder().encode('VP8L'), 12)
-    bytes.set([0x2f, 0x7f, 0xc2, 0x77, 0x00], 20)
-
-    expect(readImageDimensions(bytes)).toEqual({ width: 640, height: 480 })
-  })
-
-  it('exposes dimensions beyond the decoded-pixel ceiling', () => {
-    const bytes = new Uint8Array(24)
-    const view = new DataView(bytes.buffer)
-    view.setUint32(0, 0x89504e47)
-    view.setUint32(4, 0x0d0a1a0a)
-    view.setUint32(16, MAX_INLINE_ORIGINAL_PIXELS)
-    view.setUint32(20, 2)
-
-    const dimensions = readImageDimensions(bytes)
-    expect(dimensions && dimensions.width * dimensions.height).toBeGreaterThan(
-      MAX_INLINE_ORIGINAL_PIXELS,
+    await expect(fetchVerifiedSingleFrameJpeg(view, fetchStub)).rejects.toThrow(
+      'original bytes exceed the advertised byte length',
     )
   })
 
-  it('rejects malformed or unsupported image headers', () => {
-    expect(readImageDimensions(new TextEncoder().encode('not an image'))).toBeNull()
+  it('refuses to fetch an original advertised above the inline admission ceiling', async () => {
+    const view = { ...jpegOriginalView, byte_length: (INLINE_ORIGINAL_MAX_BYTES + 1n).toString() }
+    const fetchStub = (async () => {
+      throw new Error('the ceiling check must reject before any request is made')
+    }) as typeof fetch
+
+    await expect(fetchVerifiedSingleFrameJpeg(view, fetchStub)).rejects.toThrow(
+      'original exceeds the inline admission ceiling',
+    )
   })
 
-  it('rejects a truncated JPEG segment', () => {
-    expect(
-      readImageDimensions(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x20, 0x00, 0x00])),
-    ).toBeNull()
+  it('rejects failed original responses before reading any bytes', async () => {
+    const fetchStub = (async () => new Response('unavailable', { status: 500 })) as typeof fetch
+
+    await expect(fetchVerifiedSingleFrameJpeg(jpegOriginalView, fetchStub)).rejects.toThrow(
+      'original request failed with status 500',
+    )
+  })
+
+  it('admits only credential-free HTTPS remote media', () => {
+    expect(admitRemoteMediaUrl('https://media.example.test/status.png')).toBe(
+      'https://media.example.test/status.png',
+    )
+    expect(admitRemoteMediaUrl('http://media.example.test/status.png')).toBeNull()
+    expect(admitRemoteMediaUrl('https://token@media.example.test/status.png')).toBeNull()
   })
 })
