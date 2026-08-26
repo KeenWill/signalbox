@@ -20,6 +20,7 @@ use signalbox_domain::{
 use signalbox_persistence::{
     automatic_reconciliation::{
         AutomaticReconciliationRepositoryError, PostgresAutomaticReconciliationRepository,
+        reconciliation_deadline,
     },
     turn_liveness::{
         PostgresTurnLivenessRepository, TurnLivenessPersistenceBounds, TurnLivenessRepositoryError,
@@ -74,6 +75,9 @@ const STALE_TURN_LOCK_UNAVAILABLE_CAUSE: &str = "turn_liveness_scheduler_row_bus
 /// Why one turn-liveness pass produced no decision.
 const PASS_FAILURE_CAUSE: &str = "turn_liveness_pass_failed";
 
+/// Why a slot-held inventory read decided nothing within its bound.
+const SLOT_HELD_PAGE_TIMEOUT_CAUSE: &str = "turn_liveness_slot_held_page_timed_out";
+
 /// Why a rotation was abandoned without deciding anything.
 const ROTATION_CEILING_CAUSE: &str = "turn_liveness_rotation_ceiling_reached";
 
@@ -94,17 +98,6 @@ const ROTATION_CEILING_CAUSE: &str = "turn_liveness_rotation_ceiling_reached";
 /// candidates from it.
 // numeric-bound: guard - prevents a non-converging liveness inventory scan
 const QUIESCENT_ROTATION_PAGE_CEILING: usize = 4_096;
-/// Client-side observation bound after PostgreSQL has been told to terminate
-/// the recovery transaction at the supplied server bound.
-///
-/// The second interval is only transport grace. If it expires, PostgreSQL has
-/// already had a full transaction bound in which to terminate the backend, so
-/// dropping the client future cannot leave live database work accumulating
-/// behind the outbox allocator.
-fn recovery_client_observation_bound(server_bound: Option<Duration>) -> Option<Duration> {
-    server_bound.map(|bound| bound.saturating_add(bound))
-}
-
 /// Deployment policy for one turn-liveness scan.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TurnLivenessNumericBounds {
@@ -546,14 +539,22 @@ async fn drain_slot_held_rotation(
     let mut active = Vec::new();
     let mut cursor = None;
     for _ in 0..QUIESCENT_ROTATION_PAGE_CEILING {
-        let page = read_slot_held_inventory_page(inventory, cursor, recovery_attempt_bound).await?;
+        let page =
+            read_slot_held_inventory_page(inventory, cursor, recovery_attempt_bound, "paging")
+                .await?;
         cursor = page.resume_after();
         active.extend(page.into_candidates());
         if cursor.is_none() {
             return Some(active);
         }
     }
-    let probe = read_slot_held_inventory_page(inventory, cursor, recovery_attempt_bound).await?;
+    let probe = read_slot_held_inventory_page(
+        inventory,
+        cursor,
+        recovery_attempt_bound,
+        "rotation_ceiling_probe",
+    )
+    .await?;
     if probe.rows() == 0 {
         return Some(active);
     }
@@ -570,6 +571,7 @@ async fn read_slot_held_inventory_page(
     inventory: &PostgresTurnLivenessRepository,
     cursor: Option<SessionId>,
     recovery_attempt_bound: Option<Duration>,
+    phase: &'static str,
 ) -> Option<signalbox_persistence::turn_liveness::QuiescentActiveTurnPage> {
     match optional_timeout(
         recovery_attempt_bound,
@@ -583,11 +585,7 @@ async fn read_slot_held_inventory_page(
             None
         }
         Err(_) => {
-            tracing::warn!(
-                cause_code = "turn_liveness_slot_held_inventory_timed_out",
-                attempt_bound_seconds = ?recovery_attempt_bound.map(|bound| bound.as_secs()),
-                "slot-held inventory read exceeded its bound; the rotation made no decision"
-            );
+            report_slot_held_page_timeout(phase, recovery_attempt_bound);
             None
         }
     }
@@ -618,9 +616,9 @@ async fn reconcile_ambiguous_operations(
         .automatic_reconciliations_per_scan
         .is_none_or(|limit| reconciliations < limit)
     {
-        let claim = optional_timeout(
-            recovery_client_observation_bound(numeric_bounds.recovery_attempt_bound),
-            repository.claim_due(numeric_bounds.recovery_attempt_bound),
+        let claim = timeout(
+            reconciliation_deadline(numeric_bounds.recovery_attempt_bound),
+            repository.claim_due(),
         );
         // Once PostgreSQL has begun a bounded transaction, shutdown lets that
         // transaction reach its server-enforced outcome instead of dropping
@@ -657,9 +655,9 @@ async fn reconcile_ambiguous_operations(
             return;
         };
         let (operation_kind, operation_id) = operation_log_fields(claimed.operation());
-        let attempt = optional_timeout(
-            recovery_client_observation_bound(numeric_bounds.recovery_attempt_bound),
-            repository.reconcile(claimed, numeric_bounds.recovery_attempt_bound),
+        let attempt = timeout(
+            reconciliation_deadline(numeric_bounds.recovery_attempt_bound),
+            repository.reconcile(claimed),
         );
         let attempt_outcome = attempt.await;
         match attempt_outcome {
@@ -689,13 +687,9 @@ async fn reconcile_ambiguous_operations(
                         commit_ambiguous: true
                     }
                 ) {
-                    let record_failure = optional_timeout(
-                        recovery_client_observation_bound(numeric_bounds.recovery_attempt_bound),
-                        repository.record_failure(
-                            claimed,
-                            error.failure_kind(),
-                            numeric_bounds.recovery_attempt_bound,
-                        ),
+                    let record_failure = timeout(
+                        reconciliation_deadline(numeric_bounds.recovery_attempt_bound),
+                        repository.record_failure(claimed, error.failure_kind()),
                     );
                     let record_outcome = record_failure.await;
                     match record_outcome {
@@ -1090,16 +1084,35 @@ fn report_turn_liveness_failure(error: &TurnLivenessRepositoryError) {
     );
 }
 
+/// Reports a slot-held inventory read that exceeded its bound.
+///
+/// The slot-held scan is the durable backstop for a turn whose scheduler pass
+/// expired, so a read that keeps timing out silently would retire that backstop
+/// invisibly: `reconcile_slot_held_turns` returns at its first statement on
+/// every scan and no turn is ever reached. Every sibling bound in this file and
+/// in the scheduler-expiry path emits a cause code, and so does this one.
+fn report_slot_held_page_timeout(phase: &'static str, recovery_attempt_bound: Option<Duration>) {
+    tracing::error!(
+        failure_class = ?signalbox_application::OperatorFailureClass::Infrastructure { commit_ambiguous: false },
+        cause_code = SLOT_HELD_PAGE_TIMEOUT_CAUSE,
+        phase,
+        attempt_bound_seconds = ?recovery_attempt_bound.map(|bound| bound.as_secs()),
+        "slot-held inventory read exceeded its bound; the slot-held backstop made no progress this scan"
+    );
+}
+
 #[cfg(test)]
 mod tests {
+    use signalbox_persistence::automatic_reconciliation::RECONCILIATION_LOCK_WAIT;
+
     use super::{
         InventoryPage, PASS_FAILURE_CAUSE, QUIESCENT_ROTATION_PAGE_CEILING, QuiescentInventory,
-        ROTATION_CEILING_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_LOCK_UNAVAILABLE_CAUSE,
-        STALE_TURN_STEERING_BLOCKED_CAUSE, STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE,
-        StaleTurnTerminalizer, TERMINALIZATION_DEFERRED_CAUSE, TerminalizationWindow,
-        TurnLivenessNumericBounds, TurnLivenessWake, complete_before_shutdown,
-        drain_quiescent_rotation, next_turn_liveness_wake, reconcile_turn_liveness,
-        recovery_client_observation_bound,
+        ROTATION_CEILING_CAUSE, SLOT_HELD_PAGE_TIMEOUT_CAUSE, STALE_TURN_AMBIGUOUS_CAUSE,
+        STALE_TURN_LOCK_UNAVAILABLE_CAUSE, STALE_TURN_STEERING_BLOCKED_CAUSE,
+        STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE, StaleTurnTerminalizer,
+        TERMINALIZATION_DEFERRED_CAUSE, TerminalizationWindow, TurnLivenessNumericBounds,
+        TurnLivenessWake, complete_before_shutdown, drain_quiescent_rotation,
+        next_turn_liveness_wake, reconcile_turn_liveness, reconciliation_deadline,
     };
     use signalbox_application::{
         StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome, TurnLivenessEvidence,
@@ -1643,6 +1656,10 @@ mod tests {
             STALE_TURN_LOCK_UNAVAILABLE_CAUSE,
             "turn_liveness_scheduler_row_busy"
         );
+        assert_eq!(
+            SLOT_HELD_PAGE_TIMEOUT_CAUSE,
+            "turn_liveness_slot_held_page_timed_out"
+        );
         assert_ne!(STALE_TURN_SUPERSEDED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(STALE_TURN_AMBIGUOUS_CAUSE, STALE_TURN_TERMINAL_CAUSE);
         assert_ne!(STALE_TURN_STEERING_BLOCKED_CAUSE, STALE_TURN_TERMINAL_CAUSE);
@@ -1663,14 +1680,17 @@ mod tests {
     }
 
     /// The example keeps recovery bounded while production may choose `none`.
+    ///
+    /// The configured bound is now the reconciliation transaction's last-resort
+    /// client deadline; the database-side budgets it must sit above are pinned
+    /// in `signalbox_persistence::automatic_reconciliation`.
     #[test]
     fn recovery_attempts_use_the_configured_bound() {
         assert!(example_numeric_bounds().recovery_attempt_bound.is_some());
         assert_eq!(
-            recovery_client_observation_bound(Some(Duration::from_secs(60))),
-            Some(Duration::from_secs(120))
+            reconciliation_deadline(Some(Duration::from_secs(60))),
+            Duration::from_secs(60)
         );
-        assert_eq!(recovery_client_observation_bound(None), None);
     }
 
     #[test]
@@ -1701,5 +1721,25 @@ mod tests {
         let outcome = complete_before_shutdown(&mut shutdown, std::future::ready(7_u8)).await;
 
         assert_eq!(outcome, Some(7));
+    }
+
+    /// The reconciliation stages are bounded above their database-side lock
+    /// budget, so a contended row ends as `55P03` under the caller's timer
+    /// rather than as a dropped future that leaves the backend still waiting.
+    ///
+    /// Stated here as well as in the compile-time assertion because the two
+    /// answer different questions: that one rejects a margin that has vanished,
+    /// this one records which side of the pair the margin belongs to.
+    #[test]
+    fn the_reconciliation_bound_outlasts_its_database_budget() {
+        assert_eq!(RECONCILIATION_LOCK_WAIT, Duration::from_secs(1));
+        assert!(
+            reconciliation_deadline(None) > RECONCILIATION_LOCK_WAIT,
+            "the database-side budget has to be the one that expires first"
+        );
+        assert!(
+            reconciliation_deadline(Some(Duration::from_millis(1))) > RECONCILIATION_LOCK_WAIT,
+            "a configured bound below the floor is raised, never honoured as-is"
+        );
     }
 }

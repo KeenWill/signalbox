@@ -45,6 +45,7 @@ mod turn_eligibility;
 mod turn_lifecycle;
 mod user_content;
 mod workspace;
+mod workspace_instruction;
 
 pub use accepted_input::{
     AcceptedInputDisposition, AcceptedInputLifecycle, AcceptedInputLifecycleTransitionError,
@@ -52,7 +53,11 @@ pub use accepted_input::{
 };
 pub use actor::Actor;
 pub use applied_interrupt::{AppliedInterruptCommandResult, AppliedInterruptProof};
-pub use blob::{BlobDigest, BlobDigestParseError, BlobDigestParseFailure};
+pub use blob::{
+    BlobDerivation, BlobDerivationError, BlobDerivationProducer, BlobDigest, BlobDigestParseError,
+    BlobDigestParseFailure, BlobTransformation, BlobTransformationError, BlobTransformationName,
+    DeterministicBlobDerivationKey,
+};
 pub use configuration::{
     ConfigurationRequest, DirectModelSelection, EffectiveConfiguration, FrozenAliasDefinition,
     FrozenModelSelection, KnownProviderFailureRetry, ModelAlias, ModelFallback, ModelParameters,
@@ -310,6 +315,8 @@ pub use submit_input::{
     SubmitInputRejectedAcceptancePositionExhaustedReconstitutionInput,
     SubmitInputRejectedActiveTurnMismatchReconstitutionInput,
     SubmitInputRejectedActiveTurnPresentReconstitutionInput,
+    SubmitInputRejectedAttachmentBlobNotFoundReconstitutionInput,
+    SubmitInputRejectedAttachmentByteBudgetExceededReconstitutionInput,
     SubmitInputRejectedDefaultsVersionMismatchReconstitutionInput,
     SubmitInputRejectedInterruptAlreadyAppliedReconstitutionInput,
     SubmitInputRejectedInterruptUnavailableWhileAwaitingApprovalReconstitutionInput,
@@ -325,15 +332,18 @@ pub use tool::{
     DecideToolRequestAppliedResult, DecideToolRequestConstructionError,
     DecideToolRequestPreparationError, DecideToolRequestRejectedResult, DecideToolRequestResult,
     DelegateApprovalRecommendation, DelegateToolApproval, DelegateToolApprovalError,
-    InitialToolApproval, NormalizedToolArguments, PreparedDecideToolRequest, ToolApprovalDecider,
-    ToolApprovalDecision, ToolApprovalPosture, ToolApprovalResolution,
-    ToolApprovalResolutionReconstitutionError, ToolApprovalResolutionReconstitutionInput,
-    ToolArgumentsError, ToolArgumentsFailure, ToolArgumentsKind, ToolCallProposal,
-    ToolDecisionRationale, ToolDecisionRationaleError, ToolDecisionSource, ToolDenialReason,
-    ToolDenialReasonError, ToolDenialReasonFailure, ToolEffectClass, ToolName, ToolNameError,
-    ToolNameFailure, ToolPermissionDefault, ToolRequest, ToolRequestOrdinal,
-    ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent, ToolResultText,
-    ToolResultTextError, ToolResultTextFailure, ToolUsingAssistantResponse,
+    InitialToolApproval, NormalizedToolArguments, OverrideDeniedToolRequest,
+    OverrideDeniedToolRequestAppliedResult, OverrideDeniedToolRequestConstructionError,
+    OverrideDeniedToolRequestPreparationError, OverrideDeniedToolRequestRejectedResult,
+    OverrideDeniedToolRequestResult, PreparedDecideToolRequest, PreparedOverrideDeniedToolRequest,
+    RecordedUserOverride, ToolApprovalDecider, ToolApprovalDecision, ToolApprovalPosture,
+    ToolApprovalResolution, ToolApprovalResolutionReconstitutionError,
+    ToolApprovalResolutionReconstitutionInput, ToolArgumentsError, ToolArgumentsFailure,
+    ToolArgumentsKind, ToolCallProposal, ToolDecisionRationale, ToolDecisionRationaleError,
+    ToolDecisionSource, ToolDenialReason, ToolDenialReasonError, ToolDenialReasonFailure,
+    ToolEffectClass, ToolName, ToolNameError, ToolNameFailure, ToolPermissionDefault, ToolRequest,
+    ToolRequestOrdinal, ToolRequestReconstitutionInput, ToolRequestResolution, ToolResultContent,
+    ToolResultText, ToolResultTextError, ToolResultTextFailure, ToolUsingAssistantResponse,
     ToolUsingAssistantResponseError,
 };
 pub use tool_attempt::{
@@ -389,9 +399,20 @@ pub use turn_lifecycle::{
     NonEmptyIssuedOperationRefsError, ReconciliationMarker, ReconciliationReason, TurnDisposition,
 };
 pub use user_content::{
-    NonEmptyUnicodeText, NonEmptyUnicodeTextError, NonEmptyUnicodeTextFailure, UserContent,
+    AttachmentBlobFact, AttachmentDisplayFilename, AttachmentDisplayFilenameError,
+    AttachmentDisplayFilenameFailure, AttachmentKind, DeclaredMediaType, DeclaredMediaTypeError,
+    DeclaredMediaTypeFailure, NonEmptyUnicodeText, NonEmptyUnicodeTextError,
+    NonEmptyUnicodeTextFailure, UserContent, UserContentError, UserContentFailure, UserContentPart,
 };
 pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
+pub use workspace_instruction::{
+    EmptyTurnInstructionManifestEvidence, InstructionBundleId, InstructionBundleKind,
+    InstructionBundleRegistration, InstructionBundleRegistrationInput, InstructionDigest,
+    InstructionDiscoveryId, InstructionDiscoveryRootKind, InstructionPath, InstructionPathError,
+    InstructionSkillMetadata, InstructionSkillMetadataError, InstructionSkillMetadataInput,
+    InstructionSourcePath, InstructionSourcePathInterner, InstructionSourcePathPrefix,
+    TurnInstructionManifest, TurnInstructionManifestId,
+};
 
 macro_rules! define_identity {
     ($(#[$documentation:meta])* $name:ident) => {
@@ -425,6 +446,11 @@ define_identity!(
     ///
     /// This identity does not prove that the command was applied.
     DurableCommandId
+);
+
+define_identity!(
+    /// Identifies one immutable blob-to-blob derivation fact.
+    BlobDerivationId
 );
 
 define_identity!(

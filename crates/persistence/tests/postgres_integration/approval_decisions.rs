@@ -2,6 +2,10 @@
 
 use crate::*;
 
+/// A second fixture tool, distinct from `APPROVAL_TOOL_NAME`, so a mixed batch
+/// can park one request for the judge without that request resembling the
+/// re-proposal a recorded override pre-approves.
+const JUDGED_TOOL_NAME: &str = "current_weather";
 const FAILURE_ENTRY_ID_OFFSET: u128 = 0x1_000;
 const TERMINAL_FRONTIER_ID_OFFSET: u128 = 0x1_001;
 const CLOSED_RESULT_ID_OFFSET: u128 = 0x2_000_000;
@@ -2352,6 +2356,1184 @@ async fn explicit_tool_decision_rejects_sentinel_user_provenance() -> Result<(),
     assert_eq!(
         corruption,
         ProcessReadCorruption::Inconsistent("tool approval user command")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Drives one delegated request through its judge denial and the
+/// continuation that materializes the terminal `tool_denied` result, then
+/// checkpoints the next model call.
+///
+/// Returns the fixture, the repository, the denied request, the checkpointed
+/// continuation call, and the denying judge call.
+async fn terminal_delegate_denial(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        ToolRequestId,
+        ModelCallId,
+        Uuid,
+    ),
+    Box<dyn Error>,
+> {
+    let (fixture, model_repository, _, requests) = checkpoint_tool_batch_with_approval(
+        pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xd1));
+    let mut transaction = pool.begin().await?;
+    let judge_call = persist_delegated_denial_fixture(
+        &mut transaction,
+        &fixture,
+        *request,
+        seed + 0xe0,
+        continuation_attempt,
+        None,
+        None,
+    )
+    .await?;
+    transaction.commit().await?;
+
+    let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0xd4));
+    let continuation = model_repository
+        .tool_loop_repository()
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0xd2,
+                ))],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xd3)),
+                continuation_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xd5)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xd6)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xd7)),
+            ),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?;
+    assert_eq!(
+        continuation,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation_call)
+    );
+    Ok((
+        fixture,
+        model_repository,
+        *request,
+        continuation_call,
+        judge_call,
+    ))
+}
+
+/// The override verification predicate over durable evidence: a delegate
+/// denial still resolving inside its round rejects the command, and the
+/// same denial admits it once the continuation materializes the terminal
+/// denied result; the applied command durably links the denied request, the
+/// session, the command, and the denying judge call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn override_command_records_only_a_terminal_delegate_denial() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8e00;
+    let (fixture, model_repository, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let continuation_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xd1));
+    let mut transaction = pool.begin().await?;
+    let judge_call = persist_delegated_denial_fixture(
+        &mut transaction,
+        &fixture,
+        *request,
+        seed + 0xe0,
+        continuation_attempt,
+        None,
+        None,
+    )
+    .await?;
+    transaction.commit().await?;
+
+    let repository = model_repository.tool_loop_repository();
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf0));
+    let still_resolving = OverrideDeniedToolRequest::try_new(command_id, fixture.session, *request)
+        .expect("the fixture command identity is admitted");
+    let rejected = repository.override_denied(still_resolving).await?;
+    assert_eq!(
+        rejected.result(),
+        &OverrideDeniedToolRequestResult::Rejected(
+            OverrideDeniedToolRequestRejectedResult::NotTerminallyDenied {
+                denied_request: *request,
+            }
+        )
+    );
+
+    let continuation_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0xd4));
+    let continuation = repository
+        .prepare_continuation(
+            fixture.session,
+            fixture.turn,
+            fixture.call,
+            signalbox_application::ToolContinuationIdentities::new(
+                vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                    seed + 0xd2,
+                ))],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xd3)),
+                continuation_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xd5)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xd6)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xd7)),
+            ),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?;
+    assert_eq!(
+        continuation,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(continuation_call)
+    );
+
+    let override_command_id = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf1));
+    let override_command =
+        OverrideDeniedToolRequest::try_new(override_command_id, fixture.session, *request)
+            .expect("the fixture command identity is admitted");
+    let applied = repository.override_denied(override_command).await?;
+    let OverrideDeniedToolRequestResult::Applied(applied_result) = applied.result() else {
+        panic!("a terminal delegate denial admits the override")
+    };
+    let recorded = applied_result.recorded();
+    assert_eq!(recorded.command(), override_command_id);
+    assert_eq!(recorded.session(), fixture.session);
+    assert_eq!(recorded.denied_request(), *request);
+    assert_eq!(recorded.judge_call().into_uuid(), judge_call);
+    assert_eq!(recorded.tool().as_str(), APPROVAL_TOOL_NAME);
+    assert_eq!(recorded.arguments().as_str(), APPROVAL_ARGUMENTS);
+
+    let stored: (Uuid, Uuid, Uuid, String) = sqlx::query_as(
+        "SELECT recorded.session_id, recorded.command_id, recorded.judge_model_call_id,
+                command.result_kind
+           FROM tool_approval_user_override AS recorded
+           JOIN override_denied_tool_request_command AS command
+             ON command.command_id = recorded.command_id
+          WHERE recorded.denied_request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored.0, fixture.session.into_uuid());
+    assert_eq!(stored.1, override_command_id.into_uuid());
+    assert_eq!(stored.2, judge_call);
+    assert_eq!(stored.3, "applied");
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-012: an equal override replay returns the recorded receipt, and a
+/// distinct fresh command against the same denial records the
+/// already-overridden rejection.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv012_override_command_replay_returns_the_recorded_receipt() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8e40;
+    let (fixture, model_repository, request, _, _) = terminal_delegate_denial(&pool, seed).await?;
+    let repository = model_repository.tool_loop_repository();
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf0));
+    let override_command = OverrideDeniedToolRequest::try_new(command_id, fixture.session, request)
+        .expect("the fixture command identity is admitted");
+    let applied = repository.override_denied(override_command.clone()).await?;
+    assert!(matches!(
+        applied.result(),
+        OverrideDeniedToolRequestResult::Applied(_)
+    ));
+
+    let replayed = repository.override_denied(override_command).await?;
+    assert_eq!(replayed, applied);
+    let reloaded = repository
+        .load_recorded_override(command_id)
+        .await?
+        .expect("the claimed override command loads its recorded receipt");
+    assert_eq!(reloaded, applied);
+
+    let second_command_id = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf1));
+    let second = OverrideDeniedToolRequest::try_new(second_command_id, fixture.session, request)
+        .expect("the fixture command identity is admitted");
+    let rejected = repository.override_denied(second).await?;
+    assert_eq!(
+        rejected.result(),
+        &OverrideDeniedToolRequestResult::Rejected(
+            OverrideDeniedToolRequestRejectedResult::AlreadyOverridden {
+                denied_request: request,
+            }
+        )
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The continuation that first carries a denial to the model freezes an empty
+/// override inventory. This is the designed boundary of the feature, not a
+/// defect: that continuation is checkpointed by the very transaction that
+/// materializes the terminal `tool_denied` result, so at the instant its
+/// inventory freezes no override for that denial can exist — the user has not
+/// yet been shown the denial to disagree with. The override the user then
+/// records takes effect at the next prepared call, one round later.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn denial_continuation_freezes_an_empty_override_inventory_by_design()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8e80;
+    let (fixture, model_repository, request, _, _) = terminal_delegate_denial(&pool, seed).await?;
+    let repository = model_repository.tool_loop_repository();
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf0));
+    let override_command = OverrideDeniedToolRequest::try_new(command_id, fixture.session, request)
+        .expect("the fixture command identity is admitted");
+    let applied = repository.override_denied(override_command).await?;
+    assert!(matches!(
+        applied.result(),
+        OverrideDeniedToolRequestResult::Applied(_)
+    ));
+
+    let PrepareInitialModelCallOutcome::Ready {
+        recorded_user_overrides,
+        ..
+    } = model_repository
+        .prepare_initial_call(
+            fixture.session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 0xf2)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0xf3)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xf4)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xf5)),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?
+    else {
+        panic!("the checkpointed continuation call reloads as Ready")
+    };
+    assert!(
+        recorded_user_overrides.is_empty(),
+        "the continuation that materialized the denial froze its inventory before any override for that denial could exist"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Records a user override of a terminal delegate denial and then reaches the
+/// first model call checkpointed after that override exists, so the call's
+/// frozen inventory carries it.
+///
+/// The route is the failed-call retry path: the continuation that carried the
+/// denial fails, a fresh input opens the next turn, and the call prepared there
+/// is the first checkpointed second. Returns the fixture, the model-call
+/// repository, the denied request, the override the applied command recorded,
+/// the retry turn, and the freshly checkpointed call.
+///
+/// Uses seed offsets `0x110` through `0x11b` on top of those
+/// `terminal_delegate_denial` reserves.
+async fn recorded_override_before_a_fresh_call(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        ToolRequestId,
+        RecordedUserOverride,
+        TurnId,
+        ModelCallId,
+    ),
+    Box<dyn Error>,
+> {
+    let (fixture, model_repository, request, continuation_call, _) =
+        terminal_delegate_denial(pool, seed).await?;
+    let repository = model_repository.tool_loop_repository();
+    let command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf0));
+    let override_command = OverrideDeniedToolRequest::try_new(command, fixture.session, request)
+        .expect("the fixture command identity is admitted");
+    let applied = repository.override_denied(override_command).await?;
+    let OverrideDeniedToolRequestResult::Applied(applied_result) = applied.result() else {
+        panic!("the fixture's terminal delegate denial admits the override")
+    };
+    let recorded = applied_result.recorded().clone();
+
+    // The continuation checkpointed with the denial froze an empty inventory,
+    // so it can never consume this override. Fail it, so the retry path
+    // checkpoints a call after the override was recorded.
+    let AuthorizeModelCallOutcome::Authorized(authorized_continuation) = model_repository
+        .authorize_send(fixture.session, continuation_call)
+        .await?
+    else {
+        panic!("the checkpointed continuation call authorizes")
+    };
+    let failure = authorized_continuation
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::KnownFailed);
+    assert!(
+        matches!(
+            model_repository
+                .apply_terminal_observation(
+                    fixture.session,
+                    failure,
+                    ModelCallTerminalIdentities::Failed(FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x116)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x117)),
+                    )),
+                    |_| panic!("the fixture has no pending steering to reclassify"),
+                )
+                .await?,
+            ModelCallTerminalOutcome::Failed(_)
+        ),
+        "the continuation carrying the denial must fail before the retry prepares its call"
+    );
+
+    let retry_turn = TurnId::from_uuid(Uuid::from_u128(seed + 0x112));
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(
+                start_input(
+                    seed + 0x110,
+                    seed + 1,
+                    "retry after the failed continuation",
+                    1,
+                    ModelSelectionOverride::UseSessionDefault,
+                ),
+                AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x111)),
+                Some(retry_turn),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_)
+        ))
+    ));
+    let activated = activate_earliest_queued_turn(
+        pool,
+        EarliestQueuedTurnActivation {
+            session: fixture.session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 0x113),
+            starting_frontier: Uuid::from_u128(seed + 0x114),
+            initial_attempt: Uuid::from_u128(seed + 0x115),
+        },
+    )
+    .await?;
+    assert_eq!(activated.turn(), retry_turn);
+
+    let consuming_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x118));
+    assert!(matches!(
+        model_repository
+            .prepare_initial_call(
+                fixture.session,
+                consuming_call,
+                FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x119)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x11a)),
+                ),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x11b)),
+                |_| panic!("the retry turn has no pending steering"),
+            )
+            .await?,
+        PrepareInitialModelCallOutcome::Checkpointed(checkpointed) if checkpointed == consuming_call
+    ));
+    Ok((
+        fixture,
+        model_repository,
+        request,
+        recorded,
+        retry_turn,
+        consuming_call,
+    ))
+}
+
+/// S10 / INV-020: an override recorded before a call is checkpointed is frozen
+/// into that call, the consuming proposal records approval under
+/// `user_override` provenance naming the overridden denial, and the
+/// consumption dispatches one decided event carrying that provenance.
+///
+/// The ordering is the whole point, so the consuming call is reached through
+/// the failed-call retry path: the override is recorded first and the call that
+/// consumes it is checkpointed second, which is the exact ordering a frozen
+/// inventory admits.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn recorded_override_pre_approves_a_call_prepared_after_it() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8f40;
+    let (fixture, model_repository, request, recorded, retry_turn, consuming_call) =
+        recorded_override_before_a_fresh_call(&pool, seed).await?;
+
+    let PrepareInitialModelCallOutcome::Ready {
+        recorded_user_overrides,
+        ..
+    } = model_repository
+        .prepare_initial_call(
+            fixture.session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 0x11c)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x11d)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x11e)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x11f)),
+            |_| panic!("the retry turn has no pending steering"),
+        )
+        .await?
+    else {
+        panic!("the retry call checkpointed after the override reloads as Ready")
+    };
+    assert_eq!(
+        recorded_user_overrides.as_ref(),
+        std::slice::from_ref(&recorded),
+        "the call checkpointed after the override freezes exactly the override the command recorded"
+    );
+
+    let AuthorizeModelCallOutcome::Authorized(authorized) = model_repository
+        .authorize_send(fixture.session, consuming_call)
+        .await?
+    else {
+        panic!("the retry call checkpointed after the override authorizes")
+    };
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from(APPROVAL_TOOL_NAME)).expect("fixture name is valid"),
+                NormalizedToolArguments::try_from_provider_text(String::from(APPROVAL_ARGUMENTS))
+                    .expect("fixture arguments are valid"),
+            ),
+        )])
+        .expect("the proposal forms a tool-using response");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    let consuming_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x48));
+    let outcome = model_repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x88)),
+                    consuming_request,
+                    InitialToolApproval::UserOverride {
+                        command: recorded.command(),
+                        denied_request: request,
+                    },
+                )],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xc2)),
+                Some(TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xc3))),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::ToolRound(round) = outcome else {
+        panic!("the consuming response reaches a tool round")
+    };
+    let [consumed] = round.automatic_approvals() else {
+        panic!("the consuming round records one proposal-time approval")
+    };
+    assert_eq!(consumed.source(), ToolDecisionSource::UserOverride);
+    assert_eq!(
+        consumed.decider(),
+        Some(&ToolApprovalDecider::UserOverride {
+            command: recorded.command(),
+            denied_request: request,
+        })
+    );
+
+    let stored: (String, String, Uuid) = sqlx::query_as(
+        "SELECT decision_kind, decision_source, override_denied_request_id
+           FROM tool_approval_decision
+          WHERE request_id = $1",
+    )
+    .bind(consuming_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(stored.0, "approve");
+    assert_eq!(stored.1, "user_override");
+    assert_eq!(stored.2, request.into_uuid());
+
+    let (event_turn, approval) = dispatched_tool_approval_decision(&pool, consuming_request)
+        .await?
+        .expect("the consuming approval appends its typed outbox event");
+    assert_eq!(event_turn, retry_turn);
+    assert_eq!(approval.decision(), &ToolApprovalDecision::Approve);
+    assert_eq!(
+        approval.decider(),
+        Some(&ToolApprovalDecider::UserOverride {
+            command: recorded.command(),
+            denied_request: request,
+        })
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A proposal-time `user_override` approval on a later request in the same
+/// batch leaves the earlier delegated request's judge completion final, so an
+/// ambiguous replay must still check the persisted continuation identity.
+///
+/// The nonfinality probe reads a later request as evidence of a subsequent
+/// round only when its decision landed after the batch was proposed. The
+/// proposing transaction records a `user_override` approval itself, consuming
+/// the one-shot override from the producing call's frozen inventory, so
+/// counting it as a later decision would classify this completion as nonfinal
+/// and make the replay accept whatever continuation identity it is handed —
+/// masking exactly the mismatch this test supplies.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn judge_completion_replay_rejects_a_mismatch_behind_a_user_override_approval()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8f80;
+    let (fixture, model_repository, request, recorded, retry_turn, consuming_call) =
+        recorded_override_before_a_fresh_call(&pool, seed).await?;
+
+    // One batch, two requests: the earlier one parks for the judge, the later
+    // one consumes the recorded override at proposal time.
+    let AuthorizeModelCallOutcome::Authorized(authorized) = model_repository
+        .authorize_send(fixture.session, consuming_call)
+        .await?
+    else {
+        panic!("the retry call checkpointed after the override authorizes")
+    };
+    let response = ToolUsingAssistantResponse::try_from_parts(vec![
+        AssistantResponsePart::ToolCall(ToolCallProposal::new(
+            ToolName::try_new(String::from(JUDGED_TOOL_NAME)).expect("fixture name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from(APPROVAL_ARGUMENTS))
+                .expect("fixture arguments are valid"),
+        )),
+        AssistantResponsePart::ToolCall(ToolCallProposal::new(
+            ToolName::try_new(String::from(APPROVAL_TOOL_NAME)).expect("fixture name is valid"),
+            NormalizedToolArguments::try_from_provider_text(String::from(APPROVAL_ARGUMENTS))
+                .expect("fixture arguments are valid"),
+        )),
+    ])
+    .expect("the two proposals form a tool-using response");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    let judged_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x120));
+    let overridden_request = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x121));
+    let outcome = model_repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![
+                    ToolResponsePartIdentity::tool_call(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x122)),
+                        judged_request,
+                        InitialToolApproval::Delegated,
+                    ),
+                    ToolResponsePartIdentity::tool_call(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x123)),
+                        overridden_request,
+                        InitialToolApproval::UserOverride {
+                            command: recorded.command(),
+                            denied_request: request,
+                        },
+                    ),
+                ],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x124)),
+                None,
+            )),
+            |_| panic!("the retry turn has no pending steering to reclassify"),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::ToolRound(round) = outcome else {
+        panic!("the mixed batch reaches a tool round")
+    };
+    assert_eq!(
+        round.next_phase(),
+        &ActiveTurnPhase::AwaitingApproval {
+            request: judged_request,
+        },
+        "the earlier delegated request is the one the judge must decide"
+    );
+    let overridden_source: String = sqlx::query_scalar(
+        "SELECT decision_source FROM tool_approval_decision WHERE request_id = $1",
+    )
+    .bind(overridden_request.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        overridden_source, "user_override",
+        "the later request must carry the proposal-time source this probe has to recognize"
+    );
+
+    let judge = model_repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        judge
+            .prepare(
+                fixture.session,
+                retry_turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0x125)),
+                None,
+            )
+            .await?,
+    );
+    drop(authorized_approval_judge(judge.authorize(&prepared).await?));
+    let rationale = ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
+    let persisted_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x126));
+    let conflicting_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0x127));
+    assert_eq!(
+        judge
+            .complete(
+                &prepared,
+                DelegateApprovalRecommendation::Approve,
+                rationale.clone(),
+                ProviderReportedTokenUsage::unreported(),
+                approval_judge_completion_identities(
+                    seed,
+                    persisted_attempt.into_uuid().as_u128(),
+                ),
+                approval_judge_closed_result_entry,
+            )
+            .await?,
+        CompleteApprovalJudgeOutcome::Decided
+    );
+    let error = judge
+        .complete(
+            &prepared,
+            DelegateApprovalRecommendation::Approve,
+            rationale,
+            ProviderReportedTokenUsage::unreported(),
+            approval_judge_completion_identities(
+                seed + 0x10,
+                conflicting_attempt.into_uuid().as_u128(),
+            ),
+            approval_judge_closed_result_entry,
+        )
+        .await
+        .expect_err("a replay behind a proposal-time override cannot substitute another continuation identity");
+    assert_eq!(
+        error.operator_failure_class(),
+        OperatorFailureClass::FailClosedCorruption,
+        "unexpected replay error: {error:?}"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The UNIQUE consumption column is the durable one-shot boundary: a second
+/// decision row naming the same recorded override cannot exist under any
+/// interleaving.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn user_override_consumption_is_unique_per_recorded_override() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8ec0;
+    let (fixture, model_repository, request, _, _) = terminal_delegate_denial(&pool, seed).await?;
+    let repository = model_repository.tool_loop_repository();
+    let command_id = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf0));
+    let override_command = OverrideDeniedToolRequest::try_new(command_id, fixture.session, request)
+        .expect("the fixture command identity is admitted");
+    let applied = repository.override_denied(override_command).await?;
+    assert!(matches!(
+        applied.result(),
+        OverrideDeniedToolRequestResult::Applied(_)
+    ));
+
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text,
+             approval_posture)
+         VALUES ($1, $2, $3, $4, 1, $5, 'json', $6, 'delegated')",
+    )
+    .bind(Uuid::from_u128(seed + 0x49))
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.call.into_uuid())
+    .bind(APPROVAL_TOOL_NAME)
+    .bind(APPROVAL_ARGUMENTS)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text,
+             approval_posture)
+         VALUES ($1, $2, $3, $4, 2, $5, 'json', $6, 'delegated')",
+    )
+    .bind(Uuid::from_u128(seed + 0x4a))
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .bind(fixture.call.into_uuid())
+    .bind(APPROVAL_TOOL_NAME)
+    .bind(APPROVAL_ARGUMENTS)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source,
+             override_denied_request_id)
+         VALUES ($1, 'approve', 'user_override', $2)",
+    )
+    .bind(Uuid::from_u128(seed + 0x49))
+    .bind(request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    let error = sqlx::query(
+        "INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source,
+             override_denied_request_id)
+         VALUES ($1, 'approve', 'user_override', $2)",
+    )
+    .bind(Uuid::from_u128(seed + 0x4a))
+    .bind(request.into_uuid())
+    .execute(&mut *transaction)
+    .await
+    .expect_err("a second consumption of one recorded override is impossible");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_decision_override_denied_request_id_key")
+    );
+    transaction.rollback().await?;
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// The override guard requires a terminal delegate denial: a denial the judge
+/// recorded whose denied result is still unmaterialized cannot carry an
+/// recorded override even when its command rows are fabricated directly.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn user_override_guard_requires_a_terminal_delegate_denial() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x8f00;
+    let (fixture, _, _, requests) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        APPROVAL_PROPOSAL,
+        InitialToolApproval::Delegated,
+    )
+    .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the fixture has one delegated request")
+    };
+    let mut denial = pool.begin().await?;
+    let judge_call = persist_delegated_denial_fixture(
+        &mut denial,
+        &fixture,
+        *request,
+        seed + 0xe0,
+        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xd1)),
+        None,
+        None,
+    )
+    .await?;
+    denial.commit().await?;
+
+    let mut transaction = pool.begin().await?;
+    let command = Uuid::from_u128(seed + 0xf0);
+    sqlx::query(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ($1, 'override_denied_tool_request', 1, transaction_timestamp())",
+    )
+    .bind(command)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO override_denied_tool_request_command
+            (command_id, command_kind, storage_version, session_id,
+             request_id, result_kind, rejection_kind)
+         VALUES ($1, 'override_denied_tool_request', 1, $2, $3, 'applied', NULL)",
+    )
+    .bind(command)
+    .bind(fixture.session.into_uuid())
+    .bind(request.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO tool_approval_user_override
+            (denied_request_id, session_id, command_id, judge_model_call_id)
+         VALUES ($1, $2, $3, $4)",
+    )
+    .bind(request.into_uuid())
+    .bind(fixture.session.into_uuid())
+    .bind(command)
+    .bind(judge_call)
+    .execute(&mut *transaction)
+    .await?;
+    let error = transaction
+        .commit()
+        .await
+        .expect_err("an undenied request cannot carry a recorded override");
+    assert_eq!(
+        database_constraint(&error),
+        Some("tool_approval_user_override_requires_terminal_denial")
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// Drives the whole sequence in which another authority lets the denied command
+/// through before any call can consume the override: a terminal delegate
+/// denial, a recorded override, the immutable first post-denial call
+/// re-proposing that exact command, and the judge deciding the re-proposal on
+/// its own.
+///
+/// The re-proposal is `Delegated` rather than `UserOverride` because the call
+/// carrying it froze an empty inventory by design, so nothing pre-approves it
+/// and the judge is the only authority that can decide it. An approved
+/// re-proposal then executes and resolves its round; a denied one materializes
+/// its denied result directly. Either way the round continues into a freshly
+/// checkpointed call, whose frozen inventory is what the callers assert on.
+///
+/// Returns the fixture, the model-call repository, the denied request, the
+/// re-proposal of it, the override the applied command recorded, and the
+/// freshly checkpointed call.
+///
+/// Uses seed offsets `0xf0` and `0x120` through `0x12b` on top of those
+/// `terminal_delegate_denial` reserves.
+async fn judged_reproposal_after_a_recorded_override(
+    pool: &PgPool,
+    seed: u128,
+    recommendation: DelegateApprovalRecommendation,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        ToolRequestId,
+        ToolRequestId,
+        RecordedUserOverride,
+        ModelCallId,
+    ),
+    Box<dyn Error>,
+> {
+    let (fixture, model_repository, request, continuation_call, _) =
+        terminal_delegate_denial(pool, seed).await?;
+    let tool_repository = model_repository.tool_loop_repository();
+    let command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 0xf0));
+    let override_command = OverrideDeniedToolRequest::try_new(command, fixture.session, request)
+        .expect("the fixture command identity is admitted");
+    let applied = tool_repository.override_denied(override_command).await?;
+    let OverrideDeniedToolRequestResult::Applied(applied_result) = applied.result() else {
+        panic!("the fixture's terminal delegate denial admits the override")
+    };
+    let recorded = applied_result.recorded().clone();
+
+    // The call that carried the denial froze an empty inventory, so its
+    // re-proposal of the denied command parks for the judge like any other.
+    let AuthorizeModelCallOutcome::Authorized(authorized) = model_repository
+        .authorize_send(fixture.session, continuation_call)
+        .await?
+    else {
+        panic!("the checkpointed continuation call authorizes")
+    };
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::new(
+                ToolName::try_new(String::from(APPROVAL_TOOL_NAME)).expect("fixture name is valid"),
+                NormalizedToolArguments::try_from_provider_text(String::from(APPROVAL_ARGUMENTS))
+                    .expect("fixture arguments are valid"),
+            ),
+        )])
+        .expect("the re-proposal forms a tool-using response");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    let reproposal = ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x120));
+    let outcome = model_repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x121)),
+                    reproposal,
+                    InitialToolApproval::Delegated,
+                )],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x122)),
+                None,
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::ToolRound(round) = outcome else {
+        panic!("the re-proposal reaches a tool round")
+    };
+    assert_eq!(
+        round.next_phase(),
+        &ActiveTurnPhase::AwaitingApproval {
+            request: reproposal,
+        },
+        "an empty frozen inventory leaves the re-proposal parked for the judge"
+    );
+
+    let judge = model_repository.approval_judge_repository();
+    let prepared = ready_approval_judge(
+        judge
+            .prepare(
+                fixture.session,
+                fixture.turn,
+                ModelCallId::from_uuid(Uuid::from_u128(seed + 0x123)),
+                None,
+            )
+            .await?,
+    );
+    assert_eq!(prepared.request().id(), reproposal);
+    drop(authorized_approval_judge(judge.authorize(&prepared).await?));
+    let rationale = ToolDecisionRationale::try_new(String::from(APPROVAL_JUDGE_RATIONALE))?;
+    assert_eq!(
+        judge
+            .complete(
+                &prepared,
+                recommendation,
+                rationale,
+                ProviderReportedTokenUsage::unreported(),
+                approval_judge_completion_identities(seed, seed + 0x124),
+                approval_judge_closed_result_entry,
+            )
+            .await?,
+        CompleteApprovalJudgeOutcome::Decided
+    );
+    if recommendation == DelegateApprovalRecommendation::Approve {
+        let attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 0x125));
+        tool_repository
+            .prepare_next_attempt(
+                fixture.session,
+                fixture.turn,
+                attempt,
+                ToolEffectClass::EffectFree,
+            )
+            .await?;
+        let authority = tool_repository
+            .authorize_attempt(fixture.session, fixture.turn, attempt)
+            .await?;
+        tool_repository
+            .commit_observation(
+                authority
+                    .executor_fence()
+                    .bind(ToolAttemptObservation::Completed {
+                        result: ToolResultContent::Text(
+                            ToolResultText::try_new(String::from("2026-08-16T12:00:00Z"))
+                                .expect("bounded fixture result"),
+                        ),
+                    }),
+            )
+            .await?;
+    }
+
+    let next_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 0x126));
+    assert_eq!(
+        tool_repository
+            .prepare_continuation(
+                fixture.session,
+                fixture.turn,
+                continuation_call,
+                signalbox_application::ToolContinuationIdentities::new(
+                    vec![SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                        seed + 0x127,
+                    ))],
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x128)),
+                    next_call,
+                    FailedModelCallTurnIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x129)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x12a)),
+                    ),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x12b)),
+                ),
+                |_| panic!("the fixture has no pending steering"),
+            )
+            .await?,
+        signalbox_application::PrepareToolContinuationOutcome::Checkpointed(next_call)
+    );
+    Ok((
+        fixture,
+        model_repository,
+        request,
+        reproposal,
+        recorded,
+        next_call,
+    ))
+}
+
+/// Reads the decision recorded against one request as its kind, its source, and
+/// the recorded override it consumed.
+async fn stored_tool_approval_decision(
+    pool: &PgPool,
+    request: ToolRequestId,
+) -> Result<(String, String, Option<Uuid>), sqlx::Error> {
+    sqlx::query_as(
+        "SELECT decision_kind, decision_source, override_denied_request_id
+           FROM tool_approval_decision
+          WHERE request_id = $1",
+    )
+    .bind(request.into_uuid())
+    .fetch_one(pool)
+    .await
+}
+
+/// An override is retired once the command it authorizes has been let through
+/// since the denial by some other authority, not only by the consuming
+/// `user_override` approval that names it.
+///
+/// The immutable first post-denial call cannot carry the override, so its
+/// re-proposal of the denied command is decided by the judge alone and the
+/// resulting approval names no override. Retaining the override past that
+/// approval would let the next prepared call pre-approve yet another identical
+/// proposal, repeating a side-effecting command the session has already run
+/// once — so the call prepared after that approval must freeze nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn an_approved_matching_request_after_the_denial_retires_the_override()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x9000;
+    let (fixture, model_repository, _, reproposal, _, next_call) =
+        judged_reproposal_after_a_recorded_override(
+            &pool,
+            seed,
+            DelegateApprovalRecommendation::Approve,
+        )
+        .await?;
+
+    assert_eq!(
+        stored_tool_approval_decision(&pool, reproposal).await?,
+        (String::from("approve"), String::from("delegate"), None),
+        "the judge, not the override, is what let the re-proposal through"
+    );
+    let frozen: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM model_call_user_override WHERE model_call_id = $1",
+    )
+    .bind(next_call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        frozen, 0,
+        "the call prepared after the approval freezes no override"
+    );
+
+    let PrepareInitialModelCallOutcome::Ready {
+        recorded_user_overrides,
+        ..
+    } = model_repository
+        .prepare_initial_call(
+            fixture.session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 0x12c)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x12d)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x12e)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x12f)),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?
+    else {
+        panic!("the checkpointed continuation call reloads as Ready")
+    };
+    assert!(
+        recorded_user_overrides.is_empty(),
+        "an override whose command another authority already let through cannot pre-approve a repeat"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// A matching request denied again after the denial leaves the override
+/// standing: the user's disagreement is still unsatisfied, so the next prepared
+/// call must freeze it.
+///
+/// This is the boundary the retirement scope must not cross. The sequence is
+/// the approval test's, differing only in the judge's recommendation, so a
+/// retirement rule keyed on anything looser than an approval recorded after the
+/// denial would retire this override too and break the feature outright.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn a_denied_matching_request_after_the_denial_keeps_the_override()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x9040;
+    let (fixture, model_repository, _, reproposal, recorded, next_call) =
+        judged_reproposal_after_a_recorded_override(
+            &pool,
+            seed,
+            DelegateApprovalRecommendation::Deny,
+        )
+        .await?;
+
+    assert_eq!(
+        stored_tool_approval_decision(&pool, reproposal).await?,
+        (String::from("deny"), String::from("delegate"), None),
+        "the judge denied the re-proposal a second time"
+    );
+    let frozen: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT denied_request_id FROM model_call_user_override WHERE model_call_id = $1",
+    )
+    .bind(next_call.into_uuid())
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        frozen,
+        vec![recorded.denied_request().into_uuid()],
+        "the call prepared after the second denial still freezes the override"
+    );
+
+    let PrepareInitialModelCallOutcome::Ready {
+        recorded_user_overrides,
+        ..
+    } = model_repository
+        .prepare_initial_call(
+            fixture.session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 0x12c)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x12d)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x12e)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0x12f)),
+            |_| panic!("the fixture has no pending steering"),
+        )
+        .await?
+    else {
+        panic!("the checkpointed continuation call reloads as Ready")
+    };
+    assert_eq!(
+        recorded_user_overrides.as_ref(),
+        std::slice::from_ref(&recorded),
+        "a command denied again leaves the user's override with work left to do"
     );
 
     pool.close().await;

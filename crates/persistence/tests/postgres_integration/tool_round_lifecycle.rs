@@ -1744,6 +1744,7 @@ async fn s07_s10_inv012_inv028_parked_approval_rejection_requires_a_recorded_app
         .fail_prepared_call(
             terminal.session,
             terminal.call,
+            None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(terminal_seed + 14)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(terminal_seed + 15)),
@@ -1996,18 +1997,14 @@ async fn inv006_inv025_inv029_inv037_automatic_tool_reconciliation_releases_the_
     );
 
     let repository = PostgresAutomaticReconciliationRepository::new(pool.clone());
-    let batch = repository
-        .claim_due(std::time::Duration::from_secs(10))
-        .await?;
+    let batch = repository.claim_due().await?;
     assert_eq!(batch.claimed().len(), 1);
     assert_eq!(
         batch.claimed()[0].operation(),
         AutomaticReconciliationOperation::ToolAttempt(tool_attempt)
     );
     assert_eq!(
-        repository
-            .reconcile(batch.claimed()[0], std::time::Duration::from_secs(10),)
-            .await?,
+        repository.reconcile(batch.claimed()[0]).await?,
         AutomaticReconciliationOutcome::Reconciled
     );
     let durable: (String, String, i32, i64) = sqlx::query_as(
@@ -2195,7 +2192,7 @@ async fn swept_sessions(pool: &PgPool) -> Result<Vec<SessionId>, Box<dyn Error>>
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
     let mut sessions = Vec::new();
     loop {
-        let (page, continuation) = sweep.find_sessions().await?.into_parts();
+        let (page, _dispatch_starts, continuation) = sweep.find_sessions().await?.into_parts();
         sessions.extend(page);
         if !continuation {
             break;

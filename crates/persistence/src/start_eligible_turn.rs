@@ -37,6 +37,10 @@ use crate::{
         SubmitInputCorruption, SubmitInputRepositoryError, decode_goal_origin_configuration,
         load_scheduling_projection,
     },
+    workspace_instructions::{
+        CountedActivationInstructionEvidence, WorkspaceInstructionRepository,
+        WorkspaceInstructionRepositoryError,
+    },
 };
 
 /// Which fresh activation identity collided with an existing durable identity.
@@ -198,6 +202,8 @@ pub enum CommitActivationPreviewError {
     Activation(StartEligibleTurnRepositoryError),
     /// The exact initial model-call checkpoint could not be persisted.
     ModelCall(crate::model_execution::ModelCallRepositoryError),
+    /// Complete instruction evidence could not join the activation commit.
+    WorkspaceInstructions(WorkspaceInstructionRepositoryError),
 }
 
 impl fmt::Display for CommitActivationPreviewError {
@@ -205,6 +211,7 @@ impl fmt::Display for CommitActivationPreviewError {
         match self {
             Self::Activation(error) => error.fmt(formatter),
             Self::ModelCall(error) => error.fmt(formatter),
+            Self::WorkspaceInstructions(error) => error.fmt(formatter),
         }
     }
 }
@@ -214,6 +221,7 @@ impl Error for CommitActivationPreviewError {
         match self {
             Self::Activation(error) => Some(error),
             Self::ModelCall(error) => Some(error),
+            Self::WorkspaceInstructions(error) => Some(error),
         }
     }
 }
@@ -223,6 +231,7 @@ impl ClassifyOperatorFailure for CommitActivationPreviewError {
         match self {
             Self::Activation(error) => error.operator_failure_class(),
             Self::ModelCall(error) => error.operator_failure_class(),
+            Self::WorkspaceInstructions(error) => error.operator_failure_class(),
         }
     }
 }
@@ -309,6 +318,10 @@ impl StartEligibleTurnRepository {
             transaction.rollback().await?;
             return Ok(CommitActivationPreviewOutcome::Stale);
         }
+        if dispatch_start_lease_is_expired(&mut transaction, session).await? {
+            transaction.rollback().await?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        }
         let Some(current) = prepare_preview(&mut transaction, session, preview.identities).await?
         else {
             transaction.rollback().await?;
@@ -335,6 +348,7 @@ impl StartEligibleTurnRepository {
         preview: PreparedActivationPreview,
         prospective: crate::model_execution::ProspectiveModelCall,
         model_calls: &crate::model_execution::PostgresModelCallRepository,
+        instruction_evidence: Option<CountedActivationInstructionEvidence<'_>>,
     ) -> Result<CommitActivationPreviewOutcome, CommitActivationPreviewError> {
         let session = preview.prepared.turn().session();
         let mut transaction = self
@@ -352,6 +366,17 @@ impl StartEligibleTurnRepository {
                 .map_err(StartEligibleTurnRepositoryError::from)
                 .map_err(CommitActivationPreviewError::Activation)?;
         if !session_exists || scheduler_session.is_none() {
+            transaction
+                .rollback()
+                .await
+                .map_err(StartEligibleTurnRepositoryError::from)
+                .map_err(CommitActivationPreviewError::Activation)?;
+            return Ok(CommitActivationPreviewOutcome::Stale);
+        }
+        if dispatch_start_lease_is_expired(&mut transaction, session)
+            .await
+            .map_err(CommitActivationPreviewError::Activation)?
+        {
             transaction
                 .rollback()
                 .await
@@ -385,6 +410,14 @@ impl StartEligibleTurnRepository {
         let activated = insert_prepared_activation(&mut transaction, current)
             .await
             .map_err(CommitActivationPreviewError::Activation)?;
+        if let Some(evidence) = instruction_evidence {
+            WorkspaceInstructionRepository::record_counted_activation_in_transaction(
+                &mut transaction,
+                evidence,
+            )
+            .await
+            .map_err(CommitActivationPreviewError::WorkspaceInstructions)?;
+        }
         model_calls
             .checkpoint_counted_activation_in_transaction(
                 &mut transaction,
@@ -907,6 +940,17 @@ async fn prepare_delegated_wake_preview(
     })
 }
 
+async fn dispatch_start_lease_is_expired(
+    connection: &mut PgConnection,
+    session: SessionId,
+) -> Result<bool, StartEligibleTurnRepositoryError> {
+    sqlx::query_scalar(crate::lock_inventory::EXPIRED_DISPATCH_START_LEASE)
+        .bind(session_id_to_uuid(session))
+        .fetch_one(connection)
+        .await
+        .map_err(Into::into)
+}
+
 async fn handle_in_transaction(
     connection: &mut PgConnection,
     requested_session: SessionId,
@@ -934,6 +978,11 @@ async fn handle_in_transaction(
         if session_exists {
             return Err(StartEligibleTurnCorruption::Missing("session scheduler row").into());
         }
+        return Ok(TransactionDecision::Rollback(
+            StartEligibleTurnOutcome::NoEligibleTurn,
+        ));
+    }
+    if dispatch_start_lease_is_expired(connection, requested_session).await? {
         return Ok(TransactionDecision::Rollback(
             StartEligibleTurnOutcome::NoEligibleTurn,
         ));

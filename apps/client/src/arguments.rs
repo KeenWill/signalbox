@@ -83,6 +83,7 @@ pub(crate) enum Command {
     },
     Session(SessionCommand),
     Goal(GoalCommand),
+    Status,
     List,
     Templates,
     Search(SessionMetadataPageRequest),
@@ -424,6 +425,8 @@ enum CliCommand {
     Session(SessionDelegationArguments),
     /// Commission, inspect, or transition one session goal.
     Goal(GoalArguments),
+    /// Show what repository-watch automation is working on now.
+    Status,
     /// List current sessions.
     List,
     /// List available session templates.
@@ -1927,6 +1930,7 @@ pub(crate) fn parse(
                 command_id: arguments.command_id,
             },
         }),
+        CliCommand::Status => Command::Status,
         CliCommand::List => Command::List,
         CliCommand::Templates => Command::Templates,
         CliCommand::Search(arguments) => {

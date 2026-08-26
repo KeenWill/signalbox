@@ -3,6 +3,12 @@
 -- automatic denial lets the same turn continue; the source and safe sentinel
 -- jointly prove that no caller or policy granted execution authority.
 
+-- The rebuilt constraints extend the closed source set rather than redefining
+-- it: `202608170006` is the predecessor that last reissued them, and every
+-- source it admits — including `user_override` and the
+-- `override_denied_request_id` provenance column that carries it — must
+-- survive this migration. `runtime_safety` joins the vocabulary as a
+-- deny-only source with no provenance column of its own.
 ALTER TABLE tool_approval_decision
     DROP CONSTRAINT tool_approval_decision_source_closed,
     DROP CONSTRAINT tool_approval_decision_source_shape,
@@ -13,6 +19,7 @@ ALTER TABLE tool_approval_decision
                 'policy_auto',
                 'session_blanket',
                 'delegate',
+                'user_override',
                 'runtime_safety'
             )
         ),
@@ -24,6 +31,7 @@ ALTER TABLE tool_approval_decision
                 AND delegate_model_selection_id IS NULL
                 AND delegate_model_call_id IS NULL
                 AND rationale IS NULL
+                AND override_denied_request_id IS NULL
             )
             OR (
                 decision_source IN ('policy_auto', 'session_blanket')
@@ -32,6 +40,7 @@ ALTER TABLE tool_approval_decision
                 AND delegate_model_selection_id IS NULL
                 AND delegate_model_call_id IS NULL
                 AND rationale IS NULL
+                AND override_denied_request_id IS NULL
             )
             OR (
                 decision_source = 'delegate'
@@ -40,6 +49,16 @@ ALTER TABLE tool_approval_decision
                 AND delegate_model_call_id IS NOT NULL
                 AND rationale IS NOT NULL
                 AND octet_length(rationale) BETWEEN 1 AND 4096
+                AND override_denied_request_id IS NULL
+            )
+            OR (
+                decision_source = 'user_override'
+                AND decision_kind = 'approve'
+                AND user_command_id IS NULL
+                AND delegate_model_selection_id IS NULL
+                AND delegate_model_call_id IS NULL
+                AND rationale IS NULL
+                AND override_denied_request_id IS NOT NULL
             )
             OR (
                 decision_source = 'runtime_safety'
@@ -50,9 +69,16 @@ ALTER TABLE tool_approval_decision
                 AND delegate_model_selection_id IS NULL
                 AND delegate_model_call_id IS NULL
                 AND rationale IS NULL
+                AND override_denied_request_id IS NULL
             )
         );
 
+-- Adds the `runtime_safety` branch to the decision-authority gate; supersedes
+-- the version from 202608170006_user_override_denied_tool_approval.sql, whose
+-- `user_override` branch — and every branch before it — is carried forward
+-- unchanged. A fixed automatic denial is admitted only for a request frozen
+-- `auto` whose argument object the credential boundary already replaced with
+-- the safe sentinel.
 CREATE OR REPLACE FUNCTION require_tool_approval_decision_authority()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -99,6 +125,31 @@ BEGIN
             RAISE EXCEPTION 'automatic decision exceeds frozen posture'
                 USING ERRCODE = '23514',
                       CONSTRAINT = 'tool_approval_automatic_requires_auto_posture';
+        END IF;
+        RETURN NULL;
+    END IF;
+    IF NEW.decision_source = 'user_override' THEN
+        SELECT count(*) INTO matched
+          FROM tool_request AS request
+          JOIN tool_approval_user_override AS recorded
+            ON recorded.denied_request_id = NEW.override_denied_request_id
+          JOIN model_call_user_override AS frozen
+            ON frozen.model_call_id = request.producing_model_call_id
+           AND frozen.denied_request_id = recorded.denied_request_id
+          JOIN tool_request AS denied_request
+            ON denied_request.request_id = recorded.denied_request_id
+         WHERE request.request_id = NEW.request_id
+           AND request.approval_posture = 'delegated'
+           AND recorded.session_id = request.session_id
+           AND denied_request.tool_name = request.tool_name
+           AND denied_request.arguments_kind = request.arguments_kind
+           AND denied_request.arguments_text = request.arguments_text;
+        IF matched <> 1 THEN
+            RAISE EXCEPTION
+                'user override consumption lacks a recorded override for a delegated request'
+                USING ERRCODE = '23514',
+                      CONSTRAINT =
+                          'tool_approval_user_override_requires_recorded_override';
         END IF;
         RETURN NULL;
     END IF;
@@ -168,6 +219,13 @@ BEGIN
 END;
 $$;
 
+-- Joins `runtime_safety` to the automatic sources of the explicit-effect gate;
+-- supersedes the version from
+-- 202608170006_user_override_denied_tool_approval.sql, whose `user_override`
+-- branch is carried forward unchanged. The fixed denial is recorded with the
+-- round that produced the suppressed request, so it has no explicit effect of
+-- its own and must not consume the one-explicit-event-per-transaction budget
+-- that the user and delegate branches share.
 CREATE OR REPLACE FUNCTION require_explicit_tool_approval_effect()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -178,6 +236,80 @@ BEGIN
     IF NEW.decision_source IN (
         'policy_auto', 'session_blanket', 'runtime_safety'
     ) THEN
+        RETURN NULL;
+    END IF;
+
+    IF NEW.decision_source = 'user_override' THEN
+        SELECT count(*)
+          INTO matching_effects
+          FROM tool_approval_decided_outbox_event AS dispatched
+          JOIN tool_request AS request
+            ON request.request_id = dispatched.request_id
+          JOIN turn_lifecycle AS lifecycle
+            ON lifecycle.turn_id = request.turn_id
+           AND lifecycle.session_id = request.session_id
+         WHERE dispatched.request_id = NEW.request_id
+           AND dispatched.recording_transaction_id = pg_current_xact_id()
+           AND lifecycle.active_tool_round_call_id =
+               request.producing_model_call_id
+           AND (
+                (
+                    lifecycle.state_kind = 'active'
+                    AND lifecycle.active_phase_kind = 'awaiting_tool_approval'
+                    AND lifecycle.approval_tool_request_id = (
+                        SELECT later.request_id
+                          FROM tool_request AS later
+                          LEFT JOIN tool_approval_decision AS later_decision
+                            ON later_decision.request_id = later.request_id
+                         WHERE later.producing_model_call_id =
+                               request.producing_model_call_id
+                           AND later_decision.request_id IS NULL
+                         ORDER BY later.request_ordinal
+                         LIMIT 1
+                    )
+                )
+                OR
+                (
+                    lifecycle.state_kind = 'active'
+                    AND lifecycle.active_phase_kind = 'running'
+                    AND lifecycle.approval_tool_request_id IS NULL
+                    AND lifecycle.recovery_tool_attempt_id IS NULL
+                    AND NOT EXISTS (
+                        SELECT 1
+                          FROM tool_request AS undecided
+                          LEFT JOIN tool_approval_decision AS undecided_decision
+                            ON undecided_decision.request_id =
+                               undecided.request_id
+                         WHERE undecided.producing_model_call_id =
+                               request.producing_model_call_id
+                           AND undecided_decision.request_id IS NULL
+                    )
+                    AND EXISTS (
+                        SELECT 1
+                          FROM turn_attempt AS successor
+                          JOIN model_call AS producing_call
+                            ON producing_call.model_call_id =
+                               request.producing_model_call_id
+                           AND producing_call.turn_id = request.turn_id
+                           AND producing_call.session_id = request.session_id
+                         WHERE successor.turn_attempt_id =
+                               lifecycle.current_attempt_id
+                           AND successor.turn_id = request.turn_id
+                           AND successor.session_id = request.session_id
+                           AND successor.continued_from_attempt_id =
+                               producing_call.turn_attempt_id
+                           AND successor.state_kind = 'prepared'
+                    )
+                )
+           );
+        IF matching_effects <> 1 THEN
+            RAISE EXCEPTION
+                'user override consumption lacks its atomic proposal effect'
+                USING
+                    ERRCODE = '23514',
+                    CONSTRAINT =
+                        'tool_approval_user_override_requires_atomic_effect';
+        END IF;
         RETURN NULL;
     END IF;
 

@@ -191,6 +191,8 @@ jobs:
         run: python3 scripts/test_check_docs_consistency.py
       - name: Test the PostgreSQL suite manifest reader
         run: python3 scripts/test_postgres_integration_suites.py
+      - name: Test the convergence reconciler
+        run: python3 tooling/convergence-reconciler/test_reconcile.py
       - name: Test the built-executable resolver
         run: python3 tooling/test_resolve_cargo_bin.py
       - name: Test the lifecycle watchdog
@@ -229,7 +231,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            809ef9d584585c4f9bfbbb0f8c011c1cb5e3f51ba5160afb99ca0b3e6fb14e65
+            09620879011e0dd0ec0a8136ab25aa6f59d4f991366db4f66edf4f4da35c8299
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -368,19 +370,63 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Bubblewrap
-        run: sudo apt-get install --yes bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
       - name: Enable unprivileged user namespaces for Bubblewrap
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Delegate the file-media task controller
+        run: |
+          sudo mkdir /sys/fs/cgroup/signalbox-file-media-ci
+          sudo sh -c 'echo +pids +memory > /sys/fs/cgroup/cgroup.subtree_control'
+          sudo mkdir /sys/fs/cgroup/signalbox-file-media-ci/runner
+          sudo sh -c 'echo +pids +memory > /sys/fs/cgroup/signalbox-file-media-ci/cgroup.subtree_control'
+          sudo chown -R "$USER" /sys/fs/cgroup/signalbox-file-media-ci
       - name: Cache Rust dependencies
+        id: rust-cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # This job's shared cache contains a stale nested target path
+          # (`target/tests/target`) that rust-cache traverses after restore and
+          # reports as ENOENT. Keep registry/git dependency caching, but build
+          # test artifacts in the fresh hosted-runner target directory.
+          cache-targets: false
           shared-key: rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # A prefix restore can retain a native build-script fingerprint after its
+      # static archive was omitted from the cache, making Cargo skip the script
+      # and then fail at link time. Keep registry downloads but rebuild target
+      # artifacts whenever the dependency key is not an exact match.
+      - name: Discard target artifacts from a prefix cache restore
+        if: steps.rust-cache.outputs.cache-hit != 'true'
+        run: cargo clean
       - name: Run tests
         env:
           SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"
-        run: cargo test --no-fail-fast --workspace --all-targets --all-features
+          SIGNALBOX_FILE_MEDIA_CGROUP_ROOT: /sys/fs/cgroup/signalbox-file-media-ci
+        # Process-heavy integration targets can exhaust the hosted runner's
+        # file-descriptor limit under libtest's unrestricted CPU-sized pool.
+        # Four concurrent tests matches the explicit cap used by the
+        # PostgreSQL jobs and retains parallel execution without false EMFILE
+        # failures.
+        run: |
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          runner_home="$HOME"
+          runner_path="$PATH"
+          test_command='status=0
+            cargo test --no-fail-fast --workspace --all-targets --all-features \
+              -- --test-threads=4 || status=$?
+            cargo test --no-fail-fast -p signalbox-file-media-processor-runtime \
+              --features test-worker --test isolation -- --ignored || status=$?
+            exit "$status"'
+          sudo --preserve-env=CI,PATH,CARGO_HOME,RUSTUP_HOME,RUSTFLAGS,CARGO_INCREMENTAL,CARGO_PROFILE_DEV_DEBUG,CARGO_PROFILE_TEST_DEBUG,SIGNALBOX_RUN_BWRAP_INTEGRATION,SIGNALBOX_FILE_MEDIA_CGROUP_ROOT \
+            sh -c '
+              echo $$ > "$SIGNALBOX_FILE_MEDIA_CGROUP_ROOT/runner/cgroup.procs"
+              exec setpriv --reuid="$1" --regid="$2" --init-groups \
+                env HOME="$3" PATH="$5" sh -c "$4"
+            ' sh "$runner_uid" "$runner_gid" "$runner_home" "$test_command" "$runner_path"
       - name: Test generated browser contract runtime
         run: node --test crates/web-contract/tests/generated_roundtrip.mjs
       # `--all-targets` excludes doctests, so the domain's compile_fail
@@ -523,7 +569,7 @@ jobs:
     needs: rust-change-scope
     if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: signalbox-docker
-    # Generous by design: this job now absorbs all five suites' compilation,
+    # Generous by design: this job now absorbs all six suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
     timeout-minutes: 35
@@ -587,7 +633,7 @@ jobs:
           shared-key: rust
           save-if: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -654,24 +700,30 @@ jobs:
           path: ${{ runner.temp }}/terminal-client.tar.zst
           if-no-files-found: error
           retention-days: 1
+      - name: Upload the approval-judge-eval archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-integration-archive-approval-judge-eval
+          path: ${{ runner.temp }}/approval-judge-eval.tar.zst
+          if-no-files-found: error
+          retention-days: 1
 
   # The dedicated Docker fleet gives each shard an isolated DinD daemon. The
   # build and run jobs share the same runner image and absolute work-path shape,
   # which keeps paths embedded in nextest archives valid across their pods.
   # Each test starts its own pinned PostgreSQL container through testcontainers,
-  # so four test processes can run without sharing database state.
+  # so concurrent test processes never share database state.
   #
   # The matrix is generated from `.github/postgres-integration-suites.toml`:
   # one runner per shard, so a suite declaring one shard costs one runner and
   # still travels the same archive-and-partition path a sharded suite does.
-  # Persistence, runner, and signalboxd are sharded according to their measured
-  # test-execution cost. Program-runtime and terminal-client remain whole
-  # because each finishes in about a minute.
+  # Persistence is sharded according to its measured test-execution cost; every
+  # other suite runs whole because it fits well inside the job timeout.
   #
-  # Runner cost, stated plainly: this asks for more runners than the matrix it
-  # replaces. The run matrix currently expands to twelve shards after the one
-  # shared build. The shards compile nothing and run for minutes; the build's
-  # single cache key replaces the old per-suite keys that evicted one another.
+  # The run matrix currently expands to eight shards after the one shared
+  # build.
+  # The shards compile nothing and run for minutes; the build's single cache
+  # key replaces the old per-suite keys that evicted one another.
       - name: Publish this run's target dir as the cache seed
         # Seeds come only from pushes and same-repository pull requests, never
         # from forks; a unique temporary link keeps concurrent publishers from
@@ -695,18 +747,15 @@ jobs:
     # workspace: their permission and atomicity contracts require local /tmp.
     env:
       TMPDIR: /tmp
-    # Measured against the shards rather than guessed. The former three
-    # persistence partitions were balanced but had grown to roughly 8m15s each;
-    # runner took about eight minutes whole, and signalboxd about five. The
-    # manifest splits those suites more finely without changing test selection.
+    # Measured against the shards rather than guessed. With database state in
+    # memory and sixteen tests per shard, the recombined shards run about two
+    # to nine minutes clean.
     #
-    # Ten minutes did not leave room for the slow path. A shard whose tests
-    # actually fail runs about two minutes longer than a clean one (9.68m
-    # observed against a 7.4m median), so the cap sat within noise of exactly
-    # the runs whose results matter most — and a job the cap kills is reported
-    # as `cancelled`, which reads as an infrastructure problem and hides the
-    # test failure underneath it. Fifteen minutes is about twice the median,
-    # leaves the p90 at half the cap, and still bounds a genuinely hung job.
+    # A shard whose tests actually fail runs about two minutes longer than a
+    # clean one, and a job the cap kills is reported as `cancelled`, which
+    # reads as an infrastructure problem and hides the test failure underneath
+    # it. Fifteen minutes leaves the longest clean shard two-thirds of the cap
+    # and still bounds a genuinely hung job.
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -721,7 +770,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive
@@ -733,7 +782,10 @@ jobs:
       # `--run-ignored only` is `-- --ignored`, `--no-fail-fast` is unchanged,
       # and the archive fixes the package and feature selection at build time.
       # nextest runs each test in its own process rather than on a shared
-      # thread pool; eight concurrent tests is the cap. One per-test retry
+      # thread pool; sixteen concurrent tests is the cap. Each test can consume
+      # a 512 MiB PostgreSQL tmpfs, so the cap permits 8 GiB of tmpfs per job
+      # before PostgreSQL process memory; re-check the externally provisioned
+      # signalbox-docker pod memory limit before raising it. One per-test retry
       # absorbs a transient container-start failure without rerunning a whole
       # shard, while a repeat failure still fails the gate.
       - name: Run the ${{ matrix.suite }} partition
@@ -754,7 +806,7 @@ jobs:
           --run-ignored only
           --no-fail-fast
           --retries 1
-          --test-threads 8
+          --test-threads 16
           -E "$FILTER"
 
   # Preserve the existing required-check name while the suites build once and

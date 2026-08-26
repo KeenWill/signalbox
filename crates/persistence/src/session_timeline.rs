@@ -6,12 +6,16 @@ use rust_decimal::Decimal;
 use signalbox_application::{
     SessionTimelineBounds, SessionTimelineDescriptor, SessionTimelineEventKind,
     SessionTimelineItem, SessionTimelineReader, SessionTimelineSizeFacts, SessionTimelineWindow,
-    SessionWorkFacts, TimelineAddress, TimelineWindowAnchor, TimelineWindowLimits,
+    SessionWorkFacts, TimelineAddress, TimelineContinuation, TimelineWindowAnchor,
+    TimelineWindowLimits,
 };
 use signalbox_domain::SessionId;
 use sqlx::{PgConnection, PgPool, Row};
 
-use crate::mapping::{OutboxEventDiscriminator, outbox_event_discriminator_from_str};
+use crate::mapping::{
+    OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS, OutboxEventDiscriminator,
+    outbox_event_discriminator_from_str,
+};
 
 const PROJECTED_ITEM_ENVELOPE_BYTES: u32 = 64;
 
@@ -116,6 +120,21 @@ impl SessionTimelineRepository {
             transaction.commit().await?;
             return Ok(None);
         };
+        let requires_nonempty_window = match &anchor {
+            TimelineWindowAnchor::First
+            | TimelineWindowAnchor::Latest
+            | TimelineWindowAnchor::Around(_) => true,
+            TimelineWindowAnchor::Before(address) => descriptor
+                .bounds
+                .first
+                .is_some_and(|first| *address > first),
+            TimelineWindowAnchor::After(address) => descriptor
+                .bounds
+                .latest
+                .is_some_and(|latest| *address < latest),
+        };
+        let requires_first_bound = matches!(&anchor, TimelineWindowAnchor::First);
+        let requires_latest_bound = matches!(&anchor, TimelineWindowAnchor::Latest);
         let fetch_limit = i64::from(limits.max_items()) + 1;
         let rows = match anchor {
             TimelineWindowAnchor::First => {
@@ -184,22 +203,54 @@ impl SessionTimelineRepository {
             items.push(item);
         }
         items.sort_by_key(|item| item.address);
+        if items
+            .windows(2)
+            .any(|pair| pair[0].address == pair[1].address)
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window addresses").into());
+        }
+        if requires_nonempty_window && items.is_empty() {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window items").into());
+        }
         let first = items.first().map(|item| item.address);
         let latest = items.last().map(|item| item.address);
-        let has_more_before = first
-            .zip(descriptor.bounds.first)
-            .is_some_and(|(loaded, bound)| loaded > bound);
-        let has_more_after = latest
-            .zip(descriptor.bounds.latest)
-            .is_some_and(|(loaded, bound)| loaded < bound);
+        if (requires_first_bound && first != descriptor.bounds.first)
+            || (requires_latest_bound && latest != descriptor.bounds.latest)
+            || first
+                .is_some_and(|loaded| descriptor.bounds.first.is_none_or(|bound| loaded < bound))
+            || latest
+                .is_some_and(|loaded| descriptor.bounds.latest.is_none_or(|bound| loaded > bound))
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window bounds").into());
+        }
+        let item_count = u64::try_from(items.len())
+            .map_err(|_| SessionTimelineCorruption::InvalidOrdinal("window totals"))?;
+        if item_count > descriptor.sizes.item_count
+            || u64::from(projected_bytes) > descriptor.sizes.projected_structured_bytes
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window totals").into());
+        }
+        if item_count == descriptor.sizes.item_count
+            && (first != descriptor.bounds.first || latest != descriptor.bounds.latest)
+        {
+            return Err(SessionTimelineCorruption::InvalidOrdinal("window bounds").into());
+        }
+        let continuation_before = match first.zip(descriptor.bounds.first) {
+            Some((loaded, bound)) if loaded > bound => TimelineContinuation::MoreAt(loaded),
+            _ => TimelineContinuation::Exhausted,
+        };
+        let continuation_after = match latest.zip(descriptor.bounds.latest) {
+            Some((loaded, bound)) if loaded < bound => TimelineContinuation::MoreAt(loaded),
+            _ => TimelineContinuation::Exhausted,
+        };
         transaction.commit().await?;
 
         Ok(Some(SessionTimelineWindow {
             session,
             items,
             projected_structured_bytes: projected_bytes,
-            has_more_before,
-            has_more_after,
+            continuation_before,
+            continuation_after,
         }))
     }
 }
@@ -307,30 +358,70 @@ async fn load_descriptor(
     if !row.try_get::<bool, _>("facts_present")? {
         return Err(SessionTimelineCorruption::Missing("projection facts").into());
     }
-    let first = optional_address(row.try_get("first_sequence")?, "first address")?;
-    let latest = optional_address(row.try_get("latest_sequence")?, "latest address")?;
+    let item_count = nonnegative(row.try_get("item_count")?, "item count")?;
+    if item_count == 0 {
+        return Err(SessionTimelineCorruption::InvalidOrdinal("item count").into());
+    }
+    let first = optional_address(row.try_get("first_sequence")?, "first address")?
+        .ok_or(SessionTimelineCorruption::Missing("first address"))?;
+    let latest = optional_address(row.try_get("latest_sequence")?, "latest address")?
+        .ok_or(SessionTimelineCorruption::Missing("latest address"))?;
+    let observed_through = nonnegative(
+        row.try_get::<Option<Decimal>, _>("last_sequence")?
+            .ok_or(SessionTimelineCorruption::Missing("observation cursor"))?,
+        "observation cursor",
+    )?;
+    let address_span = latest
+        .sequence()
+        .get()
+        .checked_sub(first.sequence().get())
+        .and_then(|span| span.checked_add(1));
+    if first > latest
+        || (item_count == 1 && first != latest)
+        || latest.sequence().get() > observed_through
+        || address_span.is_none_or(|span| item_count > span)
+    {
+        return Err(SessionTimelineCorruption::InvalidOrdinal("timeline bounds").into());
+    }
+    let projected_structured_bytes = nonnegative(
+        row.try_get("structured_bytes")?,
+        "projected structured bytes",
+    )?;
+    let minimum_item_bytes = u64::from(PROJECTED_ITEM_ENVELOPE_BYTES)
+        .checked_add(OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS.0)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let maximum_item_bytes = u64::from(PROJECTED_ITEM_ENVELOPE_BYTES)
+        .checked_add(OUTBOX_EVENT_KIND_UTF8_BYTE_BOUNDS.1)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let minimum_structured_bytes = item_count
+        .checked_mul(minimum_item_bytes)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    let maximum_structured_bytes = item_count
+        .checked_mul(maximum_item_bytes)
+        .ok_or(SessionTimelineCorruption::ItemProjectionOverflow)?;
+    if projected_structured_bytes < minimum_structured_bytes
+        || projected_structured_bytes > maximum_structured_bytes
+    {
+        return Err(SessionTimelineCorruption::InvalidOrdinal("projected structured bytes").into());
+    }
     Ok(Some(SessionTimelineDescriptor {
         session,
         sizes: SessionTimelineSizeFacts {
-            item_count: nonnegative(row.try_get("item_count")?, "item count")?,
+            item_count,
             projected_text_bytes: nonnegative(row.try_get("text_bytes")?, "projected text bytes")?,
-            projected_structured_bytes: nonnegative(
-                row.try_get("structured_bytes")?,
-                "projected structured bytes",
-            )?,
+            projected_structured_bytes,
             referenced_blob_count: 0,
             referenced_blob_bytes: 0,
         },
-        bounds: SessionTimelineBounds { first, latest },
+        bounds: SessionTimelineBounds {
+            first: Some(first),
+            latest: Some(latest),
+        },
         work: SessionWorkFacts {
             active_turn_count: nonnegative(row.try_get("active_count")?, "active turn count")?,
             queued_turn_count: nonnegative(row.try_get("queued_count")?, "queued turn count")?,
         },
-        observed_through: nonnegative(
-            row.try_get::<Option<Decimal>, _>("last_sequence")?
-                .ok_or(SessionTimelineCorruption::Missing("observation cursor"))?,
-            "observation cursor",
-        )?,
+        observed_through,
     }))
 }
 

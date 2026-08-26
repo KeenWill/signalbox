@@ -1,23 +1,30 @@
 import * as Dialog from '@radix-ui/react-dialog'
-import { useHotkeys } from '@tanstack/react-hotkeys'
+import { useHotkeySequences, useHotkeys } from '@tanstack/react-hotkeys'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from '@tanstack/react-router'
 import { AlertTriangle, Command, Menu, Moon, PanelLeftClose, Rows3, Sun, X } from 'lucide-react'
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { globalHotkeyBindings } from './commands'
+import type { CommandContext, CommandId } from './commands'
+import { invokeCommand } from './commands'
 import {
+  BootstrapContractError,
   type ProductRouteId,
   productRoutes,
+  productSurfaceCacheLabel,
   productSurfaceStates,
   productTransport,
 } from './product'
 import {
   invokeProductCommand,
   type ProductCommandContext,
+  productCommandAvailable,
   productCommandRegistry,
+  productHotkeyBindings,
+  productHotkeySequenceBindings,
 } from './productCommands'
-import { SessionWorkspaceSurface } from './SessionWorkspaceSurface'
+import { type SessionSelectionEvidence, SessionWorkspaceSurface } from './SessionWorkspaceSurface'
 import { SettingsSurface } from './SettingsSurface'
+import { hasValidSessionTimelineContract } from './session-timeline/model'
 import { actions, selectApp, store, useAppDispatch, useAppSelector } from './state'
 
 const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; question: string }> = {
@@ -68,7 +75,29 @@ const surfaceCopy: Record<ProductRouteId, { eyebrow: string; title: string; ques
   },
 }
 
-function ProductNavigation({ active }: { active: ProductRouteId }) {
+const productNavigationCommandIds: Record<ProductRouteId, CommandId> = {
+  attention: 'navigate.attention',
+  sessions: 'navigate.sessions',
+  search: 'navigate.search',
+  activity: 'navigate.activity',
+  runners: 'navigate.runners',
+  reviews: 'navigate.reviews',
+  imports: 'navigate.imports',
+  usage: 'navigate.usage',
+  settings: 'navigate.settings',
+}
+
+export function ProductNavigation({
+  active,
+  context,
+  onActivate,
+  disabled = false,
+}: {
+  active: ProductRouteId
+  context: CommandContext
+  onActivate?: () => void
+  disabled?: boolean
+}) {
   return (
     <div className="product-navigation">
       <div className="brand">
@@ -84,6 +113,26 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
             params={{ surface: route.id }}
             className={active === route.id ? 'product-link active' : 'product-link'}
             aria-current={active === route.id ? 'page' : undefined}
+            aria-disabled={disabled || undefined}
+            tabIndex={disabled ? -1 : undefined}
+            onClick={(event) => {
+              if (disabled) {
+                event.preventDefault()
+                return
+              }
+              if (
+                event.button !== 0 ||
+                event.metaKey ||
+                event.ctrlKey ||
+                event.shiftKey ||
+                event.altKey
+              ) {
+                return
+              }
+              event.preventDefault()
+              onActivate?.()
+              invokeCommand(productNavigationCommandIds[route.id], context)
+            }}
           >
             <span>{route.label}</span>
             <small>{route.description}</small>
@@ -94,6 +143,15 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
         className="scenario-entry"
         to="/scenario/$scenarioId"
         params={{ scenarioId: 'streaming' }}
+        aria-disabled={disabled || undefined}
+        tabIndex={disabled ? -1 : undefined}
+        onClick={(event) => {
+          if (disabled) {
+            event.preventDefault()
+            return
+          }
+          onActivate?.()
+        }}
       >
         Scenario studio <span aria-hidden="true">↗</span>
       </Link>
@@ -103,6 +161,7 @@ function ProductNavigation({ active }: { active: ProductRouteId }) {
 
 function CommandPalette({ context }: { context: ProductCommandContext }) {
   const open = useAppSelector((state) => state.app.overlay === 'palette')
+  const focusTimelineAfterClose = useRef(false)
   return (
     <Dialog.Root
       open={open}
@@ -115,6 +174,12 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
         <Dialog.Content
           className="dialog-content product-palette"
           aria-describedby="product-palette-description"
+          onCloseAutoFocus={(event) => {
+            if (!focusTimelineAfterClose.current) return
+            event.preventDefault()
+            focusTimelineAfterClose.current = false
+            context.focusTimeline()
+          }}
         >
           <div className="dialog-heading">
             <div>
@@ -134,6 +199,7 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
               .filter(
                 (command) =>
                   command.id !== 'surface.escape' &&
+                  command.id !== 'palette.open' &&
                   (!('available' in command) || command.available(context)),
               )
               .map((command) => (
@@ -141,6 +207,9 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
                   key={command.id}
                   type="button"
                   onClick={() => {
+                    focusTimelineAfterClose.current =
+                      command.id.startsWith('selection.') &&
+                      productCommandAvailable(command.id, context)
                     invokeProductCommand('surface.escape', context)
                     invokeProductCommand(command.id, context)
                   }}
@@ -151,6 +220,58 @@ function CommandPalette({ context }: { context: ProductCommandContext }) {
                   </span>
                   <kbd>{command.bindings[0]?.label ?? '—'}</kbd>
                 </button>
+              ))}
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  )
+}
+
+function KeyboardHelp({ context }: { context: ProductCommandContext }) {
+  const open = useAppSelector((state) => state.app.overlay === 'help')
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next) invokeProductCommand('surface.escape', context)
+      }}
+    >
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content
+          className="dialog-content product-palette"
+          aria-describedby="keyboard-help-description"
+        >
+          <div className="dialog-heading">
+            <div>
+              <Dialog.Title>Keyboard help</Dialog.Title>
+              <Dialog.Description id="keyboard-help-description">
+                Available workstation commands and bindings.
+              </Dialog.Description>
+            </div>
+            <Dialog.Close asChild>
+              <button className="icon-button" type="button" aria-label="Close keyboard help">
+                <X />
+              </button>
+            </Dialog.Close>
+          </div>
+          <div className="command-list">
+            {productCommandRegistry
+              .filter(
+                (command) =>
+                  command.id !== 'surface.escape' &&
+                  command.bindings.length > 0 &&
+                  (!('available' in command) || command.available(context)),
+              )
+              .map((command) => (
+                <div key={command.id}>
+                  <span>
+                    <strong>{command.title}</strong>
+                    <small>{command.description}</small>
+                  </span>
+                  <kbd>{command.bindings.map((binding) => binding.label).join(' / ')}</kbd>
+                </div>
               ))}
           </div>
         </Dialog.Content>
@@ -208,7 +329,13 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   )
 }
 
-function ProductToolbar({ context }: { context: ProductCommandContext }) {
+function ProductToolbar({
+  context,
+  onOpenPalette,
+}: {
+  context: ProductCommandContext
+  onOpenPalette: (opener: HTMLElement) => void
+}) {
   const app = useAppSelector(selectApp)
   return (
     <div className="toolbar" role="toolbar" aria-label="Application controls">
@@ -216,7 +343,7 @@ function ProductToolbar({ context }: { context: ProductCommandContext }) {
         className="icon-button mobile-only"
         type="button"
         aria-label="Open navigation"
-        onClick={() => context.dispatch(actions.overlaySet('navigation'))}
+        onClick={() => invokeProductCommand('navigation.open', context)}
       >
         <Menu />
       </button>
@@ -248,7 +375,10 @@ function ProductToolbar({ context }: { context: ProductCommandContext }) {
         className="icon-button"
         type="button"
         aria-label="Open command palette"
-        onClick={() => invokeProductCommand('palette.open', context)}
+        onClick={(event) => {
+          onOpenPalette(event.currentTarget)
+          invokeProductCommand('palette.open', context)
+        }}
       >
         <Command />
       </button>
@@ -260,9 +390,23 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   const dispatch = useAppDispatch()
   const app = useAppSelector(selectApp)
   const navigate = useNavigate()
-  const primaryRef = useRef<HTMLElement>(null)
+  const mainRef = useRef<HTMLElement>(null)
+  const timelineRef = useRef<HTMLDivElement>(null)
+  const paletteOpenerRef = useRef<HTMLElement | null>(null)
+  const navigationOpenerRef = useRef<HTMLElement | null>(null)
   const [timelineIds, setTimelineIds] = useState<readonly string[]>([])
+  const [timelineWindowAvailable, setTimelineWindowAvailable] = useState(false)
+  const [selectionEvidence, setSelectionEvidence] = useState<SessionSelectionEvidence | null>(null)
+  const [windowRequest, setWindowRequest] = useState<{
+    anchor: 'first' | 'latest'
+    attempt: number
+  } | null>(null)
   const updateTimelineIds = useCallback((ids: readonly string[]) => setTimelineIds(ids), [])
+  const updateSelectionEvidence = useCallback(
+    (evidence: SessionSelectionEvidence | null) => setSelectionEvidence(evidence),
+    [],
+  )
+  const consumeWindowRequest = useCallback(() => setWindowRequest(null), [])
   const bootstrap = useQuery({
     queryKey: ['production', 'bootstrap'],
     queryFn: ({ signal }) => productTransport.readBootstrap(signal),
@@ -273,17 +417,71 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
       dispatch,
       getState: store.getState,
       timelineIds,
-      focusTimeline: () => primaryRef.current?.focus(),
-      navigate: (path) => void navigate({ to: '/$surface', params: { surface: path.slice(1) } }),
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      timelineWindowAvailable: surface === 'sessions' && timelineWindowAvailable,
+      focusTimeline: () => timelineRef.current?.focus(),
+      loadTimelineWindow: (anchor) =>
+        setWindowRequest((current) => ({ anchor, attempt: (current?.attempt ?? 0) + 1 })),
+      navigate: (path) => {
+        void navigate({ to: '/$surface', params: { surface: path.slice(1) } }).then(() => {
+          requestAnimationFrame(() => mainRef.current?.focus())
+        })
+      },
+      openNavigation: () => {
+        const activeElement = document.activeElement
+        const opener =
+          activeElement instanceof HTMLElement && activeElement.closest('[role="dialog"]')
+            ? paletteOpenerRef.current
+            : activeElement instanceof HTMLElement
+              ? activeElement
+              : null
+        navigationOpenerRef.current = opener?.isConnected ? opener : null
+        dispatch(actions.overlaySet('navigation'))
+      },
     }),
-    [dispatch, navigate, timelineIds],
+    [dispatch, navigate, surface, timelineIds, timelineWindowAvailable],
   )
   useHotkeys(
-    globalHotkeyBindings.map((binding) => ({
+    productHotkeyBindings.map((binding) => ({
       hotkey: binding.hotkey,
-      callback: () => invokeProductCommand(binding.commandId, context),
+      callback: () => {
+        if (store.getState().app.overlay === null || binding.commandId === 'surface.escape') {
+          if (binding.commandId === 'palette.open') {
+            const activeElement = document.activeElement
+            paletteOpenerRef.current = activeElement instanceof HTMLElement ? activeElement : null
+          }
+          if (
+            binding.commandId.startsWith('selection.') &&
+            productCommandAvailable(binding.commandId, context)
+          ) {
+            context.focusTimeline()
+          }
+          invokeProductCommand(binding.commandId, context)
+        }
+      },
     })),
   )
+  useHotkeySequences(
+    productHotkeySequenceBindings.map((binding) => ({
+      sequence: binding.sequence,
+      callback: () => {
+        if (store.getState().app.overlay === null) {
+          if (
+            binding.commandId.startsWith('selection.') &&
+            productCommandAvailable(binding.commandId, context)
+          ) {
+            context.focusTimeline()
+          }
+          invokeProductCommand(binding.commandId, context)
+        }
+      },
+    })),
+  )
+
+  useEffect(() => {
+    if (store.getState().app.overlay === 'help') dispatch(actions.overlaySet(null))
+  }, [dispatch])
 
   useEffect(() => {
     document.documentElement.dataset.theme = app.theme
@@ -291,11 +489,34 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   }, [app.density, app.theme])
 
   const copy = surfaceCopy[surface]
+  const cacheLabel = productSurfaceCacheLabel(surface)
+  const timelineCapability = bootstrap.isPending
+    ? 'checking'
+    : bootstrap.isSuccess && hasValidSessionTimelineContract(bootstrap.data)
+      ? 'available'
+      : 'unavailable'
+
+  useEffect(() => {
+    const previousTitle = document.title
+    document.title = `${copy.title} · Signalbox`
+    return () => {
+      document.title = previousTitle
+    }
+  }, [copy.title])
+
   const content =
     surface === 'attention' ? (
       <AttentionSurface />
     ) : surface === 'sessions' ? (
-      <SessionWorkspaceSurface onTimelineIds={updateTimelineIds} />
+      <SessionWorkspaceSurface
+        onSelectionEvidence={updateSelectionEvidence}
+        onTimelineIds={updateTimelineIds}
+        onTimelineWindowAvailable={setTimelineWindowAvailable}
+        onWindowRequestConsumed={consumeWindowRequest}
+        timelineCapability={timelineCapability}
+        timelineRef={timelineRef}
+        windowRequest={windowRequest}
+      />
     ) : surface === 'settings' ? (
       <SettingsSurface />
     ) : (
@@ -310,27 +531,45 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
   return (
     <div className={`product-shell layout-${app.layout}`} style={shellStyle}>
       <aside className="product-navigation-pane">
-        <ProductNavigation active={surface} />
+        <ProductNavigation active={surface} context={context} />
       </aside>
-      <main className="product-main" tabIndex={-1} ref={primaryRef}>
+      <main className="product-main" ref={mainRef} tabIndex={-1}>
         <header className="product-header">
           <div>
             <span className="eyebrow">{copy.eyebrow}</span>
             <h1>{copy.title}</h1>
           </div>
-          <ProductToolbar context={context} />
+          <ProductToolbar
+            context={context}
+            onOpenPalette={(opener) => {
+              paletteOpenerRef.current = opener
+            }}
+          />
         </header>
         <div className="surface-question">
           <p>{copy.question}</p>
           <span
             className={`contract-state ${bootstrap.isSuccess ? 'ready' : bootstrap.isError ? 'failed' : ''}`}
+            role="status"
+            aria-live="polite"
           >
             {bootstrap.isSuccess
               ? `${bootstrap.data.contract.name} · ${bootstrap.data.contract.version}`
               : bootstrap.isError
-                ? 'Transport unavailable'
+                ? bootstrap.error instanceof BootstrapContractError
+                  ? 'Incompatible daemon contract'
+                  : 'Transport unavailable'
                 : 'Checking contract…'}
           </span>
+          {bootstrap.isError && (
+            <button
+              type="button"
+              className="bootstrap-retry"
+              onClick={() => void bootstrap.refetch()}
+            >
+              Retry contract
+            </button>
+          )}
         </div>
         {content}
       </main>
@@ -338,7 +577,11 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
         <aside className="product-inspector" aria-label="Inspector">
           <span className="eyebrow">Inspector</span>
           <h2>Selection details</h2>
-          <p>Select an available operational record to inspect its server-provided evidence.</p>
+          <p>
+            {selectionEvidence === null
+              ? 'Select an available operational record to inspect its server-provided evidence.'
+              : 'Bounded server-provided timeline projection for the selected record.'}
+          </p>
           <dl>
             <div>
               <dt>Surface</dt>
@@ -348,14 +591,37 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
               <dt>Authority</dt>
               <dd>{surface === 'settings' ? 'Browser' : 'Daemon'}</dd>
             </div>
-            <div>
-              <dt>Cache</dt>
-              <dd>{surface === 'settings' ? 'Local settings' : 'Bounded query'}</dd>
-            </div>
+            {cacheLabel !== null && (
+              <div>
+                <dt>Cache</dt>
+                <dd>{cacheLabel}</dd>
+              </div>
+            )}
+            {surface === 'sessions' && selectionEvidence !== null && (
+              <>
+                <div>
+                  <dt>Session</dt>
+                  <dd>{selectionEvidence.sessionId}</dd>
+                </div>
+                <div>
+                  <dt>Event</dt>
+                  <dd>{selectionEvidence.eventSequence}</dd>
+                </div>
+                <div>
+                  <dt>Kind</dt>
+                  <dd>{selectionEvidence.kind.replaceAll('_', ' ')}</dd>
+                </div>
+                <div>
+                  <dt>Projected bytes</dt>
+                  <dd>{selectionEvidence.projectedStructuredBytes}</dd>
+                </div>
+              </>
+            )}
           </dl>
         </aside>
       )}
       <CommandPalette context={context} />
+      <KeyboardHelp context={context} />
       <Dialog.Root
         open={app.overlay === 'navigation'}
         onOpenChange={(open) => {
@@ -368,15 +634,32 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
             className="mobile-navigation"
             aria-describedby="mobile-navigation-description"
             onCloseAutoFocus={(event) => {
-              event.preventDefault()
-              document.querySelector<HTMLElement>('[aria-label="Open navigation"]')?.focus()
+              const opener = navigationOpenerRef.current
+              navigationOpenerRef.current = null
+              if (opener?.isConnected) {
+                event.preventDefault()
+                opener.focus()
+              }
             }}
           >
             <Dialog.Title className="sr-only">Product navigation</Dialog.Title>
             <Dialog.Description id="mobile-navigation-description" className="sr-only">
               Choose a Signalbox surface.
             </Dialog.Description>
-            <ProductNavigation active={surface} />
+            <Dialog.Close asChild>
+              <button
+                className="icon-button mobile-navigation-close"
+                type="button"
+                aria-label="Close navigation"
+              >
+                <X />
+              </button>
+            </Dialog.Close>
+            <ProductNavigation
+              active={surface}
+              context={context}
+              onActivate={() => dispatch(actions.overlaySet(null))}
+            />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>

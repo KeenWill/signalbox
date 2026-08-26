@@ -1,14 +1,15 @@
 //! One operation, one Codex CLI process spawn.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
+use std::{collections::HashMap, path::PathBuf};
 
 use signalbox_model_runtime::{
     AnthropicServiceTier, CLI_PROCESS_GROUP_SUPERVISION_SUPPORTED, CancellationSignal,
-    CliEnvironmentVariable, CliProcessRequest, CodexCliServiceTier, DeliveryMode, FastMode,
-    ModelCapabilityCatalog, ModelOperation, ModelRuntime, ModelSettings, ObservationSink,
-    OpenAiServiceTier, PreparationDefect, PreparationFailure, PreparationOutcome,
+    CliEnvironmentOverride, CliEnvironmentVariable, CliProcessRequest, CodexCliServiceTier,
+    DeliveryMode, FastMode, ModelCapabilityCatalog, ModelOperation, ModelRuntime, ModelSettings,
+    ObservationSink, OpenAiServiceTier, PreparationDefect, PreparationFailure, PreparationOutcome,
     ProvenUnsentEvidence, ReasoningLevel, ServiceTier, TerminalEvidence, TerminalReport,
     UnsentCause, execute_cli_process,
 };
@@ -302,6 +303,7 @@ pub struct CodexCliRuntime {
     executable: PathBuf,
     working_directory: PathBuf,
     credential_reference: signalbox_model_runtime::CredentialReference,
+    credential_homes: HashMap<signalbox_model_runtime::CredentialReference, PathBuf>,
     exchange_timeout: Option<Duration>,
     interrupt_grace: Duration,
     post_kill_reap_bound: Option<Duration>,
@@ -332,6 +334,7 @@ pub struct CodexCliPreparedRequest<C> {
     event_limit: usize,
     stderr_limit: usize,
     controls: CodexControls,
+    credential_home: Option<PathBuf>,
 }
 
 struct CodexControls {
@@ -361,6 +364,14 @@ pub enum CodexCliConstructionError {
     InvalidInterruptGrace,
     /// One of the process-output evidence bounds is zero.
     InvalidOutputLimit,
+    /// A configured credential-home path is relative.
+    RelativeCredentialHome,
+    /// A configured credential home is missing or is not a directory.
+    InvalidCredentialHome,
+    /// A configured credential home cannot be enumerated.
+    UnreadableCredentialHome,
+    /// A configured credential home contains no provisioned entries.
+    EmptyCredentialHome,
 }
 
 impl std::fmt::Display for CodexCliConstructionError {
@@ -388,6 +399,16 @@ impl std::fmt::Display for CodexCliConstructionError {
             Self::InvalidOutputLimit => {
                 formatter.write_str("event and stderr limits must be greater than zero")
             }
+            Self::RelativeCredentialHome => {
+                formatter.write_str("Codex credential-home paths must be absolute")
+            }
+            Self::InvalidCredentialHome => {
+                formatter.write_str("Codex credential home is not an existing directory")
+            }
+            Self::UnreadableCredentialHome => {
+                formatter.write_str("Codex credential home cannot be enumerated")
+            }
+            Self::EmptyCredentialHome => formatter.write_str("Codex credential home is empty"),
         }
     }
 }
@@ -440,10 +461,28 @@ impl CodexCliRuntime {
         if config.event_limit == 0 || config.stderr_limit == 0 {
             return Err(CodexCliConstructionError::InvalidOutputLimit);
         }
+        for home in config.credential_homes.values() {
+            if !home.is_absolute() {
+                return Err(CodexCliConstructionError::RelativeCredentialHome);
+            }
+            if !home.is_dir() {
+                return Err(CodexCliConstructionError::InvalidCredentialHome);
+            }
+            let mut entries = std::fs::read_dir(home)
+                .map_err(|_| CodexCliConstructionError::UnreadableCredentialHome)?;
+            match entries.next() {
+                Some(Ok(_)) => {}
+                Some(Err(_)) => {
+                    return Err(CodexCliConstructionError::UnreadableCredentialHome);
+                }
+                None => return Err(CodexCliConstructionError::EmptyCredentialHome),
+            }
+        }
         Ok(Self {
             executable: config.executable,
             working_directory: config.working_directory,
             credential_reference: config.credential_reference,
+            credential_homes: config.credential_homes,
             exchange_timeout: config.exchange_timeout,
             interrupt_grace: config.interrupt_grace,
             post_kill_reap_bound: config.post_kill_reap_bound,
@@ -512,7 +551,12 @@ impl CodexCliRuntime {
                 };
             }
         };
-        if operation.credential_reference != self.credential_reference {
+        let credential_home = self
+            .credential_homes
+            .get(&operation.credential_reference)
+            .cloned();
+        if operation.credential_reference != self.credential_reference && credential_home.is_none()
+        {
             return PreparationOutcome::Failed {
                 correlation,
                 failure: PreparationFailure::CredentialUnavailable {
@@ -613,6 +657,7 @@ impl CodexCliRuntime {
             event_limit: self.event_limit,
             stderr_limit: self.stderr_limit,
             controls,
+            credential_home,
         })
     }
 }
@@ -784,6 +829,18 @@ async fn execute_process<C: Clone + Send + Sync>(
         prepared.output_last_message.path().to_path_buf(),
         prepared.event_limit,
     );
+    // The selected profile controls this child only; the adapter passes the
+    // path reference and never opens the login material, as required by
+    // `docs/spec/configuration-and-credentials.md#the-codex_home-delivery`.
+    let environment_overrides = prepared
+        .credential_home
+        .map(|home| {
+            vec![CliEnvironmentOverride::replacing_inherited(
+                CODEX_CREDENTIAL_HOME,
+                home.into_os_string(),
+            )]
+        })
+        .unwrap_or_default();
     let request = CliProcessRequest {
         command,
         prompt: prepared.prompt,
@@ -794,7 +851,7 @@ async fn execute_process<C: Clone + Send + Sync>(
         event_limit: prepared.event_limit,
         stderr_limit: prepared.stderr_limit,
         environment: CODEX_ENVIRONMENT,
-        environment_overrides: Vec::new(),
+        environment_overrides,
     };
     let _output_schema = prepared.output_schema;
     let _output_last_message = prepared.output_last_message;

@@ -27,6 +27,11 @@ use signalbox_model_provider_runtime::{
 use signalbox_model_runtime::CredentialReference;
 use signalbox_model_runtime_anthropic::{AnthropicConfig, AnthropicRuntime};
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiRuntime};
+use signalbox_persistence::approval_judge_eval::{
+    APPROVAL_JUDGE_EVAL_CASE_CATEGORIES, APPROVAL_JUDGE_EVAL_SCORING_SEMANTICS_VERSION,
+    ApprovalJudgeEvalCallRecord, ApprovalJudgeEvalRecordingSchema, ApprovalJudgeEvalRunId,
+    ApprovalJudgeEvalRunRecord, record_eval_run, verify_recording_schema,
+};
 use signalboxd::{
     CredentialDelivery, DaemonToolCatalog, DaemonToolComposition, FileCredentialAccess,
     HubModelConfiguration, ModelAdapter,
@@ -35,7 +40,7 @@ use signalboxd::{
         ApprovalJudgeEvalVerdict, judge_eval_case, judge_system_prompt, render_eval_case,
     },
     model_adapter::ConfiguredModelRuntime,
-    usage_limits,
+    provider_reported_usage, usage_limits,
 };
 
 fn help_text() -> String {
@@ -54,6 +59,13 @@ Options:
   --repeats <n>     Judge calls per case, n >= 1. Default 3; repeats measure verdict stability.
   --filter <text>   Keep only cases whose name or category contains <text>. Default: all cases.
   --limit <n>       Stop after selecting n cases, n >= 1. Default: no bound.
+  --database-url <url>
+                    Also record the run and each verdict in the named PostgreSQL
+                    database's eval-owned tables. Default: stdout scorecard only.
+  --database-url-env <variable>
+                    Like --database-url, but read the URL from the named
+                    environment variable, keeping a password-bearing URL out of
+                    the process argument vector and shell history.
   --help            Print this reference and exit without spending quota."
     )
 }
@@ -65,8 +77,6 @@ const MAX_PAID_CALLS: usize = 1_000;
 /// Bumped whenever the majority, tie, or stability algorithms change, so
 /// before/after scorecards with identical replay metadata still declare
 /// which analysis produced their summaries.
-const SCORING_SEMANTICS_VERSION: u32 = 3;
-
 /// Closed scorecard grouping; deserialization is the single source of truth,
 /// so an unknown spelling fails the corpus load and a new variant fails
 /// compilation anywhere a match is not exhaustive.
@@ -85,8 +95,8 @@ enum CaseCategory {
 }
 
 impl CaseCategory {
-    const fn as_str(self) -> &'static str {
-        match self {
+    fn as_str(self) -> &'static str {
+        let category = match self {
             Self::GitPush => "git_push",
             Self::ThreadOps => "thread_ops",
             Self::NetworkEgress => "network_egress",
@@ -96,7 +106,9 @@ impl CaseCategory {
             Self::InjectionResistance => "injection_resistance",
             Self::ContextAbsent => "context_absent",
             Self::UndecodableArguments => "undecodable_arguments",
-        }
+        };
+        debug_assert!(APPROVAL_JUDGE_EVAL_CASE_CATEGORIES.contains(&category));
+        category
     }
 }
 
@@ -159,11 +171,18 @@ struct RunOptions {
     repeats: usize,
     filter: Option<String>,
     limit: Option<usize>,
+    database_url: Option<String>,
 }
 
 enum ParsedArguments {
     Run(RunOptions),
     Help,
+}
+
+struct EvalRecording {
+    schema: ApprovalJudgeEvalRecordingSchema,
+    repeats: u32,
+    usage_input_includes_cache_tokens: bool,
 }
 
 fn parse_arguments() -> Result<ParsedArguments, String> {
@@ -172,6 +191,8 @@ fn parse_arguments() -> Result<ParsedArguments, String> {
     let mut repeats = 3_usize;
     let mut filter = None;
     let mut limit = None;
+    let mut database_url = None;
+    let mut database_url_from_environment = None;
     let mut arguments = env::args().skip(1);
     while let Some(flag) = arguments.next() {
         let mut value = |flag: &str| {
@@ -194,6 +215,19 @@ fn parse_arguments() -> Result<ParsedArguments, String> {
                 }
             }
             "--filter" => filter = Some(value("--filter")?),
+            "--database-url" => database_url = Some(value("--database-url")?),
+            "--database-url-env" => {
+                let variable = value("--database-url-env")?;
+                let url = env::var(&variable).map_err(|_| {
+                    format!("--database-url-env names {variable}, which is unset or not text")
+                })?;
+                if url.is_empty() {
+                    return Err(format!(
+                        "--database-url-env names {variable}, which is empty"
+                    ));
+                }
+                database_url_from_environment = Some(url);
+            }
             "--limit" => {
                 let bound: usize = value("--limit")?
                     .parse()
@@ -208,12 +242,18 @@ fn parse_arguments() -> Result<ParsedArguments, String> {
             other => return Err(format!("unknown flag: {other}")),
         }
     }
+    if database_url.is_some() && database_url_from_environment.is_some() {
+        return Err(String::from(
+            "--database-url and --database-url-env both name a recording database; pass one",
+        ));
+    }
     Ok(ParsedArguments::Run(RunOptions {
         configuration: configuration.ok_or_else(|| String::from("--config is required"))?,
         cases: cases.ok_or_else(|| String::from("--cases is required"))?,
         repeats,
         filter,
         limit,
+        database_url: database_url.or(database_url_from_environment),
     }))
 }
 
@@ -324,7 +364,7 @@ fn render_scorecard(
             .sum::<usize>(),
         "failed_calls": scores.values().map(|score| score.failed_calls).sum::<usize>(),
         "escalation_calibration": escalation,
-        "scoring_semantics_version": SCORING_SEMANTICS_VERSION,
+        "scoring_semantics_version": APPROVAL_JUDGE_EVAL_SCORING_SEMANTICS_VERSION,
         "categories": categories,
         "cases": case_reports,
     });
@@ -507,6 +547,44 @@ async fn run(options: RunOptions) -> Result<(), String> {
             })
             .ok_or_else(|| String::from("approval_judge target has no runtime model definition"))?;
 
+    // Recording admission, the database connection, and the schema check all
+    // resolve before the first paid call, so neither an oversized --repeats
+    // nor an unreachable or unmigrated database can surface only after quota
+    // is already spent.
+    let recording = match &options.database_url {
+        Some(database_url) => {
+            let repeats = u32::try_from(options.repeats).map_err(|_| {
+                String::from("--repeats exceeds the range --database-url recording stores")
+            })?;
+            // Both strings are persisted as text and inside the scorecard
+            // jsonb, neither of which admits U+0000, and configuration
+            // admission does not reject it there.
+            if provider_model.contains('\u{0}') || binding.credential_reference.contains('\u{0}') {
+                return Err(String::from(
+                    "the resolved provider model or credential reference contains U+0000, \
+                     which --database-url recording cannot store",
+                ));
+            }
+            let pool = signalbox_persistence::connect_production(database_url)
+                .await
+                .map_err(|error| format!("database connection failed: {error}"))?;
+            // The eval tables must already exist: schema application belongs
+            // to the daemon, and a measurement tool never migrates a live
+            // database out from under it.
+            let schema = verify_recording_schema(&pool)
+                .await
+                .map_err(|error| format!("database recording is unavailable: {error}"))?;
+            Some(EvalRecording {
+                schema,
+                repeats,
+                usage_input_includes_cache_tokens: configuration
+                    .cache_inclusive_input_targets()
+                    .contains(&binding.target),
+            })
+        }
+        None => None,
+    };
+
     let corpus = fs::read_to_string(&options.cases)
         .map_err(|error| format!("corpus read failed: {error}"))?;
     let digest = stable_digest(corpus.as_bytes());
@@ -533,6 +611,28 @@ async fn run(options: RunOptions) -> Result<(), String> {
             && !case.category.as_str().contains(filter.as_str())
         {
             continue;
+        }
+        // The recording schema stores case names non-empty, and PostgreSQL
+        // text and jsonb admit no U+0000, so a selected case recording
+        // cannot store must fail here, before any paid call, rather than
+        // after the whole run's quota is spent. Name and notes are the only
+        // persisted case fields this can reach: category and expected are
+        // closed sets, tool names admit no control characters, and the other
+        // fields are persisted only as digests. Without --database-url the
+        // corpus admission is unchanged.
+        if recording.is_some() {
+            let name_storable = !case.name.is_empty() && !case.name.contains('\u{0}');
+            let notes_storable = case
+                .notes
+                .as_deref()
+                .is_none_or(|notes| !notes.contains('\u{0}'));
+            if !name_storable || !notes_storable {
+                return Err(format!(
+                    "corpus line {} carries a name or notes --database-url recording cannot \
+                     store: names are non-empty and neither field may contain U+0000",
+                    index + 1
+                ));
+            }
         }
         cases.push(case);
     }
@@ -674,11 +774,16 @@ async fn run(options: RunOptions) -> Result<(), String> {
 
     let mut scores: BTreeMap<CaseCategory, CategoryScore> = BTreeMap::new();
     let mut case_reports = Vec::new();
+    let mut recorded_calls: Vec<ApprovalJudgeEvalCallRecord> = Vec::new();
     for (case, eval_case) in cases.iter().zip(&eval_cases) {
         let mut verdicts: Vec<ApprovalJudgeEvalVerdict> = Vec::new();
         let mut failures = 0_usize;
+        // Counts every attempt, so a failed call leaves a gap in the recorded
+        // ordinals rather than shifting later verdicts onto its position.
+        let mut attempt_ordinal = 0_u32;
         let mut failure_causes: Vec<String> = Vec::new();
         for _ in 0..options.repeats {
+            attempt_ordinal = attempt_ordinal.saturating_add(1);
             match judge_eval_case(&model, &binding, eval_case).await {
                 Ok(verdict) => {
                     // The daemon rejects verdicts whose reported usage exceeds
@@ -694,7 +799,25 @@ async fn run(options: RunOptions) -> Result<(), String> {
                         let cause = String::from("reported usage exceeds configured limits");
                         eprintln!("call failed for {}: {cause}", case.name);
                         failure_causes.push(cause);
+                    } else if recording.is_some()
+                        && !recording_rationale_is_storable(&verdict.rationale)
+                    {
+                        failures += 1;
+                        let cause = String::from(
+                            "provider rationale contains U+0000, which database recording cannot store",
+                        );
+                        eprintln!("call failed for {}: {cause}", case.name);
+                        failure_causes.push(cause);
                     } else {
+                        if recording.is_some() {
+                            recorded_calls.push(ApprovalJudgeEvalCallRecord {
+                                case_name: case.name.clone(),
+                                repeat_ordinal: attempt_ordinal,
+                                recommendation: verdict.recommendation,
+                                rationale: verdict.rationale.clone(),
+                                usage: provider_reported_usage(verdict.usage),
+                            });
+                        }
                         verdicts.push(verdict);
                     }
                 }
@@ -771,7 +894,11 @@ async fn run(options: RunOptions) -> Result<(), String> {
             "repeats": verdicts.iter().map(|verdict| serde_json::json!({
                 "recommendation": recommendation_label(verdict.recommendation),
                 "rationale": verdict.rationale,
-                "provider_reported_model": verdict.provider_reported_model,
+                "provider_reported_model": if recording.is_some() {
+                    storable_provider_reported_model(verdict.provider_reported_model.as_deref())
+                } else {
+                    verdict.provider_reported_model.clone()
+                },
             })).collect::<Vec<_>>(),
             "notes": case.notes,
         }));
@@ -780,23 +907,87 @@ async fn run(options: RunOptions) -> Result<(), String> {
     let rendered = render_scorecard(
         ScorecardMetadata {
             judge_selection: selection.into_uuid().to_string(),
-            provider_model,
-            corpus_digest: digest,
-            contract_digest,
-            rendered_digest,
+            provider_model: provider_model.clone(),
+            corpus_digest: digest.clone(),
+            contract_digest: contract_digest.clone(),
+            rendered_digest: rendered_digest.clone(),
             repeats: options.repeats,
             speculative_tools,
         },
         &scores,
         case_reports,
     )?;
+    let scorecard = serde_json::from_str(&rendered)
+        .map_err(|error| format!("scorecard parsing failed: {error}"))?;
     println!("{rendered}");
+    // Recording follows the print, so a database failure can cost only the
+    // stored copy and never the primary stdout artifact.
+    if let Some(recording) = recording {
+        let run = ApprovalJudgeEvalRunRecord {
+            run: ApprovalJudgeEvalRunId::from_uuid(uuid::Uuid::now_v7()),
+            selection,
+            target: binding.target,
+            provider_model,
+            credential_reference: binding.credential_reference.clone(),
+            usage_input_includes_cache_tokens: recording.usage_input_includes_cache_tokens,
+            corpus_digest: digest,
+            contract_digest,
+            rendered_digest,
+            repeats: recording.repeats,
+            scorecard,
+        };
+        let run_identity = run.run.into_uuid();
+        // The identity is announced before the commit is attempted, so an
+        // ambiguous commit outcome still leaves the exact key to query for.
+        eprintln!(
+            "recording eval run {run_identity} holding {} calls",
+            recorded_calls.len()
+        );
+        record_eval_run(&recording.schema, &run, &recorded_calls)
+            .await
+            .map_err(|error| {
+                format!("database recording failed for eval run {run_identity}: {error}")
+            })?;
+        eprintln!("recorded eval run {run_identity}");
+    }
     Ok(())
+}
+
+/// PostgreSQL JSONB cannot represent U+0000. Provider-controlled model text
+/// containing it is encoded as a versioned UTF-8 hex string; ordinary model
+/// text remains unchanged, and the prefix makes decoding unambiguous.
+fn storable_provider_reported_model(model: Option<&str>) -> Option<String> {
+    const ENCODED_PREFIX: &str = "signalbox:utf8-hex-v1:";
+    let model = model?;
+    if !model.contains('\u{0}') && !model.starts_with(ENCODED_PREFIX) {
+        return Some(String::from(model));
+    }
+    let mut encoded = String::with_capacity(ENCODED_PREFIX.len() + model.len() * 2);
+    encoded.push_str(ENCODED_PREFIX);
+    let hex_digit = |nibble: u8| {
+        char::from(if nibble < 10 {
+            b'0' + nibble
+        } else {
+            b'a' + (nibble - 10)
+        })
+    };
+    for byte in model.as_bytes() {
+        encoded.push(hex_digit(byte >> 4));
+        encoded.push(hex_digit(byte & 0x0f));
+    }
+    Some(encoded)
+}
+
+fn recording_rationale_is_storable(rationale: &str) -> bool {
+    !rationale.contains('\u{0}')
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PAID_CALLS, paid_call_count};
+    use super::{
+        MAX_PAID_CALLS, paid_call_count, recording_rationale_is_storable,
+        storable_provider_reported_model,
+    };
 
     #[test]
     fn paid_call_count_accepts_the_safety_ceiling() {
@@ -811,5 +1002,43 @@ mod tests {
     #[test]
     fn paid_call_count_rejects_arithmetic_overflow() {
         assert!(paid_call_count(usize::MAX, 2).is_err());
+    }
+
+    #[test]
+    fn provider_reported_model_with_nul_is_reversibly_encoded() {
+        assert_eq!(
+            storable_provider_reported_model(Some("model\u{0}revision")),
+            Some(String::from(
+                "signalbox:utf8-hex-v1:6d6f64656c007265766973696f6e"
+            ))
+        );
+    }
+
+    #[test]
+    fn ordinary_provider_reported_model_is_unchanged() {
+        assert_eq!(
+            storable_provider_reported_model(Some("provider/model\\revision")),
+            Some(String::from("provider/model\\revision"))
+        );
+    }
+
+    #[test]
+    fn provider_reported_model_using_encoding_prefix_is_escaped() {
+        assert_eq!(
+            storable_provider_reported_model(Some("signalbox:utf8-hex-v1:literal")),
+            Some(String::from(
+                "signalbox:utf8-hex-v1:7369676e616c626f783a757466382d6865782d76313a6c69746572616c"
+            ))
+        );
+    }
+
+    #[test]
+    fn provider_rationale_with_nul_is_not_storable_for_recording() {
+        assert!(!recording_rationale_is_storable("because\u{0}details"));
+    }
+
+    #[test]
+    fn ordinary_provider_rationale_is_storable_for_recording() {
+        assert!(recording_rationale_is_storable("because details"));
     }
 }

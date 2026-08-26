@@ -122,76 +122,125 @@ impl TimelineWindowLimits {
 /// Closed durable event categories exposed by the historical foundation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SessionTimelineEventKind {
+    /// A session was durably created.
     SessionCreated,
+    /// Session-default model settings changed.
     SessionModelSettingsChanged,
+    /// Effective model settings were resolved for a turn.
     TurnModelSettingsResolved,
+    /// Input was durably accepted into the session.
     InputAccepted,
+    /// A goal-bearing turn retired.
     GoalTurnRetired,
+    /// A queued turn became active.
     TurnActivated,
+    /// A turn reached a failed terminal state.
     TurnFailed,
+    /// A model call changed durable state.
     ModelCallTransition,
+    /// A tool batch changed durable state.
     ToolBatchTransition,
+    /// A tool-approval decision was recorded.
     ToolApprovalDecided,
+    /// Historical context was compacted.
     ContextCompacted,
+    /// A turn completed successfully.
     TurnCompleted,
+    /// A turn ended by refusal.
     TurnRefused,
+    /// A turn ended by cancellation.
     TurnCancelled,
+    /// A turn requires explicit reconciliation.
     TurnReconciliationRequired,
+    /// Runner placement or execution state changed.
     RunnerStateTransition,
+    /// Delegation state changed.
     DelegationUpdate,
+    /// A delegation wake was recorded.
     DelegationWake,
 }
 
 /// One lightweight typed event header in a bounded historical window.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionTimelineItem {
+    /// Immutable creation address of this durable event.
     pub address: TimelineAddress,
+    /// Closed category of the durable event.
     pub kind: SessionTimelineEventKind,
+    /// Bytes charged to this header's structured projection.
     pub projected_structured_bytes: u32,
 }
 
 /// Exact stable address bounds for the current durable history.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionTimelineBounds {
+    /// Earliest stable event address, absent only when no events exist.
     pub first: Option<TimelineAddress>,
+    /// Latest stable event address, absent only when no events exist.
     pub latest: Option<TimelineAddress>,
 }
 
 /// Explicit policy inputs describing the lifetime history without loading it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionTimelineSizeFacts {
+    /// Total durable event-header count.
     pub item_count: u64,
+    /// Total bytes in projected human-readable text.
     pub projected_text_bytes: u64,
+    /// Total bytes in projected structured event headers.
     pub projected_structured_bytes: u64,
+    /// Number of referenced blobs without materializing them.
     pub referenced_blob_count: u64,
+    /// Total bytes of referenced blobs without materializing them.
     pub referenced_blob_bytes: u64,
 }
 
 /// Current and queued work counts needed to interpret a historical tail.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SessionWorkFacts {
+    /// Number of currently active turns.
     pub active_turn_count: u64,
+    /// Number of turns queued behind active work.
     pub queued_turn_count: u64,
 }
 
 /// Lightweight authoritative description of one session read projection.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionTimelineDescriptor {
+    /// Session described by these facts.
     pub session: SessionId,
+    /// Lifetime size facts maintained for bounded policy decisions.
     pub sizes: SessionTimelineSizeFacts,
+    /// Earliest and latest stable addresses.
     pub bounds: SessionTimelineBounds,
+    /// Current active and queued work facts.
     pub work: SessionWorkFacts,
+    /// Durable global observation cursor covered by these facts.
     pub observed_through: u64,
+}
+
+/// Closed continuation state carrying the boundary needed for another read.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TimelineContinuation {
+    /// The loaded window reaches the corresponding end of history.
+    Exhausted,
+    /// More history exists beyond the returned boundary item.
+    MoreAt(TimelineAddress),
 }
 
 /// One bounded, logically ordered historical response.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionTimelineWindow {
+    /// Session whose events were loaded.
     pub session: SessionId,
+    /// Strictly ordered durable event headers in this window.
     pub items: Vec<SessionTimelineItem>,
+    /// Sum of structured projection bytes for returned items.
     pub projected_structured_bytes: u32,
-    pub has_more_before: bool,
-    pub has_more_after: bool,
+    /// Continuation state toward earlier addresses.
+    pub continuation_before: TimelineContinuation,
+    /// Continuation state toward later addresses.
+    pub continuation_after: TimelineContinuation,
 }
 
 /// Application-owned read port for the historical session projection.
@@ -221,12 +270,15 @@ pub struct ReadSessionTimelineService<Reader> {
 }
 
 impl<Reader> ReadSessionTimelineService<Reader> {
+    /// Constructs a service around the application read port.
+    #[must_use]
     pub const fn new(reader: Reader) -> Self {
         Self { reader }
     }
 }
 
 impl<Reader: SessionTimelineReader> ReadSessionTimelineService<Reader> {
+    /// Reads the authoritative bounded descriptor for one session.
     pub async fn descriptor(
         &self,
         session: SessionId,
@@ -234,6 +286,7 @@ impl<Reader: SessionTimelineReader> ReadSessionTimelineService<Reader> {
         self.reader.read_descriptor(session).await
     }
 
+    /// Reads one validated historical window for one session.
     pub async fn window(
         &self,
         session: SessionId,
