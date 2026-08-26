@@ -3837,7 +3837,9 @@ private enum SynchronizationFixture {
         "state":{
           "type":"active_awaiting_tool_recovery",
           "ended_attempt_id":"\(attempt)",
-          "recovery_tool_attempt_id":"\(toolAttempt)"
+          "recovery_tool_attempt_id":"\(toolAttempt)",
+          "automatic_reconciliation_attempts":"0",
+          "operator_action_required":false
         }
       }
       """

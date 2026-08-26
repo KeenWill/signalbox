@@ -658,7 +658,7 @@ public struct SignalboxProcessTranscriptProjector: Sendable {
     var modelCallIDs: Set<String> = []
     for case .turn(let turn) in records {
       switch turn.state {
-      case .activeAwaitingModelCallRecovery(_, let modelCallID),
+      case .activeAwaitingModelCallRecovery(_, let modelCallID, _, _),
         .refused(_, _, let modelCallID),
         .reconciliationRequired(_, _, let modelCallID):
         modelCallIDs.insert(modelCallID.rawValue)
