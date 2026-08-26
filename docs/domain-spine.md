@@ -9310,6 +9310,7 @@ pub enum StartupScanSessionOutcome {
     },
     RecoveredToolAttempt(Box<ToolAttemptCrashOutcome>),
     ResumableToolBatch { turn: TurnId },
+    ResumablePreparedModelCall { turn: TurnId },
     AwaitingRecoveryDecision { turn: TurnId },
 }
 

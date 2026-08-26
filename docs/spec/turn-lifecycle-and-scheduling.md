@@ -1494,8 +1494,10 @@ from child transcript state nor depend on process-local wake memory.
   selected-prefix frontier path and does not close that fork question.
 - Continuation safe points after tool results consume pending steering through
   the atomic boundary in [tool-loop](tool-loop.md).
-- Startup recovery now classifies model-call evidence (a `Prepared` call closes
-  as a known failure; an unstopped in-flight call parks the turn as ambiguous in
+- Startup recovery now classifies model-call evidence (a `Prepared` call proves
+  no send authorization existed, so startup validates its stored frontier and
+  leaves the call, attempt, and turn unchanged for the ordinary scheduler to
+  retry; an unstopped in-flight call parks the turn as ambiguous in
   `awaiting_model_call_recovery`), tool-loop evidence, and delegated-result
   waits. The model-call park is resolved automatically through the bounded
   durable attempt protocol above, or by the existing user reconciliation command
