@@ -1749,6 +1749,18 @@ async fn prospective_attachment_frontier_exceeds_bound(
             field: "delegated turn attempt state",
             value,
         })) if value == "stop_requested" => Err(ModelCallRepositoryError::NoLiveExecution),
+        // A turn executing a tool batch keeps the `running` phase against the
+        // continuation attempt while the call that produced the batch is
+        // already terminal. Model-execution reconstitution then sees the
+        // turn's retained provider pin with no current call and reports
+        // `PinnedTargetUnexpected`, which is exactly the statement that this
+        // turn has no live model call to read a frontier from. The scheduling
+        // projection records the batch's yielded frontier, so route the state
+        // through the same no-live-execution path the parked phases use rather
+        // than rolling back an otherwise-applied submission.
+        Err(ModelCallRepositoryError::Corruption(ModelCallCorruption::Execution(
+            signalbox_domain::ModelCallExecutionReconstitutionFailure::PinnedTargetUnexpected,
+        ))) => Err(ModelCallRepositoryError::NoLiveExecution),
         result => result,
     };
     let (base_origins, check_base) = match live_execution {
