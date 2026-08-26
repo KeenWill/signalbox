@@ -193,11 +193,19 @@ const WEBHOOK_DRAIN_PAGE_LIMIT: usize = 1;
 // poll is preempted again: at ingress meeting or exceeding drain throughput the
 // authoritative completeness sweep never commits, and the facts outside the
 // webhook mapping — reactions, missed deliveries — stop being reconciled for as
-// long as the backlog lasts. Eight pages carry a merge batch's worth of
-// deliveries at WEBHOOK_PENDING_PAGE_SIZE each before the sweep takes its turn;
-// remaining backlog re-arms the scheduler immediately after it.
+// long as the backlog lasts.
+//
+// Counted in preemptions, but chosen against the pages they cost, because a
+// preempted pass drains two: the poll's own pre-poll drain in
+// `run_attempt_prelude` and then the attempt the admission wake runs. The
+// suppressed pass that ends the cycle drains one more, so the sweep waits behind
+// `2 * MAX_CONSECUTIVE_POLL_PREEMPTIONS + 1` bounded pages — nine here, about
+// 225 deliveries at WEBHOOK_PENDING_PAGE_SIZE each, which covers a merge
+// batch. Raising this raises that ceiling twice as fast, and every page may
+// spend its own deadline. Remaining backlog re-arms the scheduler immediately
+// after the sweep, so suppression delays webhook work rather than dropping it.
 // numeric-bound: guard - prevents sustained webhook ingress from starving the complete poll
-const MAX_CONSECUTIVE_POLL_PREEMPTIONS: u32 = 8;
+const MAX_CONSECUTIVE_POLL_PREEMPTIONS: u32 = 4;
 // One repository scheduling phase may settle this many cutoff or dispatch
 // records before returning to the webhook-aware outer loop. The remaining work
 // is durable and re-arms that loop; bounding the phase prevents an event backlog
@@ -1532,7 +1540,6 @@ impl RepositoryWatchTask {
                 return;
             }
         }
-        let poll_schedule_started = Instant::now();
         // The lookup acquires a pooled connection and queries, neither of which
         // this task bounds, and the supervisor joins every child before aborting
         // the set — an uncancellable await here would hold daemon termination
@@ -1545,12 +1552,18 @@ impl RepositoryWatchTask {
         else {
             return;
         };
+        // Anchored after the lookup rather than before it. PostgreSQL measures
+        // the age when the statement runs, so whatever time the lookup itself
+        // spent is already subtracted once; anchoring ahead of it subtracts the
+        // same delay a second time and brings the sweep forward by however long
+        // a contended pool made this read take.
+        let poll_schedule_started = Instant::now();
         let complete_poll_age = match complete_poll_age {
             Ok(age) => age,
             Err(error) => {
                 tracing::warn!(
                     repository = %self.repository.as_str(),
-                    cause_code = "repository_watch_startup_cursor_unavailable",
+                    cause_code = "repository_watch_startup_poll_cadence_unavailable",
                     error = ?error,
                     "repository-watch startup could not inspect its durable poll cadence; an immediate full poll remains scheduled"
                 );
@@ -4770,20 +4783,24 @@ impl RepositoryWatchAttemptError {
 /// Classifies a rejected REST response.
 ///
 /// `403` carries two unrelated meanings on this provider, and only one of them
-/// is repository-wide. A throttled request is reported as `403` with the
-/// rate-limit headers set, and stopping the page is right: every later targeted
-/// request would meet the same limit. A credential that is simply not scoped for
-/// one endpoint — the Checks endpoints are the live case — is also `403`, with
-/// no such headers, and is specific to that resource. Treating the second as a
-/// provider outage stops the drain at the same oldest receipt on every retry, so
-/// later payload-only and ignored deliveries behind it are never attempted: an
-/// ordinary under-scoped token becomes a permanent per-repository drain stall.
-fn rejected_response_error(status: StatusCode, headers: &HeaderMap) -> RepositoryWatchAttemptError {
+/// is repository-wide. A throttled request is reported as `403` and stopping the
+/// page is right: every later targeted request would meet the same limit. A
+/// credential that is simply not scoped for one endpoint — the Checks endpoints
+/// are the live case — is also `403`, and is specific to that resource. Treating
+/// the second as a provider outage stops the drain at the same oldest receipt on
+/// every retry, so later payload-only and ignored deliveries behind it are never
+/// attempted: an ordinary under-scoped token becomes a permanent per-repository
+/// drain stall.
+fn rejected_response_error(
+    status: StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> RepositoryWatchAttemptError {
     if status == StatusCode::UNAUTHORIZED {
         RepositoryWatchAttemptError::Credential
     } else if status == StatusCode::TOO_MANY_REQUESTS
         || status.is_server_error()
-        || (status == StatusCode::FORBIDDEN && response_is_throttled(headers))
+        || (status == StatusCode::FORBIDDEN && response_is_throttled(headers, body))
     {
         RepositoryWatchAttemptError::ProviderUnavailable
     } else {
@@ -4791,19 +4808,52 @@ fn rejected_response_error(status: StatusCode, headers: &HeaderMap) -> Repositor
     }
 }
 
-/// Whether the provider's own headers say a rejection is a rate limit.
+/// Whether the provider says a rejection is one of its own rate limits.
 ///
-/// A secondary limit answers with `Retry-After`; a primary limit answers with an
-/// exhausted `X-RateLimit-Remaining`. Neither header accompanies a
-/// permission-scoped rejection, so their absence is what separates the two
-/// meanings of `403` above.
-fn response_is_throttled(headers: &HeaderMap) -> bool {
+/// The provider documents three ordered signals, and only the first two are
+/// headers: `Retry-After` for a secondary limit, an exhausted
+/// `X-RateLimit-Remaining` for a primary one. The third case is a secondary
+/// limit carrying neither — the documented guidance there is to wait anyway —
+/// and the rejection's own message is what names it. Reading the headers alone
+/// would classify that case as a permission rejection and let the drain re-issue
+/// the same doomed request for every later delivery on the page, which is the
+/// amplification the page-stopping predicate exists to prevent. A
+/// permission-scoped rejection carries neither the headers nor the message.
+fn response_is_throttled(headers: &HeaderMap, body: &[u8]) -> bool {
     headers.contains_key(RETRY_AFTER)
         || headers
             .get("x-ratelimit-remaining")
             .and_then(|remaining| remaining.to_str().ok())
             .and_then(|remaining| remaining.trim().parse::<u64>().ok())
             .is_some_and(|remaining| remaining == 0)
+        || rejection_reports_a_rate_limit(body)
+}
+
+/// Whether a rejection's own message names one of the provider's rate limits.
+///
+/// Read from the typed error envelope rather than by scanning the response
+/// bytes: an unparseable or absent message is not evidence of throttling, so it
+/// leaves the classification to the status and headers exactly as it stood
+/// before the body was consulted.
+fn rejection_reports_a_rate_limit(body: &[u8]) -> bool {
+    // The provider's two documented spellings for a secondary limit; the older
+    // one still appears on the same responses.
+    const MARKERS: [&str; 2] = ["secondary rate limit", "abuse detection mechanism"];
+    serde_json::from_slice::<ProviderRejection>(body)
+        .ok()
+        .and_then(|rejection| rejection.message)
+        .is_some_and(|message| {
+            let message = message.to_ascii_lowercase();
+            MARKERS.iter().any(|marker| message.contains(marker))
+        })
+}
+
+/// The provider's error envelope, of which only the operator-facing message
+/// carries a classification signal this runtime reads.
+#[derive(Deserialize)]
+struct ProviderRejection {
+    #[serde(default)]
+    message: Option<String>,
 }
 
 /// Classifies an `HTTP 200` GraphQL error envelope.
@@ -6789,10 +6839,21 @@ impl GitHubRepositoryPoller {
             return Ok(accepted);
         }
         if response.status() != StatusCode::OK {
-            return Err(rejected_response_error(
-                response.status(),
-                response.headers(),
-            ));
+            let status = response.status();
+            let headers = response.headers().clone();
+            // The provider separates a secondary rate limit from a
+            // permission-scoped rejection by the message alone when neither
+            // rate-limit header is present, so the rejection is read before it
+            // is classified. It is read under the same ceiling every other body
+            // is; a read this bounded cannot deliver leaves an empty message,
+            // which classifies from the status and headers exactly as it did
+            // before the body was consulted, rather than replacing the
+            // provider's own cause with a transport one.
+            let body = self
+                .read_bounded(resource_kind, response)
+                .await
+                .unwrap_or_default();
+            return Err(rejected_response_error(status, &headers, &body));
         }
         // The cached pair stays in place while this body is read and parsed.
         // Two open pull requests sharing a head SHA fetch the same check-suite
@@ -13042,55 +13103,185 @@ mod tests {
         );
     }
 
-    /// A credential that lacks permission on one endpoint answers `403` without
-    /// rate-limit headers. Treating that as a provider outage stops the drain
-    /// page at the same oldest receipt on every retry, so every later delivery
-    /// behind it — payload-only and ignored ones included — is never attempted.
+    /// The budget is counted in preemptions but chosen against the pages they
+    /// cost, and the two are not the same number: a preempted pass drains the
+    /// poll's own pre-poll page and then the page the admission wake's attempt
+    /// runs, and the suppressed pass that ends the cycle drains one more. Keeping
+    /// that conversion in a test is what stops the constant and the ceiling it
+    /// was chosen for from drifting apart.
+    #[test]
+    fn the_preemption_budget_holds_the_sweep_within_its_page_ceiling() {
+        const DRAINS_PER_PREEMPTED_PASS: u32 = 2;
+        const SUPPRESSED_PASS_DRAINS: u32 = 1;
+        const MAX_DELIVERIES_BEFORE_THE_SWEEP: u32 = 225;
+
+        let pages =
+            MAX_CONSECUTIVE_POLL_PREEMPTIONS * DRAINS_PER_PREEMPTED_PASS + SUPPRESSED_PASS_DRAINS;
+
+        assert_eq!(pages, 9);
+        assert_eq!(
+            pages * u32::from(WEBHOOK_PENDING_PAGE_SIZE.get()),
+            MAX_DELIVERIES_BEFORE_THE_SWEEP
+        );
+    }
+
+    /// What the provider returns when a valid credential lacks permission on one
+    /// endpoint: an error envelope naming no rate limit.
+    const PERMISSION_REJECTION_BODY: &[u8] = br#"{"message":"Resource not accessible by personal access token","documentation_url":"https://docs.github.com/rest"}"#;
+    /// What it returns for the secondary limit that carries neither rate-limit
+    /// header, where the message is the only signal.
+    const SECONDARY_RATE_LIMIT_BODY: &[u8] = br#"{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}"#;
+
+    /// A credential that lacks permission on one endpoint answers `403` with no
+    /// rate-limit signal of any kind. Treating that as a provider outage stops
+    /// the drain page at the same oldest receipt on every retry, so every later
+    /// delivery behind it — payload-only and ignored ones included — is never
+    /// attempted.
     #[test]
     fn a_permission_scoped_rejection_defers_only_its_own_receipt() {
-        let error = rejected_response_error(StatusCode::FORBIDDEN, &HeaderMap::new());
+        let error = rejected_response_error(
+            StatusCode::FORBIDDEN,
+            &HeaderMap::new(),
+            PERMISSION_REJECTION_BODY,
+        );
 
         assert_eq!(error, RepositoryWatchAttemptError::Rejected);
         assert!(!error.stops_webhook_page());
     }
 
+    /// The provider answers a `403` with its quota intact when the rejection is
+    /// about permission rather than rate, so an unexhausted counter is no more a
+    /// throttle than an absent one.
     #[test]
-    fn a_throttled_rejection_stops_the_whole_page() {
-        let mut secondary = HeaderMap::new();
-        secondary.insert(RETRY_AFTER, HeaderValue::from_static("60"));
-        let mut primary = HeaderMap::new();
-        primary.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+    fn a_rejection_with_quota_remaining_defers_only_its_own_receipt() {
         let mut remaining = HeaderMap::new();
         remaining.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
 
         assert_eq!(
-            rejected_response_error(StatusCode::FORBIDDEN, &secondary),
+            rejected_response_error(StatusCode::FORBIDDEN, &remaining, PERMISSION_REJECTION_BODY),
+            RepositoryWatchAttemptError::Rejected
+        );
+    }
+
+    /// The provider documents three ordered signals for its own rate limits, and
+    /// each one has to stop the page: a secondary limit's `Retry-After`, a
+    /// primary limit's exhausted counter, and — the case neither header covers —
+    /// a secondary limit named only by the rejection's own message.
+    #[test]
+    fn a_throttled_rejection_stops_the_whole_page() {
+        let mut retry_after = HeaderMap::new();
+        retry_after.insert(RETRY_AFTER, HeaderValue::from_static("60"));
+        let mut exhausted = HeaderMap::new();
+        exhausted.insert("x-ratelimit-remaining", HeaderValue::from_static("0"));
+        let mut unexhausted = HeaderMap::new();
+        unexhausted.insert("x-ratelimit-remaining", HeaderValue::from_static("4999"));
+
+        let signalled_by_header = rejected_response_error(
+            StatusCode::FORBIDDEN,
+            &retry_after,
+            PERMISSION_REJECTION_BODY,
+        );
+        let signalled_by_quota =
+            rejected_response_error(StatusCode::FORBIDDEN, &exhausted, PERMISSION_REJECTION_BODY);
+        let signalled_by_message = rejected_response_error(
+            StatusCode::FORBIDDEN,
+            &unexhausted,
+            SECONDARY_RATE_LIMIT_BODY,
+        );
+
+        assert_eq!(
+            signalled_by_header,
             RepositoryWatchAttemptError::ProviderUnavailable
         );
         assert_eq!(
-            rejected_response_error(StatusCode::FORBIDDEN, &primary),
+            signalled_by_quota,
             RepositoryWatchAttemptError::ProviderUnavailable
         );
         assert_eq!(
-            rejected_response_error(StatusCode::FORBIDDEN, &remaining),
+            signalled_by_message,
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+        assert!(signalled_by_message.stops_webhook_page());
+    }
+
+    /// The provider's older spelling for the same secondary limit still reaches
+    /// live responses, so it stops the page on the same terms.
+    #[test]
+    fn the_legacy_secondary_limit_message_stops_the_whole_page() {
+        assert_eq!(
+            rejected_response_error(
+                StatusCode::FORBIDDEN,
+                &HeaderMap::new(),
+                br#"{"message":"You have triggered an abuse detection mechanism."}"#,
+            ),
+            RepositoryWatchAttemptError::ProviderUnavailable
+        );
+    }
+
+    /// A rejection whose body is absent or unparseable is not evidence of
+    /// throttling, so it classifies from the status and headers alone.
+    #[test]
+    fn an_unreadable_rejection_body_is_not_read_as_a_throttle() {
+        assert_eq!(
+            rejected_response_error(StatusCode::FORBIDDEN, &HeaderMap::new(), b""),
             RepositoryWatchAttemptError::Rejected
         );
         assert_eq!(
-            rejected_response_error(StatusCode::TOO_MANY_REQUESTS, &HeaderMap::new()),
+            rejected_response_error(
+                StatusCode::FORBIDDEN,
+                &HeaderMap::new(),
+                b"<html>429</html>"
+            ),
+            RepositoryWatchAttemptError::Rejected
+        );
+    }
+
+    #[test]
+    fn a_too_many_requests_response_stops_the_whole_page() {
+        assert_eq!(
+            rejected_response_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                &HeaderMap::new(),
+                PERMISSION_REJECTION_BODY
+            ),
             RepositoryWatchAttemptError::ProviderUnavailable
         );
+    }
+
+    #[test]
+    fn a_provider_server_error_stops_the_whole_page() {
         assert_eq!(
-            rejected_response_error(StatusCode::SERVICE_UNAVAILABLE, &HeaderMap::new()),
+            rejected_response_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &HeaderMap::new(),
+                PERMISSION_REJECTION_BODY
+            ),
             RepositoryWatchAttemptError::ProviderUnavailable
         );
+    }
+
+    #[test]
+    fn an_unauthorized_response_reports_a_credential_failure() {
         assert_eq!(
-            rejected_response_error(StatusCode::UNAUTHORIZED, &HeaderMap::new()),
+            rejected_response_error(
+                StatusCode::UNAUTHORIZED,
+                &HeaderMap::new(),
+                PERMISSION_REJECTION_BODY
+            ),
             RepositoryWatchAttemptError::Credential
         );
-        assert_eq!(
-            rejected_response_error(StatusCode::NOT_FOUND, &HeaderMap::new()),
-            RepositoryWatchAttemptError::Rejected
+    }
+
+    #[test]
+    fn an_ordinary_rejection_defers_only_its_own_receipt() {
+        let error = rejected_response_error(
+            StatusCode::NOT_FOUND,
+            &HeaderMap::new(),
+            PERMISSION_REJECTION_BODY,
         );
+
+        assert_eq!(error, RepositoryWatchAttemptError::Rejected);
+        assert!(!error.stops_webhook_page());
     }
 
     /// Throttling and provider outage arrive as an `HTTP 200` GraphQL error

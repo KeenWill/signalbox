@@ -735,11 +735,14 @@ impl PostgresRepoWatchStore {
         .await?;
         elapsed_seconds
             .map(|seconds| {
+                // `completed_at` belongs to the cadence record, not the cursor,
+                // so a negative age is a stored value that cannot be read back
+                // rather than a malformed cursor field.
                 u64::try_from(seconds)
                     .map(Duration::from_secs)
                     .map_err(|_| {
                         RepoWatchStoreError::Corruption(
-                            RepoWatchPersistenceCorruption::InvalidCursorField("completed_at"),
+                            RepoWatchPersistenceCorruption::InvalidStoredDomainValue,
                         )
                     })
             })

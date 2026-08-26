@@ -202,7 +202,10 @@ once a page observes no remainder, it leaves no continuation wake and the
 complete poll proceeds. That remainder is not a termination argument on its own:
 while ingress keeps the durable backlog nonempty, every page requests a
 continuation the next fresh pass observes, so one still-due poll yields to at
-most eight consecutive preemptions and then runs uninterruptibly. Suppression
+most four consecutive preemptions and then runs uninterruptibly. Each preempted
+pass drains two bounded pages — the poll's own pre-poll drain and then the
+attempt the admission wake runs — and the suppressed pass that ends the cycle
+drains one more, so the sweep waits behind at most nine pages. Suppression
 discards no wake — the wake is latched, and the scheduler admits it as ordinary
 webhook work as soon as the sweep commits — and the next poll starts the count
 again. A drain retry in backoff suppresses admission preemption until its
@@ -1432,25 +1435,29 @@ instead: they prove later targeted requests cannot make independent progress, so
 issuing one for every loaded peer would amplify the same outage. Those receipts
 remain durably pending for the bounded retry backoff. What separates the two
 classes is the provider's own answer, not the transport it arrives on. A `403`
-carries both meanings: it is read as a throttle only when the rate-limit headers
-say so — a `Retry-After` for a secondary limit, an exhausted
-`X-RateLimit-Remaining` for a primary one — and otherwise as a resource-scoped
-permission rejection, so a credential that lacks one endpoint's scope defers its
-own receipt rather than stalling the drain at that same receipt on every retry.
-A GraphQL response reports throttling and outage in an error envelope under
-`HTTP 200`; the envelope's error type is what classifies it, with the
-repository-wide types stopping the page and every other type — a query-scoped
-failure or a missing node — deferring only its own receipt. A signature-valid
-delivery whose event or action is outside the mapped set, including a broadly
-subscribed `workflow_job`, is still acknowledged successfully and is cheaply
-logged and recorded as ignored rather than treated as an intake failure. A
-targeted projection records its terminal disposition and exact projections as
-the durable recovery handoff before its cursor write. If that cursor write
-conflicts with an intervening full poll, the delivery remains terminal and the
-in-memory shadow is handed over to the competing durable cursor before later
-pending receipts are projected. A webhook-enabled shadow wake may also preempt
-the read-only provider sweep of an in-flight complete poll, without resetting
-that poll's deadline, so the durable delivery drains before bounded
+carries both meanings, and it is read as a throttle only when the provider says
+so through one of the three signals it documents: a `Retry-After` for a
+secondary limit, an exhausted `X-RateLimit-Remaining` for a primary one, or —
+for the secondary limit that carries neither header — a rejection message naming
+that limit. A rejection is therefore read before it is classified, under the
+same byte ceiling as any other body, and a body that cannot be read or parsed
+leaves the classification to the status and headers. Anything else is a
+resource-scoped permission rejection, so a credential that lacks one endpoint's
+scope defers its own receipt rather than stalling the drain at that same receipt
+on every retry. A GraphQL response reports throttling and outage in an error
+envelope under `HTTP 200`; the envelope's error type is what classifies it, with
+the repository-wide types stopping the page and every other type — a
+query-scoped failure or a missing node — deferring only its own receipt. A
+signature-valid delivery whose event or action is outside the mapped set,
+including a broadly subscribed `workflow_job`, is still acknowledged
+successfully and is cheaply logged and recorded as ignored rather than treated
+as an intake failure. A targeted projection records its terminal disposition and
+exact projections as the durable recovery handoff before its cursor write. If
+that cursor write conflicts with an intervening full poll, the delivery remains
+terminal and the in-memory shadow is handed over to the competing durable cursor
+before later pending receipts are projected. A webhook-enabled shadow wake may
+also preempt the read-only provider sweep of an in-flight complete poll, without
+resetting that poll's deadline, so the durable delivery drains before bounded
 reconciliation resumes. After the delivery's bounded page drains, the still-due
 poll returns through the same interruptible scheduler path rather than entering
 an uninterruptible resumed sweep, until that poll has been preempted the bounded
