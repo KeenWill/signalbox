@@ -3057,15 +3057,18 @@ async fn multipart_replay_fixture(
             Some(TurnId::from_uuid(Uuid::from_u128(MULTIPART_TURN_ID))),
         )
         .await?;
-    assert!(
-        matches!(
-            first,
-            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-                SubmitInputAppliedResult::TurnOrigin(_)
-            ))
+    match &first {
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_),
+        )) => {}
+        SubmitInputHandlingOutcome::Recorded(
+            SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+            | SubmitInputResult::Rejected(_),
+        )
+        | SubmitInputHandlingOutcome::ConflictingReuse { .. } => panic!(
+            "the multipart fixture submission must record a turn-origin acceptance, not {first:?}"
         ),
-        "the multipart fixture submission must record an acceptance, not a rejection: {first:?}"
-    );
+    }
 
     Ok(MultipartReplayFixture {
         container,
