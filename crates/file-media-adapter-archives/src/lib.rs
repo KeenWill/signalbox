@@ -63,6 +63,8 @@ const OUTPUT_NODES: u64 = 5_000;
 const OUTPUT_STRING_BYTES: usize = 480_000;
 // numeric-bound: not-a-bound - fixed ZIP central-directory record header size
 const ZIP_CENTRAL_HEADER_BYTES: usize = 46;
+// numeric-bound: not-a-bound - fixed streaming read-buffer size for decoded bytes
+const DECODE_BUFFER_BYTES: usize = 8_192;
 
 /// ZIP, TAR, GZIP, and Zstandard provider for the isolated worker.
 #[derive(Clone, Copy, Debug, Default)]
@@ -673,7 +675,7 @@ fn count_reader_with_detector(
     detector: &mut RecursiveDetector,
 ) -> Result<u64, ArchiveIssue> {
     let mut total = 0_u64;
-    let mut buffer = [0_u8; 8192];
+    let mut buffer = [0_u8; DECODE_BUFFER_BYTES];
     loop {
         let count = reader
             .read(&mut buffer)
@@ -771,16 +773,20 @@ enum DecodeStatus {
     Malformed,
 }
 
+// Structural decoding reads past `MAX_ENTRY_BYTES` on purpose: a source whose tail is
+// corrupt must still report `Malformed` rather than an entry-size verdict. That overshoot
+// is bounded by the aggregate expansion ceiling, because a high-expansion source would
+// otherwise spend the worker's whole CPU and wall-clock budget proving a decode this
+// adapter has already refused on size.
 fn reader_decode_status(reader: &mut dyn Read) -> DecodeStatus {
     let mut total = 0_u64;
-    let mut limit_exceeded = false;
-    let mut buffer = [0_u8; 8192];
+    let mut buffer = [0_u8; DECODE_BUFFER_BYTES];
     loop {
         let Ok(count) = reader.read(&mut buffer) else {
             return DecodeStatus::Malformed;
         };
         if count == 0 {
-            return if limit_exceeded {
+            return if total > MAX_ENTRY_BYTES {
                 DecodeStatus::LimitExceeded
             } else {
                 DecodeStatus::Complete
@@ -789,16 +795,9 @@ fn reader_decode_status(reader: &mut dyn Read) -> DecodeStatus {
         let Ok(count) = u64::try_from(count) else {
             return DecodeStatus::Malformed;
         };
-        if !limit_exceeded {
-            let Some(next) = total.checked_add(count) else {
-                limit_exceeded = true;
-                continue;
-            };
-            if next > MAX_ENTRY_BYTES {
-                limit_exceeded = true;
-            } else {
-                total = next;
-            }
+        total = total.saturating_add(count);
+        if total > MAX_EXPANDED_BYTES {
+            return DecodeStatus::LimitExceeded;
         }
     }
 }
@@ -1168,5 +1167,40 @@ fn malformed_validation(kind: ArchiveKind, reason: &str) -> ProcessorValidationO
     ProcessorValidationOutput::Malformed {
         media_type: String::from(kind.media_type()),
         reason_code: String::from(reason),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Read, Result};
+
+    use super::{DECODE_BUFFER_BYTES, DecodeStatus, MAX_EXPANDED_BYTES, reader_decode_status};
+
+    /// A well-formed decoder over a high-expansion source: it never fails and never ends,
+    /// so only a decode bound can stop it. `produced` records how much it was asked for.
+    struct EndlessDecoder {
+        produced: u64,
+    }
+
+    impl Read for EndlessDecoder {
+        fn read(&mut self, buffer: &mut [u8]) -> Result<usize> {
+            buffer.fill(b'x');
+            self.produced = self
+                .produced
+                .saturating_add(u64::try_from(buffer.len()).expect("buffer length fits in u64"));
+            Ok(buffer.len())
+        }
+    }
+
+    #[test]
+    fn structural_decoding_of_an_endless_source_stops_at_the_expansion_ceiling() {
+        let mut decoder = EndlessDecoder { produced: 0 };
+        let buffer_bytes =
+            u64::try_from(DECODE_BUFFER_BYTES).expect("read-buffer size fits in u64");
+
+        let status = reader_decode_status(&mut decoder);
+
+        assert_eq!(status, DecodeStatus::LimitExceeded);
+        assert!(decoder.produced <= MAX_EXPANDED_BYTES + buffer_bytes);
     }
 }
