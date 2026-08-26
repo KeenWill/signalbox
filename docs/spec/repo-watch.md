@@ -420,7 +420,7 @@ stream's next occurrence overwrites the member with the pull request that
 produced it, so only a stream that never recurs again keeps null.
 
 Storage version four adds the required compact merged-pull-request baseline
-collection. Migration `202608251001` seeds that collection empty while retaining
+collection. Migration `202608260002` seeds that collection empty while retaining
 every version-three pull-request observation. The first successful cursor commit
 on the new runtime derives compact baselines from those full merged observations
 and removes the full entries atomically, so migration neither loses the prior
