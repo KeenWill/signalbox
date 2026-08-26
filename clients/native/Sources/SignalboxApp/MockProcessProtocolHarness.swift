@@ -730,17 +730,14 @@ private actor MockProcessProtocolState {
           "terminal_model_call_id": MockProcessProtocolFixtures.activeModelCallID,
         ],
       ],
-      textEntry(
+      userEntry(
         index: "0",
         sessionID: sessionID,
         entryID: MockProcessProtocolFixtures.activeUserEntryID,
-        entry: [
-          "type": "user",
-          "accepted_input_id": MockProcessProtocolFixtures.activeAcceptedInputID,
-          "turn_id": MockProcessProtocolFixtures.activeTurnID,
-        ]
+        acceptedInputID: MockProcessProtocolFixtures.activeAcceptedInputID,
+        turnID: MockProcessProtocolFixtures.activeTurnID,
+        text: userText
       ),
-      content(index: "0", text: userText),
       textEntry(
         index: "1",
         sessionID: sessionID,
@@ -800,17 +797,14 @@ private actor MockProcessProtocolState {
           "terminal_model_call_id": MockProcessProtocolFixtures.activeModelCallID,
         ],
       ],
-      textEntry(
+      userEntry(
         index: "0",
         sessionID: sessionID,
         entryID: MockProcessProtocolFixtures.activeUserEntryID,
-        entry: [
-          "type": "user",
-          "accepted_input_id": MockProcessProtocolFixtures.activeAcceptedInputID,
-          "turn_id": MockProcessProtocolFixtures.activeTurnID,
-        ]
+        acceptedInputID: MockProcessProtocolFixtures.activeAcceptedInputID,
+        turnID: MockProcessProtocolFixtures.activeTurnID,
+        text: "Save the runner status report."
       ),
-      content(index: "0", text: "Save the runner status report."),
       [
         "type": "transcript_entry",
         "entry_index": MockProcessProtocolFixtures.completedToolRequestEntryIndex,
@@ -851,17 +845,14 @@ private actor MockProcessProtocolState {
           "tool_request_id": MockSignalboxFixtures.invocationID,
         ],
       ],
-      textEntry(
+      userEntry(
         index: "0",
         sessionID: sessionID,
         entryID: MockProcessProtocolFixtures.approvalUserEntryID,
-        entry: [
-          "type": "user",
-          "accepted_input_id": MockProcessProtocolFixtures.approvalAcceptedInputID,
-          "turn_id": MockProcessProtocolFixtures.approvalTurnID,
-        ]
+        acceptedInputID: MockProcessProtocolFixtures.approvalAcceptedInputID,
+        turnID: MockProcessProtocolFixtures.approvalTurnID,
+        text: "Apply the proposed local patch."
       ),
-      content(index: "0", text: "Apply the proposed local patch."),
       [
         "type": "transcript_entry",
         "entry_index": "1",
@@ -892,17 +883,14 @@ private actor MockProcessProtocolState {
           "terminal_model_call": NSNull(),
         ],
       ],
-      textEntry(
+      userEntry(
         index: "0",
         sessionID: sessionID,
         entryID: MockProcessProtocolFixtures.failedUserEntryID,
-        entry: [
-          "type": "user",
-          "accepted_input_id": MockProcessProtocolFixtures.failedAcceptedInputID,
-          "turn_id": MockProcessProtocolFixtures.failedTurnID,
-        ]
+        acceptedInputID: MockProcessProtocolFixtures.failedAcceptedInputID,
+        turnID: MockProcessProtocolFixtures.failedTurnID,
+        text: "Run the local operation."
       ),
-      content(index: "0", text: "Run the local operation."),
       [
         "type": "transcript_entry",
         "entry_index": "1",
@@ -913,6 +901,25 @@ private actor MockProcessProtocolState {
           "turn_id": MockProcessProtocolFixtures.failedTurnID,
         ],
       ],
+    ]
+  }
+
+  private func userEntry(
+    index: String,
+    sessionID: String,
+    entryID: String,
+    acceptedInputID: String,
+    turnID: String,
+    text: String
+  ) -> [String: Any] {
+    [
+      "type": "transcript_user_entry",
+      "entry_index": index,
+      "source_session_id": sessionID,
+      "entry_id": entryID,
+      "accepted_input_id": acceptedInputID,
+      "turn_id": turnID,
+      "content": [["type": "text", "text": text]],
     ]
   }
 
