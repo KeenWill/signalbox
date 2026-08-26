@@ -724,7 +724,9 @@ async fn reconcile_ambiguous_operations(
                     }
                 ) {
                     let record_failure = timeout(
-                        reconciliation_deadline(numeric_bounds.automatic_reconciliation_attempt_bound),
+                        reconciliation_deadline(
+                            numeric_bounds.automatic_reconciliation_attempt_bound,
+                        ),
                         repository.record_failure(claimed, error.failure_kind()),
                     );
                     let Some(record_outcome) =
@@ -1816,7 +1818,11 @@ mod tests {
     fn the_per_scan_ceiling_still_ends_a_batch_no_shutdown_preempts() {
         let (_sender, shutdown) = tokio::sync::watch::channel(false);
 
-        assert!(!batch_admits_another_reconciliation(&shutdown, 64, Some(64)));
+        assert!(!batch_admits_another_reconciliation(
+            &shutdown,
+            64,
+            Some(64)
+        ));
     }
 
     #[tokio::test]

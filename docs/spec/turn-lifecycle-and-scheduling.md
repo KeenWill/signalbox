@@ -19,9 +19,9 @@ is verified against this PR (`agent/daemon-live-shutdown-checkpoint`) and
 re-verified, for every committed stage boundary the tool loop reaches, against
 this PR (`agent/fix-liveness-shutdown-recovery`). Shutdown preemption of the
 ambiguous-operation batch, the separated slot-held and reconciliation attempt
-ceilings, the recovery transaction's write-lock budget, and the handoff's
-bounded attempts across correlating and recovering are verified against the same
-PR.
+ceilings, the recovery transaction's write-lock budget, the handoff's
+bounded attempts across correlating and recovering, and expiry recovery for the
+pre-activation compaction window are verified against the same PR.
 
 The expired-pass recovery lock classification and retry budgets were re-verified
 against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
@@ -514,7 +514,11 @@ the sweep (INV-007).
   Active-turn execution reports the exact turn after its resumable-work lookup
   and before driving that work, so a pass that begins between operations still
   gives the handoff the identity of any model call or tool attempt it later
-  starts. The handoff marks the correlated cancellation so fatal supervision
+  starts. A pass inside its pre-activation compaction reports that window
+  instead: it has no turn to name, and its dedicated compaction call is durable
+  work no other in-process path reconciles, so expiry there hands the session to
+  the same per-session recovery transaction startup uses rather than reporting
+  nothing. The handoff marks the correlated cancellation so fatal supervision
   does not mistake the scheduler's bounded drop for an unrelated failure, then
   spends four bounded database attempts, the first immediate and the rest at the
   configured cadence, across correlating the turn and recovering it. Each

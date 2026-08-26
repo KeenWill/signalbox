@@ -2638,8 +2638,7 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
 /// lap reaches it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn s04_recovery_discovery_waits_on_the_interrupted_turn_row()
--> Result<(), Box<dyn Error>> {
+async fn s04_recovery_discovery_waits_on_the_interrupted_turn_row() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let seed = 0xD1A0;
     let parked = park_restart_ambiguity(&pool, seed).await?;
