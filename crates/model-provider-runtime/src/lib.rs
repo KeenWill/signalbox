@@ -1771,6 +1771,7 @@ fn render_tool_result(content: &ModelToolResultContent) -> (String, bool) {
             let kind = match error.kind() {
                 ToolExecutionErrorKind::UnknownTool => "unknown_tool",
                 ToolExecutionErrorKind::InvalidArguments => "invalid_arguments",
+                ToolExecutionErrorKind::PreauthorizationRejected => "preauthorization_rejected",
                 ToolExecutionErrorKind::ExecutionFailed => "execution_failed",
                 ToolExecutionErrorKind::ResultTooLarge => "result_too_large",
                 ToolExecutionErrorKind::CrashLost => "crash_lost",

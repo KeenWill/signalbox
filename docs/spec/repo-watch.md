@@ -59,9 +59,11 @@ this PR (`agent/daemon-live-bounded-repo-reconciliation`). Repeatable preemption
 while durable drain pages remain is verified against this PR
 (`agent/daemon-live-repeatable-webhook-preemption`). The progressing-drain work
 budget and continuation wake are verified against this PR
-(`agent/daemon-live-webhook-progress-budget`). Primary webhook intake, the
-producer each event row records, the parity view's promotion bound, and the
-frontier entry's ownership member are verified against this PR
+(`agent/daemon-live-webhook-progress-budget`). Merged-pull-request cursor
+compaction and payload-scaled webhook deadlines are verified against this PR
+(`agent/repo-watch-cursor-drain-bounds`). Primary webhook intake, the producer
+each event row records, the parity view's promotion bound, and the frontier
+entry's ownership member are verified against this PR
 (`agent/webhook-primary-mode`). The approval-judge dispatch fence and unattended
 escalation release described below are verified against this PR
 (`agent/headless-approval-escalation`). The operator-commissioned dispatch fence
@@ -73,7 +75,9 @@ complete-poll fetches is verified against this PR
 commissioned-session obligation blocking and blocker replacement are verified
 against this PR (`agent/daemon-convergence-sweep`). Conservative stale
 blocking-review dismissal is verified against this PR
-(`agent/dispatch-autonomy-review-clearance`).
+(`agent/dispatch-autonomy-review-clearance`). The bounded repository-watch
+operator projections are verified against this PR
+(`agent/web-repo-watch-projection`).
 
 ## Configuration and credential boundary
 
@@ -258,11 +262,17 @@ clean exit. Once shutdown is observable, the supervisor drains every watch task
 and reports a clean stop; a task that exits cleanly before shutdown remains a
 runtime lifecycle defect.
 
-**Implemented behavior.** The versioned durable cursor retains the complete
-normalized repository state, exact signal-reviewer set, and the last positive
-occurrence sequence for each recurring source-independent event stream. The
-frontier is canonical by its 32-byte stream identities, rejects duplicates and
-zero sequences, and admits at most 1,000,000 streams. That ceiling is where one
+**Implemented behavior.** The versioned durable cursor retains the normalized
+repository state needed for future comparisons, exact signal-reviewer set, and
+the last positive occurrence sequence for each recurring source-independent
+event stream. A complete or targeted observation derives events against the full
+provider state first, then omits merged pull-request details from the cursor
+candidate while retaining the merge event's advanced occurrence frontier. Closed
+unmerged pull requests remain until a later complete poll no longer fetches
+them. Thus a merge burst cannot make every later webhook refresh re-transfer
+terminal titles, bodies, checks, reviews, threads, and reactions. The frontier
+is canonical by its 32-byte stream identities, rejects duplicates and zero
+sequences, and admits at most 1,000,000 streams. That ceiling is where one
 repository's identity state, rather than its event history, becomes the dominant
 cost of watching it: each entry costs a 32-byte stream identity, an 8-byte
 sequence, and an 8-byte owning pull-request number, so the limit bounds one
@@ -1346,24 +1356,30 @@ progressing drain also yields after the deployment-owned
 last terminal delivery, so a slow but productive page returns before consuming
 the outer deadline and does not enter failure backoff. Configuring that policy
 as `"none"` disables the progress yield; the outer deadline still bounds a stuck
-operation. Every drain call also has a sixty-second outer deadline spanning its
-provider and database work. Expiry cancels that attempt, leaves unfinished
-deliveries pending, invalidates partial provider freshness, emits the closed
-`webhook_projection_drain_timed_out` cause, and, unless only post-terminal
-dispatch work expired, enters the same bounded projection backoff as another
-retryable drain failure. Post-terminal dispatch expiry instead arms its fixed
-dispatch follow-up. The serialized task is therefore returned to its scheduler
-after bounded child cleanup even when an inner operation never returns. The
-enclosing webhook attempt has a seventy-second deadline so activation, lifecycle
-cutoffs, and dispatch reconciliation surrounding the drain cannot hold that task
-indefinitely either. Its cancellation performs the same bounded child cleanup
-and shadow settlement described below, invalidates partial freshness, and emits
-the closed `webhook_attempt_timed_out` cause. Cancellation carries no failure of
-its own, so the step it interrupted decides the retry: a cancelled drain
-advances the projection backoff, a cancelled reconciliation after a committed
-drain clears that backoff and arms the fixed dispatch follow-up, and a
-cancellation before the drain began neither grows nor clears it. A cleanup that
-exceeds its own five-second bound emits
+operation. Before each drain, the runtime reads the stored byte size of the
+latest cursor document without deserializing it. That read derives the deadlines
+below and so cannot be covered by them; it carries its own ten-second bound,
+whose expiry fails the attempt as a persistence failure rather than leaving one
+unbounded step ahead of every attempt. The outer deadline is the greater of 60
+seconds and 30 seconds per started MiB of stored cursor payload, capped at 15
+minutes. It spans the drain's provider and database work. Expiry cancels that
+attempt, leaves unfinished deliveries pending, invalidates partial provider
+freshness, emits the closed `webhook_projection_drain_timed_out` cause, and,
+unless only post-terminal dispatch work expired, enters the same bounded
+projection backoff as another retryable drain failure. Post-terminal dispatch
+expiry instead arms its fixed dispatch follow-up. The serialized task is
+therefore returned to its scheduler after bounded child cleanup even when an
+inner operation never returns. The enclosing webhook attempt uses the same
+payload-scaled drain deadline plus a ten-second reconciliation margin, so
+activation, lifecycle cutoffs, and dispatch reconciliation surrounding the drain
+cannot hold that task indefinitely either. Its cancellation performs the same
+bounded child cleanup and shadow settlement described below, invalidates partial
+freshness, and emits the closed `webhook_attempt_timed_out` cause. Cancellation
+carries no failure of its own, so the step it interrupted decides the retry: a
+cancelled drain advances the projection backoff, a cancelled reconciliation
+after a committed drain clears that backoff and arms the fixed dispatch
+follow-up, and a cancellation before the drain began neither grows nor clears
+it. A cleanup that exceeds its own five-second bound emits
 `webhook_cancelled_fetch_drain_timed_out` instead of preventing that retry from
 being scheduled. The same cleanup bound applies when an admission wake or retry
 cancels a complete provider sweep. Unfinished child fetches remain in the
@@ -1735,6 +1751,44 @@ projection and the view derives `poll_only_family` on the poll side;
 `compressed_transition` and `context_drift` are admitted by the durable
 vocabulary and are not emitted, so a divergence whose real explanation is either
 one is reported without a cause.
+
+## Operator read projection
+
+**Implemented behavior.** Repository-watch operations are available through a
+typed, read-only application port backed by the existing durable cursor, event,
+evaluation, dispatch, release, obligation, held-slot, webhook, and commissioned
+dispatch records. Each call uses one repeatable-read, read-only transaction.
+Current repository, pull-request, held-work, queued-work, and correlated-session
+pages return at most 64 rows per collection. Event and webhook history return at
+most 100 rows per collection and continue with durable keyset positions rather
+than an offset or fixed terminal limit. A pull request's correlated session
+summaries are loaded as one bounded set in that transaction; constructing the
+page never follows each session separately.
+
+**Implemented behavior.** The projection retains separate typed facts for the
+last observed event, last event that matched an actionable rule, last dispatch
+attempt, and last achieved-and-released automation settlement. It reports held
+slots and outstanding obligations separately, including the held release
+blockers and whether an obligation is ready, occupied by a watch dispatch, held
+by a live independently commissioned session, cooling down, or parked. The
+external hold is its own reported state because that session owns no dispatch
+identity, and readiness is conjoined from the durable outstanding-obligation
+view rather than recomputed, so this read cannot report an obligation ready that
+admission refuses. Repository health includes explicit five-minute and one-hour
+webhook windows, latest and one-hour maximum projection latency, and event-kind
+counts. Activity times come from durable record timestamps; neither session age
+nor activity time is inferred from a UUID.
+
+**Implemented behavior.** Pull-request provider state comes from the normalized
+durable cursor and reports lifecycle, draft state, mergeability, completed-check
+status, current-head review decision, stale-review count, unresolved-thread
+count, and current open-stack relationships. Automation convergence is not a
+synonym for provider mergeability or checks: a current-head seal requires the
+latest dispatch to have been released, the goal generation bound to every
+dispatched action turn to have a terminal achieved event, and the dispatch's
+delivered-state event head to equal the current normalized head. An achieved
+release against an older delivered head is reported as a stale seal; held,
+queued, non-converged, and unattempted states remain distinct.
 
 ## Open edges
 

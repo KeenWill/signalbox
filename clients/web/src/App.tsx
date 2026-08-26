@@ -115,11 +115,19 @@ export function Workspace({
       timelineIds,
       artifactPreviewIds: knownId === 'blobs' ? artifactPreviewIds : [],
       artifactOriginalIds: knownId === 'blobs' ? artifactOriginalIds : [],
-      navigate: (path) =>
+      navigate: (path) => {
+        if (path === '/scenario/streaming') {
+          void navigate({
+            to: '/scenario/$scenarioId',
+            params: { scenarioId: 'streaming' },
+          })
+          return
+        }
         void navigate({
           to: '/$surface',
           params: { surface: path.slice(1) as ProductRouteId },
-        }),
+        })
+      },
       focusTimeline: () => {
         const target =
           document.querySelector<HTMLElement>('[aria-label="Session timeline"]') ??

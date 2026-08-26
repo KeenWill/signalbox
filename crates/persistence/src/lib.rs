@@ -37,6 +37,7 @@ pub mod replace_session_defaults;
 pub mod repo_watch;
 pub mod repo_watch_dispatch;
 pub mod repo_watch_dispatch_obligation;
+pub mod repo_watch_operations;
 pub mod repo_watch_webhook;
 pub mod review_orchestration;
 pub mod review_workflow;
