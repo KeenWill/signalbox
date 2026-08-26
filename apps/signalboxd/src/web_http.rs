@@ -865,7 +865,7 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
     };
     drop(snapshot_permit);
     let cursor = snapshot.cursor;
-    let live_page_has_capacity = snapshot.continuation_after.is_none();
+    let live_page_has_capacity = snapshot.continuation.is_none();
     let visible_sessions = snapshot
         .summaries
         .iter()
@@ -4170,7 +4170,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4264,7 +4264,12 @@ mod tests {
         let off_page = SessionId::from_uuid(Uuid::from_u128(2));
         let summary = |session| AttentionSummary {
             session,
+            title_summary: None,
+            title_truncated: false,
+            archived: false,
             current_turn: None,
+            active_turn_count: 0,
+            queued_turn_count: 0,
             state: AttentionState::Idle,
             action: None,
             goal_block: None,
@@ -4296,7 +4301,12 @@ mod tests {
         let new_session = SessionId::from_uuid(Uuid::from_u128(2));
         let summary = AttentionSummary {
             session: new_session,
+            title_summary: None,
+            title_truncated: false,
+            archived: false,
             current_turn: None,
+            active_turn_count: 0,
+            queued_turn_count: 0,
             state: AttentionState::Idle,
             action: None,
             goal_block: None,
@@ -4333,7 +4343,12 @@ mod tests {
         let off_page = SessionId::from_uuid(Uuid::from_u128(4));
         let summary = |session| AttentionSummary {
             session,
+            title_summary: None,
+            title_truncated: false,
+            archived: false,
             current_turn: None,
+            active_turn_count: 0,
+            queued_turn_count: 0,
             state: AttentionState::Idle,
             action: None,
             goal_block: None,

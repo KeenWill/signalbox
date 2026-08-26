@@ -1944,7 +1944,7 @@ async fn postgres_before_approval_event_migration()
 const OPERATOR_ATTENTION_CHANGE_MIGRATION_VERSION: i64 = 202608250800;
 /// The catalog activity substrate depends on the attention journal and is also
 /// withheld while staging the journal's historical backfill fixture.
-const SESSION_CATALOG_ACTIVITY_MIGRATION_VERSION: i64 = 202608251501;
+const SESSION_CATALOG_ACTIVITY_MIGRATION_VERSION: i64 = 202608260003;
 
 /// Stages the database an existing installation carries when the attention
 /// journal ships: every independent migration applied, the journal and its

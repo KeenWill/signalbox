@@ -1587,6 +1587,8 @@ pub struct WebSessionCatalogSnapshot {
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
     pub continuation: Option<WebSessionCatalogContinuation>,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WebRepoWatchEventKind {
