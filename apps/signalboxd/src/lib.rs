@@ -417,6 +417,42 @@ where
         }
     }
 
+    /// Reports the resumed turn the wrapped execution found.
+    ///
+    /// The default discards the observation, which would leave the scheduler's
+    /// occupancy handoff without the exact turn a bounded pass was occupying
+    /// whenever instruction preparation wraps the execution. It would then fall
+    /// back to re-admitting the session and never repair that turn, so this
+    /// forwards rather than inherits.
+    fn resume_active_with_observer(
+        &self,
+        session: SessionId,
+        observe_turn: std::sync::Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.execution.clone();
+        async move {
+            execution
+                .resume_active_with_observer(session, observe_turn)
+                .await
+                .map_err(WorkspaceInstructionPreparedExecutionError::Execution)
+        }
+    }
+
+    /// Reports the turn a dispatch-start hint resumed, for the same reason.
+    fn resume_dispatch_start_with_observer(
+        &self,
+        session: SessionId,
+        observe_turn: std::sync::Arc<dyn Fn(TurnId) + Send + Sync>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        let execution = self.execution.clone();
+        async move {
+            execution
+                .resume_dispatch_start_with_observer(session, observe_turn)
+                .await
+                .map_err(WorkspaceInstructionPreparedExecutionError::Execution)
+        }
+    }
+
     fn active_resume_failure_requires_recovery(error: &Self::Error) -> bool {
         match error {
             WorkspaceInstructionPreparedExecutionError::WorkspaceInstructions(_) => true,
