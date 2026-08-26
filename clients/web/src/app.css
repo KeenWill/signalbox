@@ -1549,7 +1549,10 @@ kbd {
 .import-artifact-view .artifact-heading {
   padding: 0.62rem;
 }
-.import-artifact-view .artifact-rendered pre {
+/* The renderer emits a `textarea.artifact-scroll` whose shared rule pins both the minimum and the
+   maximum height at 300px, so the compact imports panel must override both to bound the control. */
+.import-artifact-view .artifact-rendered .artifact-scroll {
+  min-height: 120px;
   max-height: 120px;
   padding: 0.62rem;
 }
