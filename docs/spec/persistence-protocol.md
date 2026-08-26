@@ -185,21 +185,20 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — one hundred twenty-seven files,
-`202607180001` through `202608251000` — embedded by `sqlx::migrate!` as the
-static `MIGRATOR` and applied through one `migrate(pool)` operation. SQLx's
-`_sqlx_migrations` ledger records applied files with checksums (the integration
-tests read the ledger directly); serialization of concurrent migration runs is
-SQLx dependency behavior, relied on but not demonstrated in this repo.
-`.gitattributes` pins migration files to LF so checksums do not vary by
-platform, and a build script re-embeds the set whenever a file changes. The
-production binary holds the singleton daemon guard and fences the prior pool
-generation, then runs `migrate` as its first schema phase, followed by the
-startup scan and runtime (INV-034). The fence migration's first installation is
-the sole case without a prior fenced pool, because no earlier schema can have
-admitted one. Why: checksummed forward-only files make every schema change a
-reviewed, immutable artifact, so a deployed database's history is never silently
-edited.
+`crates/persistence/migrations/` — one hundred fourty files, `202607180001`
+through `202608251300` — embedded by `sqlx::migrate!` as the static `MIGRATOR`
+and applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations`
+ledger records applied files with checksums (the integration tests read the
+ledger directly); serialization of concurrent migration runs is SQLx dependency
+behavior, relied on but not demonstrated in this repo. `.gitattributes` pins
+migration files to LF so checksums do not vary by platform, and a build script
+re-embeds the set whenever a file changes. The production binary holds the
+singleton daemon guard and fences the prior pool generation, then runs `migrate`
+as its first schema phase, followed by the startup scan and runtime (INV-034).
+The fence migration's first installation is the sole case without a prior fenced
+pool, because no earlier schema can have admitted one. Why: checksummed
+forward-only files make every schema change a reviewed, immutable artifact, so a
+deployed database's history is never silently edited.
 
 A migration becomes immutable as soon as its version is recorded in the
 `_sqlx_migrations` table of any database whose history must remain continuous:
