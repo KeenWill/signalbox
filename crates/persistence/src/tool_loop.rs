@@ -382,7 +382,7 @@ impl PostgresToolLoopRepository {
         result
     }
 
-    /// Finds the exact active tool turn whose durable phase can make progress.
+    /// Finds the exact active turn whose durable execution can make progress.
     ///
     /// This is a reconciliation hint only. Every later tool transaction
     /// rechecks the complete batch under the session scheduler lock.
@@ -395,47 +395,61 @@ impl PostgresToolLoopRepository {
                FROM turn_lifecycle
               WHERE session_id = $1
                 AND state_kind = 'active'
-                AND active_tool_round_call_id IS NOT NULL
                 AND goal_turn_is_runtime_relevant(session_id, turn_id)
                 AND (
-                    active_phase_kind = 'running'
-                    OR (
-                        active_phase_kind = 'awaiting_child'
-                        AND EXISTS (
-                            SELECT 1
-                              FROM session_delegation_wait AS waiting
-                              JOIN session_child_result_delivery AS delivery
-                                ON delivery.awaiting_tool_request_id =
-                                   waiting.awaiting_tool_request_id
-                               AND delivery.spawning_tool_request_id =
-                                   waiting.spawning_tool_request_id
-                               AND delivery.parent_session_id =
-                                   waiting.parent_session_id
-                               AND delivery.delivery_sequence IS NULL
-                             WHERE waiting.awaiting_tool_request_id =
-                                   turn_lifecycle.child_wait_request_id
-                               AND waiting.parent_session_id =
-                                   turn_lifecycle.session_id
-                               AND waiting.parent_turn_id =
-                                   turn_lifecycle.turn_id
-                               AND waiting.wait_mode = 'foreground'
-                        )
+                    EXISTS (
+                        SELECT 1
+                          FROM model_call AS prepared
+                         WHERE prepared.session_id = turn_lifecycle.session_id
+                           AND prepared.turn_id = turn_lifecycle.turn_id
+                           AND prepared.turn_attempt_id =
+                               turn_lifecycle.current_attempt_id
+                           AND prepared.state_kind = 'prepared'
                     )
                     OR (
-                        active_phase_kind = 'awaiting_tool_approval'
-                        AND EXISTS (
-                            SELECT 1
-                              FROM tool_request AS request
-                             WHERE request.request_id = approval_tool_request_id
-                               AND request.session_id = turn_lifecycle.session_id
-                               AND request.turn_id = turn_lifecycle.turn_id
-                               AND request.approval_posture = 'delegated'
-                               AND NOT EXISTS (
+                        active_tool_round_call_id IS NOT NULL
+                        AND (
+                            active_phase_kind = 'running'
+                            OR (
+                                active_phase_kind = 'awaiting_child'
+                                AND EXISTS (
                                     SELECT 1
-                                      FROM tool_approval_judge_model_call AS judge
-                                     WHERE judge.request_id = request.request_id
-                                       AND judge.state_kind = 'terminal'
-                               )
+                                      FROM session_delegation_wait AS waiting
+                                      JOIN session_child_result_delivery AS delivery
+                                        ON delivery.awaiting_tool_request_id =
+                                           waiting.awaiting_tool_request_id
+                                       AND delivery.spawning_tool_request_id =
+                                           waiting.spawning_tool_request_id
+                                       AND delivery.parent_session_id =
+                                           waiting.parent_session_id
+                                       AND delivery.delivery_sequence IS NULL
+                                     WHERE waiting.awaiting_tool_request_id =
+                                           turn_lifecycle.child_wait_request_id
+                                       AND waiting.parent_session_id =
+                                           turn_lifecycle.session_id
+                                       AND waiting.parent_turn_id =
+                                           turn_lifecycle.turn_id
+                                       AND waiting.wait_mode = 'foreground'
+                                )
+                            )
+                            OR (
+                                active_phase_kind = 'awaiting_tool_approval'
+                                AND EXISTS (
+                                    SELECT 1
+                                      FROM tool_request AS request
+                                     WHERE request.request_id = approval_tool_request_id
+                                       AND request.session_id =
+                                           turn_lifecycle.session_id
+                                       AND request.turn_id = turn_lifecycle.turn_id
+                                       AND request.approval_posture = 'delegated'
+                                       AND NOT EXISTS (
+                                            SELECT 1
+                                              FROM tool_approval_judge_model_call AS judge
+                                             WHERE judge.request_id = request.request_id
+                                               AND judge.state_kind = 'terminal'
+                                       )
+                                )
+                            )
                         )
                     )
                 )",

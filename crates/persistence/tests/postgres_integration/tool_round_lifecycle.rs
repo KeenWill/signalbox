@@ -822,50 +822,40 @@ async fn s02_s08_inv016_inv036_steering_consumed_at_continuation_reloads_and_sca
             &mut recovery_ids,
         )
         .await?;
-    let StartupScanSessionOutcome::RecoveredModelCall(recovered) = scan else {
-        panic!("the startup scan classifies the prepared continuation call instead of aborting");
-    };
-    assert!(
-        matches!(*recovered, ModelCallTerminalOutcome::Failed(_)),
-        "the lost prepared continuation call closes as a known failure"
+    assert_eq!(
+        scan,
+        StartupScanSessionOutcome::ResumablePreparedModelCall { turn: fixture.turn },
+        "the startup scan preserves the prepared continuation for resumption"
     );
-    let recovered_shape: (String, Option<Uuid>) = sqlx::query_as(
-        "SELECT terminal_disposition_kind, terminal_model_call_id
-           FROM turn_lifecycle
-          WHERE session_id = $1
-            AND turn_id = $2",
+    let recovered_shape: (String, Option<String>, Uuid, String, Option<String>) = sqlx::query_as(
+        "SELECT lifecycle.state_kind,
+                lifecycle.terminal_disposition_kind,
+                lifecycle.current_attempt_id,
+                continuation.state_kind,
+                continuation.terminal_disposition_kind
+           FROM turn_lifecycle AS lifecycle
+           JOIN model_call AS continuation
+             ON continuation.session_id = lifecycle.session_id
+            AND continuation.turn_id = lifecycle.turn_id
+            AND continuation.model_call_id = $3
+          WHERE lifecycle.session_id = $1
+            AND lifecycle.turn_id = $2",
     )
     .bind(fixture.session.into_uuid())
     .bind(fixture.turn.into_uuid())
+    .bind(continuation_call.into_uuid())
     .fetch_one(&pool)
     .await?;
     assert_eq!(
         recovered_shape,
-        (String::from("failed"), Some(continuation_call.into_uuid()),),
-        "restart recovery names the steering-consuming continuation call"
-    );
-
-    let post_recovery = SubmitInputRepository::new(pool.clone())
-        .handle(
-            start_input(
-                seed + 0x33,
-                seed + 1,
-                "work after recovered continuation",
-                1,
-                ModelSelectionOverride::UseSessionDefault,
-            ),
-            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x34)),
-            Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x35))),
-        )
-        .await?;
-    assert!(
-        matches!(
-            post_recovery,
-            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-                SubmitInputAppliedResult::TurnOrigin(_)
-            ))
+        (
+            String::from("active"),
+            None,
+            continuation_attempt.into_uuid(),
+            String::from("prepared"),
+            None,
         ),
-        "the failed terminal continuation shape must reconstitute before the next submit"
+        "restart recovery leaves the steering-consuming continuation unchanged"
     );
 
     pool.close().await;
