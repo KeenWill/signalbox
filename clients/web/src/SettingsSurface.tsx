@@ -31,6 +31,8 @@ export function SettingsSurface() {
       dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => {},
       paneSize,
     })

@@ -8,7 +8,7 @@ use serde::de::{DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 
 /// Maximum permitted nesting of JSON object and array containers in one
 /// provider-controlled value.
-// numeric-bound: ceiling - protects parser stack and latency from pathological nesting
+// numeric-bound: guard - prevents pathological provider-JSON nesting from exhausting the stack
 pub const PROVIDER_JSON_NESTING_LIMIT: usize = 127;
 
 /// Provider-controlled JSON exceeds [`PROVIDER_JSON_NESTING_LIMIT`].

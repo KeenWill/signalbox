@@ -9,6 +9,8 @@ import {
   invokeCommand,
 } from './commands'
 import { FleetTable } from './FleetTable'
+import { ArtifactWorkbench } from './features/artifacts/ArtifactRenderer'
+import { artifactOriginalIds, artifactPreviewIds } from './features/artifacts/artifactScenario'
 import {
   SCENARIO_FLEET_WINDOW_ITEMS,
   SCENARIO_TIMELINE_WINDOW_ITEMS,
@@ -90,18 +92,22 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
       dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: knownId === 'blobs' ? artifactPreviewIds : [],
+      artifactOriginalIds: knownId === 'blobs' ? artifactOriginalIds : [],
       navigate: (path) =>
         void navigate({
           to: '/$surface',
           params: { surface: path.slice(1) as ProductRouteId },
         }),
       focusTimeline: () => {
-        const active = document.activeElement
-        if (active instanceof HTMLElement) active.blur()
-        document.querySelector<HTMLElement>('[aria-label="Session timeline"]')?.focus()
+        const target =
+          document.querySelector<HTMLElement>('[aria-label="Session timeline"]') ??
+          document.querySelector<HTMLElement>('.artifact-heading[aria-pressed="true"]') ??
+          document.querySelector<HTMLElement>('.artifact-heading')
+        target?.focus()
       },
     }),
-    [dispatch, navigate, timelineIds],
+    [dispatch, knownId, navigate, timelineIds],
   )
   useCommandHotkeys(commandContext)
 
@@ -196,12 +202,16 @@ export function Workspace({ scenarioId }: { scenarioId: string }) {
           <Toolbar context={commandContext} />
         </header>
         <div className="primary-stack">
-          <Transcript
-            key={`timeline-${knownId}`}
-            items={timeline.items}
-            context={commandContext}
-            autoFocus
-          />
+          {knownId === 'blobs' ? (
+            <ArtifactWorkbench commandContext={commandContext} />
+          ) : (
+            <Transcript
+              key={`timeline-${knownId}`}
+              items={timeline.items}
+              context={commandContext}
+              autoFocus
+            />
+          )}
           {app.layout === 'workbench' && (
             <FleetTable key={`fleet-${knownId}`} rows={fleet.items} totalCount={fleet.totalCount} />
           )}
