@@ -217,6 +217,8 @@ impl FileMediaProvider for PdfProvider {
                 Ok(ProcessorProbeOutput::Candidate {
                     media_type: String::from(MEDIA_TYPE),
                     strength: ProbeStrength::Strong,
+                    evidence_bytes: u64::try_from(prefix.len())
+                        .map_err(|_| FileMediaProviderFailure::Failed)?,
                 })
             } else {
                 Ok(malformed_probe())

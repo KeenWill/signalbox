@@ -37,6 +37,7 @@ pub mod replace_session_defaults;
 pub mod repo_watch;
 pub mod repo_watch_dispatch;
 pub mod repo_watch_dispatch_obligation;
+pub mod repo_watch_operations;
 pub mod repo_watch_webhook;
 pub mod review_orchestration;
 pub mod review_workflow;
@@ -57,6 +58,7 @@ pub mod submit_input;
 pub mod test_support;
 pub mod tool_loop;
 pub mod turn_liveness;
+pub mod usage;
 pub mod workspace_instructions;
 
 pub use session_credentials::{

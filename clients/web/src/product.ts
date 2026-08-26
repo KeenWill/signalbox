@@ -1,7 +1,14 @@
 import {
   decodeWebApiErrorResponse,
+  decodeWebAttentionSnapshot,
+  decodeWebAttentionStreamEvent,
+  decodeWebBlobDescriptor,
   decodeWebContractBootstrap,
   decodeWebSearchPage,
+  type WebApiErrorResponse,
+  type WebAttentionSnapshot,
+  type WebAttentionStreamEvent,
+  type WebBlobDescriptor,
   type WebContractBootstrap,
   type WebSearchPage,
 } from './generated/web-contract.mjs'
@@ -31,9 +38,9 @@ export type ProductSurfaceState =
 
 export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> = {
   attention: {
-    kind: 'committed-unimplemented',
+    kind: 'server-backed',
     owningTrack: '#992 attention projections',
-    facts: ['prioritized attention reads'],
+    facts: ['keyset attention snapshot pages', 'streamed attention projection updates'],
   },
   sessions: {
     kind: 'server-backed',
@@ -41,9 +48,9 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
     facts: ['bounded session descriptors', 'stable-address timeline windows'],
   },
   search: {
-    kind: 'server-backed',
+    kind: 'committed-unimplemented',
     owningTrack: '#994 search and usage reads',
-    facts: ['bounded lexical search pages', 'stable-address search continuations'],
+    facts: ['cross-session search reads'],
   },
   activity: {
     kind: 'committed-unimplemented',
@@ -61,9 +68,9 @@ export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> =
     facts: ['review discovery reads'],
   },
   imports: {
-    kind: 'committed-unimplemented',
+    kind: 'server-backed',
     owningTrack: '#995 discovery reads',
-    facts: ['import discovery reads'],
+    facts: ['keyset import catalog pages', 'bounded imported-entry windows'],
   },
   usage: {
     kind: 'committed-unimplemented',
@@ -84,6 +91,14 @@ export const productSurfaceCacheLabel = (surface: ProductRouteId): string | null
   }
 }
 
+export interface ProductTransport {
+  readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap>
+  readBlobDescriptor(input: BlobDescriptorInput, signal?: AbortSignal): Promise<WebBlobDescriptor>
+  readAttention(afterSessionId?: string, signal?: AbortSignal): Promise<WebAttentionSnapshot>
+  followAttention(signal?: AbortSignal): AsyncIterable<WebAttentionStreamEvent>
+  search(request: ProductSearchRequest, signal?: AbortSignal): Promise<WebSearchPage>
+}
+
 export interface ProductSearchState {
   q?: string
   session?: string
@@ -102,24 +117,311 @@ export interface ProductSearchRequest {
   after?: { address: string; projectionId: string }
 }
 
-// Hard safety ceiling: bounds search-response allocation and parse work in the browser.
+export interface BlobDescriptorInput {
+  digest: string
+  mediaType: string
+  displayFilename?: string
+}
+
+export class ProductRequestError extends Error {
+  readonly status: number
+  readonly response: WebApiErrorResponse
+
+  constructor(status: number, response: WebApiErrorResponse) {
+    super(response.error.message)
+    this.name = 'ProductRequestError'
+    this.status = status
+    this.response = response
+  }
+}
+
+export class ProductTransportError extends Error {
+  constructor(cause: unknown) {
+    super('The Signalbox daemon could not be reached.', { cause })
+    this.name = 'ProductTransportError'
+  }
+}
+
+export class ProductContractError extends Error {
+  constructor(cause: unknown) {
+    super('The bootstrap response did not match the generated web contract.', { cause })
+    this.name = 'ProductContractError'
+  }
+}
+
+export class ProductInputError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ProductInputError'
+  }
+}
+
+export const MAX_PRODUCT_JSON_BYTES = 65_536
+export const MAX_NDJSON_ITEM_BYTES = 65_536
+export const MAX_DECLARED_MEDIA_TYPE_BYTES = 255
+export const MAX_DISPLAY_FILENAME_BYTES = 1_024
+// The Attention projection contract pages at 32 summaries; the byte ceilings are the shared
+// product JSON and NDJSON item limits the bootstrap already pins.
+export const MAX_ATTENTION_SNAPSHOT_ITEMS = 32
+// Hard safety ceiling: bounds search-response allocation and parse work in the browser. Search
+// pages carry snippets for a full page of results, so they need a wider ceiling than the shared
+// product JSON limit that bounds identity-sized responses.
 const MAX_SEARCH_RESPONSE_BYTES = 1_048_576
-// Hard safety ceiling: bounds bootstrap-response allocation and parse work before decoding. The
-// bootstrap carries only contract identity, capabilities, and limits, so this ceiling stays
-// independent of the untrusted limits inside that response.
-export const MAX_BOOTSTRAP_RESPONSE_BYTES = 65_536
 // Hard safety ceiling: rejects advertised query limits above the browser's bounded input budget.
 const MAX_SEARCH_QUERY_BYTES = 512
 // Hard safety ceiling: rejects advertised page sizes above the browser's bounded render budget.
 const MAX_SEARCH_PAGE_ITEMS = 100
 // Hard safety ceiling: rejects advertised snippets above the browser's bounded render budget.
 const MAX_SEARCH_SNIPPET_BYTES = 512
-// Hard safety ceiling: bounds error-response allocation and parse work before classification.
-const ERROR_RESPONSE_BYTES = 16_384
 // Representation fact: projection identities are positive signed 64-bit database integers.
 const MAX_I64 = 9_223_372_036_854_775_807n
 const isUtf8ContinuationByte = (byte: number | undefined) =>
   byte !== undefined && (byte & 0xc0) === 0x80
+
+const MAX_UNSIGNED_64 = 18_446_744_073_709_551_615n
+const SESSION_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const CANONICAL_NONNEGATIVE_INTEGER_PATTERN = /^(0|[1-9]\d*)$/
+
+const validateCursor = (cursor: string): void => {
+  if (!CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(cursor) || BigInt(cursor) > MAX_UNSIGNED_64) {
+    throw new TypeError('attention cursor must be a canonical unsigned 64-bit integer')
+  }
+}
+
+type AttentionSummary = WebAttentionSnapshot['summaries'][number]
+
+const validateAttentionSummary = (summary: AttentionSummary): void => {
+  if (!SESSION_ID_PATTERN.test(summary.session_id)) {
+    throw new TypeError('attention summary session identity must be a canonical UUID')
+  }
+  if (summary.current_turn_id != null && !SESSION_ID_PATTERN.test(summary.current_turn_id)) {
+    throw new TypeError('attention summary current-turn identity must be a canonical UUID')
+  }
+  if (
+    summary.current_turn_id == null &&
+    [
+      'active',
+      'queued',
+      'awaiting_approval',
+      'ambiguous',
+      'awaiting_tool_recovery',
+      'awaiting_reconciliation',
+    ].includes(summary.state)
+  ) {
+    throw new TypeError('turn-derived attention summary must include a current-turn identity')
+  }
+  if (!CANONICAL_NONNEGATIVE_INTEGER_PATTERN.test(summary.last_activity.unix_milliseconds)) {
+    throw new TypeError('attention activity timestamp must be a canonical nonnegative integer')
+  }
+  for (const count of [
+    summary.judge.actionable,
+    summary.judge.completed,
+    summary.judge.escalated,
+    summary.judge.failed,
+  ]) {
+    validateCursor(count)
+  }
+  const expectedAction = (() => {
+    switch (summary.state) {
+      case 'blocked':
+        return summary.goal_block?.reason === 'execution_failure' && summary.action == null
+          ? null
+          : 'provide_goal_need'
+      case 'awaiting_approval':
+        return summary.action === null || summary.action === undefined ? null : 'decide_approval'
+      case 'ambiguous':
+        return 'reconcile_turn'
+      case 'awaiting_reconciliation':
+      case 'runner_lost':
+      case 'awaiting_tool_recovery':
+        return null
+      case 'active':
+      case 'queued':
+      case 'idle':
+        return null
+    }
+  })()
+  if ((summary.action ?? null) !== expectedAction) {
+    throw new TypeError('attention summary state and action are incoherent')
+  }
+  if (
+    summary.state === 'blocked' &&
+    (summary.goal_block === null || summary.goal_block === undefined)
+  ) {
+    throw new TypeError('blocked attention summary must include goal-block evidence')
+  }
+  if (summary.goal_block != null) {
+    validateCursor(summary.goal_block.generation)
+    if (summary.state !== 'blocked' && summary.state !== 'runner_lost') {
+      throw new TypeError('attention summary state and goal-block evidence are incoherent')
+    }
+  }
+}
+
+const validateAttentionSnapshot = (
+  snapshot: WebAttentionSnapshot,
+  afterSessionId?: string,
+): WebAttentionSnapshot => {
+  validateCursor(snapshot.cursor)
+  if (snapshot.summaries.length > MAX_ATTENTION_SNAPSHOT_ITEMS) {
+    throw new TypeError('attention snapshot exceeds the contract item ceiling')
+  }
+  const sessionIds = new Set(snapshot.summaries.map((summary) => summary.session_id))
+  if (sessionIds.size !== snapshot.summaries.length) {
+    throw new TypeError('attention snapshot contains duplicate session identities')
+  }
+  for (const summary of snapshot.summaries) validateAttentionSummary(summary)
+  if (
+    afterSessionId !== undefined &&
+    snapshot.summaries.some((summary) => summary.session_id <= afterSessionId)
+  ) {
+    throw new TypeError('attention snapshot contains an identity at or before its keyset cursor')
+  }
+  for (let index = 1; index < snapshot.summaries.length; index += 1) {
+    const previous = snapshot.summaries[index - 1]
+    const current = snapshot.summaries[index]
+    if (!previous || !current) continue
+    if (previous.session_id >= current.session_id) {
+      throw new TypeError('attention snapshot summaries are not ordered by session identity')
+    }
+  }
+  const lastSessionId = snapshot.summaries.at(-1)?.session_id ?? null
+  const continuation = snapshot.continuation_after_session_id ?? null
+  if (continuation !== null && continuation !== lastSessionId) {
+    throw new TypeError('attention snapshot continuation does not match its last session identity')
+  }
+  if (continuation !== null && snapshot.summaries.length !== MAX_ATTENTION_SNAPSHOT_ITEMS) {
+    throw new TypeError('continued attention snapshot must contain a full contract page')
+  }
+  return snapshot
+}
+
+const decodeBoundedAttentionSnapshot = (
+  value: unknown,
+  afterSessionId?: string,
+): WebAttentionSnapshot =>
+  validateAttentionSnapshot(decodeWebAttentionSnapshot(value), afterSessionId)
+
+const decodeAttentionLines = async function* (
+  body: ReadableStream<Uint8Array>,
+  signal?: AbortSignal,
+): AsyncGenerator<WebAttentionStreamEvent> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder('utf-8', { fatal: true })
+  let line: number[] = []
+  let completed = false
+  try {
+    while (true) {
+      let chunk: ReadableStreamReadResult<Uint8Array>
+      try {
+        chunk = await reader.read()
+      } catch (error) {
+        if (signal?.aborted) throw error
+        throw new ProductTransportError(error)
+      }
+      if (chunk.done) {
+        completed = true
+        break
+      }
+      for (const byte of chunk.value) {
+        if (byte === 10) {
+          if (line.length === 0) throw new TypeError('attention stream contains an empty item')
+          const value = JSON.parse(decoder.decode(Uint8Array.from(line)))
+          line = []
+          const event = decodeWebAttentionStreamEvent(value)
+          if (event.kind === 'snapshot') validateAttentionSnapshot(event.snapshot)
+          else {
+            validateCursor(event.cursor)
+            if (event.kind === 'update') {
+              if (event.summaries.length > MAX_ATTENTION_SNAPSHOT_ITEMS) {
+                throw new TypeError('attention update exceeds the contract item ceiling')
+              }
+              for (const summary of event.summaries) validateAttentionSummary(summary)
+            }
+          }
+          yield event
+        } else {
+          if (line.length === MAX_NDJSON_ITEM_BYTES) {
+            throw new TypeError('attention stream item exceeds the contract ceiling')
+          }
+          line.push(byte)
+        }
+      }
+    }
+    if (line.length !== 0) throw new TypeError('attention stream ended with an incomplete item')
+  } finally {
+    if (!completed) await reader.cancel().catch(() => undefined)
+    reader.releaseLock()
+  }
+}
+
+const utf8Length = (value: string): number => new TextEncoder().encode(value).byteLength
+
+const validateBlobDescriptorInput = (input: BlobDescriptorInput): void => {
+  if (utf8Length(input.mediaType) > MAX_DECLARED_MEDIA_TYPE_BYTES) {
+    throw new ProductInputError('Descriptor media type exceeded the 255-byte limit.')
+  }
+  if (
+    input.displayFilename !== undefined &&
+    utf8Length(input.displayFilename) > MAX_DISPLAY_FILENAME_BYTES
+  ) {
+    throw new ProductInputError('Descriptor display filename exceeded the 1024-byte limit.')
+  }
+}
+
+const readBoundedJson = async (
+  response: Response,
+  maximumBytes: number = MAX_PRODUCT_JSON_BYTES,
+): Promise<unknown> => {
+  const declaredLength = Number(response.headers.get('content-length'))
+  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+    throw new Error('response exceeded the product JSON byte limit')
+  }
+
+  if (!response.body) {
+    const text = await response.text()
+    if (new TextEncoder().encode(text).byteLength > maximumBytes) {
+      throw new Error('response exceeded the product JSON byte limit')
+    }
+    return JSON.parse(text)
+  }
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let received = 0
+  while (true) {
+    let result: ReadableStreamReadResult<Uint8Array>
+    try {
+      result = await reader.read()
+    } catch (error) {
+      throw new ProductTransportError(error)
+    }
+    if (result.done) break
+    received += result.value.byteLength
+    if (received > maximumBytes) {
+      await reader.cancel()
+      throw new Error('response exceeded the product JSON byte limit')
+    }
+    chunks.push(result.value)
+  }
+
+  const bytes = new Uint8Array(received)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+}
+
+const request = async (input: RequestInfo | URL, init: RequestInit): Promise<Response> => {
+  try {
+    return await fetch(input, init)
+  } catch (error) {
+    throw new ProductTransportError(error)
+  }
+}
 
 const canonicalUuid = (value: string): string | undefined => {
   const compact = value
@@ -154,90 +456,19 @@ const sourceUuids = (source: WebSearchPage['results'][number]['source']): string
   }
 }
 
-// A bounded read refused the body before allocating it. Kept distinct from a decode failure so
-// callers can report an over-large response separately from a contract violation.
-class ResponseTooLargeError extends TypeError {
-  constructor(maximumBytes: number) {
-    super(`response exceeds ${maximumBytes} bytes`)
-    this.name = 'ResponseTooLargeError'
-  }
-}
-
-export class BootstrapContractError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
-    super(message, options)
-    this.name = 'BootstrapContractError'
-  }
-}
-
-const describeCause = (error: unknown) => (error instanceof Error ? error.message : String(error))
-
-const readBoundedJson = async (
-  response: Response,
-  maximumBytes: number,
-  streamFailureMessage: string,
-): Promise<unknown> => {
-  const declaredLength = response.headers.get('content-length')
-  if (declaredLength !== null && Number(declaredLength) > maximumBytes) {
-    throw new ResponseTooLargeError(maximumBytes)
-  }
-  const reader = response.body?.getReader()
-  if (reader === undefined) {
-    let text: string
-    try {
-      text = await response.text()
-    } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') throw error
-      throw new ProductTransportError(streamFailureMessage)
-    }
-    if (new TextEncoder().encode(text).byteLength > maximumBytes) {
-      throw new ResponseTooLargeError(maximumBytes)
-    }
-    return JSON.parse(text)
-  }
-  const chunks: Uint8Array[] = []
-  let length = 0
-  try {
-    while (true) {
-      let read: ReadableStreamReadResult<Uint8Array>
-      try {
-        read = await reader.read()
-      } catch (error) {
-        if (error instanceof Error && error.name === 'AbortError') throw error
-        throw new ProductTransportError(streamFailureMessage)
-      }
-      const { done, value } = read
-      if (done) break
-      length += value.byteLength
-      if (length > maximumBytes) {
-        await reader.cancel()
-        throw new ResponseTooLargeError(maximumBytes)
-      }
-      chunks.push(value)
-    }
-  } finally {
-    reader.releaseLock()
-  }
-  const bytes = new Uint8Array(length)
-  let offset = 0
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset)
-    offset += chunk.byteLength
-  }
-  return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
-}
-
 const validateSearchPageBounds = (
   page: WebSearchPage,
-  request: ProductSearchRequest,
+  searchRequest: ProductSearchRequest,
 ): WebSearchPage => {
-  if (page.results.length > request.maxItems) throw new TypeError('search page exceeds item limit')
+  if (page.results.length > searchRequest.maxItems)
+    throw new TypeError('search page exceeds item limit')
   const encoder = new TextEncoder()
   const requestedSession =
-    request.sessionId === undefined ? undefined : canonicalUuid(request.sessionId)
-  let previousAddress = request.after === undefined ? undefined : BigInt(request.after.address)
+    searchRequest.sessionId === undefined ? undefined : canonicalUuid(searchRequest.sessionId)
+  let previousAddress =
+    searchRequest.after === undefined ? undefined : BigInt(searchRequest.after.address)
   let previousProjectionId =
-    request.after === undefined ? undefined : BigInt(request.after.projectionId)
+    searchRequest.after === undefined ? undefined : BigInt(searchRequest.after.projectionId)
   let firstResult = true
   for (const result of page.results) {
     const resultSession = canonicalUuid(result.session_id)
@@ -248,7 +479,7 @@ const validateSearchPageBounds = (
       throw new TypeError('search result carries an invalid UUID identity')
     }
     if (
-      request.sessionId !== undefined &&
+      searchRequest.sessionId !== undefined &&
       (requestedSession === undefined || resultSession !== requestedSession)
     ) {
       throw new TypeError('search result falls outside the requested session')
@@ -269,7 +500,7 @@ const validateSearchPageBounds = (
           projectionId >= previousProjectionId))
     ) {
       throw new TypeError(
-        firstResult && request.after !== undefined
+        firstResult && searchRequest.after !== undefined
           ? 'search page does not advance past the request cursor'
           : 'search page is not ordered newest first',
       )
@@ -279,7 +510,7 @@ const validateSearchPageBounds = (
     previousProjectionId = projectionId
     const snippetBytes = encoder.encode(result.snippet)
     const snippetLength = snippetBytes.byteLength
-    if (snippetLength > request.maxSnippetBytes) {
+    if (snippetLength > searchRequest.maxSnippetBytes) {
       throw new TypeError('search result exceeds snippet limit')
     }
     let previousEnd = 0
@@ -364,117 +595,141 @@ const validateBootstrapSearchLimits = (bootstrap: WebContractBootstrap): WebCont
   return bootstrap
 }
 
-export interface ProductTransport {
-  readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap>
-  search(request: ProductSearchRequest, signal?: AbortSignal): Promise<WebSearchPage>
-}
-
-export class ProductRequestError extends Error {
-  constructor(
-    readonly code: string,
-    readonly kind: 'transport' | 'application',
-    message: string,
+const validateCurrentBootstrap = (bootstrap: WebContractBootstrap): WebContractBootstrap => {
+  if (
+    bootstrap.contract.name !== 'signalbox.web-http' ||
+    bootstrap.contract.version !== '2' ||
+    bootstrap.limits.max_json_body_bytes !== MAX_PRODUCT_JSON_BYTES ||
+    bootstrap.limits.max_ndjson_item_bytes !== MAX_NDJSON_ITEM_BYTES ||
+    !bootstrap.capabilities.bounded_json ||
+    !bootstrap.capabilities.same_origin_json_mutations ||
+    !bootstrap.capabilities.ndjson_streaming ||
+    (bootstrap.capabilities.blob_derivations && !bootstrap.capabilities.immutable_blob_content) ||
+    (bootstrap.capabilities.image_derivatives && !bootstrap.capabilities.blob_derivations)
   ) {
-    super(message)
+    throw new Error('bootstrap contradicted the fixed signalbox.web-http v2 contract')
   }
-}
-
-export class ProductTransportError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'ProductTransportError'
-  }
+  return bootstrap
 }
 
 export class SameOriginProductTransport implements ProductTransport {
   async readBootstrap(signal?: AbortSignal): Promise<WebContractBootstrap> {
-    let response: Response
+    const response = await request('/api/bootstrap', {
+      headers: { accept: 'application/json' },
+      credentials: 'same-origin',
+      signal,
+    })
+    if (!response.ok) throw new Error(`bootstrap request failed with status ${response.status}`)
     try {
-      response = await fetch('/api/bootstrap', {
-        headers: { accept: 'application/json' },
-        credentials: 'same-origin',
-        signal,
-      })
-    } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') throw error
-      throw new ProductTransportError('The bootstrap request could not reach Signalbox.')
-    }
-    if (!response.ok) {
-      throw new ProductTransportError(`Bootstrap request failed with status ${response.status}.`)
-    }
-    let payload: unknown
-    try {
-      payload = await readBoundedJson(
-        response,
-        MAX_BOOTSTRAP_RESPONSE_BYTES,
-        'The bootstrap response stream was interrupted.',
+      return validateBootstrapSearchLimits(
+        validateCurrentBootstrap(decodeWebContractBootstrap(await readBoundedJson(response))),
       )
     } catch (error) {
       if (error instanceof ProductTransportError) throw error
-      if (error instanceof Error && error.name === 'AbortError') throw error
-      if (error instanceof ResponseTooLargeError) {
-        throw new BootstrapContractError(
-          `bootstrap response exceeds the byte limit: ${error.message}`,
-          { cause: error },
-        )
-      }
-      throw new BootstrapContractError(
-        `bootstrap response violates the web contract: ${describeCause(error)}`,
-        { cause: error },
-      )
+      throw new ProductContractError(error)
     }
-    let decoded: WebContractBootstrap
-    try {
-      decoded = decodeWebContractBootstrap(payload)
-    } catch (error) {
-      throw new BootstrapContractError(
-        `bootstrap response violates the web contract: ${describeCause(error)}`,
-        { cause: error },
-      )
-    }
-    return validateBootstrapSearchLimits(decoded)
   }
 
-  async search(request: ProductSearchRequest, signal?: AbortSignal): Promise<WebSearchPage> {
-    const query = new URLSearchParams({
-      strategy: 'lexical',
-      q: request.query,
-      max_items: String(request.maxItems),
-    })
-    if (request.sessionId) query.set('session_id', request.sessionId)
-    if (request.after) {
-      query.set('after_address', request.after.address)
-      query.set('after_projection', request.after.projectionId)
-    }
-    let response: Response
-    try {
-      response = await fetch(`/api/search?${query}`, {
+  async readBlobDescriptor(
+    input: BlobDescriptorInput,
+    signal?: AbortSignal,
+  ): Promise<WebBlobDescriptor> {
+    validateBlobDescriptorInput(input)
+    const query = new URLSearchParams({ media_type: input.mediaType })
+    if (input.displayFilename) query.set('display_filename', input.displayFilename)
+    const response = await request(
+      `/api/blobs/${encodeURIComponent(input.digest)}/descriptor?${query.toString()}`,
+      {
         headers: { accept: 'application/json' },
         credentials: 'same-origin',
         signal,
-      })
-    } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') throw error
-      throw new ProductTransportError('The search request could not reach Signalbox.')
-    }
-    if (!response.ok) {
-      const failure = decodeWebApiErrorResponse(
-        await readBoundedJson(
-          response,
-          ERROR_RESPONSE_BYTES,
-          'The search response stream was interrupted.',
-        ),
-      )
-      throw new ProductRequestError(failure.error.code, failure.error.kind, failure.error.message)
-    }
-    const page = decodeWebSearchPage(
-      await readBoundedJson(
-        response,
-        MAX_SEARCH_RESPONSE_BYTES,
-        'The search response stream was interrupted.',
-      ),
+      },
     )
-    return validateSearchPageBounds(page, request)
+    const payload = await readBoundedJson(response)
+    if (!response.ok) {
+      throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
+    }
+    const descriptor = decodeWebBlobDescriptor(payload)
+    if (descriptor.digest !== input.digest) {
+      throw new Error('descriptor digest did not match the requested blob identity')
+    }
+    if (descriptor.declared_media_type !== input.mediaType) {
+      throw new Error('descriptor media type did not match the requested blob use')
+    }
+    const expectedFilenames = input.displayFilename ? [input.displayFilename] : []
+    if (
+      descriptor.display_filename.length !== expectedFilenames.length ||
+      descriptor.display_filename.some((filename, index) => filename !== expectedFilenames[index])
+    ) {
+      throw new Error('descriptor filename did not match the requested blob use')
+    }
+    return descriptor
+  }
+
+  async readAttention(
+    afterSessionId?: string,
+    signal?: AbortSignal,
+  ): Promise<WebAttentionSnapshot> {
+    const query = new URLSearchParams()
+    if (afterSessionId) query.set('after_session_id', afterSessionId)
+    const path = query.size === 0 ? '/api/attention' : `/api/attention?${query}`
+    const response = await request(path, {
+      headers: { accept: 'application/json' },
+      credentials: 'same-origin',
+      signal,
+    })
+    const payload = await readBoundedJson(response)
+    if (!response.ok) {
+      throw new ProductRequestError(response.status, decodeWebApiErrorResponse(payload))
+    }
+    return decodeBoundedAttentionSnapshot(payload, afterSessionId)
+  }
+
+  async *followAttention(signal?: AbortSignal): AsyncGenerator<WebAttentionStreamEvent> {
+    const response = await request('/api/attention/follow', {
+      headers: { accept: 'application/x-ndjson' },
+      credentials: 'same-origin',
+      signal,
+    })
+    if (!response.ok) {
+      throw new ProductRequestError(
+        response.status,
+        decodeWebApiErrorResponse(await readBoundedJson(response)),
+      )
+    }
+    const mediaType = response.headers.get('content-type')?.split(';', 1)[0]?.trim().toLowerCase()
+    if (mediaType !== 'application/x-ndjson') {
+      await response.body?.cancel().catch(() => undefined)
+      throw new TypeError('attention stream response must use application/x-ndjson')
+    }
+    if (!response.body) throw new TypeError('attention stream response has no body')
+    yield* decodeAttentionLines(response.body, signal)
+  }
+
+  async search(searchRequest: ProductSearchRequest, signal?: AbortSignal): Promise<WebSearchPage> {
+    const query = new URLSearchParams({
+      strategy: 'lexical',
+      q: searchRequest.query,
+      max_items: String(searchRequest.maxItems),
+    })
+    if (searchRequest.sessionId) query.set('session_id', searchRequest.sessionId)
+    if (searchRequest.after) {
+      query.set('after_address', searchRequest.after.address)
+      query.set('after_projection', searchRequest.after.projectionId)
+    }
+    const response = await request(`/api/search?${query}`, {
+      headers: { accept: 'application/json' },
+      credentials: 'same-origin',
+      signal,
+    })
+    if (!response.ok) {
+      throw new ProductRequestError(
+        response.status,
+        decodeWebApiErrorResponse(await readBoundedJson(response)),
+      )
+    }
+    const page = decodeWebSearchPage(await readBoundedJson(response, MAX_SEARCH_RESPONSE_BYTES))
+    return validateSearchPageBounds(page, searchRequest)
   }
 }
 

@@ -1028,6 +1028,113 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     Ok(())
 }
 
+/// INV-092: a durable Prepared model call is a reconciliation-sweep hint, so
+/// temporary attachment unavailability can retry without process restart.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv092_prepared_model_call_remains_scheduler_eligible() -> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let session = SessionId::from_uuid(Uuid::from_u128(0x8e0_6201));
+    let direct_selection =
+        signalbox_domain::DirectModelSelection::from_uuid(Uuid::from_u128(0xce0_6201));
+    let mut create_service = CreateSessionService::new(
+        FixedSessionIds::new([session]),
+        CreateSessionRepository::new(pool.clone(), test_session_credential_pin()),
+    );
+    let CreateSessionOutcome::Applied(_) = create_service
+        .execute(CreateSessionRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4e0_6201)),
+            SessionConfigurationDefaults::new(ModelSelectionRequest::Direct(direct_selection)),
+        )?)
+        .await?
+    else {
+        panic!("the prepared-call sweep fixture session is created")
+    };
+
+    let accepted_input = AcceptedInputId::from_uuid(Uuid::from_u128(0x9e0_6201));
+    let turn = TurnId::from_uuid(Uuid::from_u128(0xae0_6201));
+    let mut submit_service = SubmitInputService::new(
+        FixedSubmitInputIds::new([accepted_input], [turn]),
+        SubmitInputRepository::new(pool.clone()),
+        AcceptingEligibilityNudge,
+        signalbox_application::InProcessToolDispatchGate::default(),
+    );
+    let SubmitInputOutcome::Recorded(SubmitInputResult::Applied(
+        SubmitInputAppliedResult::TurnOrigin(_),
+    )) = submit_service
+        .execute(SubmitInputRequest::try_new(
+            DurableCommandId::from_uuid(Uuid::from_u128(0x4e0_6202)),
+            session,
+            UserContent::try_text("attachment retry fixture".to_owned())
+                .expect("fixture user content is admitted"),
+            DeliveryRequest::StartWhenNoActiveTurn {
+                configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+            },
+        )?)
+        .await?
+    else {
+        panic!("the prepared-call sweep fixture input is accepted")
+    };
+
+    let attempt = TurnAttemptId::from_uuid(Uuid::from_u128(0xbe0_6201));
+    let mut activation_service = StartEligibleTurnService::new(
+        FixedStartEligibleTurnIds::new(
+            [SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(
+                0xde0_6201,
+            ))],
+            [ContextFrontierId::from_uuid(Uuid::from_u128(0xee0_6201))],
+            [attempt],
+        ),
+        StartEligibleTurnRepository::new(pool.clone()),
+    );
+    let StartEligibleTurnOutcome::Activated(_) = activation_service.execute(session).await? else {
+        panic!("the prepared-call sweep fixture turn activates")
+    };
+    record_empty_instruction_manifest(&pool, session).await?;
+
+    let provider_identity = ProviderModelIdentity::from_uuid(Uuid::from_u128(0xfe0_6201));
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        direct_selection,
+        ResolvedProviderTarget::naming(provider_identity),
+    )])
+    .expect("one immutable direct target forms a catalog");
+    let repository =
+        PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
+    let call = ModelCallId::from_uuid(Uuid::from_u128(0xce0_6202));
+    let PrepareInitialModelCallOutcome::Checkpointed(checkpointed) = repository
+        .prepare_initial_call(
+            session,
+            call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xde0_6202)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xee0_6202)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(0xfe0_6202)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xdf0_6201)),
+                    TurnId::from_uuid(Uuid::from_u128(0xdf0_6202)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("the fresh model call checkpoints Prepared")
+    };
+    let (eligible, _dispatch_starts, continuation) = PostgresEligibilitySweep::new(pool.clone())
+        .find_sessions()
+        .await?
+        .into_parts();
+
+    assert_eq!(checkpointed, call);
+    assert!(!continuation);
+    assert_eq!(eligible, vec![session]);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S02 / S08 / INV-005 / INV-012 / INV-014 / INV-015 / INV-032 / INV-036: the scripted
 /// application path consumes multiple steering inputs at preparation, renders
 /// them immediately in the process projection and to the provider in acceptance
@@ -2519,10 +2626,40 @@ async fn s04_exhausted_automatic_reconciliation_is_visible_to_the_operator()
     Ok(())
 }
 
+/// S03 / INV-014: a prepared model call remains discoverable for ordinary
+/// active-turn resumption even when no tool round is active.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s03_inv014_prepared_model_call_is_resumable_without_tool_round()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let fixture = checkpoint_restart_model_call(&pool, 0xc700, false).await?;
+    let active_tool_round = sqlx::query_scalar::<_, Option<Uuid>>(
+        "SELECT active_tool_round_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(fixture.session.into_uuid())
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert_eq!(active_tool_round, None);
+    assert_eq!(
+        PostgresToolLoopRepository::new(pool.clone())
+            .find_resumable_turn(fixture.session)
+            .await?,
+        Some(fixture.turn)
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 /// S03 / S04 / S08 / INV-006 / INV-014 / INV-016 / INV-034: the production
 /// startup repository applies call-aware recovery under its session lock:
-/// Prepared is known-failed with exact terminal execution provenance while
-/// reclassifying newly observed steering, an issued call becomes an exact
+/// Prepared remains retryable with its steering unchanged, an issued call becomes an exact
 /// ambiguity wait, a stopped call terminalizes as reconciliation while
 /// reclassifying its steering, that successor remains a valid replay origin,
 /// and replay changes neither.
@@ -2641,25 +2778,29 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
                 ContextFrontierId::from_uuid(Uuid::from_u128(0x5005)),
             ],
         )
-        .with_reclassified_turns([
-            prepared.turn,
-            TurnId::from_uuid(Uuid::from_u128(0x6201)),
-            TurnId::from_uuid(Uuid::from_u128(0x6202)),
-        ]),
+        .with_reclassified_turns([TurnId::from_uuid(Uuid::from_u128(0x6202))]),
         PostgresStartupScanRepository::new(restarted_pool.clone()),
     );
 
     let first = scan.execute().await?;
-    assert_eq!(first.recovered_turn_count(), 2);
+    assert_eq!(first.recovered_turn_count(), 1);
 
-    let prepared_state: (String, String, String, String, String, Uuid, Uuid) = sqlx::query_as(
+    let prepared_state: (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+        Uuid,
+        Uuid,
+    ) = sqlx::query_as(
         "SELECT call.state_kind,
                 call.terminal_disposition_kind,
                 attempt.state_kind,
                 attempt.end_disposition,
                 turn.state_kind,
-                turn.terminal_attempt_id,
-                turn.terminal_model_call_id
+                turn.current_attempt_id,
+                call.model_call_id
            FROM model_call AS call
            JOIN turn_attempt AS attempt
              ON attempt.turn_attempt_id = call.turn_attempt_id
@@ -2673,11 +2814,11 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
     assert_eq!(
         prepared_state,
         (
-            "terminal".into(),
-            "known_failed".into(),
-            "ended".into(),
-            "lost".into(),
-            "terminal".into(),
+            "prepared".into(),
+            None,
+            "prepared".into(),
+            None,
+            "active".into(),
             prepared.attempt.into_uuid(),
             prepared.call.into_uuid(),
         )
@@ -2754,8 +2895,8 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
     assert_eq!(
         steering_state,
         (
-            "reclassified_as_turn_origin".into(),
-            Some(Uuid::from_u128(0x6201)),
+            "pending_steering".into(),
+            None,
             "pending_steering".into(),
             None,
         )
@@ -2806,7 +2947,9 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
                 &mut stale_recovery_ids,
             )
             .await?,
-        StartupScanSessionOutcome::NoActiveTurn
+        StartupScanSessionOutcome::ResumablePreparedModelCall {
+            turn: prepared.turn,
+        }
     );
 
     let replay = scan.execute().await?;
@@ -2830,7 +2973,7 @@ async fn s03_s04_inv006_inv014_inv034_startup_scan_classifies_prepared_and_issue
     .bind(issued.turn.into_uuid())
     .fetch_one(&restarted_pool)
     .await?;
-    assert_eq!(unchanged, (2, 2, 1, 0));
+    assert_eq!(unchanged, (1, 1, 0, 0));
     assert_ne!(prepared.session, issued.session);
 
     let activated_interrupt = activate_earliest_queued_turn(

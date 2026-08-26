@@ -11,37 +11,128 @@ import {
   RouterProvider,
   stringifySearchWith,
 } from '@tanstack/react-router'
-import { lazy, StrictMode, Suspense, useEffect } from 'react'
+import {
+  Component,
+  lazy,
+  type ReactNode,
+  StrictMode,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+} from 'react'
 import { createRoot } from 'react-dom/client'
 import { Provider } from 'react-redux'
-import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import { ScenarioImportApi } from './imports/scenario'
 import { ProductApp } from './ProductApp'
+import { applyPresentationPreferences } from './preferences'
 import { type ProductRouteId, productRoutes, readProductSearchState } from './product'
+import { defaultSearchUsageRouteState, type SearchUsageRouteState } from './SearchUsage'
 import { selectApp, store } from './state'
 import './app.css'
 
 const rootRoute = createRootRoute({ component: () => <Outlet /> })
-const httpImportApi = new HttpImportApi()
 const scenarioImportApi = new ScenarioImportApi()
-const ScenarioWorkspace = lazy(() =>
-  import('./App').then((module) => ({ default: module.Workspace })),
-)
-const ScenarioRoute = () => {
+const routeString = (value: unknown): string | undefined =>
+  typeof value === 'string' ? value : undefined
+
+// A sparse URL must not report absent parameters as explicit `undefined`: the scenario screen
+// spreads this result over `defaultSearchUsageRouteState`, so a present-but-undefined property
+// would overwrite its default instead of falling back to it.
+const withoutAbsent = (state: Partial<SearchUsageRouteState>): Partial<SearchUsageRouteState> =>
+  Object.fromEntries(
+    Object.entries(state).filter(([, value]) => value !== undefined),
+  ) as Partial<SearchUsageRouteState>
+
+const validateScenarioSearch = (
+  search: Record<string, unknown>,
+): Partial<SearchUsageRouteState> => {
+  const view = routeString(search.view)
+  const searchScope = routeString(search.searchScope)
+  const usageSession = routeString(search.usageSession)
+  const provenance = routeString(search.provenance)
+  const callKind = routeString(search.callKind)
+  return withoutAbsent({
+    view: view === 'usage' ? 'usage' : view === 'search' ? 'search' : undefined,
+    q: routeString(search.q),
+    searchScope:
+      searchScope === 'session' ? 'session' : searchScope === 'global' ? 'global' : undefined,
+    usageSession:
+      usageSession === 'current' ? 'current' : usageSession === 'all' ? 'all' : undefined,
+    provenance:
+      provenance === 'reported' ? 'reported' : provenance === 'estimated' ? 'estimated' : undefined,
+    modelId: routeString(search.modelId),
+    callKind:
+      callKind === 'model_call' ||
+      callKind === 'approval_judge' ||
+      callKind === 'context_compaction'
+        ? callKind
+        : undefined,
+  })
+}
+
+const createScenarioWorkspace = () =>
+  lazy(() => import('./App').then((module) => ({ default: module.Workspace })))
+
+class ScenarioChunkBoundary extends Component<
+  { children: ReactNode; onRetry: () => void },
+  { failed: boolean }
+> {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  render() {
+    if (this.state.failed) {
+      return (
+        <main className="loading">
+          <p>Scenario studio could not be loaded.</p>
+          <button type="button" onClick={this.props.onRetry}>
+            Retry scenario studio
+          </button>
+        </main>
+      )
+    }
+    return this.props.children
+  }
+}
+
+function ScenarioRoute() {
   const scenarioId = scenarioRoute.useParams().scenarioId
+  const search = scenarioRoute.useSearch()
+  const navigate = scenarioRoute.useNavigate()
+  const route = { ...defaultSearchUsageRouteState, ...search }
+  const ScenarioWorkspace = useMemo(() => createScenarioWorkspace(), [])
+  const routeRef = useRef<HTMLDivElement>(null)
   useEffect(() => {
-    document.title = 'Signalbox scenarios'
+    routeRef.current?.focus()
   }, [])
+  // The imported-conversation scenario is statically imported, so it needs neither the
+  // lazy chunk boundary nor the studio's focus wrapper.
   if (scenarioId === 'imports') {
     return <ImportsWorkspace api={scenarioImportApi} scenario />
   }
   return (
-    <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
-      <ScenarioWorkspace scenarioId={scenarioId} />
-    </Suspense>
+    <div ref={routeRef} className="scenario-route" tabIndex={-1}>
+      <ScenarioChunkBoundary onRetry={() => window.location.reload()}>
+        <Suspense fallback={<main className="loading">Loading scenario studio…</main>}>
+          <ScenarioWorkspace
+            key={scenarioId}
+            scenarioId={scenarioId}
+            route={route}
+            onRouteChange={(patch) =>
+              void navigate({ search: (previous) => ({ ...previous, ...patch }), replace: true })
+            }
+          />
+        </Suspense>
+      </ScenarioChunkBoundary>
+    </div>
   )
 }
+
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
@@ -57,15 +148,13 @@ const productRoute = createRoute({
     if (!productRoutes.some((route) => route.id === candidate)) {
       return <Navigate to="/$surface" params={{ surface: 'attention' }} replace />
     }
-    if (candidate === 'imports') {
-      return <ImportsWorkspace api={httpImportApi} scenario={false} />
-    }
     return <ProductApp surface={candidate as ProductRouteId} search={search} />
   },
 })
 const scenarioRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/scenario/$scenarioId',
+  validateSearch: validateScenarioSearch,
   component: ScenarioRoute,
 })
 const router = createRouter({
@@ -92,9 +181,7 @@ declare module '@tanstack/react-router' {
 const root = document.getElementById('root')
 if (!root) throw new Error('Missing web application root')
 
-const initialPresentation = selectApp(store.getState())
-document.documentElement.dataset.theme = initialPresentation.theme
-document.documentElement.dataset.density = initialPresentation.density
+applyPresentationPreferences(selectApp(store.getState()))
 
 createRoot(root).render(
   <StrictMode>

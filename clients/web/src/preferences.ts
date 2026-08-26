@@ -165,10 +165,16 @@ export const saveBrowserPreferences = (preferences: BrowserPreferences): void =>
   }
 }
 
+export const applyPresentationPreferences = (
+  preferences: Pick<BrowserPreferences, 'density' | 'theme'>,
+  root: HTMLElement = document.documentElement,
+): void => {
+  root.dataset.theme = preferences.theme
+  root.dataset.density = preferences.density
+}
+
 // Applied from a render-blocking module so the stored theme and density paint on the first frame
 // instead of flashing the defaults until React mounts.
 export const applyStoredVisualPreferences = (): void => {
-  const preferences = loadBrowserPreferences()
-  document.documentElement.dataset.theme = preferences.theme
-  document.documentElement.dataset.density = preferences.density
+  applyPresentationPreferences(loadBrowserPreferences())
 }

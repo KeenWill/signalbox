@@ -83,6 +83,7 @@ export type WebContractCapabilities = {
   readonly bounded_json: boolean;
   readonly bounded_lexical_search: boolean;
   readonly bounded_session_timeline: boolean;
+  readonly bounded_usage_cost: boolean;
   readonly image_derivatives: boolean;
   readonly immutable_blob_content: boolean;
   readonly import_discovery: boolean;
@@ -104,7 +105,11 @@ export type WebContractLimits = {
   readonly max_search_snippet_bytes: number;
   readonly max_timeline_window_bytes: number;
   readonly max_timeline_window_items: number;
+  readonly max_usage_aggregate_groups: number;
+  readonly max_usage_call_page_items: number;
 };
+
+export type WebDollarAmount = string;
 
 export type WebImportContinuationReference = {
   readonly imported_conversation_id: string;
@@ -181,6 +186,10 @@ export type WebModelSelection = {
   readonly alias_id: string;
   readonly kind: "alias";
 };
+
+export type WebNullableU128 = WebU128 | null;
+
+export type WebNullableU64 = WebU64 | null;
 
 export type WebSearchContentClass = "user_transcript" | "assistant_transcript" | "tool_arguments" | "tool_result" | "session_metadata" | "attachment_filename" | "attachment_media_metadata" | "derived_text_artifact";
 
@@ -264,7 +273,84 @@ export type WebTimelineAddress = {
 
 export type WebTimelineEventSequence = string;
 
+export type WebU128 = string;
+
 export type WebU64 = string;
+
+export type WebUsageAggregateGroup = {
+  readonly call_count: WebUsageCallCount;
+  readonly call_kind: WebUsageCallKind;
+  readonly cost: WebUsageCost;
+  readonly coverage: WebUsageTokenCoverage;
+  readonly input_semantics: WebUsageInputSemantics;
+  readonly model_id: WebUuid;
+  readonly profile_id: WebUsageProfileId;
+  readonly provenance: WebUsageProvenance;
+  readonly tokens: WebUsageAggregateTokenAxes;
+};
+
+export type WebUsageAggregateTokenAxes = {
+  readonly cache_creation_input: WebNullableU128;
+  readonly cache_read_input: WebNullableU128;
+  readonly input: WebNullableU128;
+  readonly output: WebNullableU128;
+};
+
+export type WebUsageCall = {
+  readonly call_id: WebUuid;
+  readonly call_kind: WebUsageCallKind;
+  readonly cost: WebUsageCost;
+  readonly input_semantics: WebUsageInputSemantics;
+  readonly model_id: WebUuid;
+  readonly profile_id: WebUsageProfileId;
+  readonly provenance: WebUsageProvenance;
+  readonly recorded_at_micros: WebUsageTimestampMicros;
+  readonly session_id: WebSessionId;
+  readonly tokens: WebUsageTokenAxes;
+  readonly turn_id: string | null;
+};
+
+export type WebUsageCallCount = string;
+
+export type WebUsageCallKind = "model_call" | "approval_judge" | "context_compaction";
+
+export type WebUsageCost = {
+  readonly amount_usd: WebDollarAmount;
+  readonly label: WebUsageCostLabel;
+  readonly rate_version: WebUsageRateVersion;
+  readonly status: "derived";
+} | {
+  readonly reason: WebUsageCostUnavailableReason;
+  readonly status: "unavailable";
+};
+
+export type WebUsageCostLabel = "real" | "metered_equivalent";
+
+export type WebUsageCostUnavailableReason = "no_token_evidence" | "unknown_input_semantics" | "incomplete_cache_axes" | "invalid_cache_breakdown" | "configuration_unavailable";
+
+export type WebUsageInputSemantics = "unknown" | "cache_exclusive" | "cache_inclusive";
+
+export type WebUsageProfileId = string;
+
+export type WebUsageProvenance = "reported" | "estimated";
+
+export type WebUsageRateVersion = string;
+
+export type WebUsageTimestampMicros = string;
+
+export type WebUsageTokenAxes = {
+  readonly cache_creation_input: WebNullableU64;
+  readonly cache_read_input: WebNullableU64;
+  readonly input: WebNullableU64;
+  readonly output: WebNullableU64;
+};
+
+export type WebUsageTokenCoverage = {
+  readonly cache_creation_input: boolean;
+  readonly cache_read_input: boolean;
+  readonly input: boolean;
+  readonly output: boolean;
+};
 
 export type WebUuid = string;
 
@@ -393,6 +479,19 @@ export type WebSearchPage = {
   readonly results: ReadonlyArray<WebSearchResult>;
 };
 
+export type WebUsageSummary = {
+  readonly groups: ReadonlyArray<WebUsageAggregateGroup>;
+  readonly truncated: boolean;
+};
+
+export type WebUsageCallPage = {
+  readonly calls: ReadonlyArray<WebUsageCall>;
+  readonly continuation: {
+  readonly call_id: WebUuid;
+  readonly recorded_at_micros: WebUsageTimestampMicros;
+} | null;
+};
+
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
@@ -409,3 +508,5 @@ export function decodeWebImportEntryWindow(value: unknown): WebImportEntryWindow
 export function decodeWebImportContinuationRequest(value: unknown): WebImportContinuationRequest;
 export function decodeWebImportContinuationResponse(value: unknown): WebImportContinuationResponse;
 export function decodeWebSearchPage(value: unknown): WebSearchPage;
+export function decodeWebUsageSummary(value: unknown): WebUsageSummary;
+export function decodeWebUsageCallPage(value: unknown, order: "newest"): WebUsageCallPage;

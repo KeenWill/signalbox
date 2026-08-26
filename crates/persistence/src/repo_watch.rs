@@ -56,8 +56,8 @@ use crate::{
     },
 };
 
-const CURSOR_STORAGE_VERSION: u64 = 2;
-const CURSOR_STORAGE_VERSION_DB: i16 = 2;
+const CURSOR_STORAGE_VERSION: u64 = 3;
+const CURSOR_STORAGE_VERSION_DB: i16 = 3;
 const EVENT_CONTENT_IDENTITY_VERSION_V1: i16 = 1;
 const EVENT_VERSION_V1: i16 = 1;
 const MAX_EVENT_PAGE_SIZE: u16 = 100;
@@ -147,12 +147,24 @@ impl RepoWatchCursor {
     }
 }
 
+/// Auditable transport that produced one repository-watch event batch.
+///
+/// Recorded on every event row so a reader can tell which intake observed a
+/// fact. Polling remains the complete reconciliation sweep; `Webhook` marks the
+/// rows an authenticated delivery produced under primary mode.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepoWatchEventProducer {
+    Poll,
+    Webhook,
+}
+
 /// One optimistic atomic cursor-and-event commit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepoWatchCommitRequest {
     expected_generation: Option<RepoWatchCursorGeneration>,
     candidate: RepoWatchCursorCandidate,
     events: Box<[RepoWatchEventOccurrenceV1]>,
+    producer: RepoWatchEventProducer,
 }
 
 impl RepoWatchCommitRequest {
@@ -165,6 +177,25 @@ impl RepoWatchCommitRequest {
             expected_generation,
             candidate,
             events: events.into_boxed_slice(),
+            producer: RepoWatchEventProducer::Poll,
+        }
+    }
+
+    /// The same commit, attributed to an authenticated webhook delivery.
+    ///
+    /// A primary-mode delivery writes ordinary event rows, so the producer they
+    /// record has to be the transport that actually observed them rather than
+    /// the poll the rows would otherwise claim.
+    pub fn from_webhook(
+        expected_generation: Option<RepoWatchCursorGeneration>,
+        candidate: RepoWatchCursorCandidate,
+        events: Vec<RepoWatchEventOccurrenceV1>,
+    ) -> Self {
+        Self {
+            expected_generation,
+            candidate,
+            events: events.into_boxed_slice(),
+            producer: RepoWatchEventProducer::Webhook,
         }
     }
 
@@ -178,6 +209,10 @@ impl RepoWatchCommitRequest {
 
     pub fn events(&self) -> &[RepoWatchEventOccurrenceV1] {
         &self.events
+    }
+
+    pub const fn producer(&self) -> RepoWatchEventProducer {
+        self.producer
     }
 }
 
@@ -251,6 +286,7 @@ impl Error for RepoWatchPageSizeError {}
 pub struct PositionedRepoWatchEvent {
     position: RepoWatchEventPosition,
     event: RepoWatchEvent,
+    producer: RepoWatchEventProducer,
 }
 
 impl PositionedRepoWatchEvent {
@@ -260,6 +296,14 @@ impl PositionedRepoWatchEvent {
 
     pub const fn event(&self) -> &RepoWatchEvent {
         &self.event
+    }
+
+    /// The intake whose commit wrote this row.
+    ///
+    /// Returned rather than validated and discarded, so a reader auditing which
+    /// intake produced a fact does not have to reach past this repository.
+    pub const fn producer(&self) -> RepoWatchEventProducer {
+        self.producer
     }
 }
 
@@ -637,6 +681,38 @@ impl PostgresRepoWatchStore {
             .transpose()
     }
 
+    /// Returns the stored byte size of the latest cursor document.
+    ///
+    /// The repository runtime uses this metadata to choose a bounded drain
+    /// deadline before it transfers and decodes the document itself. PostgreSQL
+    /// can answer `pg_column_size` from the stored varlena representation, so
+    /// this does not deserialize the cursor or duplicate its contents in the
+    /// daemon.
+    pub async fn load_cursor_payload_bytes(
+        &self,
+        repository: &RepositorySlug,
+    ) -> Result<Option<u64>, RepoWatchStoreError> {
+        let stored = sqlx::query_scalar::<_, i64>(
+            "SELECT pg_column_size(cursor_payload)::bigint
+               FROM repo_watch_cursor
+              WHERE repository = $1
+              ORDER BY generation DESC
+              LIMIT 1",
+        )
+        .bind(repository.as_str())
+        .fetch_optional(&self.pool)
+        .await?;
+        stored
+            .map(|bytes| {
+                u64::try_from(bytes).map_err(|_| {
+                    RepoWatchStoreError::Corruption(
+                        RepoWatchPersistenceCorruption::InvalidCursorField("cursor_payload_bytes"),
+                    )
+                })
+            })
+            .transpose()
+    }
+
     pub async fn commit(
         &self,
         repository: &RepositorySlug,
@@ -735,6 +811,13 @@ impl PostgresRepoWatchStore {
         .bind(Json(payload))
         .execute(&mut *transaction)
         .await?;
+        replace_current_pull_requests(
+            &mut transaction,
+            repository,
+            generation,
+            request.candidate().observation().state().pull_requests(),
+        )
+        .await?;
         let already_durable =
             durable_occurrences(&mut transaction, repository, request.events(), None).await?;
         let fresh = request
@@ -742,7 +825,14 @@ impl PostgresRepoWatchStore {
             .iter()
             .filter(|occurrence| is_new_occurrence(&already_durable, occurrence))
             .collect::<Vec<_>>();
-        insert_events(&mut transaction, repository, generation, &fresh).await?;
+        insert_events(
+            &mut transaction,
+            repository,
+            generation,
+            &fresh,
+            request.producer(),
+        )
+        .await?;
         let cursor = RepoWatchCursor {
             repository: repository.clone(),
             generation,
@@ -1467,7 +1557,7 @@ fn stale_review_dismissal_message(candidate: &RepoWatchStaleReviewClearanceCandi
     )
 }
 
-async fn load_cursor_in_transaction(
+pub(crate) async fn load_cursor_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
     repository: &RepositorySlug,
 ) -> Result<Option<RepoWatchCursor>, RepoWatchStoreError> {
@@ -1762,11 +1852,21 @@ struct CursorRecord {
     state: RepositoryStateRecord,
 }
 
+/// One stored frontier entry.
+///
+/// `pull_request_number` is required rather than defaulted: a storage-version
+/// three payload always writes the member, null for a repository-global stream
+/// and the owning number otherwise. Defaulting it would decode a version-two
+/// entry as unowned while leaving the version unchanged, which is the
+/// version-tolerant decoding `AGENTS.md` forbids; the version bump and the
+/// deliberate frontier reset in
+/// `202608250501_repo_watch_cursor_frontier_ownership.sql` replace it.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct EventIdentityFrontierRecord {
     stream_identity: [u8; 32],
     sequence: u64,
+    pull_request_number: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1913,6 +2013,7 @@ fn cursor_record(candidate: &RepoWatchCursorCandidate) -> CursorRecord {
             .map(|entry| EventIdentityFrontierRecord {
                 stream_identity: *entry.stream_identity(),
                 sequence: entry.sequence().get(),
+                pull_request_number: entry.pull_request_number().map(PullRequestNumber::get),
             })
             .collect(),
         state: repository_state_record(candidate.observation().state()),
@@ -2024,6 +2125,82 @@ fn pull_request_state_record(state: &RepoWatchPullRequestState) -> PullRequestSt
     }
 }
 
+pub(crate) fn encode_current_pull_request(
+    state: &RepoWatchPullRequestState,
+) -> Result<Value, RepoWatchStoreError> {
+    serde_json::to_value(pull_request_state_record(state))
+        .map_err(RepoWatchStoreError::CursorEncoding)
+}
+
+pub(crate) fn decode_current_pull_request(
+    value: Value,
+) -> Result<RepoWatchPullRequestState, RepoWatchStoreError> {
+    let record = serde_json::from_value(value).map_err(|_| {
+        RepoWatchStoreError::Corruption(RepoWatchPersistenceCorruption::MalformedCursorDocument)
+    })?;
+    decode_pull_request_state(record)
+}
+
+async fn replace_current_pull_requests(
+    transaction: &mut Transaction<'_, Postgres>,
+    repository: &RepositorySlug,
+    generation: RepoWatchCursorGeneration,
+    pull_requests: &[RepoWatchPullRequestState],
+) -> Result<(), RepoWatchStoreError> {
+    sqlx::query("DELETE FROM repo_watch_current_pull_request WHERE repository = $1")
+        .bind(repository.as_str())
+        .execute(&mut **transaction)
+        .await?;
+
+    let mut pull_request_numbers = Vec::with_capacity(pull_requests.len());
+    let mut cursor_generations = Vec::with_capacity(pull_requests.len());
+    let mut lifecycles = Vec::with_capacity(pull_requests.len());
+    let mut head_repositories = Vec::with_capacity(pull_requests.len());
+    let mut base_branches = Vec::with_capacity(pull_requests.len());
+    let mut head_branches = Vec::with_capacity(pull_requests.len());
+    let mut state_payloads = Vec::with_capacity(pull_requests.len());
+    for pull_request in pull_requests {
+        let context = pull_request.context();
+        pull_request_numbers.push(Decimal::from(context.number().get()));
+        cursor_generations.push(generation_to_i64(generation));
+        lifecycles
+            .push(repo_watch_pull_request_lifecycle_to_str(pull_request.lifecycle()).to_owned());
+        head_repositories.push(context.head_repository().as_str().to_owned());
+        base_branches.push(context.base_branch().as_str().to_owned());
+        head_branches.push(context.head_branch().as_str().to_owned());
+        state_payloads.push(Json(encode_current_pull_request(pull_request)?));
+    }
+
+    sqlx::query(
+        "INSERT INTO repo_watch_current_pull_request (
+            repository, pull_request_number, cursor_generation, lifecycle,
+            head_repository, base_branch, head_branch, state_payload
+         )
+         SELECT $1, supplied.pull_request_number, supplied.cursor_generation,
+                supplied.lifecycle, supplied.head_repository, supplied.base_branch,
+                supplied.head_branch, supplied.state_payload
+           FROM UNNEST(
+                $2::numeric[], $3::bigint[], $4::text[], $5::text[],
+                $6::text[], $7::text[], $8::jsonb[]
+           ) AS supplied(
+                pull_request_number, cursor_generation, lifecycle, head_repository,
+                base_branch, head_branch, state_payload
+           )",
+    )
+    .bind(repository.as_str())
+    .bind(pull_request_numbers)
+    .bind(cursor_generations)
+    .bind(lifecycles)
+    .bind(head_repositories)
+    .bind(base_branches)
+    .bind(head_branches)
+    .bind(state_payloads)
+    .execute(&mut **transaction)
+    .await?;
+
+    Ok(())
+}
+
 fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, RepoWatchStoreError> {
     let mut record: CursorRecord = serde_json::from_value(value.clone()).map_err(|_| {
         RepoWatchStoreError::Corruption(RepoWatchPersistenceCorruption::MalformedCursorDocument)
@@ -2059,13 +2236,29 @@ fn decode_cursor_candidate(value: Value) -> Result<RepoWatchCursorCandidate, Rep
             .event_identity_frontier
             .into_iter()
             .map(|entry| {
-                NonZeroU64::new(entry.sequence)
-                    .map(|sequence| {
-                        RepoWatchEventIdentityFrontierEntryV1::new(entry.stream_identity, sequence)
-                    })
-                    .ok_or(RepoWatchPersistenceCorruption::InvalidCursorField(
+                let sequence = NonZeroU64::new(entry.sequence).ok_or(
+                    RepoWatchPersistenceCorruption::InvalidCursorField(
                         "event_identity_frontier.sequence",
-                    ))
+                    ),
+                )?;
+                match entry.pull_request_number {
+                    None => Ok(RepoWatchEventIdentityFrontierEntryV1::new(
+                        entry.stream_identity,
+                        sequence,
+                    )),
+                    Some(number) => NonZeroU64::new(number)
+                        .map(PullRequestNumber::new)
+                        .map(|number| {
+                            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                                entry.stream_identity,
+                                sequence,
+                                number,
+                            )
+                        })
+                        .ok_or(RepoWatchPersistenceCorruption::InvalidCursorField(
+                            "event_identity_frontier.pull_request_number",
+                        )),
+                }
             })
             .collect::<Result<Vec<_>, _>>()?,
     )
@@ -2495,7 +2688,12 @@ async fn insert_events(
     repository: &RepositorySlug,
     generation: RepoWatchCursorGeneration,
     events: &[&RepoWatchEventOccurrenceV1],
+    producer: RepoWatchEventProducer,
 ) -> Result<(), RepoWatchStoreError> {
+    let producer = match producer {
+        RepoWatchEventProducer::Poll => RepoWatchEventProducerStorageKind::Poll,
+        RepoWatchEventProducer::Webhook => RepoWatchEventProducerStorageKind::Webhook,
+    };
     for (index, occurrence) in events.iter().enumerate() {
         let ordinal =
             i32::try_from(index + 1).map_err(|_| RepoWatchStoreError::EventBatchTooLarge)?;
@@ -2529,9 +2727,7 @@ async fn insert_events(
         .bind(encoded.event_version)
         .bind(EVENT_CONTENT_IDENTITY_VERSION_V1)
         .bind(occurrence.content_identity().as_bytes().as_slice())
-        .bind(repo_watch_event_producer_to_str(
-            RepoWatchEventProducerStorageKind::Poll,
-        ))
+        .bind(repo_watch_event_producer_to_str(producer))
         .bind(encoded.target_kind)
         .bind(encoded.event_kind)
         .bind(encoded.pull_request_number)
@@ -2753,10 +2949,11 @@ fn decode_positioned_event(
     if row.content_identity.len() != 32 {
         return Err(RepoWatchPersistenceCorruption::InvalidEventContentIdentity.into());
     }
-    match repo_watch_event_producer_from_str(&row.producer) {
-        Some(RepoWatchEventProducerStorageKind::Poll) => {}
+    let producer = match repo_watch_event_producer_from_str(&row.producer) {
+        Some(RepoWatchEventProducerStorageKind::Poll) => RepoWatchEventProducer::Poll,
+        Some(RepoWatchEventProducerStorageKind::Webhook) => RepoWatchEventProducer::Webhook,
         None => return Err(RepoWatchPersistenceCorruption::UnknownEventProducer.into()),
-    }
+    };
     let target = repo_watch_event_target_from_str(&row.target_kind).ok_or(
         RepoWatchPersistenceCorruption::UnknownEventDiscriminator("target_kind"),
     )?;
@@ -2801,6 +2998,7 @@ fn decode_positioned_event(
     Ok(PositionedRepoWatchEvent {
         position: RepoWatchEventPosition::new(generation, ordinal),
         event,
+        producer,
     })
 }
 

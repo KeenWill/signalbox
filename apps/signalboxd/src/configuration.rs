@@ -517,6 +517,7 @@ impl RepositoryWatchWebhookConfiguration {
 pub struct WatchedRepositoryWebhookConfiguration {
     hook_id: NonZeroU64,
     secret_file: PathBuf,
+    mode: RepositoryWatchWebhookMode,
 }
 
 impl WatchedRepositoryWebhookConfiguration {
@@ -529,6 +530,11 @@ impl WatchedRepositoryWebhookConfiguration {
     pub fn secret_file(&self) -> &Path {
         &self.secret_file
     }
+
+    /// Returns whether authenticated deliveries only project or also write.
+    pub const fn mode(&self) -> RepositoryWatchWebhookMode {
+        self.mode
+    }
 }
 
 impl fmt::Debug for WatchedRepositoryWebhookConfiguration {
@@ -537,8 +543,20 @@ impl fmt::Debug for WatchedRepositoryWebhookConfiguration {
             .debug_struct("WatchedRepositoryWebhookConfiguration")
             .field("hook_id", &self.hook_id)
             .field("secret_file", &"[REDACTED REFERENCE]")
+            .field("mode", &self.mode)
             .finish()
     }
+}
+
+/// Per-repository rollout mode for authenticated webhook deliveries.
+///
+/// Shadow projects a delivery against an in-memory baseline and writes only
+/// parity rows; the durable cursor stays the poller's. Primary applies the
+/// delivery to the durable cursor and writes ordinary webhook-produced events.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepositoryWatchWebhookMode {
+    Shadow,
+    Primary,
 }
 
 /// One repository-specific version-one polling and credential configuration.
@@ -1809,6 +1827,13 @@ impl HubModelConfiguration {
         self.provider_model_adapters.get(provider_model).copied()
     }
 
+    /// Returns whether one configured target's reported input count includes cache axes.
+    pub fn input_includes_cache_tokens(&self, target: ResolvedProviderTarget) -> bool {
+        self.target_adapters
+            .get(&target)
+            .is_some_and(|adapter| adapter.reports_cache_inclusive_input())
+    }
+
     /// Returns targets whose provider-reported input count includes cache axes.
     pub fn cache_inclusive_input_targets(&self) -> HashSet<ResolvedProviderTarget> {
         self.target_adapters
@@ -1895,7 +1920,59 @@ impl HubModelConfiguration {
             ProcessModelCallInputTokenSemantics::CacheExclusive => input.tokens,
         };
         let amount_usd = fold_reported_cost([
-            (input_tokens, rates.input),
+            (input_tokens.map(u128::from), rates.input),
+            (output_tokens.map(u128::from), rates.output),
+            (
+                cache_creation_input_tokens.map(u128::from),
+                rates.cache_creation_input,
+            ),
+            (
+                cache_read_input_tokens.map(u128::from),
+                rates.cache_read_input,
+            ),
+        ])?;
+        Some(DerivedModelCallCost {
+            amount_usd,
+            rate_version: Arc::clone(&rates.version),
+            billing_kind,
+        })
+    }
+
+    /// Derives a labeled USD figure from widened aggregate token totals.
+    ///
+    /// Every reported axis must price exactly; when any reported axis cannot
+    /// be represented by exact decimal arithmetic, the whole derivation is
+    /// absent rather than an understated partial total.
+    pub(crate) fn derive_usage_aggregate_cost(
+        &self,
+        target: ResolvedProviderTarget,
+        profile: &str,
+        semantics: ProcessModelCallInputTokenSemantics,
+        token_axes: [Option<u128>; 4],
+    ) -> Option<DerivedModelCallCost> {
+        let [
+            input_tokens,
+            output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
+        ] = token_axes;
+        let rates = self.billing_rates.get(&target)?;
+        let billing_kind = self.credential_profiles.get(profile)?.billing_kind();
+        let ordinary_input_tokens = match semantics {
+            ProcessModelCallInputTokenSemantics::CacheInclusive => match (
+                input_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+            ) {
+                (Some(total), Some(cache_creation), Some(cache_read)) => {
+                    Some(total.checked_sub(cache_creation.checked_add(cache_read)?)?)
+                }
+                _ => None,
+            },
+            ProcessModelCallInputTokenSemantics::CacheExclusive => input_tokens,
+        };
+        let amount_usd = fold_reported_cost([
+            (ordinary_input_tokens, rates.input),
             (output_tokens, rates.output),
             (cache_creation_input_tokens, rates.cache_creation_input),
             (cache_read_input_tokens, rates.cache_read_input),
@@ -2275,6 +2352,7 @@ fn parse_repository_watch_configuration(
                 "credential_file",
                 "webhook_hook_id",
                 "webhook_secret_file",
+                "webhook_mode",
                 "convergence_pull_requests",
             ],
         )
@@ -2317,9 +2395,10 @@ fn parse_repository_watch_configuration(
         let repository_webhook = match (
             repository.get("webhook_hook_id"),
             repository.get("webhook_secret_file"),
+            repository.get("webhook_mode"),
         ) {
-            (None, None) => None,
-            (Some(hook_id), Some(secret_file)) => {
+            (None, None, None) => None,
+            (Some(hook_id), Some(secret_file), mode) => {
                 let hook_id = hook_id
                     .as_integer()
                     .and_then(|value| u64::try_from(value).ok())
@@ -2346,13 +2425,30 @@ fn parse_repository_watch_configuration(
                     return Err(HubModelConfigurationError::DuplicateRepositoryWatchCredentialFile);
                 }
                 credential_file_references.push(resolved_secret_file);
+                // Only an absent key defaults. A present item of any other TOML
+                // type is malformed configuration rather than an omission, so it
+                // is refused instead of silently selecting the shadow rollout
+                // mode a deployment did not ask for.
+                let mode = match mode {
+                    None => RepositoryWatchWebhookMode::Shadow,
+                    Some(item) => match item.as_str() {
+                        Some("shadow") => RepositoryWatchWebhookMode::Shadow,
+                        Some("primary") => RepositoryWatchWebhookMode::Primary,
+                        Some(_) | None => {
+                            return Err(
+                                HubModelConfigurationError::InvalidRepositoryWatchConfiguration,
+                            );
+                        }
+                    },
+                };
                 webhook_repository_count += 1;
                 Some(WatchedRepositoryWebhookConfiguration {
                     hook_id,
                     secret_file,
+                    mode,
                 })
             }
-            (Some(_), None) | (None, Some(_)) => {
+            (Some(_), None, _) | (None, Some(_), _) | (None, None, Some(_)) => {
                 return Err(HubModelConfigurationError::InvalidRepositoryWatchConfiguration);
             }
         };
@@ -3072,7 +3168,7 @@ fn validated_rate_version(value: &str) -> Result<Arc<str>, HubModelConfiguration
     }
 }
 
-fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
+fn fold_reported_cost(axes: [(Option<u128>, Decimal); 4]) -> Option<Decimal> {
     const TOKENS_PER_MILLION: u64 = 1_000_000;
     let mut amount = Decimal::ZERO;
     let mut reported = false;
@@ -3097,14 +3193,17 @@ fn fold_reported_cost(axes: [(Option<u64>, Decimal); 4]) -> Option<Decimal> {
     reported.then(|| amount.normalize())
 }
 
-fn exact_rate_token_product(rate: Decimal, tokens: u64) -> Option<Decimal> {
+fn exact_rate_token_product(rate: Decimal, tokens: u128) -> Option<Decimal> {
+    if tokens > u128::try_from(Decimal::MAX.mantissa()).ok()? {
+        return None;
+    }
     let product = rate.checked_mul(Decimal::from(tokens))?;
     let scale_loss = rate.scale().checked_sub(product.scale())?;
     if scale_loss == 0 {
         return Some(product);
     }
     let mut rate_mantissa = u128::try_from(rate.mantissa()).ok()?;
-    let mut token_mantissa = u128::from(tokens);
+    let mut token_mantissa = tokens;
     for _ in 0..scale_loss {
         divide_product_factor(&mut rate_mantissa, &mut token_mantissa, 2)?;
         divide_product_factor(&mut rate_mantissa, &mut token_mantissa, 5)?;
@@ -4382,7 +4481,7 @@ async fn read_bounded_credential_file(path: &Path, maximum_bytes: usize) -> io::
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         collections::HashSet,
         net::SocketAddr,
@@ -4417,9 +4516,9 @@ mod tests {
         ANTHROPIC_CREDENTIAL_REFERENCE, BillingKind, DEFAULT_CONVERSATION_IMPORT_MAX_SOURCE_BYTES,
         DEFAULT_REPOSITORY_WATCH_WEBHOOK_BIND_ADDRESS, FileCredentialAccess, HubModelConfiguration,
         HubModelConfigurationError, MAX_COMPACTION_PROMPT_UTF8_BYTES,
-        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage, UnknownSessionModel,
-        absolute_search_entries, credential_bytes, resolved_mcp_bridge_reference,
-        validate_alias_count, validate_model_count,
+        MIGRATED_ANTHROPIC_MODEL_FAMILY, ModelAdapter, ModelCallInputUsage,
+        RepositoryWatchWebhookMode, UnknownSessionModel, absolute_search_entries, credential_bytes,
+        resolved_mcp_bridge_reference, validate_alias_count, validate_model_count,
     };
 
     const CODEX_SUBSCRIPTION_PROFILE: &str = "codex-subscription-primary";
@@ -4503,7 +4602,7 @@ members = [{ profile = "codex-subscription-primary", priority = 1 }]"#;
     const EAGER_WATCH_HEAD_PATTERN: &str = "^agent/.+$";
     const WATCH_TEMPLATE: &str = "merge-forward";
     const REGISTERED_INSTRUCTION_ROOT: &str = "/srv/signalbox/instruction-library";
-    const CONFIGURATION: &str = r#"
+    pub(crate) const CONFIGURATION: &str = r#"
 version = 1
 
 [numeric_bounds]
@@ -5328,6 +5427,89 @@ selection_id = "10000000-0000-4000-8000-000000000001"
                 .expect("the webhook repository has a secret reference")
                 .as_str(),
             WATCH_WEBHOOK_SECRET_REFERENCE
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_defaults_to_shadow_mode() {
+        let configured =
+            HubModelConfiguration::parse(&configuration_with_repository_watch_webhook())
+                .expect("repository-watch webhook fixture is valid");
+        let webhook = configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories()[0]
+            .webhook()
+            .expect("the first repository configures webhook intake");
+
+        assert_eq!(webhook.mode(), RepositoryWatchWebhookMode::Shadow);
+    }
+
+    #[test]
+    fn repository_watch_webhook_selects_primary_mode() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\""),
+            &format!(
+                "webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\"\nwebhook_mode = \"primary\""
+            ),
+        );
+        let configured = HubModelConfiguration::parse(&configured)
+            .expect("an explicit primary webhook mode is valid");
+        let webhook = configured
+            .repository_watch()
+            .expect("fixture configures repository watch")
+            .repositories()[0]
+            .webhook()
+            .expect("the first repository configures webhook intake");
+
+        assert_eq!(webhook.mode(), RepositoryWatchWebhookMode::Primary);
+    }
+
+    /// Only an absent key defaults. A present non-string item is malformed
+    /// configuration, not an omission, so it must not silently select shadow.
+    #[test]
+    fn repository_watch_webhook_rejects_a_non_string_mode() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\""),
+            &format!("webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\"\nwebhook_mode = true"),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_an_unknown_mode() {
+        let configured = configuration_with_repository_watch_webhook().replace(
+            &format!("webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\""),
+            &format!(
+                "webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\"\nwebhook_mode = \"authoritative\""
+            ),
+        );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
+        );
+    }
+
+    #[test]
+    fn repository_watch_webhook_rejects_a_mode_without_an_association() {
+        let configured = configuration_with_repository_watch_webhook()
+            .replace(
+                &format!("webhook_hook_id = {WATCH_WEBHOOK_HOOK_ID}\n"),
+                "webhook_mode = \"primary\"\n",
+            )
+            .replace(
+                &format!("webhook_secret_file = \"{WATCH_WEBHOOK_SECRET_FILE}\"\n"),
+                "",
+            );
+
+        assert_eq!(
+            HubModelConfiguration::parse(&configured).err(),
+            Some(HubModelConfigurationError::InvalidRepositoryWatchConfiguration)
         );
     }
 
@@ -6456,6 +6638,36 @@ cool_off_seconds = {}
             .expect("fixture quotient is representable");
 
         assert_eq!(cost.amount_usd(), expected);
+    }
+
+    #[test]
+    fn widened_usage_aggregate_cost_prices_totals_above_u64() {
+        let configuration =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+        let cost = configuration
+            .derive_usage_aggregate_cost(
+                configured_target(&configuration),
+                "anthropic-primary",
+                ProcessModelCallInputTokenSemantics::CacheExclusive,
+                [None, Some(u128::from(u64::MAX) + 1), None, None],
+            )
+            .expect("the widened output total is exactly priceable");
+
+        assert!(cost.amount_usd() > Decimal::ZERO);
+    }
+
+    #[test]
+    fn widened_usage_aggregate_cost_fails_whole_when_one_reported_axis_is_unpriceable() {
+        let configuration =
+            HubModelConfiguration::parse(CONFIGURATION).expect("fixture configuration is valid");
+        let cost = configuration.derive_usage_aggregate_cost(
+            configured_target(&configuration),
+            "anthropic-primary",
+            ProcessModelCallInputTokenSemantics::CacheExclusive,
+            [Some(u128::MAX), Some(1_000_000), None, None],
+        );
+
+        assert_eq!(cost, None, "an unpriceable input axis must not be dropped");
     }
 
     #[test]

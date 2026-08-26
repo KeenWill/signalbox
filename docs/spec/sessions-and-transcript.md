@@ -743,12 +743,20 @@ change the lexical request into a database query language.
 The dedicated PostgreSQL full-text projection indexes canonical accepted user
 text, final assistant transcript text, model-visible tool arguments and results,
 current session title/tags/searchable attributes, explicitly published
-attachment filenames and media metadata, and durable derived text. Context
-summaries are the implemented transcript-owned derived-text producer. Attachment
-and other derivation producers publish only text their durable contract
-explicitly supplies, through the typed projection-writer port and after their
-own source exists. The projection performs no implicit attachment reading, OCR,
-text extraction, or model pass.
+attachment filenames and media metadata, and durable derived text. The
+implemented producers are durable transitions that project their own text as
+they commit: input acceptance, steering acceptance, a terminal model call, a
+tool batch transition, context compaction, and session-metadata installation.
+Context summaries are the implemented transcript-owned derived-text producer.
+Attachment filenames, attachment media metadata, and explicitly derived text
+artifacts are classes the schema admits and a read returns, and no producer in
+the daemon publishes them. The projection performs no implicit attachment
+reading, OCR, text extraction, or model pass.
+
+Publication through the typed projection-writer port is committed unimplemented
+functionality: no present producer calls it. The compatibility constraint is
+that a producer adopting the port publishes only text its durable contract
+explicitly supplies, and only after its own source exists.
 
 Every result carries its session, stable timeline address, positive projection
 identity, typed owning session/input/turn transcript entry/tool request/tool
@@ -881,7 +889,8 @@ The transcript therefore remains complete and addressable after compaction. No
 entry or frontier is deleted, replaced, reordered, or rewritten. The
 compaction-call record separately retains the session's current direct model
 selection, resolved provider target, source frontier, physical lifecycle and
-disposition, non-secret credential reference, and each independently optional
+disposition, non-secret credential reference, whether provider-reported input
+tokens include separately reported cache axes, and each independently optional
 provider-reported usage field. Summary production is its own model call; it is
 not assistant output attributed to an accepted-input turn.
 

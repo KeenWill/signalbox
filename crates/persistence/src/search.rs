@@ -707,61 +707,41 @@ fn validate_source_correlation(
     turn_id: Option<Uuid>,
     content_class: SearchContentClass,
 ) -> Result<(), SearchProjectionCorruption> {
+    // The content class is a project-owned enum, so the decision enumerates
+    // every variant: a new class has to name its own admitted source shapes
+    // here, rather than falling through an implicit arm and being reported as
+    // projection corruption for every row it produces. The source and item
+    // kinds are stored spellings, so their arms stay open.
+    let shape = (source_kind, item_kind, turn_id);
     let correlated = source_id == item_id
-        && matches!(
-            (source_kind, item_kind, turn_id, content_class),
-            (
-                "accepted_input",
-                "accepted_input",
-                Some(_),
-                SearchContentClass::UserTranscript
-            ) | (
-                "steering_input",
-                "accepted_input",
-                Some(_),
-                SearchContentClass::UserTranscript
-            ) | (
-                "semantic_entry",
-                "transcript_entry",
-                Some(_),
-                SearchContentClass::AssistantTranscript
-            ) | (
-                "semantic_entry",
-                "transcript_entry",
-                None,
-                SearchContentClass::DerivedTextArtifact
-            ) | (
-                "tool_request",
-                "tool_request",
-                Some(_),
-                SearchContentClass::ToolArguments
-            ) | (
-                "tool_attempt",
-                "tool_attempt",
-                Some(_),
-                SearchContentClass::ToolResult
-            ) | (
-                "session_metadata",
-                "session",
-                None,
-                SearchContentClass::SessionMetadata
-            ) | (
-                "attachment",
-                "attachment",
-                None,
-                SearchContentClass::AttachmentFilename
-            ) | (
-                "attachment",
-                "attachment",
-                None,
-                SearchContentClass::AttachmentMediaMetadata
-            ) | (
-                "derived_artifact",
-                "derived_artifact",
-                None,
-                SearchContentClass::DerivedTextArtifact
-            )
-        );
+        && match content_class {
+            SearchContentClass::UserTranscript => matches!(
+                shape,
+                ("accepted_input", "accepted_input", Some(_))
+                    | ("steering_input", "accepted_input", Some(_))
+            ),
+            SearchContentClass::AssistantTranscript => {
+                matches!(shape, ("semantic_entry", "transcript_entry", Some(_)))
+            }
+            SearchContentClass::ToolArguments => {
+                matches!(shape, ("tool_request", "tool_request", Some(_)))
+            }
+            SearchContentClass::ToolResult => {
+                matches!(shape, ("tool_attempt", "tool_attempt", Some(_)))
+            }
+            SearchContentClass::SessionMetadata => {
+                matches!(shape, ("session_metadata", "session", None))
+            }
+            SearchContentClass::AttachmentFilename
+            | SearchContentClass::AttachmentMediaMetadata => {
+                matches!(shape, ("attachment", "attachment", None))
+            }
+            SearchContentClass::DerivedTextArtifact => matches!(
+                shape,
+                ("semantic_entry", "transcript_entry", None)
+                    | ("derived_artifact", "derived_artifact", None)
+            ),
+        };
     if correlated {
         Ok(())
     } else {

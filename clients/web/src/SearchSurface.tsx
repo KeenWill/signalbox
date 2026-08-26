@@ -312,7 +312,7 @@ export function SearchSurface({
             </h2>
             <p>
               {results.error instanceof ProductRequestError
-                ? `${results.error.code}: ${results.error.message}`
+                ? `${results.error.response.error.code}: ${results.error.message}`
                 : results.error instanceof ProductTransportError
                   ? results.error.message
                   : 'The response did not match the generated web contract.'}

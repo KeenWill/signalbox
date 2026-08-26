@@ -1659,13 +1659,13 @@ async fn buffered_tool_call_retains_the_same_verbatim_arguments() {
     );
 }
 
-/// Defect regression (found by the gated compatibility smoke): the envelope
-/// carries each tool call's argument object as JSON text inside a string,
-/// because strict structured output forbids a free-form object member. A
-/// string that does not hold JSON is unintelligible-response boundary loss,
-/// never completion material.
+/// Defect regression: the envelope carries each tool call's provider-supplied
+/// argument text inside a string because strict structured output forbids a
+/// free-form object member. Malformed text remains an authoritative proposal
+/// the provider-independent typed decoders classify, which the tool loop
+/// projects as its `invalid_arguments` result.
 #[tokio::test]
-async fn non_json_string_carried_tool_arguments_are_boundary_loss() {
+async fn non_json_string_carried_tool_arguments_are_preserved() {
     let result = execute_scenario(
         "tool_call_bad_arguments",
         DeliveryMode::Buffered,
@@ -1673,16 +1673,36 @@ async fn non_json_string_carried_tool_arguments_are_boundary_loss() {
         CancellationSignal::never(),
     )
     .await;
+    let completed = completed(&result.evidence);
 
-    assert!(
-        response_unintelligible(&boundary_loss(&result.evidence).cause)
-            .contains("arguments are not valid JSON")
+    assert_eq!(
+        tool_proposal(&completed.content).arguments_json,
+        fixtures::MALFORMED_TOOL_ARGUMENTS
     );
 }
 
-/// The provider nesting bound applies to the argument text carried inside
-/// the envelope string, which the line-level and agent-message-level checks
-/// cannot see because string content does not nest the outer JSON.
+#[tokio::test]
+async fn non_object_string_carried_tool_arguments_are_preserved() {
+    let result = execute_scenario(
+        "tool_call_non_object_arguments",
+        DeliveryMode::Buffered,
+        OperationShape::Tool,
+        CancellationSignal::never(),
+    )
+    .await;
+    let completed = completed(&result.evidence);
+
+    assert_eq!(
+        tool_proposal(&completed.content).arguments_json,
+        fixtures::NON_OBJECT_TOOL_ARGUMENTS
+    );
+}
+
+/// Preservation stops at the shared nesting bound. The bound applies to the
+/// argument text carried inside the envelope string, which the line-level and
+/// agent-message-level checks cannot see because string content does not nest
+/// the outer JSON, and which the shared typed decoders could not decode past
+/// serde_json's recursion boundary.
 #[tokio::test]
 async fn over_deep_string_carried_tool_arguments_are_boundary_loss() {
     let result = execute_scenario(

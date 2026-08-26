@@ -11,6 +11,11 @@ streaming whole-object and ranged store contract, filesystem publication,
 verification, and corrupt-object repair behavior, and shared store conformance
 suite are verified against PR #555 (`agent/blob-storage-substrate`).
 
+The path-style S3 adapter, explicit rotating credential-file reads, streaming
+multipart publication, namespace and lifecycle authentication, bounded
+transport, and opt-in live conformance suite are verified against this
+implementing change (`agent/blob-storage-s3`).
+
 The append-only identity, store-binding, and verified-replica catalog and its
 transactional registration behavior are verified against PR #581
 (`agent/blob-storage-catalog`).
@@ -37,6 +42,27 @@ are verified against this implementing change
 
 Same-origin browser delivery, immutable derivation provenance, and lazy isolated
 image derivatives are verified against this PR (`agent/web-blob-delivery`).
+
+Registry-first attachment catalog admission, distinct-digest byte accounting,
+and durable typed rejection replay are verified against this implementing change
+(`agent/blob-storage-attachment-admission`).
+
+Prospective rendered-frontier attachment accounting and affected queued-input
+revalidation are verified against this implementing change
+(`agent/blob-storage-attachment-frontier-admission`).
+
+Provider-neutral ordered attachment stubs and immutable catalog-length
+projection are verified against this implementing change
+(`agent/blob-storage-attachment-rendering`).
+
+Distinct attachment sizing and streamed replica verification, typed
+missing/corrupt closure before send authorization, and typed unavailable retry
+are verified against this implementing change
+(`agent/blob-storage-attachment-preparation`).
+
+The text-only blob-read family, frontier-derived digest authorization, and
+durable per-request and per-turn admission counters are verified against this
+implementing change (`agent/blob-storage-read-tools`).
 
 It owns one thing: how Signalbox stores, identifies, references, and reads
 immutable binary content — blob identity, the durable replica catalog, store
@@ -610,8 +636,12 @@ unsent call. The eligibility sweep includes an active turn whose current model
 call remains `Prepared`, so this retryable durable shape receives another pass;
 the per-session in-flight deduplication prevents concurrent execution.
 Authoritative cancellation aborts store I/O without relabeling cancellation as
-an attachment failure. Successful verification seeds the turn-scoped bounded
-verification inventory used by later blob reads.
+an attachment failure. Seeding attachment verification into the turn-scoped
+bounded verification inventory is committed unimplemented functionality: the
+inventory accepts only an immutable-generation token, and neither the filesystem
+adapter nor the current S3 adapter supplies one. Until an adapter can pin a
+generation and make later ranges conditional on that exact token, later blob
+reads reverify as required by the wire-vocabulary contract above.
 
 The model and serving-target modality grammar, defaults, effective selection,
 and client projection are owned by

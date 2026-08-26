@@ -734,6 +734,10 @@ const schemas = {
             "description": "Stable bounded session descriptors and historical windows are available.",
             "type": "boolean"
           },
+          "bounded_usage_cost": {
+            "description": "Dedicated bounded aggregate and per-call usage/cost reads are available.",
+            "type": "boolean"
+          },
           "image_derivatives": {
             "description": "The daemon can lazily produce isolated deterministic image derivatives.",
             "type": "boolean"
@@ -769,7 +773,8 @@ const schemas = {
           "import_discovery",
           "imported_continuations",
           "bounded_session_timeline",
-          "bounded_lexical_search"
+          "bounded_lexical_search",
+          "bounded_usage_cost"
         ],
         "type": "object"
       },
@@ -837,6 +842,18 @@ const schemas = {
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
+          },
+          "max_usage_aggregate_groups": {
+            "description": "Maximum compatibility-preserving groups in one usage summary.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "max_usage_call_page_items": {
+            "description": "Maximum individual calls in one usage detail page.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
           }
         },
         "required": [
@@ -846,7 +863,9 @@ const schemas = {
           "max_timeline_window_bytes",
           "max_search_query_bytes",
           "max_search_page_items",
-          "max_search_snippet_bytes"
+          "max_search_snippet_bytes",
+          "max_usage_aggregate_groups",
+          "max_usage_call_page_items"
         ],
         "type": "object"
       }
@@ -2454,6 +2473,534 @@ const schemas = {
     ],
     "title": "WebSessionTimelineWindow",
     "type": "object"
+  },
+  "WebUsageCallPage": {
+    "$defs": {
+      "WebDollarAmount": {
+        "description": "Canonical nonnegative fixed-point USD amount derived by the daemon.",
+        "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$",
+        "type": "string"
+      },
+      "WebNullableU64": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebU64"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Independently nullable token axes; null is never interpreted as zero."
+      },
+      "WebSessionId": {
+        "description": "Checked canonical UUID used for browser-visible session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      },
+      "WebU64": {
+        "description": "Checked unsigned 64-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]*)$",
+        "type": "string"
+      },
+      "WebUsageCall": {
+        "additionalProperties": false,
+        "description": "One terminal call with exact token, provenance, rate, and billing evidence.",
+        "properties": {
+          "call_id": {
+            "$ref": "#/$defs/WebUuid"
+          },
+          "call_kind": {
+            "$ref": "#/$defs/WebUsageCallKind"
+          },
+          "cost": {
+            "$ref": "#/$defs/WebUsageCost"
+          },
+          "input_semantics": {
+            "$ref": "#/$defs/WebUsageInputSemantics"
+          },
+          "model_id": {
+            "$ref": "#/$defs/WebUuid"
+          },
+          "profile_id": {
+            "$ref": "#/$defs/WebUsageProfileId"
+          },
+          "provenance": {
+            "$ref": "#/$defs/WebUsageProvenance"
+          },
+          "recorded_at_micros": {
+            "$ref": "#/$defs/WebUsageTimestampMicros"
+          },
+          "session_id": {
+            "$ref": "#/$defs/WebSessionId"
+          },
+          "tokens": {
+            "$ref": "#/$defs/WebUsageTokenAxes"
+          },
+          "turn_id": {
+            "anyOf": [
+              {
+                "description": "Owning turn, present-but-null exactly for context compaction.",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "call_kind",
+          "call_id",
+          "session_id",
+          "turn_id",
+          "model_id",
+          "profile_id",
+          "provenance",
+          "input_semantics",
+          "tokens",
+          "recorded_at_micros",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "WebUsageCallKind": {
+        "description": "Closed physical class of one terminal usage record.",
+        "enum": [
+          "model_call",
+          "approval_judge",
+          "context_compaction"
+        ],
+        "type": "string"
+      },
+      "WebUsageCost": {
+        "description": "Labeled configured cost, or an explicit reason it cannot be derived.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "amount_usd": {
+                "$ref": "#/$defs/WebDollarAmount"
+              },
+              "label": {
+                "$ref": "#/$defs/WebUsageCostLabel"
+              },
+              "rate_version": {
+                "$ref": "#/$defs/WebUsageRateVersion"
+              },
+              "status": {
+                "const": "derived",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "amount_usd",
+              "rate_version",
+              "label"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WebUsageCostUnavailableReason"
+              },
+              "status": {
+                "const": "unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebUsageCostLabel": {
+        "description": "Browser-visible billing label derived from the serving credential profile.",
+        "enum": [
+          "real",
+          "metered_equivalent"
+        ],
+        "type": "string"
+      },
+      "WebUsageCostUnavailableReason": {
+        "description": "Why no configured dollar derivation is available for exact token evidence.",
+        "enum": [
+          "no_token_evidence",
+          "unknown_input_semantics",
+          "incomplete_cache_axes",
+          "invalid_cache_breakdown",
+          "configuration_unavailable"
+        ],
+        "type": "string"
+      },
+      "WebUsageInputSemantics": {
+        "description": "Meaning of one provider target's input-token axis.",
+        "enum": [
+          "unknown",
+          "cache_exclusive",
+          "cache_inclusive"
+        ],
+        "type": "string"
+      },
+      "WebUsageProfileId": {
+        "description": "Non-secret bounded profile identity retained by usage summaries.",
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageProvenance": {
+        "description": "Closed provenance of one token-evidence projection.",
+        "enum": [
+          "reported",
+          "estimated"
+        ],
+        "type": "string"
+      },
+      "WebUsageRateVersion": {
+        "description": "Checked nonempty configured rate version exposed to browser clients.",
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageTimestampMicros": {
+        "description": "Checked application-range usage timestamp encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]{0,17})$",
+        "type": "string"
+      },
+      "WebUsageTokenAxes": {
+        "additionalProperties": false,
+        "description": "Independently nullable token axes; null is never interpreted as zero.",
+        "properties": {
+          "cache_creation_input": {
+            "$ref": "#/$defs/WebNullableU64"
+          },
+          "cache_read_input": {
+            "$ref": "#/$defs/WebNullableU64"
+          },
+          "input": {
+            "$ref": "#/$defs/WebNullableU64"
+          },
+          "output": {
+            "$ref": "#/$defs/WebNullableU64"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "cache_creation_input",
+          "cache_read_input"
+        ],
+        "type": "object"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "One bounded page of exact call evidence.",
+    "properties": {
+      "calls": {
+        "items": {
+          "$ref": "#/$defs/WebUsageCall"
+        },
+        "maxItems": 100,
+        "type": "array"
+      },
+      "continuation": {
+        "anyOf": [
+          {
+            "additionalProperties": false,
+            "description": "Present-but-null when the page exhausts the matching evidence, so an\nomitted member is an incompatibility rather than a silent exhaustion.",
+            "properties": {
+              "call_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "recorded_at_micros": {
+                "$ref": "#/$defs/WebUsageTimestampMicros"
+              }
+            },
+            "required": [
+              "recorded_at_micros",
+              "call_id"
+            ],
+            "type": "object"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "required": [
+      "calls",
+      "continuation"
+    ],
+    "title": "WebUsageCallPage",
+    "type": "object"
+  },
+  "WebUsageSummary": {
+    "$defs": {
+      "WebDollarAmount": {
+        "description": "Canonical nonnegative fixed-point USD amount derived by the daemon.",
+        "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$",
+        "type": "string"
+      },
+      "WebNullableU128": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/WebU128"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "description": "Independently nullable aggregate token axis widened beyond one call."
+      },
+      "WebU128": {
+        "description": "Checked unsigned 128-bit value encoded losslessly for JavaScript.",
+        "pattern": "^(0|[1-9][0-9]{0,38})$",
+        "type": "string"
+      },
+      "WebUsageAggregateGroup": {
+        "additionalProperties": false,
+        "description": "One compatibility-preserving usage and configured-cost summary row.",
+        "properties": {
+          "call_count": {
+            "$ref": "#/$defs/WebUsageCallCount"
+          },
+          "call_kind": {
+            "$ref": "#/$defs/WebUsageCallKind"
+          },
+          "cost": {
+            "$ref": "#/$defs/WebUsageCost"
+          },
+          "coverage": {
+            "$ref": "#/$defs/WebUsageTokenCoverage"
+          },
+          "input_semantics": {
+            "$ref": "#/$defs/WebUsageInputSemantics"
+          },
+          "model_id": {
+            "$ref": "#/$defs/WebUuid"
+          },
+          "profile_id": {
+            "$ref": "#/$defs/WebUsageProfileId"
+          },
+          "provenance": {
+            "$ref": "#/$defs/WebUsageProvenance"
+          },
+          "tokens": {
+            "$ref": "#/$defs/WebUsageAggregateTokenAxes"
+          }
+        },
+        "required": [
+          "call_kind",
+          "model_id",
+          "profile_id",
+          "provenance",
+          "input_semantics",
+          "coverage",
+          "call_count",
+          "tokens",
+          "cost"
+        ],
+        "type": "object"
+      },
+      "WebUsageAggregateTokenAxes": {
+        "additionalProperties": false,
+        "description": "Aggregate token axes widened beyond one physical call.",
+        "properties": {
+          "cache_creation_input": {
+            "$ref": "#/$defs/WebNullableU128"
+          },
+          "cache_read_input": {
+            "$ref": "#/$defs/WebNullableU128"
+          },
+          "input": {
+            "$ref": "#/$defs/WebNullableU128"
+          },
+          "output": {
+            "$ref": "#/$defs/WebNullableU128"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "cache_creation_input",
+          "cache_read_input"
+        ],
+        "type": "object"
+      },
+      "WebUsageCallCount": {
+        "description": "Checked positive summary call count encoded losslessly for JavaScript.",
+        "pattern": "^([1-9][0-9]{0,3}|10000)$",
+        "type": "string"
+      },
+      "WebUsageCallKind": {
+        "description": "Closed physical class of one terminal usage record.",
+        "enum": [
+          "model_call",
+          "approval_judge",
+          "context_compaction"
+        ],
+        "type": "string"
+      },
+      "WebUsageCost": {
+        "description": "Labeled configured cost, or an explicit reason it cannot be derived.",
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "amount_usd": {
+                "$ref": "#/$defs/WebDollarAmount"
+              },
+              "label": {
+                "$ref": "#/$defs/WebUsageCostLabel"
+              },
+              "rate_version": {
+                "$ref": "#/$defs/WebUsageRateVersion"
+              },
+              "status": {
+                "const": "derived",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "amount_usd",
+              "rate_version",
+              "label"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/WebUsageCostUnavailableReason"
+              },
+              "status": {
+                "const": "unavailable",
+                "type": "string"
+              }
+            },
+            "required": [
+              "status",
+              "reason"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "WebUsageCostLabel": {
+        "description": "Browser-visible billing label derived from the serving credential profile.",
+        "enum": [
+          "real",
+          "metered_equivalent"
+        ],
+        "type": "string"
+      },
+      "WebUsageCostUnavailableReason": {
+        "description": "Why no configured dollar derivation is available for exact token evidence.",
+        "enum": [
+          "no_token_evidence",
+          "unknown_input_semantics",
+          "incomplete_cache_axes",
+          "invalid_cache_breakdown",
+          "configuration_unavailable"
+        ],
+        "type": "string"
+      },
+      "WebUsageInputSemantics": {
+        "description": "Meaning of one provider target's input-token axis.",
+        "enum": [
+          "unknown",
+          "cache_exclusive",
+          "cache_inclusive"
+        ],
+        "type": "string"
+      },
+      "WebUsageProfileId": {
+        "description": "Non-secret bounded profile identity retained by usage summaries.",
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageProvenance": {
+        "description": "Closed provenance of one token-evidence projection.",
+        "enum": [
+          "reported",
+          "estimated"
+        ],
+        "type": "string"
+      },
+      "WebUsageRateVersion": {
+        "description": "Checked nonempty configured rate version exposed to browser clients.",
+        "maxLength": 128,
+        "minLength": 1,
+        "type": "string"
+      },
+      "WebUsageTokenCoverage": {
+        "additionalProperties": false,
+        "description": "Explicit presence shape retained by compatibility-preserving aggregates.",
+        "properties": {
+          "cache_creation_input": {
+            "type": "boolean"
+          },
+          "cache_read_input": {
+            "type": "boolean"
+          },
+          "input": {
+            "type": "boolean"
+          },
+          "output": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "input",
+          "output",
+          "cache_creation_input",
+          "cache_read_input"
+        ],
+        "type": "object"
+      },
+      "WebUuid": {
+        "description": "Checked canonical UUID used for browser-visible non-session identities.",
+        "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+        "type": "string"
+      }
+    },
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "additionalProperties": false,
+    "description": "Bounded aggregate response; truncation is never implicit.",
+    "properties": {
+      "groups": {
+        "items": {
+          "$ref": "#/$defs/WebUsageAggregateGroup"
+        },
+        "maxItems": 256,
+        "type": "array"
+      },
+      "truncated": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "groups",
+      "truncated"
+    ],
+    "title": "WebUsageSummary",
+    "type": "object"
   }
 };
 
@@ -2627,6 +3174,24 @@ function assertSchema(root, schema, value, path) {
       BigInt(value) > 9223372036854775807n
     ) {
       fail(path, "a positive signed 64-bit integer");
+    }
+    if (
+      schema.pattern === "^(0|[1-9][0-9]*)(\\.[0-9]{0,27}[1-9])?$" &&
+      BigInt(value.replace(".", "")) > 79228162514264337593543950335n
+    ) {
+      fail(path, "a rust_decimal coefficient");
+    }
+    if (
+      schema.pattern === "^(0|[1-9][0-9]{0,17})$" &&
+      BigInt(value) > 253402300799999999n
+    ) {
+      fail(path, "an application-range usage timestamp");
+    }
+    if (
+      schema.pattern === "^(0|[1-9][0-9]{0,38})$" &&
+      BigInt(value) > 340282366920938463463374607431768211455n
+    ) {
+      fail(path, "an unsigned 128-bit integer");
     }
     if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {
       fail(path, `at most ${schema.maxLength} Unicode scalar values`);
@@ -3162,6 +3727,167 @@ export function decodeWebSearchPage(value) {
     }
   }
   return value;
+}
+
+export function decodeWebUsageSummary(value) {
+  assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
+  const encoder = new TextEncoder();
+  const compatibilityKeys = new Set();
+  let totalCallCount = 0n;
+  value.groups.forEach((group, index) => {
+    const callCount = BigInt(group.call_count);
+    totalCallCount += callCount;
+    if (totalCallCount > 10000n) {
+      fail("usage_summary.groups", "at most 10000 represented calls");
+    }
+    assertUsageEvidence(
+      group.input_semantics,
+      group.tokens,
+      group.cost,
+      `usage_summary.groups[${index}]`,
+      group.input_semantics === "cache_inclusive" &&
+        callCount > 1n &&
+        group.tokens.input !== null &&
+        group.tokens.cache_creation_input !== null &&
+        group.tokens.cache_read_input !== null,
+    );
+    const compatibilityKey = JSON.stringify([
+      group.call_kind,
+      group.model_id,
+      group.profile_id,
+      group.provenance,
+      group.input_semantics,
+      group.coverage.input,
+      group.coverage.output,
+      group.coverage.cache_creation_input,
+      group.coverage.cache_read_input,
+    ]);
+    if (compatibilityKeys.has(compatibilityKey)) {
+      fail(`usage_summary.groups[${index}]`, "a unique compatibility key");
+    }
+    compatibilityKeys.add(compatibilityKey);
+    const profileBytes = encoder.encode(group.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {
+      fail(`usage_summary.groups[${index}].profile_id`, "1 through 256 UTF-8 bytes");
+    }
+    for (const axis of ["input", "output", "cache_creation_input", "cache_read_input"]) {
+      if (group.coverage[axis] !== (group.tokens[axis] !== null)) {
+        fail(`usage_summary.groups[${index}].coverage.${axis}`, "consistent with token evidence");
+      }
+      if (
+        group.tokens[axis] !== null &&
+        BigInt(group.tokens[axis]) > callCount * 18446744073709551615n
+      ) {
+        fail(`usage_summary.groups[${index}].tokens.${axis}`, "bounded by call_count times u64::MAX");
+      }
+    }
+  });
+  return value;
+}
+
+export function decodeWebUsageCallPage(value, order) {
+  assertSchema(schemas.WebUsageCallPage, schemas.WebUsageCallPage, value, "usage_call_page");
+  if (order !== "newest") {
+    fail("usage_call_page.order", "newest");
+  }
+  const encoder = new TextEncoder();
+  let previousKey = null;
+  const callIds = new Set();
+  value.calls.forEach((call, index) => {
+    assertUsageEvidence(
+      call.input_semantics,
+      call.tokens,
+      call.cost,
+      `usage_call_page.calls[${index}]`,
+      false,
+    );
+    const profileBytes = encoder.encode(call.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {
+      fail(`usage_call_page.calls[${index}].profile_id`, "1 through 256 UTF-8 bytes");
+    }
+    const isCompaction = call.call_kind === "context_compaction";
+    if (!Object.hasOwn(call, "turn_id") || isCompaction !== (call.turn_id === null)) {
+      fail(
+        `usage_call_page.calls[${index}].turn_id`,
+        "null exactly for context compaction calls",
+      );
+    }
+    const key = { recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id };
+    if (callIds.has(call.call_id)) {
+      fail(`usage_call_page.calls[${index}].call_id`, "unique within the page");
+    }
+    callIds.add(call.call_id);
+    if (previousKey !== null) {
+      const comparison = key.recordedAt === previousKey.recordedAt
+        ? key.callId < previousKey.callId ? -1 : key.callId > previousKey.callId ? 1 : 0
+        : key.recordedAt < previousKey.recordedAt ? -1 : 1;
+      if (comparison >= 0) {
+        fail(
+          `usage_call_page.calls[${index}]`,
+          "strictly descending by call key",
+        );
+      }
+    }
+    previousKey = key;
+  });
+  if (value.continuation != null) {
+    const lastCall = value.calls.at(-1);
+    if (
+      lastCall === undefined ||
+      value.continuation.recorded_at_micros !== lastCall.recorded_at_micros ||
+      value.continuation.call_id !== lastCall.call_id
+    ) {
+      fail("usage_call_page.continuation", "a cursor anchored to the final usage call");
+    }
+  }
+  return value;
+}
+
+function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInvalidBreakdown) {
+  if (cost.status === "derived") {
+    const rateVersionBytes = new TextEncoder().encode(cost.rate_version).length;
+    if (rateVersionBytes === 0 || rateVersionBytes > 128) {
+      fail(`${path}.cost.rate_version`, "1 through 128 UTF-8 bytes");
+    }
+  }
+  const hasTokenEvidence = Object.values(tokens).some((value) => value !== null);
+  const incompleteCacheAxes =
+    inputSemantics === "cache_inclusive" &&
+    tokens.input !== null &&
+    tokens.output === null &&
+    tokens.cache_creation_input === null &&
+    tokens.cache_read_input === null;
+  const invalidCacheBreakdown =
+    inputSemantics === "cache_inclusive" &&
+    tokens.input !== null &&
+    tokens.cache_creation_input !== null &&
+    tokens.cache_read_input !== null &&
+    BigInt(tokens.input) <
+      BigInt(tokens.cache_creation_input) + BigInt(tokens.cache_read_input);
+  const requiredReason = !hasTokenEvidence
+    ? "no_token_evidence"
+    : inputSemantics === "unknown"
+      ? "unknown_input_semantics"
+      : incompleteCacheAxes
+        ? "incomplete_cache_axes"
+        : invalidCacheBreakdown
+          ? "invalid_cache_breakdown"
+          : null;
+  if (requiredReason !== null) {
+    if (cost.status !== "unavailable" || cost.reason !== requiredReason) {
+      fail(`${path}.cost`, `unavailable with reason ${requiredReason}`);
+    }
+    return;
+  }
+  if (
+    cost.status === "unavailable" &&
+    (cost.reason === "no_token_evidence" ||
+      cost.reason === "unknown_input_semantics" ||
+      cost.reason === "incomplete_cache_axes" ||
+      (cost.reason === "invalid_cache_breakdown" && !allowHiddenInvalidBreakdown))
+  ) {
+    fail(`${path}.cost.reason`, "consistent with token evidence and input semantics");
+  }
 }
 export function decodeWebContractBootstrap(value) {
   assertSchema(schemas.WebContractBootstrap, schemas.WebContractBootstrap, value, "webcontractbootstrap");

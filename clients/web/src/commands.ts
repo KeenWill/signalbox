@@ -14,6 +14,8 @@ export interface CommandContext {
   sessionId?: string
   timelineWindowAvailable?: boolean
   focusTimeline: () => void
+  searchAvailable?: boolean
+  focusSearch?: () => void
   importEntryIds?: readonly string[]
   selectedImportEntry?: string | null
   requestedImportEntry?: string
@@ -28,8 +30,10 @@ export interface CommandContext {
   loadTimelineWindow?: (anchor: 'first' | 'latest') => void
   navigate?: (path: string) => void
   configuresTranscriptDetail?: boolean
+  openArtifactInspector?: () => void
   openSession?: (sessionId: string) => void
   toggleTimelineExpansion?: () => void
+  unwindSurface?: () => boolean
 }
 
 export interface CommandBinding {
@@ -66,6 +70,7 @@ const setDensity = (density: DensityMode) => (context: CommandContext) =>
   context.dispatch(actions.densitySet(density))
 const setTheme = (theme: ThemeMode) => (context: CommandContext) =>
   context.dispatch(actions.themeSet(theme))
+const artifactInspector = (context: CommandContext) => context.openArtifactInspector !== undefined
 export const commandRegistry = [
   {
     id: 'artifact.select',
@@ -221,6 +226,24 @@ export const commandRegistry = [
     run: (context) => context.navigate?.('/settings'),
   },
   {
+    id: 'navigate.scenario',
+    title: 'Go to Scenario Studio',
+    description: 'Open the streaming interaction scenario.',
+    category: 'Navigate',
+    bindings: [],
+    available: productNavigation,
+    run: (context) => context.navigate?.('/scenario/streaming'),
+  },
+  {
+    id: 'artifact.open',
+    title: 'Open artifact inspector',
+    description: 'Resolve and inspect an immutable blob by its server-provided identity.',
+    category: 'Surface',
+    bindings: [],
+    available: artifactInspector,
+    run: (context) => context.openArtifactInspector?.(),
+  },
+  {
     id: 'palette.open',
     title: 'Open command palette',
     description: 'Browse every available application command.',
@@ -248,6 +271,15 @@ export const commandRegistry = [
     run: (context) => context.dispatch(actions.overlaySet('navigation')),
   },
   {
+    id: 'search.focus',
+    title: 'Focus lexical search',
+    description: 'Move directly to the bounded canonical-evidence search field.',
+    category: 'Navigate',
+    bindings: [{ label: 'Mod+Shift+F', registration: { kind: 'hotkey', hotkey: 'Mod+Shift+F' } }],
+    available: (context) => context.searchAvailable === true,
+    run: (context) => context.focusSearch?.(),
+  },
+  {
     id: 'surface.escape',
     title: 'Unwind current surface',
     description: 'Close the nearest overlay or leave editing and return to the timeline.',
@@ -256,6 +288,7 @@ export const commandRegistry = [
     available: always,
     run: (context) => {
       if (context.getState().app.overlay !== null) context.dispatch(actions.overlaySet(null))
+      else if (context.unwindSurface?.()) return
       else context.focusTimeline()
     },
   },
@@ -472,7 +505,7 @@ export const commandRegistry = [
     available: always,
     run: (context) => {
       const current = context.getState().app.layout
-      if (current === 'workbench') context.focusTimeline()
+      if (current !== 'focus') context.focusTimeline()
       context.dispatch(actions.layoutSet(current === 'focus' ? 'workbench' : 'focus'))
     },
   },

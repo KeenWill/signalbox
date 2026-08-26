@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use signalbox_application::{
     MAX_SEARCH_HIGHLIGHTS_PER_RESULT, max_search_page_items, max_search_query_bytes,
     max_search_snippet_bytes, max_timeline_window_bytes, max_timeline_window_items,
+    max_usage_aggregate_calls, max_usage_aggregate_groups, max_usage_call_page_items,
 };
 
 /// Exact browser HTTP contract version served by this daemon build.
@@ -58,6 +59,8 @@ pub struct WebContractCapabilities {
     pub bounded_session_timeline: bool,
     /// Bounded lexical search with stable history reveal addresses is available.
     pub bounded_lexical_search: bool,
+    /// Dedicated bounded aggregate and per-call usage/cost reads are available.
+    pub bounded_usage_cost: bool,
 }
 
 /// Effective hard limits clients must honor for this contract version.
@@ -78,6 +81,10 @@ pub struct WebContractLimits {
     pub max_search_page_items: u32,
     /// Maximum UTF-8 bytes in one search result snippet.
     pub max_search_snippet_bytes: u32,
+    /// Maximum compatibility-preserving groups in one usage summary.
+    pub max_usage_aggregate_groups: u32,
+    /// Maximum individual calls in one usage detail page.
+    pub max_usage_call_page_items: u32,
 }
 
 /// Response from the contract bootstrap endpoint.
@@ -118,6 +125,7 @@ impl WebContractBootstrap {
                 imported_continuations: true,
                 bounded_session_timeline: true,
                 bounded_lexical_search: true,
+                bounded_usage_cost: true,
             },
             limits: WebContractLimits {
                 max_json_body_bytes: MAX_JSON_BODY_BYTES as u32,
@@ -127,6 +135,8 @@ impl WebContractBootstrap {
                 max_search_query_bytes: max_search_query_bytes() as u32,
                 max_search_page_items: u32::from(max_search_page_items()),
                 max_search_snippet_bytes: max_search_snippet_bytes() as u32,
+                max_usage_aggregate_groups: u32::from(max_usage_aggregate_groups()),
+                max_usage_call_page_items: u32::from(max_usage_call_page_items()),
             },
         }
     }
@@ -727,6 +737,38 @@ impl<'de> Deserialize<'de> for WebU64 {
     }
 }
 
+/// Checked unsigned 128-bit value encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebU128(#[schemars(regex(pattern = r"^(0|[1-9][0-9]{0,38})$"))] String);
+
+impl WebU128 {
+    /// Encodes one unsigned 128-bit value in canonical decimal form.
+    #[must_use]
+    pub fn from_u128(value: u128) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebU128 {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value
+            .parse::<u128>()
+            .ok()
+            .is_none_or(|parsed| parsed.to_string() != value)
+        {
+            return Err(de::Error::custom(
+                "wire value must be a canonical unsigned 128-bit integer",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
 /// Stable browser-visible location of one durable session event.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -945,6 +987,365 @@ pub struct WebSearchPage {
     #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
     pub continuation: Option<WebSearchCursor>,
+}
+
+/// Closed physical class of one terminal usage record.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageCallKind {
+    ModelCall,
+    ApprovalJudge,
+    ContextCompaction,
+}
+
+/// Closed provenance of one token-evidence projection.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageProvenance {
+    Reported,
+    Estimated,
+}
+
+/// Meaning of one provider target's input-token axis.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageInputSemantics {
+    Unknown,
+    CacheExclusive,
+    CacheInclusive,
+}
+
+/// Independently nullable token axes; null is never interpreted as zero.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum WebNullableU64 {
+    Value(WebU64),
+    Null,
+}
+
+impl WebNullableU64 {
+    /// Preserves a missing axis as an explicit JSON null.
+    #[must_use]
+    pub fn from_option(value: Option<u64>) -> Self {
+        match value {
+            Some(value) => Self::Value(WebU64::from_u64(value)),
+            None => Self::Null,
+        }
+    }
+}
+
+/// Independently nullable aggregate token axis widened beyond one call.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum WebNullableU128 {
+    Value(WebU128),
+    Null,
+}
+
+impl WebNullableU128 {
+    /// Preserves a missing aggregate axis as an explicit JSON null.
+    #[must_use]
+    pub fn from_option(value: Option<u128>) -> Self {
+        match value {
+            Some(value) => Self::Value(WebU128::from_u128(value)),
+            None => Self::Null,
+        }
+    }
+}
+
+/// Independently nullable token axes; null is never interpreted as zero.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageTokenAxes {
+    pub input: WebNullableU64,
+    pub output: WebNullableU64,
+    pub cache_creation_input: WebNullableU64,
+    pub cache_read_input: WebNullableU64,
+}
+
+/// Aggregate token axes widened beyond one physical call.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageAggregateTokenAxes {
+    pub input: WebNullableU128,
+    pub output: WebNullableU128,
+    pub cache_creation_input: WebNullableU128,
+    pub cache_read_input: WebNullableU128,
+}
+
+/// Explicit presence shape retained by compatibility-preserving aggregates.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageTokenCoverage {
+    pub input: bool,
+    pub output: bool,
+    pub cache_creation_input: bool,
+    pub cache_read_input: bool,
+}
+
+/// Browser-visible billing label derived from the serving credential profile.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageCostLabel {
+    Real,
+    MeteredEquivalent,
+}
+
+/// Why no configured dollar derivation is available for exact token evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUsageCostUnavailableReason {
+    NoTokenEvidence,
+    UnknownInputSemantics,
+    IncompleteCacheAxes,
+    InvalidCacheBreakdown,
+    ConfigurationUnavailable,
+}
+
+/// Canonical nonnegative fixed-point USD amount derived by the daemon.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebDollarAmount(
+    #[schemars(regex(pattern = r"^(0|[1-9][0-9]*)(\.[0-9]{0,27}[1-9])?$"))] String,
+);
+
+impl WebDollarAmount {
+    /// Wraps configuration arithmetic already represented by `rust_decimal`.
+    #[must_use]
+    pub fn from_derived(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebDollarAmount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        let (whole, fractional) = value
+            .split_once('.')
+            .map_or((value.as_str(), None), |(whole, fractional)| {
+                (whole, Some(fractional))
+            });
+        let whole_is_canonical = !whole.is_empty()
+            && whole.bytes().all(|byte| byte.is_ascii_digit())
+            && (whole == "0" || !whole.starts_with('0'));
+        let fractional_is_canonical = fractional.is_none_or(|fractional| {
+            !fractional.is_empty()
+                && fractional.len() <= 28
+                && fractional.bytes().all(|byte| byte.is_ascii_digit())
+                && !fractional.ends_with('0')
+        });
+        let coefficient = format!("{whole}{}", fractional.unwrap_or_default());
+        let significant_coefficient = coefficient.trim_start_matches('0');
+        let coefficient_fits = significant_coefficient.len() < 29
+            || (significant_coefficient.len() == 29
+                && significant_coefficient <= "79228162514264337593543950335");
+        if !whole_is_canonical || !fractional_is_canonical || !coefficient_fits {
+            return Err(de::Error::custom(
+                "dollar amount must be a canonical nonnegative decimal",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked nonempty configured rate version exposed to browser clients.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUsageRateVersion(#[schemars(length(min = 1, max = 128))] String);
+
+impl WebUsageRateVersion {
+    /// Wraps a rate version already admitted by daemon configuration.
+    #[must_use]
+    pub fn from_configured(value: String) -> Self {
+        debug_assert!(!value.is_empty() && value.len() <= 128);
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUsageRateVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() || value.len() > 128 {
+            return Err(de::Error::custom(
+                "usage rate version must contain 1 through 128 UTF-8 bytes",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Labeled configured cost, or an explicit reason it cannot be derived.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WebUsageCost {
+    Derived {
+        amount_usd: WebDollarAmount,
+        rate_version: WebUsageRateVersion,
+        label: WebUsageCostLabel,
+    },
+    Unavailable {
+        reason: WebUsageCostUnavailableReason,
+    },
+}
+
+/// Non-secret bounded profile identity retained by usage summaries.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUsageProfileId(#[schemars(length(min = 1, max = 256))] String);
+
+impl WebUsageProfileId {
+    /// Wraps a profile identity already validated by the persistence boundary.
+    #[must_use]
+    pub fn from_bounded(value: String) -> Self {
+        debug_assert!(!value.is_empty() && value.len() <= 256);
+        Self(value)
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUsageProfileId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if value.is_empty() || value.len() > 256 {
+            return Err(de::Error::custom(
+                "usage profile identity must contain 1 through 256 UTF-8 bytes",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked positive summary call count encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUsageCallCount(#[schemars(regex(pattern = r"^([1-9][0-9]{0,3}|10000)$"))] String);
+
+impl WebUsageCallCount {
+    /// Encodes a positive aggregate count produced by persistence.
+    #[must_use]
+    pub fn from_positive(value: u64) -> Self {
+        debug_assert!(value > 0 && value <= u64::from(max_usage_aggregate_calls()));
+        Self(value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUsageCallCount {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if canonical_u64(&value)
+            .is_none_or(|parsed| parsed == 0 || parsed > u64::from(max_usage_aggregate_calls()))
+        {
+            return Err(de::Error::custom(
+                "usage summary call count must be canonical and within the aggregation ceiling",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// Checked application-range usage timestamp encoded losslessly for JavaScript.
+#[derive(Clone, Debug, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct WebUsageTimestampMicros(#[schemars(regex(pattern = r"^(0|[1-9][0-9]{0,17})$"))] String);
+
+impl WebUsageTimestampMicros {
+    /// Encodes one timestamp already admitted by the application boundary.
+    #[must_use]
+    pub fn from_application(value: u64) -> Self {
+        debug_assert!(value <= 253_402_300_799_999_999);
+        Self(value.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for WebUsageTimestampMicros {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        if canonical_u64(&value).is_none_or(|parsed| parsed > 253_402_300_799_999_999) {
+            return Err(de::Error::custom(
+                "usage timestamp must be canonical and within the application range",
+            ));
+        }
+        Ok(Self(value))
+    }
+}
+
+/// One compatibility-preserving usage and configured-cost summary row.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageAggregateGroup {
+    pub call_kind: WebUsageCallKind,
+    pub model_id: WebUuid,
+    pub profile_id: WebUsageProfileId,
+    pub provenance: WebUsageProvenance,
+    pub input_semantics: WebUsageInputSemantics,
+    pub coverage: WebUsageTokenCoverage,
+    pub call_count: WebUsageCallCount,
+    pub tokens: WebUsageAggregateTokenAxes,
+    pub cost: WebUsageCost,
+}
+
+/// Bounded aggregate response; truncation is never implicit.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageSummary {
+    #[schemars(length(max = 256))]
+    pub groups: Vec<WebUsageAggregateGroup>,
+    pub truncated: bool,
+}
+
+/// One terminal call with exact token, provenance, rate, and billing evidence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageCall {
+    pub call_kind: WebUsageCallKind,
+    pub call_id: WebUuid,
+    pub session_id: WebSessionId,
+    /// Owning turn, present-but-null exactly for context compaction.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub turn_id: Option<WebUuid>,
+    pub model_id: WebUuid,
+    pub profile_id: WebUsageProfileId,
+    pub provenance: WebUsageProvenance,
+    pub input_semantics: WebUsageInputSemantics,
+    pub tokens: WebUsageTokenAxes,
+    pub recorded_at_micros: WebUsageTimestampMicros,
+    pub cost: WebUsageCost,
+}
+
+/// Stable terminal-time/UUID keyset boundary for usage detail traversal.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageCallCursor {
+    pub recorded_at_micros: WebUsageTimestampMicros,
+    pub call_id: WebUuid,
+}
+
+/// One bounded page of exact call evidence.
+#[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebUsageCallPage {
+    #[schemars(length(max = 100))]
+    pub calls: Vec<WebUsageCall>,
+    /// Present-but-null when the page exhausts the matching evidence, so an
+    /// omitted member is an incompatibility rather than a silent exhaustion.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
+    pub continuation: Option<WebUsageCallCursor>,
 }
 
 /// Layer that owns one browser API failure.
@@ -1187,6 +1588,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
     make_property_nullable(&mut search_page_schema, "continuation")?;
     let search_page_schema = canonical_schema(search_page_schema);
 
+    let mut usage_call_page_schema = schemars::schema_for!(WebUsageCallPage).to_value();
+    make_property_nullable(&mut usage_call_page_schema, "continuation")?;
+    make_definition_property_nullable(&mut usage_call_page_schema, "WebUsageCall", "turn_id")?;
+    let usage_call_page_schema = canonical_schema(usage_call_page_schema);
+
     Ok(vec![
         ContractSchema {
             name: "WebContractBootstrap",
@@ -1274,6 +1680,16 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
             decoder: "decodeWebSearchPage",
             schema: search_page_schema,
         },
+        ContractSchema {
+            name: "WebUsageSummary",
+            decoder: "decodeWebUsageSummary",
+            schema: canonical_schema(schemars::schema_for!(WebUsageSummary).to_value()),
+        },
+        ContractSchema {
+            name: "WebUsageCallPage",
+            decoder: "decodeWebUsageCallPage",
+            schema: usage_call_page_schema,
+        },
     ])
 }
 
@@ -1291,6 +1707,24 @@ fn make_property_nullable(
 ) -> Result<(), GenerateWebContractError> {
     let property = schema
         .pointer_mut(&format!("/properties/{property_name}"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let concrete = property.take();
+    *property = json!({ "anyOf": [concrete, { "type": "null" }] });
+    Ok(())
+}
+
+// `#[schemars(required)]` marks an `Option` member required by emitting the
+// inner type alone, so a required-present nullable member restores its null
+// branch here. Definitions carry the members of referenced types.
+fn make_definition_property_nullable(
+    schema: &mut Value,
+    definition_name: &str,
+    property_name: &str,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(&format!(
+            "/$defs/{definition_name}/properties/{property_name}"
+        ))
         .ok_or(GenerateWebContractError::UnsupportedSchema)?;
     let concrete = property.take();
     *property = json!({ "anyOf": [concrete, { "type": "null" }] });
@@ -1483,6 +1917,24 @@ function assertSchema(root, schema, value, path) {{
       BigInt(value) > 9223372036854775807n
     ) {{
       fail(path, "a positive signed 64-bit integer");
+    }}
+    if (
+      schema.pattern === "^(0|[1-9][0-9]*)(\\.[0-9]{{0,27}}[1-9])?$" &&
+      BigInt(value.replace(".", "")) > 79228162514264337593543950335n
+    ) {{
+      fail(path, "a rust_decimal coefficient");
+    }}
+    if (
+      schema.pattern === "^(0|[1-9][0-9]{{0,17}})$" &&
+      BigInt(value) > 253402300799999999n
+    ) {{
+      fail(path, "an application-range usage timestamp");
+    }}
+    if (
+      schema.pattern === "^(0|[1-9][0-9]{{0,38}})$" &&
+      BigInt(value) > 340282366920938463463374607431768211455n
+    ) {{
+      fail(path, "an unsigned 128-bit integer");
     }}
     if (schema.maxLength !== undefined && Array.from(value).length > schema.maxLength) {{
       fail(path, `at most ${{schema.maxLength}} Unicode scalar values`);
@@ -2019,6 +2471,167 @@ export function decodeWebSearchPage(value) {{
   }}
   return value;
 }}
+
+export function decodeWebUsageSummary(value) {{
+  assertSchema(schemas.WebUsageSummary, schemas.WebUsageSummary, value, "usage_summary");
+  const encoder = new TextEncoder();
+  const compatibilityKeys = new Set();
+  let totalCallCount = 0n;
+  value.groups.forEach((group, index) => {{
+    const callCount = BigInt(group.call_count);
+    totalCallCount += callCount;
+    if (totalCallCount > 10000n) {{
+      fail("usage_summary.groups", "at most 10000 represented calls");
+    }}
+    assertUsageEvidence(
+      group.input_semantics,
+      group.tokens,
+      group.cost,
+      `usage_summary.groups[${{index}}]`,
+      group.input_semantics === "cache_inclusive" &&
+        callCount > 1n &&
+        group.tokens.input !== null &&
+        group.tokens.cache_creation_input !== null &&
+        group.tokens.cache_read_input !== null,
+    );
+    const compatibilityKey = JSON.stringify([
+      group.call_kind,
+      group.model_id,
+      group.profile_id,
+      group.provenance,
+      group.input_semantics,
+      group.coverage.input,
+      group.coverage.output,
+      group.coverage.cache_creation_input,
+      group.coverage.cache_read_input,
+    ]);
+    if (compatibilityKeys.has(compatibilityKey)) {{
+      fail(`usage_summary.groups[${{index}}]`, "a unique compatibility key");
+    }}
+    compatibilityKeys.add(compatibilityKey);
+    const profileBytes = encoder.encode(group.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {{
+      fail(`usage_summary.groups[${{index}}].profile_id`, "1 through 256 UTF-8 bytes");
+    }}
+    for (const axis of ["input", "output", "cache_creation_input", "cache_read_input"]) {{
+      if (group.coverage[axis] !== (group.tokens[axis] !== null)) {{
+        fail(`usage_summary.groups[${{index}}].coverage.${{axis}}`, "consistent with token evidence");
+      }}
+      if (
+        group.tokens[axis] !== null &&
+        BigInt(group.tokens[axis]) > callCount * 18446744073709551615n
+      ) {{
+        fail(`usage_summary.groups[${{index}}].tokens.${{axis}}`, "bounded by call_count times u64::MAX");
+      }}
+    }}
+  }});
+  return value;
+}}
+
+export function decodeWebUsageCallPage(value, order) {{
+  assertSchema(schemas.WebUsageCallPage, schemas.WebUsageCallPage, value, "usage_call_page");
+  if (order !== "newest") {{
+    fail("usage_call_page.order", "newest");
+  }}
+  const encoder = new TextEncoder();
+  let previousKey = null;
+  const callIds = new Set();
+  value.calls.forEach((call, index) => {{
+    assertUsageEvidence(
+      call.input_semantics,
+      call.tokens,
+      call.cost,
+      `usage_call_page.calls[${{index}}]`,
+      false,
+    );
+    const profileBytes = encoder.encode(call.profile_id).length;
+    if (profileBytes === 0 || profileBytes > 256) {{
+      fail(`usage_call_page.calls[${{index}}].profile_id`, "1 through 256 UTF-8 bytes");
+    }}
+    const isCompaction = call.call_kind === "context_compaction";
+    if (!Object.hasOwn(call, "turn_id") || isCompaction !== (call.turn_id === null)) {{
+      fail(
+        `usage_call_page.calls[${{index}}].turn_id`,
+        "null exactly for context compaction calls",
+      );
+    }}
+    const key = {{ recordedAt: BigInt(call.recorded_at_micros), callId: call.call_id }};
+    if (callIds.has(call.call_id)) {{
+      fail(`usage_call_page.calls[${{index}}].call_id`, "unique within the page");
+    }}
+    callIds.add(call.call_id);
+    if (previousKey !== null) {{
+      const comparison = key.recordedAt === previousKey.recordedAt
+        ? key.callId < previousKey.callId ? -1 : key.callId > previousKey.callId ? 1 : 0
+        : key.recordedAt < previousKey.recordedAt ? -1 : 1;
+      if (comparison >= 0) {{
+        fail(
+          `usage_call_page.calls[${{index}}]`,
+          "strictly descending by call key",
+        );
+      }}
+    }}
+    previousKey = key;
+  }});
+  if (value.continuation != null) {{
+    const lastCall = value.calls.at(-1);
+    if (
+      lastCall === undefined ||
+      value.continuation.recorded_at_micros !== lastCall.recorded_at_micros ||
+      value.continuation.call_id !== lastCall.call_id
+    ) {{
+      fail("usage_call_page.continuation", "a cursor anchored to the final usage call");
+    }}
+  }}
+  return value;
+}}
+
+function assertUsageEvidence(inputSemantics, tokens, cost, path, allowHiddenInvalidBreakdown) {{
+  if (cost.status === "derived") {{
+    const rateVersionBytes = new TextEncoder().encode(cost.rate_version).length;
+    if (rateVersionBytes === 0 || rateVersionBytes > 128) {{
+      fail(`${{path}}.cost.rate_version`, "1 through 128 UTF-8 bytes");
+    }}
+  }}
+  const hasTokenEvidence = Object.values(tokens).some((value) => value !== null);
+  const incompleteCacheAxes =
+    inputSemantics === "cache_inclusive" &&
+    tokens.input !== null &&
+    tokens.output === null &&
+    tokens.cache_creation_input === null &&
+    tokens.cache_read_input === null;
+  const invalidCacheBreakdown =
+    inputSemantics === "cache_inclusive" &&
+    tokens.input !== null &&
+    tokens.cache_creation_input !== null &&
+    tokens.cache_read_input !== null &&
+    BigInt(tokens.input) <
+      BigInt(tokens.cache_creation_input) + BigInt(tokens.cache_read_input);
+  const requiredReason = !hasTokenEvidence
+    ? "no_token_evidence"
+    : inputSemantics === "unknown"
+      ? "unknown_input_semantics"
+      : incompleteCacheAxes
+        ? "incomplete_cache_axes"
+        : invalidCacheBreakdown
+          ? "invalid_cache_breakdown"
+          : null;
+  if (requiredReason !== null) {{
+    if (cost.status !== "unavailable" || cost.reason !== requiredReason) {{
+      fail(`${{path}}.cost`, `unavailable with reason ${{requiredReason}}`);
+    }}
+    return;
+  }}
+  if (
+    cost.status === "unavailable" &&
+    (cost.reason === "no_token_evidence" ||
+      cost.reason === "unknown_input_semantics" ||
+      cost.reason === "incomplete_cache_axes" ||
+      (cost.reason === "invalid_cache_breakdown" && !allowHiddenInvalidBreakdown))
+  ) {{
+    fail(`${{path}}.cost.reason`, "consistent with token evidence and input semantics");
+  }}
+}}
 "##,
         max_search_snippet_bytes = max_search_snippet_bytes(),
     );
@@ -2033,6 +2646,8 @@ export function decodeWebSearchPage(value) {{
                 | "WebAttentionSnapshot"
                 | "WebAttentionStreamEvent"
                 | "WebSearchPage"
+                | "WebUsageSummary"
+                | "WebUsageCallPage"
         ) {
             continue;
         }
@@ -2089,8 +2704,15 @@ fn declaration_module(schemas: &[ContractSchema]) -> Result<String, GenerateWebC
         output.push_str(&format!("export type {} = {root};\n\n", schema.name));
     }
     for (schema, _) in roots {
+        // The usage call page decoder also takes the page order its caller
+        // requested, which is what lets it check descending call keys.
+        let parameters = if schema.name == "WebUsageCallPage" {
+            "value: unknown, order: \"newest\""
+        } else {
+            "value: unknown"
+        };
         output.push_str(&format!(
-            "export function {}(value: unknown): {};\n",
+            "export function {}({parameters}): {};\n",
             schema.decoder, schema.name
         ));
     }
@@ -2203,8 +2825,9 @@ mod tests {
     use std::{fs, path::Path};
 
     use super::{
-        WebAttentionStreamEvent, WebContractBootstrap, WebContractExample, WebSessionId,
-        WebTimelineEventSequence, WebU64, generated_artifacts,
+        WebAttentionStreamEvent, WebContractBootstrap, WebContractExample, WebDollarAmount,
+        WebSessionId, WebTimelineEventSequence, WebU64, WebUsageCallCount, WebUsageRateVersion,
+        WebUsageTimestampMicros, generated_artifacts,
     };
 
     #[track_caller]
@@ -2308,6 +2931,49 @@ mod tests {
         assert!(serde_json::from_str::<WebU64>(r#""18446744073709551616""#).is_err());
         assert!(serde_json::from_str::<WebU64>(r#""0""#).is_ok());
         assert!(serde_json::from_str::<WebU64>(r#""18446744073709551615""#).is_ok());
+    }
+
+    #[test]
+    fn usage_call_count_requires_canonical_positive_u64() {
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""0""#).is_err());
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""01""#).is_err());
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""1""#).is_ok());
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""10000""#).is_ok());
+        assert!(serde_json::from_str::<WebUsageCallCount>(r#""10001""#).is_err());
+    }
+
+    #[test]
+    fn usage_timestamp_requires_the_application_range() {
+        assert!(serde_json::from_str::<WebUsageTimestampMicros>(r#""0""#).is_ok());
+        assert!(serde_json::from_str::<WebUsageTimestampMicros>(r#""253402300799999999""#).is_ok());
+        assert!(
+            serde_json::from_str::<WebUsageTimestampMicros>(r#""253402300800000000""#).is_err()
+        );
+    }
+
+    #[test]
+    fn usage_rate_version_requires_one_through_128_utf8_bytes() {
+        assert!(serde_json::from_str::<WebUsageRateVersion>(r#""""#).is_err());
+        let oversized = serde_json::to_string(&"é".repeat(65)).expect("fixture serializes");
+        assert!(serde_json::from_str::<WebUsageRateVersion>(&oversized).is_err());
+        assert!(serde_json::from_str::<WebUsageRateVersion>(r#""fixture-v2""#).is_ok());
+    }
+
+    #[test]
+    fn dollar_amount_rejects_noncanonical_wire_spellings() {
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""-1""#).is_err());
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""01""#).is_err());
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""1.""#).is_err());
+        assert!(
+            serde_json::from_str::<WebDollarAmount>(r#""0.12345678901234567890123456789""#)
+                .is_err()
+        );
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""0""#).is_ok());
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""0.17""#).is_ok());
+        assert!(serde_json::from_str::<WebDollarAmount>(r#""0.170""#).is_err());
+        assert!(
+            serde_json::from_str::<WebDollarAmount>(r#""79228162514264337593543950336""#).is_err()
+        );
     }
 
     #[test]
