@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest'
-import { globalHotkeySequenceBindings, invokeCommand } from './commands'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { commandById, globalHotkeySequenceBindings, invokeCommand } from './commands'
 import { productCommandRegistry } from './productCommands'
 import { actions, selectApp, store } from './state'
 
 describe('command registry', () => {
+  afterEach(() => vi.unstubAllGlobals())
+
   it('registers the advertised product navigation sequences', () => {
     expect(globalHotkeySequenceBindings).toEqual(
       expect.arrayContaining([
@@ -274,5 +276,60 @@ describe('command registry', () => {
     invokeCommand('selection.last', context)
 
     expect(loaded).toEqual(['first', 'latest'])
+  })
+
+  it('applies an exact Settings preference through its registered command', () => {
+    invokeCommand('theme.light', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+    })
+
+    expect(selectApp(store.getState()).theme).toBe('light')
+  })
+
+  it('offers transcript detail only for transcript and Settings contexts', () => {
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+    }
+
+    expect(commandById('detail.full').available(context)).toBe(false)
+    expect(
+      commandById('detail.full').available({ ...context, configuresTranscriptDetail: true }),
+    ).toBe(true)
+    expect(commandById('detail.full').available({ ...context, timelineIds: ['event-0'] })).toBe(
+      true,
+    )
+  })
+
+  it('previews pane sizes without writing preferences until commit', () => {
+    const setItem = vi.fn()
+    vi.stubGlobal('localStorage', { setItem })
+    const context = {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+      paneSize: 320,
+    }
+
+    invokeCommand('pane.navigation.preview', context)
+
+    expect(selectApp(store.getState()).paneSizes.navigation).toBe(320)
+    expect(setItem).not.toHaveBeenCalled()
+
+    invokeCommand('pane.navigation.resize', context)
+
+    expect(setItem).toHaveBeenCalledOnce()
   })
 })

@@ -1,5 +1,5 @@
 import { expect, type Page, type TestInfo, test } from '@playwright/test'
-import { webContractBootstrapFixture as bootstrapFixture } from '../src/product.fixture'
+import { webContractBootstrapFixture } from '../src/product.fixture'
 
 interface RouteEvidence {
   path: string
@@ -30,7 +30,7 @@ const skipUnlessLinuxChromium = (testInfo: TestInfo) => {
 }
 
 const useDeterministicBootstrap = (page: Page) =>
-  page.route('**/api/bootstrap', (route) => route.fulfill({ json: bootstrapFixture }))
+  page.route('**/api/bootstrap', (route) => route.fulfill({ json: webContractBootstrapFixture }))
 
 const watchBrowser = (page: Page) => {
   const problems = { consoleErrors: [] as string[], pageErrors: [] as string[] }
