@@ -14,7 +14,9 @@ snapshot and monitor stream are verified against this PR
 (`agent/web-attention-projections`). The bounded lexical-search route and
 generated DTOs are verified against this PR (`agent/web-search-usage`). The
 dedicated browser usage/cost routes and generated DTOs are verified against this
-PR (`agent/web-usage-http`).
+PR (`agent/web-usage-http`). The repository-watch browser projection and
+Activity surface are verified against this PR
+(`agent/web-attention-activity-surfaces`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -271,6 +273,14 @@ empty polls. An initial projection failure returns a typed HTTP error before
 streaming begins. The append-only change journal timestamps commits explicitly;
 historical creation is seeded only from the durable command claim time and never
 inferred from UUID bits.
+
+Five read-only repository-watch routes expose the durable operator projection:
+`GET /api/repository-watch/repositories`, `pull-requests`, `work`, `sessions`,
+and `activity`. Their projection bounds, keyset continuation semantics, typed
+facts, and read-only behavior are owned by the
+[repository-watch operator read projection](repo-watch.md#operator-read-projection).
+The activity route exposes independently selectable event and webhook cursors
+under that contract; an excluded feed cannot carry a cursor.
 
 Rust serde DTOs and their schemars schemas under `crates/web-contract` are the
 authority. The checked-in `web-contract.mjs` runtime decoders and

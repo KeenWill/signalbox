@@ -5,6 +5,7 @@
 //! authentication.
 
 use std::{
+    collections::BTreeSet,
     env,
     error::Error,
     ffi::OsString,
@@ -439,7 +440,7 @@ fn production_router_with_budget(
         search: pool.clone().map(SearchRepository::new),
         usage: pool.clone().map(UsageRepository::new),
         model_configuration: model_configuration.clone().map(Arc::new),
-        snapshot_reader_budget,
+        snapshot_reader_budget: snapshot_reader_budget.clone(),
         shutdown,
     };
     // Every route that reads session data sits behind the loopback authority
@@ -462,6 +463,15 @@ fn production_router_with_budget(
         .route("/attention/follow", get(attention_follow))
         .route_layer(middleware::from_fn(validate_loopback_host))
         .with_state(state);
+    // Repository-watch operator projections carry session identities, dispatch
+    // state, and webhook activity, so they sit behind the same inner gate for
+    // the same reason the session reads do.
+    let repository_watch_reads = crate::web_repo_watch::router(
+        pool.clone(),
+        snapshot_reader_budget,
+        automatic_resume_attempt_budget,
+    )
+    .route_layer(middleware::from_fn(validate_loopback_host));
     // Every route that reads session-attached content sits behind the
     // loopback authority gate. Blob descriptors and bytes are reachable by
     // digest alone and a descriptor read can start isolated derivation work,
@@ -487,7 +497,8 @@ fn production_router_with_budget(
         .route("/bootstrap", get(contract_bootstrap))
         .with_state(http_state)
         .merge(session_reads)
-        .merge(blob_reads);
+        .merge(blob_reads)
+        .merge(repository_watch_reads);
     // Imported-conversation reads need both a pool and hub model settings; the
     // bootstrap and session surfaces stay routable without either.
     let api = match (pool, model_configuration) {
@@ -627,6 +638,12 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
     };
     drop(snapshot_permit);
     let cursor = snapshot.cursor;
+    let live_page_has_capacity = snapshot.continuation_after.is_none();
+    let visible_sessions = snapshot
+        .summaries
+        .iter()
+        .map(|summary| summary.session)
+        .collect::<BTreeSet<_>>();
     let snapshot = match attention_snapshot_dto(snapshot) {
         Ok(snapshot) => snapshot,
         Err(()) => return attention_projection_error(None),
@@ -636,11 +653,22 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
             repository,
             Some(WebAttentionStreamEvent::Snapshot { snapshot }),
             cursor,
+            visible_sessions,
+            live_page_has_capacity,
             budget,
             shutdown,
             AttentionFollowDisposition::Continue,
         ),
-        |(repository, pending, cursor, budget, mut shutdown, disposition)| async move {
+        |(
+            repository,
+            pending,
+            cursor,
+            visible_sessions,
+            live_page_has_capacity,
+            budget,
+            mut shutdown,
+            disposition,
+        )| async move {
             if shutdown.as_ref().is_some_and(|shutdown| *shutdown.borrow()) {
                 return None;
             }
@@ -651,6 +679,8 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                         repository,
                         None,
                         cursor,
+                        visible_sessions,
+                        live_page_has_capacity,
                         budget,
                         shutdown,
                         AttentionFollowDisposition::Continue,
@@ -690,11 +720,37 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                         cursor: next,
                         summaries,
                     }) => {
-                        let summaries = summaries
-                            .into_iter()
-                            .map(attention_summary_dto)
-                            .collect::<Result<Vec<_>, _>>()
-                            .ok()?;
+                        if attention_changes_require_resync(
+                            &summaries,
+                            &visible_sessions,
+                            live_page_has_capacity,
+                        ) {
+                            return Some((
+                                WebAttentionStreamEvent::ResyncRequired {
+                                    cursor: next.value().to_string(),
+                                },
+                                (
+                                    repository,
+                                    None,
+                                    next,
+                                    visible_sessions,
+                                    live_page_has_capacity,
+                                    budget,
+                                    shutdown,
+                                    AttentionFollowDisposition::End,
+                                ),
+                            ));
+                        }
+                        let summaries =
+                            page_scoped_attention_summaries(summaries, &visible_sessions)
+                                .into_iter()
+                                .map(attention_summary_dto)
+                                .collect::<Result<Vec<_>, _>>()
+                                .ok()?;
+                        if summaries.is_empty() {
+                            cursor = next;
+                            continue;
+                        }
                         return Some((
                             WebAttentionStreamEvent::Update {
                                 cursor: next.value().to_string(),
@@ -704,6 +760,8 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                                 repository,
                                 None,
                                 next,
+                                visible_sessions,
+                                live_page_has_capacity,
                                 budget,
                                 shutdown,
                                 AttentionFollowDisposition::Continue,
@@ -719,6 +777,8 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                                 repository,
                                 None,
                                 next,
+                                visible_sessions,
+                                live_page_has_capacity,
                                 budget,
                                 shutdown,
                                 AttentionFollowDisposition::End,
@@ -734,6 +794,29 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
         },
     );
     ndjson_response(source)
+}
+
+fn page_scoped_attention_summaries(
+    summaries: Vec<AttentionSummary>,
+    visible_sessions: &BTreeSet<SessionId>,
+) -> Vec<AttentionSummary> {
+    summaries
+        .into_iter()
+        .filter(|summary| visible_sessions.contains(&summary.session))
+        .collect()
+}
+
+fn attention_changes_require_resync(
+    summaries: &[AttentionSummary],
+    visible_sessions: &BTreeSet<SessionId>,
+    live_page_has_capacity: bool,
+) -> bool {
+    let page_boundary = visible_sessions.last();
+    summaries.iter().any(|summary| {
+        !visible_sessions.contains(&summary.session)
+            && (live_page_has_capacity
+                || page_boundary.is_some_and(|boundary| summary.session < *boundary))
+    })
 }
 
 fn empty_ndjson_response() -> Response {
@@ -772,7 +855,7 @@ fn attention_snapshot_dto(snapshot: AttentionSnapshot) -> Result<WebAttentionSna
     })
 }
 
-fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummary, ()> {
+pub(crate) fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummary, ()> {
     let unix_milliseconds = summary
         .last_activity
         .recorded_at
@@ -2956,6 +3039,7 @@ async fn static_assets_not_configured() -> Response {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         ffi::OsString,
         io::{self, Write as _},
         net::SocketAddr,
@@ -3772,6 +3856,110 @@ mod tests {
             .await
             .expect("the follower wait exits promptly on shutdown")
             .expect("the follower wait task completes cleanly");
+    }
+
+    #[test]
+    fn attention_follow_filters_changes_to_the_visible_snapshot_page() {
+        let visible = SessionId::from_uuid(Uuid::from_u128(1));
+        let off_page = SessionId::from_uuid(Uuid::from_u128(2));
+        let summary = |session| AttentionSummary {
+            session,
+            current_turn: None,
+            state: AttentionState::Idle,
+            action: None,
+            goal_block: None,
+            judge: AttentionJudgeFacts {
+                actionable: 0,
+                completed: 0,
+                escalated: 0,
+                failed: 0,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH,
+                kind: AttentionActivityKind::Session,
+            },
+        };
+        let visible_sessions = BTreeSet::from([visible]);
+
+        let scoped = super::page_scoped_attention_summaries(
+            vec![summary(off_page), summary(visible)],
+            &visible_sessions,
+        );
+
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].session, visible);
+    }
+
+    #[test]
+    fn attention_follow_resyncs_for_a_new_identity_on_a_partial_live_page() {
+        let visible = SessionId::from_uuid(Uuid::from_u128(1));
+        let new_session = SessionId::from_uuid(Uuid::from_u128(2));
+        let summary = AttentionSummary {
+            session: new_session,
+            current_turn: None,
+            state: AttentionState::Idle,
+            action: None,
+            goal_block: None,
+            judge: AttentionJudgeFacts {
+                actionable: 0,
+                completed: 0,
+                escalated: 0,
+                failed: 0,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH,
+                kind: AttentionActivityKind::Session,
+            },
+        };
+        let visible_sessions = BTreeSet::from([visible]);
+
+        assert!(super::attention_changes_require_resync(
+            std::slice::from_ref(&summary),
+            &visible_sessions,
+            true,
+        ));
+        assert!(!super::attention_changes_require_resync(
+            &[summary],
+            &visible_sessions,
+            false,
+        ));
+    }
+
+    #[test]
+    fn attention_follow_resyncs_when_a_new_identity_enters_a_full_live_page() {
+        let first = SessionId::from_uuid(Uuid::from_u128(2));
+        let boundary = SessionId::from_uuid(Uuid::from_u128(3));
+        let entering = SessionId::from_uuid(Uuid::from_u128(1));
+        let off_page = SessionId::from_uuid(Uuid::from_u128(4));
+        let summary = |session| AttentionSummary {
+            session,
+            current_turn: None,
+            state: AttentionState::Idle,
+            action: None,
+            goal_block: None,
+            judge: AttentionJudgeFacts {
+                actionable: 0,
+                completed: 0,
+                escalated: 0,
+                failed: 0,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH,
+                kind: AttentionActivityKind::Session,
+            },
+        };
+        let visible_sessions = BTreeSet::from([first, boundary]);
+
+        assert!(super::attention_changes_require_resync(
+            &[summary(entering)],
+            &visible_sessions,
+            false,
+        ));
+        assert!(!super::attention_changes_require_resync(
+            &[summary(off_page)],
+            &visible_sessions,
+            false,
+        ));
     }
 
     /// The projection reports a blocked goal as still owed automatic
