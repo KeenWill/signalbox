@@ -795,9 +795,17 @@ async fn context_compaction_usage_axes_stay_integral_at_the_column_type()
     Ok(())
 }
 
+/// The projection reads whatever input semantics the canonical compaction call
+/// pinned, so it must observe the semantics contract owned by
+/// 202608210611_context_compaction_input_semantics.sql rather than restate one.
+/// That migration keeps the column nullable so pre-migration rows retain their
+/// unknown meaning, defaults newly inserted calls to cache-exclusive, and makes
+/// the pinned value immutable. The daemon's only write path
+/// (`ContextCompactionRepository::prepare`) always binds the value explicitly;
+/// this exercises the raw-insert edges that path does not reach.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn context_compaction_input_semantics_preserve_history_and_pin_new_calls()
+async fn context_compaction_input_semantics_default_new_calls_and_stay_immutable()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let compaction_semantics_nullable: bool = sqlx::query_scalar(
@@ -824,30 +832,32 @@ async fn context_compaction_input_semantics_preserve_history_and_pin_new_calls()
     .execute(&pool)
     .await?;
 
-    let call = Uuid::from_u128(seed + 0x81);
-    let missing_semantics_error = sqlx::query(
+    let defaulted_call = Uuid::from_u128(seed + 0x81);
+    sqlx::query(
         "INSERT INTO context_compaction_model_call
             (model_call_id, session_id, direct_model_selection_id,
              resolved_provider_model_identity_id, source_frontier_id,
              credential_reference, state_kind)
          VALUES ($1, $2, $3, $4, $5, 'semantic-pin-fixture', 'prepared')",
     )
-    .bind(call)
+    .bind(defaulted_call)
     .bind(fixture.session.into_uuid())
     .bind(Uuid::from_u128(seed + 0x82))
     .bind(Uuid::from_u128(seed + 0x83))
     .bind(source_frontier)
     .execute(&pool)
-    .await
-    .expect_err("new compaction calls must pin input semantics");
-    assert!(
-        missing_semantics_error
-            .as_database_error()
-            .is_some_and(|error| error
-                .message()
-                .contains("compaction input-token semantics must be pinned"))
-    );
+    .await?;
+    let defaulted_semantics: Option<bool> = sqlx::query_scalar(
+        "SELECT usage_input_includes_cache_tokens
+           FROM context_compaction_model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(defaulted_call)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(defaulted_semantics, Some(false));
 
+    let call = Uuid::from_u128(seed + 0x84);
     sqlx::query(
         "INSERT INTO context_compaction_model_call
             (model_call_id, session_id, direct_model_selection_id,
@@ -874,8 +884,8 @@ async fn context_compaction_input_semantics_preserve_history_and_pin_new_calls()
     assert_eq!(
         changed_semantics_error
             .as_database_error()
-            .and_then(|error| error.code()),
-        Some("23514".into())
+            .and_then(|error| error.constraint()),
+        Some("context_compaction_input_semantics_immutable")
     );
     let retained_semantics: bool = sqlx::query_scalar(
         "SELECT usage_input_includes_cache_tokens

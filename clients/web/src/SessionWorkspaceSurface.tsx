@@ -351,6 +351,8 @@ export function SessionWorkspaceSurface({
       dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => timelineRef.current?.focus(),
       sessionId:
         isCanonicalSessionId(candidate) && timelineCapability === 'available'
@@ -375,6 +377,8 @@ export function SessionWorkspaceSurface({
       dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       timelineWindowAvailable: displayedSession !== undefined,
       focusTimeline: () => timelineRef.current?.focus(),
       loadTimelineWindow: loadWindow,

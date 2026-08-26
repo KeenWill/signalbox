@@ -7,8 +7,11 @@
 -- Tighten canonical compaction evidence before projection backfill. This is a
 -- forward correction because recorded migrations are immutable. The replaced
 -- constraint was defined by 202607290401_context_compaction.sql.
-ALTER TABLE context_compaction_model_call
-    ADD COLUMN usage_input_includes_cache_tokens boolean;
+--
+-- The projected `usage_input_includes_cache_tokens` column, its `false`
+-- default for newly prepared calls, and its update-immutability trigger are
+-- owned by 202608210611_context_compaction_input_semantics.sql; this migration
+-- only reads that column.
 ALTER TABLE context_compaction_model_call
     DROP CONSTRAINT context_compaction_model_call_usage_nonnegative;
 ALTER TABLE context_compaction_model_call
@@ -46,34 +49,6 @@ ALTER TABLE context_compaction_model_call
                 )
             )
         );
-
-CREATE FUNCTION require_context_compaction_usage_input_semantics()
-RETURNS trigger
-LANGUAGE plpgsql
-AS $$
-BEGIN
-    IF TG_OP = 'INSERT' THEN
-        IF NEW.usage_input_includes_cache_tokens IS NULL THEN
-            RAISE EXCEPTION 'compaction input-token semantics must be pinned'
-                USING ERRCODE = '23514';
-        END IF;
-        RETURN NEW;
-    END IF;
-
-    IF NEW.usage_input_includes_cache_tokens IS DISTINCT FROM
-       OLD.usage_input_includes_cache_tokens
-    THEN
-        RAISE EXCEPTION 'compaction input-token semantics are immutable'
-            USING ERRCODE = '23514';
-    END IF;
-    RETURN NEW;
-END;
-$$;
-
-CREATE TRIGGER context_compaction_usage_input_semantics_are_pinned
-BEFORE INSERT OR UPDATE ON context_compaction_model_call
-FOR EACH ROW
-EXECUTE FUNCTION require_context_compaction_usage_input_semantics();
 
 CREATE TABLE web_usage_oversized_profile_identity (
     profile_id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,

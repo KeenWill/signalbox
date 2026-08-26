@@ -32,6 +32,7 @@ use signalbox_application::{
     UpdateSessionPlacementService, UuidV7CommissionedDispatchIdGenerator,
     UuidV7CreateSessionFromImportedFrontierIdGenerator, UuidV7ImportedConversationIdGenerator,
     UuidV7SessionIdGenerator, UuidV7SubmitInputIdGenerator, UuidV7ToolLoopIdGenerator,
+    render_model_user_content,
 };
 use signalbox_blob_store::ExpectedBlob;
 use signalbox_conversation_import_claude_code::{
@@ -103,8 +104,8 @@ use signalbox_persistence::{
         PostgresCommissionedDispatchStore,
     },
     context_compaction::{
-        AppliedContextCompaction, ContextCompactionCommandLookup,
-        ContextCompactionInputTokenSemantics, ContextCompactionRepository,
+        AppliedContextCompaction, AutomaticContextCompactionPreviewMember,
+        ContextCompactionCommandLookup, ContextCompactionRepository,
         ContextCompactionRepositoryError, FailedContextCompactionDisposition,
         PrepareContextCompactionOutcome, PrepareContextCompactionRequest,
         PreparedContextCompaction,
@@ -179,11 +180,11 @@ use signalbox_process_protocol::{
     ImportedConversationSourceFormat as WireImportedConversationSourceFormat,
     ImportedSessionRelationship as WireImportedSessionRelationship, ImportedSourceSpeaker,
     ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery, MAX_BLOB_READ_BYTES,
-    MAX_CONCURRENT_SNAPSHOT_READERS, MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter,
-    ModelCallCostLabel, ModelCallDisposition, ModelCallDollarCost, ModelCallState,
-    ModelCallTokenUsage, ModelCapabilities as WireModelCapabilities,
-    ModelChangeAdjustment as WireModelChangeAdjustment, ModelSelection as WireModelSelection,
-    ModelSettingSource as WireModelSettingSource, ModelSettingsOverlay as WireModelSettingsOverlay,
+    MAX_FRAME_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
+    ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
+    ModelCapabilities as WireModelCapabilities, ModelChangeAdjustment as WireModelChangeAdjustment,
+    ModelSelection as WireModelSelection, ModelSettingSource as WireModelSettingSource,
+    ModelSettingsOverlay as WireModelSettingsOverlay,
     ModelSettingsPrecedence as WireModelSettingsPrecedence,
     ModelSettingsSnapshot as WireModelSettingsSnapshot,
     OperatorStatusConvergenceSeal as WireOperatorStatusConvergenceSeal,
@@ -270,7 +271,6 @@ const BULK_INGEST_SESSION_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 /// Hard safety ceiling bounding store latency and retained read capacity.
 const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const INBOUND_READ_AHEAD_BYTES: usize = 8 * 1024;
-const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS: u32 = 2;
 
 #[derive(Debug)]
@@ -394,8 +394,10 @@ impl ProcessRuntime {
         model_configuration: HubModelConfiguration,
         template_configuration: SessionTemplateConfiguration,
     ) -> Self {
-        let snapshot_reader_budget =
-            shared_snapshot_reader_budget(pool.options().get_max_connections());
+        let snapshot_reader_budget = shared_snapshot_reader_budget(
+            pool.options().get_max_connections(),
+            Some(&model_configuration),
+        );
         let (durable_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         let (streaming_updates, _) = broadcast::channel(PROCESS_UPDATE_CAPACITY);
         Self {
@@ -824,6 +826,17 @@ async fn serve_connection(
             }
         };
         let (version, request_id, request) = frame.into_parts();
+        if !request_within_configured_collection_limits(&request, &services.model_configuration) {
+            drop(frame_buffer_permit);
+            write_error(
+                &mut writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::InvalidRequest),
+            )
+            .await?;
+            continue;
+        }
         let follows = matches!(request, ClientRequest::FollowSession { .. });
         let import_limit = services
             .model_configuration
@@ -933,6 +946,23 @@ fn active_bulk_ingest_kind(
         Some(BulkIngestKind::BlobUpload)
     } else {
         None
+    }
+}
+
+fn request_within_configured_collection_limits(
+    request: &ClientRequest,
+    configuration: &HubModelConfiguration,
+) -> bool {
+    match request {
+        ClientRequest::RecordReviewFindings { findings, .. } => {
+            configured_usize(configuration, "max_review_findings_per_run")
+                .is_none_or(|maximum| findings.len() <= maximum)
+        }
+        ClientRequest::StartReviewOrchestration { concerns, .. } => {
+            configured_usize(configuration, "max_review_orchestration_concerns")
+                .is_none_or(|maximum| concerns.len() <= maximum)
+        }
+        _ => true,
     }
 }
 
@@ -1066,6 +1096,7 @@ fn conversation_import_request_requires_permit(
         | ClientRequest::CreateSessionFromTemplate { .. }
         | ClientRequest::CommissionSession { .. }
         | ClientRequest::ListTemplates {}
+        | ClientRequest::ReadDeploymentLimits {}
         | ClientRequest::ListSessions {}
         | ClientRequest::ReadOperatorStatus {}
         | ClientRequest::UpdateSessionPlacement { .. }
@@ -1275,6 +1306,7 @@ impl SnapshotReaderAdmission {
             | ClientRequest::CreateSessionFromTemplate { .. }
             | ClientRequest::CommissionSession { .. }
             | ClientRequest::ListTemplates {}
+            | ClientRequest::ReadDeploymentLimits {}
             | ClientRequest::UpdateSessionPlacement { .. }
             | ClientRequest::AttachGoal { .. }
             | ClientRequest::ResumeGoal { .. }
@@ -1342,19 +1374,51 @@ async fn admit_snapshot_reader(
     }
 }
 
-fn snapshot_reader_capacity(max_pool_connections: u32) -> Option<usize> {
+fn configured_usize(configuration: &HubModelConfiguration, field: &'static str) -> Option<usize> {
+    configured_u64(configuration, field).and_then(|value| usize::try_from(value).ok())
+}
+
+fn configured_u64(configuration: &HubModelConfiguration, field: &'static str) -> Option<u64> {
+    configuration.numeric_bounds().integer(field).flatten()
+}
+
+const fn lower_optional_usize(left: Option<usize>, right: Option<usize>) -> Option<usize> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(if left < right { left } else { right }),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn snapshot_reader_capacity(
+    max_pool_connections: u32,
+    configured_limit: Option<usize>,
+) -> Option<usize> {
     let available =
         max_pool_connections.checked_sub(RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS)?;
     if available == 0 {
         return None;
     }
-    usize::try_from(available)
-        .ok()
-        .map(|available| available.min(MAX_CONCURRENT_SNAPSHOT_READERS))
+    usize::try_from(available).ok().and_then(|available| {
+        let admitted = configured_limit.map_or(available, |limit| available.min(limit));
+        (admitted > 0).then_some(admitted)
+    })
 }
 
-pub fn shared_snapshot_reader_budget(max_pool_connections: u32) -> Option<Arc<Semaphore>> {
-    snapshot_reader_capacity(max_pool_connections)
+/// Builds the daemon-wide snapshot-reader admission budget once so the process
+/// runtime and the browser HTTP reads draw permits from the same ceiling.
+///
+/// The ceiling honours the operator's `max_concurrent_snapshot_readers` bound
+/// when the hub configuration carries one; callers without a configuration
+/// (deterministic routers) fall back to the pool-derived ceiling alone.
+pub fn shared_snapshot_reader_budget(
+    max_pool_connections: u32,
+    model_configuration: Option<&HubModelConfiguration>,
+) -> Option<Arc<Semaphore>> {
+    let configured_limit = model_configuration.and_then(|configuration| {
+        configured_usize(configuration, "max_concurrent_snapshot_readers")
+    });
+    snapshot_reader_capacity(max_pool_connections, configured_limit)
         .map(|capacity| Arc::new(Semaphore::new(capacity)))
 }
 
@@ -1617,6 +1681,7 @@ where
                 request_id,
                 imported_conversation_id,
                 &services.pool,
+                &services.model_configuration,
                 snapshot_permit,
             )
             .await
@@ -1776,6 +1841,46 @@ where
             )
             .await
         }
+        ClientRequest::ReadDeploymentLimits {} => {
+            write_message(
+                writer,
+                version,
+                request_id,
+                ServerMessage::DeploymentLimits {
+                    max_message_utf8_bytes: configured_u64(
+                        &services.model_configuration,
+                        "max_message_utf8_bytes",
+                    )
+                    .map(CanonicalU64::new),
+                    max_system_prompt_utf8_bytes: configured_u64(
+                        &services.model_configuration,
+                        "max_system_prompt_utf8_bytes",
+                    )
+                    .map(CanonicalU64::new),
+                    terminal_input_channel_capacity: configured_u64(
+                        &services.model_configuration,
+                        "terminal_input_channel_capacity",
+                    )
+                    .map(CanonicalU64::new),
+                    min_metadata_page_size: configured_u64(
+                        &services.model_configuration,
+                        "min_metadata_page_size",
+                    )
+                    .map(CanonicalU64::new),
+                    max_metadata_page_size: configured_u64(
+                        &services.model_configuration,
+                        "max_metadata_page_size",
+                    )
+                    .map(CanonicalU64::new),
+                    max_review_findings_per_run: configured_u64(
+                        &services.model_configuration,
+                        "max_review_findings_per_run",
+                    )
+                    .map(CanonicalU64::new),
+                },
+            )
+            .await
+        }
         ClientRequest::SubmitInput {
             command_id,
             session_id,
@@ -1798,6 +1903,7 @@ where
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
+                services.blob_store_registry.as_deref(),
             )
             .await
         }
@@ -1823,6 +1929,7 @@ where
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
+                services.blob_store_registry.as_deref(),
             )
             .await
         }
@@ -1880,6 +1987,7 @@ where
                     after_session_id,
                 },
                 &services.pool,
+                &services.model_configuration,
                 snapshot_permit,
             )
             .await
@@ -1906,6 +2014,7 @@ where
                     after,
                 },
                 &services.pool,
+                &services.model_configuration,
                 snapshot_permit,
             )
             .await
@@ -1955,6 +2064,7 @@ where
                 session_id,
                 metadata,
                 &services.pool,
+                &services.model_configuration,
             )
             .await
         }
@@ -2468,6 +2578,7 @@ where
                 &services.eligibility_nudge,
                 &services.tool_dispatch_gate,
                 services.model_configuration.as_ref(),
+                services.blob_store_registry.as_deref(),
             )
             .await
         }
@@ -5772,6 +5883,11 @@ where
     drop(snapshot_permit);
     match outcome {
         Ok(metadata) => {
+            if configured_u64(&services.model_configuration, "max_blob_replica_count")
+                .is_some_and(|maximum| metadata.replica_count > maximum)
+            {
+                return Err(ProcessConnectionError::EncodeInvariant);
+            }
             write_message(
                 writer,
                 version,
@@ -6866,6 +6982,7 @@ where
         )
         .await;
     };
+    let input_includes_cache_tokens = route.adapter().reports_cache_inclusive_input();
     let credential_reference =
         match signalbox_persistence::session_credentials::current_session_credential_with_migration_fallback(
             &services.pool,
@@ -6923,14 +7040,7 @@ where
             defaults_version: defaults.version(),
             selection,
             target,
-            input_token_semantics: if services
-                .model_configuration
-                .input_includes_cache_tokens(target)
-            {
-                ContextCompactionInputTokenSemantics::CacheInclusive
-            } else {
-                ContextCompactionInputTokenSemantics::CacheExclusive
-            },
+            input_includes_cache_tokens,
             credential_reference: credential_reference.clone(),
             call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
             compaction: ContextCompactionId::from_uuid(uuid::Uuid::now_v7()),
@@ -7137,6 +7247,7 @@ pub(crate) enum AutomaticContextCompactionError {
     Repository(ContextCompactionRepositoryError),
     Model,
     Configuration,
+    InputDoesNotFit,
     State,
     Integrity,
     AlreadyAttempted,
@@ -7163,7 +7274,7 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
             Self::Read(ProcessReadError::Corruption(_)) | Self::Integrity => {
                 signalbox_application::OperatorFailureClass::FailClosedCorruption
             }
-            Self::Configuration | Self::State | Self::AlreadyAttempted => {
+            Self::Configuration | Self::InputDoesNotFit | Self::State | Self::AlreadyAttempted => {
                 signalbox_application::OperatorFailureClass::CallerOrHubBug
             }
         }
@@ -7188,11 +7299,125 @@ impl ClassifyOperatorFailure for AutomaticContextCompactionError {
             }
             Self::Model => "context_compaction_model",
             Self::Configuration => "context_compaction_configuration",
+            Self::InputDoesNotFit => "context_compaction_input_does_not_fit",
             Self::State => "context_compaction_state",
             Self::Integrity => "context_compaction_integrity",
             Self::AlreadyAttempted => "context_compaction_already_attempted",
         }
     }
+}
+
+async fn automatic_context_compaction_boundary(
+    members: &[AutomaticContextCompactionPreviewMember],
+    entries: &[ProcessTranscriptEntry],
+    input_byte_budget: u64,
+    catalog: &BlobCatalogRepository,
+) -> Result<Option<u64>, AutomaticContextCompactionError> {
+    if members.len() != entries.len() {
+        return Err(AutomaticContextCompactionError::Integrity);
+    }
+    let mut encoded_lengths = Vec::with_capacity(entries.len());
+    let mut boundaries = Vec::with_capacity(entries.len());
+    for (member, entry) in members.iter().zip(entries) {
+        if member.reference() != transcript_entry_reference(entry) {
+            return Err(AutomaticContextCompactionError::Integrity);
+        }
+        // Attachment parts resolve through the blob catalog, so rendering one
+        // entry is a database read that carries the same closed dispositions
+        // the compaction range load already maps.
+        let value = context_compaction_entry_value(entry, catalog)
+            .await
+            .map_err(|error| match error {
+                ContextCompactionRangeLoadError::Read(error) => {
+                    AutomaticContextCompactionError::Read(error)
+                }
+                ContextCompactionRangeLoadError::CatalogUnavailable => {
+                    AutomaticContextCompactionError::Model
+                }
+                ContextCompactionRangeLoadError::Integrity => {
+                    AutomaticContextCompactionError::Integrity
+                }
+            })?;
+        let encoded =
+            serde_json::to_vec(&value).map_err(|_| AutomaticContextCompactionError::Integrity)?;
+        encoded_lengths.push(
+            u64::try_from(encoded.len()).map_err(|_| AutomaticContextCompactionError::Integrity)?,
+        );
+        boundaries.push((member.position(), member.is_safe_boundary()));
+    }
+    let selected =
+        bounded_rendered_compaction_boundary(&encoded_lengths, &boundaries, input_byte_budget);
+    let selected_only_current_summary = selected
+        == boundaries.first().map(|(position, _)| *position)
+        && matches!(
+            entries.first(),
+            Some(ProcessTranscriptEntry::ContextSummary { .. })
+        );
+    if selected_only_current_summary
+        && successor_compaction_cannot_advance(&encoded_lengths, &boundaries, input_byte_budget)
+    {
+        return Ok(None);
+    }
+    Ok(selected)
+}
+
+fn successor_compaction_cannot_advance(
+    encoded_lengths: &[u64],
+    boundaries: &[(u64, bool)],
+    input_byte_budget: u64,
+) -> bool {
+    if encoded_lengths.len() != boundaries.len() || encoded_lengths.len() < 2 {
+        return true;
+    }
+    let mut minimum_bytes = 2_u64;
+    for (encoded_length, (_, safe_boundary)) in encoded_lengths[1..].iter().zip(&boundaries[1..]) {
+        minimum_bytes = minimum_bytes
+            .saturating_add(1)
+            .saturating_add(*encoded_length);
+        if *safe_boundary {
+            return minimum_bytes > input_byte_budget;
+        }
+    }
+    true
+}
+
+fn bounded_rendered_compaction_boundary(
+    encoded_lengths: &[u64],
+    boundaries: &[(u64, bool)],
+    input_byte_budget: u64,
+) -> Option<u64> {
+    if encoded_lengths.len() != boundaries.len() {
+        return None;
+    }
+    let separators = u64::try_from(encoded_lengths.len().saturating_sub(1)).ok()?;
+    let total_bytes = encoded_lengths
+        .iter()
+        .fold(2_u64, |total, length| total.saturating_add(*length));
+    let target_bytes = total_bytes
+        .saturating_add(separators)
+        .div_ceil(2)
+        .min(input_byte_budget);
+    let mut prefix_bytes = 1_u64;
+    let mut latest_safe = None;
+    for (index, ((position, safe_boundary), encoded_length)) in
+        boundaries.iter().zip(encoded_lengths).enumerate()
+    {
+        if index > 0 {
+            prefix_bytes = prefix_bytes.saturating_add(1);
+        }
+        prefix_bytes = prefix_bytes.saturating_add(*encoded_length);
+        let candidate_bytes = prefix_bytes.saturating_add(1);
+        if candidate_bytes > input_byte_budget {
+            break;
+        }
+        if *safe_boundary {
+            latest_safe = Some(*position);
+            if candidate_bytes >= target_bytes {
+                return latest_safe;
+            }
+        }
+    }
+    latest_safe
 }
 
 pub(crate) async fn compact_automatically(
@@ -7225,25 +7450,64 @@ pub(crate) async fn compact_automatically(
         .resolve(FrozenModelSelection::Direct(selection))
         .map_err(|_| AutomaticContextCompactionError::Configuration)?
         .target();
+    let route = model_configuration
+        .resolve_direct_model(selection)
+        .ok_or(AutomaticContextCompactionError::Configuration)?;
+    let input_includes_cache_tokens = route.adapter().reports_cache_inclusive_input();
+    let runtime_models = model_configuration.runtime_model_catalog();
+    let definition = runtime_models
+        .resolve(target)
+        .ok_or(AutomaticContextCompactionError::Configuration)?;
+    let compaction_prompt = model_configuration.compaction_prompt();
+    let prompt_bytes = u64::try_from(compaction_prompt.len())
+        .map_err(|_| AutomaticContextCompactionError::Configuration)?;
+    let automatic_input_byte_budget = u64::from(definition.context_window_tokens())
+        .checked_sub(u64::from(definition.max_output_tokens()))
+        .and_then(|available| available.checked_sub(prompt_bytes))
+        .filter(|available| *available > 0)
+        .ok_or(AutomaticContextCompactionError::Configuration)?;
     let credential_reference = model_calls
         .resolve_session_credential_reference(session, target)
         .await
         .map_err(AutomaticContextCompactionError::Credential)?;
     let repository = ContextCompactionRepository::new(model_calls.pool().clone());
+    let preview = repository
+        .preview_automatic_range(session)
+        .await
+        .map_err(AutomaticContextCompactionError::Repository)?
+        .ok_or(AutomaticContextCompactionError::State)?;
+    let preview_positions = preview
+        .members()
+        .iter()
+        .map(|member| member.position())
+        .collect::<Vec<_>>();
+    let preview_entries = preview
+        .members()
+        .iter()
+        .map(|member| member.reference())
+        .collect::<Vec<_>>();
+    let rendered_entries = ProcessReadRepository::new(model_calls.pool().clone())
+        .read_selected_transcript_entries(&preview_positions, &preview_entries)
+        .await
+        .map_err(AutomaticContextCompactionError::Read)?;
+    let requested_through_position = automatic_context_compaction_boundary(
+        preview.members(),
+        &rendered_entries,
+        automatic_input_byte_budget,
+        &BlobCatalogRepository::new(model_calls.pool().clone()),
+    )
+    .await?
+    .ok_or(AutomaticContextCompactionError::InputDoesNotFit)?;
     let prepared = loop {
         let request = PrepareContextCompactionRequest {
             command: DurableCommandId::from_uuid(uuid::Uuid::now_v7()),
             session,
-            requested_through_position: None,
+            requested_through_position: Some(requested_through_position),
             automatic_for_turn: Some(turn),
             defaults_version: defaults.version(),
             selection,
             target,
-            input_token_semantics: if model_configuration.input_includes_cache_tokens(target) {
-                ContextCompactionInputTokenSemantics::CacheInclusive
-            } else {
-                ContextCompactionInputTokenSemantics::CacheExclusive
-            },
+            input_includes_cache_tokens,
             credential_reference: credential_reference.as_str().to_owned(),
             call: ModelCallId::from_uuid(uuid::Uuid::now_v7()),
             compaction: ContextCompactionId::from_uuid(uuid::Uuid::now_v7()),
@@ -7287,6 +7551,9 @@ pub(crate) async fn compact_automatically(
             .map_err(AutomaticContextCompactionError::Repository)?;
             return Err(AutomaticContextCompactionError::Read(error));
         }
+        Err(ContextCompactionRangeLoadError::CatalogUnavailable) => {
+            return Err(AutomaticContextCompactionError::Model);
+        }
         Err(ContextCompactionRangeLoadError::Integrity) => {
             fail_context_compaction_until_resolved(
                 &repository,
@@ -7298,6 +7565,19 @@ pub(crate) async fn compact_automatically(
             return Err(AutomaticContextCompactionError::Integrity);
         }
     };
+    if u64::try_from(rendered_range.len())
+        .ok()
+        .is_none_or(|rendered_bytes| rendered_bytes > automatic_input_byte_budget)
+    {
+        fail_context_compaction_until_resolved(
+            &repository,
+            &prepared,
+            FailedContextCompactionDisposition::KnownFailed,
+        )
+        .await
+        .map_err(AutomaticContextCompactionError::Repository)?;
+        return Err(AutomaticContextCompactionError::InputDoesNotFit);
+    }
     authorize_context_compaction_until_resolved(&repository, &prepared)
         .await
         .map_err(AutomaticContextCompactionError::Repository)?;
@@ -7307,7 +7587,7 @@ pub(crate) async fn compact_automatically(
         selection: prepared.selection(),
         target: prepared.target(),
         credential_reference: prepared.credential_reference().to_owned(),
-        system_prompt: model_configuration.compaction_prompt().to_owned(),
+        system_prompt: compaction_prompt.to_owned(),
         rendered_range,
     };
     let result = match model.execute(request).await {
@@ -7354,10 +7634,11 @@ async fn load_context_compaction_range(
     {
         return Err(ContextCompactionRangeLoadError::Integrity);
     }
-    let values = entries
-        .iter()
-        .map(context_compaction_entry_value)
-        .collect::<Vec<_>>();
+    let catalog = BlobCatalogRepository::new(pool.clone());
+    let mut values = Vec::with_capacity(entries.len());
+    for entry in &entries {
+        values.push(context_compaction_entry_value(entry, &catalog).await?);
+    }
     serde_json::to_string(&values).map_err(|_| ContextCompactionRangeLoadError::Integrity)
 }
 
@@ -7371,6 +7652,9 @@ where
     loop {
         match load().await {
             Err(ContextCompactionRangeLoadError::Read(ProcessReadError::Database(_))) => {
+                sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await;
+            }
+            Err(ContextCompactionRangeLoadError::CatalogUnavailable) => {
                 sleep(CONTEXT_COMPACTION_PERSISTENCE_RETRY_INTERVAL).await;
             }
             result => return result,
@@ -7466,7 +7750,10 @@ fn transcript_entry_reference(
     signalbox_domain::SemanticTranscriptEntryRef::from_source(source_session, entry)
 }
 
-fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json::Value {
+async fn context_compaction_entry_value(
+    entry: &ProcessTranscriptEntry,
+    catalog: &BlobCatalogRepository,
+) -> Result<serde_json::Value, ContextCompactionRangeLoadError> {
     let reference = transcript_entry_reference(entry);
     let source_session_id = reference
         .source_session()
@@ -7474,7 +7761,7 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
         .hyphenated()
         .to_string();
     let entry_id = reference.entry().into_uuid().hyphenated().to_string();
-    match entry {
+    let value = match entry {
         ProcessTranscriptEntry::DelegatedTask {
             entry_index,
             spawning_request,
@@ -7585,15 +7872,42 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
             turn,
             content,
             ..
-        } => serde_json::json!({
-            "position": entry_index + 1,
-            "source_session_id": source_session_id,
-            "entry_id": entry_id,
-            "type": "user",
-            "accepted_input_id": accepted_input.into_uuid().hyphenated().to_string(),
-            "turn_id": turn.into_uuid().hyphenated().to_string(),
-            "content": content,
-        }),
+        } => {
+            let mut lengths = std::collections::BTreeMap::new();
+            for part in content.parts() {
+                let signalbox_domain::UserContentPart::Attachment { digest, .. } = part else {
+                    continue;
+                };
+                if lengths.contains_key(digest) {
+                    continue;
+                }
+                let catalog_entry = catalog
+                    .find(*digest)
+                    .await
+                    .map_err(map_context_compaction_catalog_error)?
+                    .ok_or(ContextCompactionRangeLoadError::Integrity)?;
+                let length = NonZeroU64::new(catalog_entry.expected().byte_length())
+                    .ok_or(ContextCompactionRangeLoadError::Integrity)?;
+                lengths.insert(*digest, length);
+            }
+            let rendered =
+                render_model_user_content(content.clone(), |digest| lengths.get(&digest).copied())
+                    .map_err(|_| ContextCompactionRangeLoadError::Integrity)?;
+            let rendered_parts = rendered
+                .parts()
+                .iter()
+                .map(|part| part.as_str())
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "position": entry_index + 1,
+                "source_session_id": source_session_id,
+                "entry_id": entry_id,
+                "type": "user",
+                "accepted_input_id": accepted_input.into_uuid().hyphenated().to_string(),
+                "turn_id": turn.into_uuid().hyphenated().to_string(),
+                "content": rendered_parts,
+            })
+        }
         ProcessTranscriptEntry::Assistant {
             entry_index,
             turn,
@@ -7731,6 +8045,21 @@ fn context_compaction_entry_value(entry: &ProcessTranscriptEntry) -> serde_json:
             "source_speaker": imported_source_speaker_label(*source_speaker),
             "content_kind": imported_content_kind_label(*content_kind),
         }),
+    };
+    Ok(value)
+}
+
+fn map_context_compaction_catalog_error(
+    error: signalbox_persistence::blob::BlobCatalogRepositoryError,
+) -> ContextCompactionRangeLoadError {
+    match error {
+        signalbox_persistence::blob::BlobCatalogRepositoryError::Database(_)
+        | signalbox_persistence::blob::BlobCatalogRepositoryError::CommitAmbiguous(_) => {
+            ContextCompactionRangeLoadError::CatalogUnavailable
+        }
+        signalbox_persistence::blob::BlobCatalogRepositoryError::Corruption(_) => {
+            ContextCompactionRangeLoadError::Integrity
+        }
     }
 }
 
@@ -7878,6 +8207,15 @@ where
     Writer: AsyncWrite + Unpin,
 {
     match error {
+        ContextCompactionRangeLoadError::CatalogUnavailable => {
+            write_error(
+                writer,
+                version,
+                request_id,
+                ProtocolError::without_detail(ErrorCode::Unavailable),
+            )
+            .await
+        }
         ContextCompactionRangeLoadError::Read(error) => {
             if let Err(repository_error) = fail_context_compaction_until_resolved(
                 repository,
@@ -8032,6 +8370,7 @@ where
 #[derive(Debug)]
 enum ContextCompactionRangeLoadError {
     Read(ProcessReadError),
+    CatalogUnavailable,
     Integrity,
 }
 
@@ -8086,6 +8425,7 @@ async fn handle_read_imported_conversation<Writer>(
     request_id: RequestId,
     imported_conversation_id: CanonicalUuid,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
     snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
@@ -8132,9 +8472,14 @@ where
             .await;
         }
     };
-    let spool_result =
-        spool_imported_conversation(&conversation, imported_conversation_id, version, request_id)
-            .await;
+    let spool_result = spool_imported_conversation(
+        &conversation,
+        imported_conversation_id,
+        version,
+        request_id,
+        configured_usize(model_configuration, "max_imported_text_preview_utf8_bytes"),
+    )
+    .await;
     drop(conversation);
     drop(snapshot_permit);
     let mut spool = match spool_result {
@@ -8149,6 +8494,7 @@ async fn spool_imported_conversation(
     imported_conversation_id: CanonicalUuid,
     version: ProtocolVersion,
     request_id: RequestId,
+    max_text_preview_utf8_bytes: Option<usize>,
 ) -> Result<tokio::fs::File, SnapshotSpoolError> {
     let standard_file = tempfile::tempfile().map_err(SnapshotSpoolError::Io)?;
     let mut file = tokio::fs::File::from_std(standard_file);
@@ -8174,7 +8520,7 @@ async fn spool_imported_conversation(
                 content_kind: wire_imported_content_kind(process_imported_content_kind(
                     entry.content(),
                 )),
-                text_preview: imported_text_preview(entry.content()),
+                text_preview: imported_text_preview(entry.content(), max_text_preview_utf8_bytes),
             },
         )
         .await?;
@@ -8225,11 +8571,20 @@ const fn process_imported_content_kind(
 
 /// Previews exactly the text the transcript projection already carries in
 /// full; every other imported content stays behind its kind alone.
-fn imported_text_preview(content: &ImportedTranscriptContent) -> Option<ImportedTextPreview> {
+fn imported_text_preview(
+    content: &ImportedTranscriptContent,
+    max_utf8_bytes: Option<usize>,
+) -> Option<ImportedTextPreview> {
     match content {
-        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text)) => {
-            Some(ImportedTextPreview::of_exact_text(text.as_str()))
+        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(text))
+            if max_utf8_bytes != Some(0) =>
+        {
+            Some(ImportedTextPreview::of_exact_text_with_limit(
+                text.as_str(),
+                max_utf8_bytes,
+            ))
         }
+        ImportedTranscriptContent::Text(ImportedSourceAttestation::Attested(_)) => None,
         ImportedTranscriptContent::Text(
             ImportedSourceAttestation::AttestedAbsent | ImportedSourceAttestation::NotAttested,
         )
@@ -8288,7 +8643,13 @@ where
         system_prompt,
         placement,
     } = wire_request;
-    let Ok(system_prompt) = domain_system_prompt(system_prompt) else {
+    let Ok(system_prompt) = domain_system_prompt(
+        system_prompt,
+        configured_usize(
+            &services.model_configuration,
+            "max_system_prompt_utf8_bytes",
+        ),
+    ) else {
         return write_error(
             writer,
             version,
@@ -9802,12 +10163,13 @@ async fn handle_list_session_metadata<Writer>(
     request_id: RequestId,
     request: WireMetadataPageRequest,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
     snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    let query = SessionMetadataListQuery::try_new(
+    let query = SessionMetadataListQuery::try_new_with_limits(
         request.required_tags,
         request.title_contains,
         request.include_archived,
@@ -9815,6 +10177,12 @@ where
         request
             .after_session_id
             .map(|value| SessionId::from_uuid(value.into_uuid())),
+        lower_optional_usize(
+            configured_usize(model_configuration, "max_required_tags"),
+            configured_usize(model_configuration, "max_session_metadata_required_tags"),
+        ),
+        configured_u64(model_configuration, "min_metadata_page_size"),
+        configured_u64(model_configuration, "max_metadata_page_size"),
     );
     let Ok(query) = query else {
         drop(snapshot_permit);
@@ -9947,17 +10315,20 @@ async fn handle_list_conversations<Writer>(
     request_id: RequestId,
     request: WireConversationPageRequest,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
     snapshot_permit: OwnedSemaphorePermit,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
-    let query = ConversationListQuery::try_new(
+    let query = ConversationListQuery::try_new_with_page_limits(
         request.title_contains,
         application_origin_filter(request.origin),
         request.include_archived,
         request.page_size.value(),
         request.after.map(application_cursor),
+        configured_u64(model_configuration, "min_metadata_page_size"),
+        configured_u64(model_configuration, "max_metadata_page_size"),
     );
     let Ok(query) = query else {
         drop(snapshot_permit);
@@ -9974,6 +10345,10 @@ where
         query,
         version,
         request_id,
+        configured_usize(
+            model_configuration,
+            "max_imported_conversation_display_title_scalars",
+        ),
     )
     .await;
     drop(snapshot_permit);
@@ -9999,6 +10374,7 @@ async fn spool_conversation_page(
     query: ConversationListQuery,
     version: ProtocolVersion,
     request_id: RequestId,
+    max_imported_title_scalars: Option<usize>,
 ) -> Result<SessionListSpool, ConversationPageSpoolError> {
     let mut page = ListConversationsService::new(repository)
         .execute(query)
@@ -10027,7 +10403,7 @@ async fn spool_conversation_page(
             version,
             request_id,
             ServerMessage::ConversationSummary {
-                conversation: wire_conversation_summary(item),
+                conversation: wire_conversation_summary(item, max_imported_title_scalars),
             },
         )
         .await
@@ -10096,7 +10472,10 @@ fn wire_cursor(cursor: ConversationListCursor) -> WireConversationCursor {
     }
 }
 
-fn wire_conversation_summary(item: ConversationListItem) -> WireConversationSummary {
+fn wire_conversation_summary(
+    item: ConversationListItem,
+    max_imported_title_scalars: Option<usize>,
+) -> WireConversationSummary {
     match item {
         ConversationListItem::NativeSession {
             session,
@@ -10116,11 +10495,21 @@ fn wire_conversation_summary(item: ConversationListItem) -> WireConversationSumm
             format,
         } => WireConversationSummary::ImportedConversation {
             imported_conversation_id: wire_uuid(conversation.into_uuid()),
-            title,
+            title: configured_imported_title(title, max_imported_title_scalars),
             entry_count: CanonicalU64::new(entry_count),
             source_format: wire_imported_source_format(format),
         },
     }
+}
+
+fn configured_imported_title(title: Option<String>, maximum: Option<usize>) -> Option<String> {
+    let title = title?;
+    let Some(maximum) = maximum else {
+        return Some(title);
+    };
+    let truncated = title.chars().take(maximum).collect::<String>();
+    let truncated = truncated.trim_end_matches([' ', '\t']);
+    (!truncated.is_empty()).then(|| truncated.to_owned())
 }
 
 const fn wire_imported_source_format(
@@ -10285,6 +10674,9 @@ where
     }
 }
 
+// The protocol handler keeps envelope identity beside the decoded payload and
+// deployment policy; grouping them would obscure the runtime module's ownership fence.
+#[allow(clippy::too_many_arguments)]
 async fn handle_replace_session_metadata<Writer>(
     writer: &mut Writer,
     version: ProtocolVersion,
@@ -10293,10 +10685,24 @@ async fn handle_replace_session_metadata<Writer>(
     session_id: CanonicalUuid,
     metadata: WireSessionMetadata,
     pool: &PgPool,
+    model_configuration: &HubModelConfiguration,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
 {
+    if configured_usize(model_configuration, "max_session_metadata_tags")
+        .is_some_and(|maximum| metadata.tags().len() > maximum)
+        || configured_usize(model_configuration, "max_session_metadata_attributes")
+            .is_some_and(|maximum| metadata.attributes().len() > maximum)
+    {
+        return write_error(
+            writer,
+            version,
+            request_id,
+            ProtocolError::without_detail(ErrorCode::InvalidRequest),
+        )
+        .await;
+    }
     let replacement = SessionMetadataContent::try_new(
         metadata.title().map(str::to_owned),
         metadata.tags().map(str::to_owned).collect(),
@@ -10439,7 +10845,10 @@ where
         .await;
     };
     let prompt_member_is_absent = system_prompt.value().is_none();
-    let Ok(system_prompt) = domain_system_prompt(system_prompt) else {
+    let Ok(system_prompt) = domain_system_prompt(
+        system_prompt,
+        configured_usize(model_configuration, "max_system_prompt_utf8_bytes"),
+    ) else {
         return write_error(
             writer,
             version,
@@ -11037,6 +11446,7 @@ async fn handle_submit_input<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -11056,6 +11466,10 @@ where
         pool.clone(),
         model_configuration.model_capability_catalog(),
     );
+    let repository = match blob_store_registry {
+        Some(registry) => repository.with_attachment_maximum_bytes(registry.max_blob_bytes()),
+        None => repository,
+    };
     let expected_version = expected_defaults_version
         .and_then(|version| SessionConfigurationDefaultsVersion::try_from_u64(version.value()));
     let model_settings = domain_model_settings_overlay(model_settings);
@@ -11097,7 +11511,13 @@ where
         )
         .await;
     };
-    let request = SubmitInputRequest::try_new(command_id, session, content, delivery);
+    let request = SubmitInputRequest::try_new_with_content_limit(
+        command_id,
+        session,
+        content,
+        delivery,
+        configured_usize(model_configuration, "max_message_utf8_bytes"),
+    );
     let Ok(request) = request else {
         return write_error(
             writer,
@@ -11147,6 +11567,7 @@ async fn handle_reconcile_turn<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -11158,6 +11579,10 @@ where
         pool.clone(),
         model_configuration.model_capability_catalog(),
     );
+    let repository = match blob_store_registry {
+        Some(registry) => repository.with_attachment_maximum_bytes(registry.max_blob_bytes()),
+        None => repository,
+    };
     // A command identity that already names durable intent must reach the
     // replay boundary unconditionally (INV-012): the first handling already
     // released the wait, so re-applying the current-state precondition would
@@ -11249,7 +11674,7 @@ where
             }
         }
     }
-    let request = SubmitInputRequest::try_new(
+    let request = SubmitInputRequest::try_new_with_content_limit(
         command_id,
         session,
         content,
@@ -11262,6 +11687,7 @@ where
                 model_settings,
             ),
         },
+        configured_usize(model_configuration, "max_message_utf8_bytes"),
     );
     let Ok(request) = request else {
         return write_error(
@@ -11325,6 +11751,7 @@ async fn handle_stop_turn<Writer>(
     eligibility_nudge: &InProcessEligibilityNudge,
     tool_dispatch_gate: &InProcessToolDispatchGate,
     model_configuration: &HubModelConfiguration,
+    blob_store_registry: Option<&BlobStoreRegistry>,
 ) -> Result<(), ProcessConnectionError>
 where
     Writer: AsyncWrite + Unpin,
@@ -11336,6 +11763,10 @@ where
         pool.clone(),
         model_configuration.model_capability_catalog(),
     );
+    let repository = match blob_store_registry {
+        Some(registry) => repository.with_attachment_maximum_bytes(registry.max_blob_bytes()),
+        None => repository,
+    };
     let Some(expected_version) =
         SessionConfigurationDefaultsVersion::try_from_u64(expected_defaults_version.value())
     else {
@@ -11357,7 +11788,7 @@ where
         .await;
     };
     let model_settings = domain_model_settings_overlay(model_settings);
-    let request = SubmitInputRequest::try_new(
+    let request = SubmitInputRequest::try_new_with_content_limit(
         command_id,
         session,
         content,
@@ -11370,6 +11801,7 @@ where
                 model_settings,
             ),
         },
+        configured_usize(model_configuration, "max_message_utf8_bytes"),
     );
     let Ok(request) = request else {
         return write_error(
@@ -11974,11 +12406,81 @@ where
 }
 
 fn admitted_user_content(content: UserInputContent) -> Result<UserContent, ()> {
-    let text = content.single_text().ok_or(())?;
-    if text.len() > MAX_SUBMITTED_INPUT_BYTES {
-        return Err(());
-    }
-    UserContent::try_text(text.to_owned()).map_err(|_| ())
+    let parts = content
+        .into_parts()
+        .into_iter()
+        .map(|part| match part {
+            signalbox_process_protocol::UserInputPart::Text { text } => {
+                signalbox_domain::UserContentPart::try_text(text).map_err(|_| ())
+            }
+            signalbox_process_protocol::UserInputPart::Attachment {
+                digest,
+                kind,
+                media_type,
+                display_filename,
+            } => Ok(signalbox_domain::UserContentPart::Attachment {
+                digest: digest.into_digest(),
+                kind: match kind {
+                    signalbox_process_protocol::UserAttachmentKind::Image => {
+                        signalbox_domain::AttachmentKind::Image
+                    }
+                    signalbox_process_protocol::UserAttachmentKind::Document => {
+                        signalbox_domain::AttachmentKind::Document
+                    }
+                    signalbox_process_protocol::UserAttachmentKind::File => {
+                        signalbox_domain::AttachmentKind::File
+                    }
+                },
+                media_type: signalbox_domain::DeclaredMediaType::try_new(media_type)
+                    .map_err(|_| ())?,
+                display_filename: display_filename
+                    .map(signalbox_domain::AttachmentDisplayFilename::try_new)
+                    .transpose()
+                    .map_err(|_| ())?,
+            }),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    UserContent::try_parts(parts).map_err(|_| ())
+}
+
+pub(crate) fn wire_user_content(content: &UserContent) -> UserInputContent {
+    UserInputContent::from_parts(
+        content
+            .parts()
+            .iter()
+            .map(|part| match part {
+                signalbox_domain::UserContentPart::Text { value } => {
+                    signalbox_process_protocol::UserInputPart::Text {
+                        text: value.as_str().to_owned(),
+                    }
+                }
+                signalbox_domain::UserContentPart::Attachment {
+                    digest,
+                    kind,
+                    media_type,
+                    display_filename,
+                } => signalbox_process_protocol::UserInputPart::Attachment {
+                    digest: signalbox_process_protocol::CanonicalBlobDigest::from_digest(*digest),
+                    kind: match kind {
+                        signalbox_domain::AttachmentKind::Image => {
+                            signalbox_process_protocol::UserAttachmentKind::Image
+                        }
+                        signalbox_domain::AttachmentKind::Document => {
+                            signalbox_process_protocol::UserAttachmentKind::Document
+                        }
+                        signalbox_domain::AttachmentKind::File => {
+                            signalbox_process_protocol::UserAttachmentKind::File
+                        }
+                    },
+                    media_type: media_type.as_str().to_owned(),
+                    display_filename: display_filename
+                        .as_ref()
+                        .map(signalbox_domain::AttachmentDisplayFilename::as_str)
+                        .map(str::to_owned),
+                },
+            })
+            .collect(),
+    )
 }
 
 async fn handle_read_transcript<Writer>(
@@ -12694,18 +13196,16 @@ where
                 writer,
                 version,
                 request_id,
-                ServerMessage::TranscriptTextEntry {
+                ServerMessage::TranscriptUserEntry {
                     entry_index: CanonicalU64::new(*entry_index),
                     source_session_id: wire_uuid(source_session.into_uuid()),
                     entry_id: wire_uuid(entry.into_uuid()),
-                    entry: TranscriptTextEntry::User {
-                        accepted_input_id: wire_uuid(accepted_input.into_uuid()),
-                        turn_id: wire_uuid(turn.into_uuid()),
-                    },
+                    accepted_input_id: wire_uuid(accepted_input.into_uuid()),
+                    turn_id: wire_uuid(turn.into_uuid()),
+                    content: wire_user_content(content),
                 },
             )
-            .await?;
-            write_content(writer, version, request_id, *entry_index, content).await
+            .await
         }
         ProcessTranscriptEntry::Assistant {
             entry_index,
@@ -13032,6 +13532,17 @@ fn map_rejection(
     rejected: SubmitInputRejectedResult,
 ) -> Result<RejectionDetail, ProcessConnectionError> {
     Ok(match rejected {
+        SubmitInputRejectedResult::AttachmentBlobNotFound { digest } => {
+            RejectionDetail::AttachmentBlobNotFound {
+                digest: signalbox_process_protocol::CanonicalBlobDigest::from_digest(digest),
+            }
+        }
+        SubmitInputRejectedResult::AttachmentByteBudgetExceeded { maximum_bytes } => {
+            RejectionDetail::AttachmentByteBudgetExceeded {
+                maximum_bytes: PositiveCanonicalU64::try_new(maximum_bytes)
+                    .map_err(|_| ProcessConnectionError::EncodeInvariant)?,
+            }
+        }
         SubmitInputRejectedResult::SessionNotFound { session } => {
             RejectionDetail::SessionNotFound {
                 session_id: wire_uuid(session.into_uuid()),
@@ -13575,9 +14086,13 @@ const fn wire_model_setting_source(value: DomainModelSettingSource) -> WireModel
 /// a fail-closed invalid request rather than a panic.
 fn domain_system_prompt(
     member: SystemPromptMember,
+    max_utf8_bytes: Option<usize>,
 ) -> Result<Option<signalbox_domain::SessionSystemPrompt>, ()> {
     match member.value() {
         None | Some(None) => Ok(None),
+        Some(Some(text)) if max_utf8_bytes.is_some_and(|maximum| text.as_str().len() > maximum) => {
+            Err(())
+        }
         Some(Some(text)) => {
             signalbox_domain::SessionSystemPrompt::try_new(text.as_str().to_owned())
                 .map(Some)
@@ -13685,7 +14200,7 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
             content,
         } => TurnState::Queued {
             accepted_input_id: wire_uuid(accepted_input.into_uuid()),
-            content: UserInputContent::text(content.clone()),
+            content: wire_user_content(content),
         },
         ProcessTurnState::QueuedDelegated {
             spawning_request,
@@ -13768,9 +14283,15 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
         ProcessTurnState::ActiveAwaitingToolRecovery {
             ended_attempt,
             recovery_attempt,
+            automatic_reconciliation_attempts,
+            operator_action_required,
         } => TurnState::ActiveAwaitingToolRecovery {
             ended_attempt_id: wire_uuid(ended_attempt.into_uuid()),
             recovery_tool_attempt_id: wire_uuid(recovery_attempt.into_uuid()),
+            automatic_reconciliation_attempts: CanonicalU64::new(u64::from(
+                *automatic_reconciliation_attempts,
+            )),
+            operator_action_required: *operator_action_required,
         },
         ProcessTurnState::ActiveAwaitingRunnerRecovery {
             runner,
@@ -13792,12 +14313,24 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                 let model_call_id = wire_uuid(call.call().into_uuid());
                 match call.disposition() {
                     ProcessFailedModelCallDisposition::KnownFailed => {
-                        match call.provider_failure_cause() {
-                            Some(cause) => FailedTerminalModelCall::known_failed_with_cause(
+                        let provider_cause = call.provider_failure_cause();
+                        let attachment_cause = call.attachment_preparation_failure_cause();
+                        debug_assert!(
+                            provider_cause.is_none() || attachment_cause.is_none(),
+                            "process-read validation rejects overlapping failure causes"
+                        );
+                        match (provider_cause, attachment_cause) {
+                            (Some(cause), _) => FailedTerminalModelCall::known_failed_with_cause(
                                 model_call_id,
                                 wire_provider_failure_cause(cause),
                             ),
-                            None => FailedTerminalModelCall::new(
+                            (None, Some(cause)) => {
+                                FailedTerminalModelCall::known_failed_with_cause(
+                                    model_call_id,
+                                    wire_attachment_preparation_failure_cause(cause),
+                                )
+                            }
+                            (None, None) => FailedTerminalModelCall::new(
                                 model_call_id,
                                 FailedModelCallDisposition::KnownFailed,
                             ),
@@ -13808,6 +14341,7 @@ fn wire_turn_state(state: &ProcessTurnState) -> TurnState {
                             call.provider_failure_cause().is_none(),
                             "process-read validation rejects causes on cancelled model calls"
                         );
+                        debug_assert!(call.attachment_preparation_failure_cause().is_none());
                         FailedTerminalModelCall::new(
                             model_call_id,
                             FailedModelCallDisposition::Cancelled,
@@ -14404,6 +14938,24 @@ fn wire_provider_failure_cause(
     }
 }
 
+fn wire_attachment_preparation_failure_cause(
+    cause: signalbox_persistence::process_read::ProcessAttachmentPreparationFailureCause,
+) -> FailedModelCallCause {
+    use signalbox_persistence::process_read::ProcessAttachmentPreparationFailureCause;
+
+    match cause {
+        ProcessAttachmentPreparationFailureCause::TooLarge => {
+            FailedModelCallCause::AttachmentTooLarge
+        }
+        ProcessAttachmentPreparationFailureCause::Missing => {
+            FailedModelCallCause::AttachmentMissing
+        }
+        ProcessAttachmentPreparationFailureCause::Corrupt => {
+            FailedModelCallCause::AttachmentCorrupt
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn handle_goal_user_command<Writer>(
     writer: &mut Writer,
@@ -14919,7 +15471,7 @@ enum ProcessUpdateEvent {
         accepted_input: signalbox_domain::AcceptedInputId,
         turn: signalbox_domain::TurnId,
         acceptance_position: u64,
-        content: String,
+        content: UserContent,
     },
     GoalTurnRetired {
         turn: signalbox_domain::TurnId,
@@ -15173,7 +15725,7 @@ impl ProcessUpdateEvent {
                 accepted_input_id: wire_uuid(accepted_input.into_uuid()),
                 turn_id: wire_uuid(turn.into_uuid()),
                 acceptance_position: CanonicalU64::new(*acceptance_position),
-                content: UserInputContent::text(content.clone()),
+                content: wire_user_content(content),
             },
             Self::GoalTurnRetired { turn } => SessionEvent::GoalTurnRetired {
                 turn_id: wire_uuid(turn.into_uuid()),
@@ -15753,21 +16305,21 @@ mod tests {
         ConversionFailureDisposition, GENERAL_BUFFERED_INBOUND_FRAMES, INBOUND_READ_AHEAD_BYTES,
         ImportedConversationRepositoryError, InboundFrameBudgets, IncomingLine, InternalDiagnostic,
         MAX_ACTIVE_CONNECTIONS, MAX_BUFFERED_INBOUND_FRAMES, MAX_CONCURRENT_BLOB_READS,
-        MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_CONCURRENT_SNAPSHOT_READERS,
-        MAX_FRAME_BYTES, MAX_IMPORT_ADMISSION_WAITERS, MAX_SUBMITTED_INPUT_BYTES,
-        OperationalImportError, PendingConversationImport, ProcessConnectionError,
-        ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
+        MAX_CONCURRENT_IMPORTS, MAX_CONCURRENT_REVIEW_COMMANDS, MAX_FRAME_BYTES,
+        MAX_IMPORT_ADMISSION_WAITERS, OperationalImportError, PendingConversationImport,
+        ProcessConnectionError, ProcessRuntimeError, ProcessUpdateEvent, ProtocolError,
         RESERVED_ACTIVE_IMPORT_INBOUND_FRAMES, RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS,
         RequestId, ReviewCommandAdmission, SnapshotReaderAdmission, SnapshotSpoolError,
         SubmitInputModelExecutionDiagnostic, acquire_import_permit, acquire_import_waiter_permit,
         acquire_inbound_frame_permit, acquire_inbound_frame_permit_after_input,
         acquire_review_command_permit, acquire_review_command_permit_while_buffered,
         acquire_snapshot_reader_permit, admit_snapshot_reader, admitted_user_content,
-        blob_read_budget, blob_upload_begin_preflight, canonical_review_request_digest,
-        claude_conversion_failure_disposition, codex_conversion_failure_disposition,
-        consume_snapshot_queued_update, context_compaction_failure_disposition, execute_import,
-        foreground_peer_activity, handle_append_conversation_import,
-        handle_begin_conversation_import, handle_commit_conversation_import, import_evidence,
+        blob_read_budget, blob_upload_begin_preflight, bounded_rendered_compaction_boundary,
+        canonical_review_request_digest, claude_conversion_failure_disposition,
+        codex_conversion_failure_disposition, consume_snapshot_queued_update,
+        context_compaction_failure_disposition, execute_import, foreground_peer_activity,
+        handle_append_conversation_import, handle_begin_conversation_import,
+        handle_commit_conversation_import, import_evidence,
         imported_conversation_internal_diagnostic, inspect_connection_completion,
         internal_protocol_error, map_rejection, nudge_after_process_await_rejection,
         nudge_after_process_message_rejection, nudge_delegation_issuer, nudge_delegation_wake,
@@ -15888,7 +16440,10 @@ mod tests {
             accepted_input,
             turn,
             acceptance_position: SessionInputPosition::first(),
-            content: "synthetic prompt with tool arguments".to_owned(),
+            content: signalbox_domain::UserContent::try_text(
+                "synthetic prompt with tool arguments".to_owned(),
+            )
+            .expect("the telemetry fixture content is valid"),
         };
         let activation = DispatchedOutboxEventKind::TurnActivated {
             turn,
@@ -16155,6 +16710,68 @@ mod tests {
             context_compaction_failure_disposition(ContextCompactionModelError::BoundaryLoss),
             FailedContextCompactionDisposition::Ambiguous
         );
+    }
+
+    #[test]
+    fn automatic_compaction_boundary_counts_the_rendered_json_envelope() {
+        let first = serde_json::json!({
+            "position": 1,
+            "type": "user",
+            "content": "x".repeat(90),
+        });
+        let second = serde_json::json!({
+            "position": 2,
+            "type": "assistant",
+            "content": "y".repeat(90),
+        });
+        let first_bytes = u64::try_from(
+            serde_json::to_vec(&first)
+                .expect("the fixture JSON is serializable")
+                .len(),
+        )
+        .expect("the fixture length fits u64");
+        let second_bytes = u64::try_from(
+            serde_json::to_vec(&second)
+                .expect("the fixture JSON is serializable")
+                .len(),
+        )
+        .expect("the fixture length fits u64");
+        let first_array_bytes = first_bytes + 2;
+
+        assert_eq!(
+            bounded_rendered_compaction_boundary(
+                &[first_bytes, second_bytes],
+                &[(11, true), (12, true)],
+                first_array_bytes,
+            ),
+            Some(11)
+        );
+    }
+
+    #[test]
+    fn automatic_compaction_boundary_never_crosses_the_model_budget_for_a_tool_exchange() {
+        assert_eq!(
+            bounded_rendered_compaction_boundary(
+                &[60, 100, 100],
+                &[(21, true), (22, false), (23, true)],
+                170,
+            ),
+            Some(21)
+        );
+    }
+
+    #[test]
+    fn successor_compaction_rejects_an_unreachable_later_safe_boundary() {
+        assert!(super::successor_compaction_cannot_advance(
+            &[10, 100, 100],
+            &[(31, true), (32, false), (33, true)],
+            203,
+        ));
+        assert!(!super::successor_compaction_cannot_advance(
+            &[10, 100, 100],
+            &[(31, true), (32, false), (33, true)],
+            204,
+        ));
     }
 
     #[test]
@@ -16746,32 +17363,27 @@ mod tests {
         assert_eq!(budget.available_permits(), capacity - 1);
         drop(permit);
         assert_eq!(budget.available_permits(), capacity);
-        assert_eq!(snapshot_reader_capacity(3), Some(1));
-        assert!(snapshot_reader_capacity(2).is_none());
+        assert_eq!(snapshot_reader_capacity(3, None), Some(1));
+        assert!(snapshot_reader_capacity(2, None).is_none());
         Ok(())
     }
 
     #[tokio::test]
     async fn snapshot_reader_budget_reserves_two_pool_connections() -> Result<(), Box<dyn Error>> {
         let max_pool_connections = 10;
-        let capacity = snapshot_reader_capacity(max_pool_connections)
+        let capacity = snapshot_reader_capacity(max_pool_connections, None)
             .ok_or_else(|| io::Error::other("the production pool must admit snapshot readers"))?;
         assert_eq!(
             capacity,
             usize::try_from(max_pool_connections - RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS)?
         );
-        assert!(snapshot_reader_capacity(2).is_none());
+        assert!(snapshot_reader_capacity(2, None).is_none());
 
         let budget = Arc::new(Semaphore::new(capacity));
         let (shutdown, shutdown_receiver) = watch::channel(false);
-        let mut permits = Vec::new();
-        for _ in 0..capacity {
-            permits.push(
-                acquire_snapshot_reader_permit(Arc::clone(&budget), &mut shutdown_receiver.clone())
-                    .await?
-                    .ok_or_else(|| io::Error::other("the running fixture must acquire a permit"))?,
-            );
-        }
+        let permits = Arc::clone(&budget)
+            .acquire_many_owned(u32::try_from(capacity)?)
+            .await?;
         assert!(
             timeout(
                 Duration::from_millis(20),
@@ -16788,19 +17400,21 @@ mod tests {
                 .await?
                 .is_none()
         );
+        drop(permits);
         Ok(())
     }
 
     #[test]
-    fn enlarged_pool_preserves_the_snapshot_reader_effective_ceiling() {
-        let enlarged_pool_connections = u32::try_from(MAX_CONCURRENT_SNAPSHOT_READERS)
+    fn enlarged_pool_applies_the_configured_snapshot_reader_limit() {
+        let configured_limit = 3;
+        let enlarged_pool_connections = u32::try_from(configured_limit)
             .expect("the effective ceiling fits PostgreSQL pool capacity")
             + RESERVED_POOL_CONNECTIONS_OUTSIDE_SNAPSHOTS
             + 1;
 
         assert_eq!(
-            snapshot_reader_capacity(enlarged_pool_connections),
-            Some(MAX_CONCURRENT_SNAPSHOT_READERS)
+            snapshot_reader_capacity(enlarged_pool_connections, Some(configured_limit)),
+            Some(configured_limit)
         );
     }
 
@@ -18133,7 +18747,8 @@ mod tests {
 
     #[test]
     fn process_submission_admits_the_exact_content_bound() {
-        let exact = UserInputContent::text("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES));
+        let exact =
+            UserInputContent::text("\u{1}".repeat(signalbox_domain::UserContent::MAX_TEXT_BYTES));
         assert!(admitted_user_content(exact).is_ok());
     }
 
@@ -18141,7 +18756,7 @@ mod tests {
     fn process_submission_rejects_content_over_the_bound() {
         assert!(
             admitted_user_content(UserInputContent::text(
-                "x".repeat(MAX_SUBMITTED_INPUT_BYTES + 1),
+                "x".repeat(signalbox_domain::UserContent::MAX_TEXT_BYTES + 1),
             ))
             .is_err()
         );
@@ -18158,7 +18773,9 @@ mod tests {
                 model_settings: None,
                 state: TurnState::Queued {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1)),
-                    content: UserInputContent::text("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
+                    content: UserInputContent::text(
+                        "\u{1}".repeat(signalbox_domain::UserContent::MAX_TEXT_BYTES),
+                    ),
                 },
             },
         )?;
@@ -18178,7 +18795,9 @@ mod tests {
                     accepted_input_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 1)),
                     turn_id: CanonicalUuid::from_uuid(Uuid::from_u128(u128::MAX - 2)),
                     acceptance_position: CanonicalU64::new(u64::MAX),
-                    content: UserInputContent::text("\u{1}".repeat(MAX_SUBMITTED_INPUT_BYTES)),
+                    content: UserInputContent::text(
+                        "\u{1}".repeat(signalbox_domain::UserContent::MAX_TEXT_BYTES),
+                    ),
                 },
             },
         )?;

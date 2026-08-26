@@ -1026,6 +1026,7 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
   case transcriptModelCallUsage(SignalboxTranscriptModelCallUsage)
   case transcriptModelCallsEnd(modelCallCount: SignalboxCanonicalUInt64)
   case transcriptEntry(SignalboxTranscriptEntryMessage)
+  case transcriptUserEntry(SignalboxTranscriptUserEntryMessage)
   case transcriptTextEntry(SignalboxTranscriptTextEntryMessage)
   case transcriptContent(SignalboxTranscriptContent)
   case transcriptSnapshotEnd(SignalboxTranscriptSnapshotEnd)
@@ -1187,6 +1188,15 @@ public enum SignalboxProcessServerMessage: Decodable, Equatable, Sendable {
           decoder: decoder
         )
         self = .transcriptEntry(try SignalboxTranscriptEntryMessage(from: decoder))
+      case "transcript_user_entry":
+        try tagged.rejectUnadmittedFields(
+          [
+            "type", "entry_index", "source_session_id", "entry_id",
+            "accepted_input_id", "turn_id", "content",
+          ],
+          decoder: decoder
+        )
+        self = .transcriptUserEntry(try SignalboxTranscriptUserEntryMessage(from: decoder))
       case "transcript_text_entry":
         try tagged.rejectUnadmittedFields(
           ["type", "entry_index", "source_session_id", "entry_id", "entry"],
@@ -3198,6 +3208,9 @@ public enum SignalboxFailedModelCallDisposition: Decodable, Equatable, Sendable 
 }
 
 public enum SignalboxFailedModelCallCause: Decodable, Equatable, Sendable {
+  case attachmentTooLarge
+  case attachmentMissing
+  case attachmentCorrupt
   case credentialRejected
   case permissionDenied
   case invalidRequest
@@ -3214,6 +3227,9 @@ public enum SignalboxFailedModelCallCause: Decodable, Equatable, Sendable {
     let value = try decoder.singleValueContainer().decode(String.self)
     switch value {
     case "credential_rejected": self = .credentialRejected
+    case "attachment_too_large": self = .attachmentTooLarge
+    case "attachment_missing": self = .attachmentMissing
+    case "attachment_corrupt": self = .attachmentCorrupt
     case "permission_denied": self = .permissionDenied
     case "invalid_request": self = .invalidRequest
     case "target_not_found": self = .targetNotFound
@@ -3277,6 +3293,24 @@ public struct SignalboxTranscriptEntryMessage: Decodable, Equatable, Sendable {
     case sourceSessionID = "source_session_id"
     case entryID = "entry_id"
     case entry
+  }
+}
+
+public struct SignalboxTranscriptUserEntryMessage: Decodable, Equatable, Sendable {
+  public let entryIndex: SignalboxCanonicalUInt64
+  public let sourceSessionID: SignalboxCanonicalUUID
+  public let entryID: SignalboxCanonicalUUID
+  public let acceptedInputID: SignalboxCanonicalUUID
+  public let turnID: SignalboxCanonicalUUID
+  public let content: SignalboxUserInputContent
+
+  private enum CodingKeys: String, CodingKey {
+    case entryIndex = "entry_index"
+    case sourceSessionID = "source_session_id"
+    case entryID = "entry_id"
+    case acceptedInputID = "accepted_input_id"
+    case turnID = "turn_id"
+    case content
   }
 }
 
@@ -3730,7 +3764,6 @@ public struct SignalboxTranscriptTextEntryMessage: Decodable, Equatable, Sendabl
 }
 
 public enum SignalboxTranscriptTextEntry: Decodable, Equatable, Sendable {
-  case user(acceptedInputID: SignalboxCanonicalUUID, turnID: SignalboxCanonicalUUID)
   case assistant(turnID: SignalboxCanonicalUUID, modelCallID: SignalboxCanonicalUUID)
   case contextSummary(
     modelCallID: SignalboxCanonicalUUID,
@@ -3753,13 +3786,12 @@ public enum SignalboxTranscriptTextEntry: Decodable, Equatable, Sendable {
     do {
       switch tagged.kind {
       case "user":
-        try tagged.rejectUnadmittedFields(
-          ["type", "accepted_input_id", "turn_id"],
-          decoder: decoder
+        throw DecodingError.dataCorrupted(
+          .init(
+            codingPath: decoder.codingPath,
+            debugDescription: "Version-one user transcript entries require transcript_user_entry."
+          )
         )
-        self = .user(
-          acceptedInputID: try decoder.decode("accepted_input_id"),
-          turnID: try decoder.decode("turn_id"))
       case "assistant":
         try tagged.rejectUnadmittedFields(
           ["type", "turn_id", "model_call_id"],
@@ -4541,6 +4573,8 @@ public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
     requestedPosition: SignalboxCanonicalUInt64,
     lastPosition: SignalboxCanonicalUInt64
   )
+  case attachmentBlobNotFound(digest: SignalboxCanonicalBlobDigest)
+  case attachmentByteBudgetExceeded(maximumBytes: SignalboxCanonicalUInt64)
   case unknown(kind: String, payload: [String: SignalboxJSONValue])
 
   public init(from decoder: Decoder) throws {
@@ -4727,6 +4761,21 @@ public enum SignalboxRejectionDetail: Decodable, Equatable, Sendable {
         requestedPosition: try decoder.decode("requested_position"),
         lastPosition: try decoder.decode("last_position")
       )
+    case "attachment_blob_not_found":
+      try tagged.rejectUnadmittedFields(["type", "digest"], decoder: decoder)
+      self = .attachmentBlobNotFound(digest: try decoder.decode("digest"))
+    case "attachment_byte_budget_exceeded":
+      try tagged.rejectUnadmittedFields(["type", "maximum_bytes"], decoder: decoder)
+      let maximumBytes: SignalboxCanonicalUInt64 = try decoder.decode("maximum_bytes")
+      guard maximumBytes.rawValue > 0 else {
+        throw DecodingError.dataCorrupted(
+          .init(
+            codingPath: decoder.codingPath + [SignalboxDynamicCodingKey("maximum_bytes")],
+            debugDescription: "Attachment byte budget maximum must be positive."
+          )
+        )
+      }
+      self = .attachmentByteBudgetExceeded(maximumBytes: maximumBytes)
     default:
       self = .unknown(kind: tagged.kind, payload: tagged.payload)
     }

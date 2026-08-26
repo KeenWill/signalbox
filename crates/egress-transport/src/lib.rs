@@ -60,18 +60,22 @@ pub struct ResolvedPublicDestination {
 }
 
 /// Builds one credential-free client pinned to a URL's complete admitted
-/// public DNS result.
+/// public DNS result. `None` leaves DNS resolution and exchange time unbounded.
 #[doc(hidden)]
 pub async fn public_destination_client(
     url: &Url,
-    exchange_timeout: Duration,
+    exchange_timeout: Option<Duration>,
 ) -> Result<Client, PublicDestinationClientError> {
     let started = tokio::time::Instant::now();
     let destination = resolve_public_destination(url, exchange_timeout).await?;
     let remaining = exchange_timeout
-        .checked_sub(started.elapsed())
-        .filter(|remaining| !remaining.is_zero())
-        .ok_or(PublicDestinationClientError::Infrastructure)?;
+        .map(|timeout| {
+            timeout
+                .checked_sub(started.elapsed())
+                .filter(|remaining| !remaining.is_zero())
+                .ok_or(PublicDestinationClientError::Infrastructure)
+        })
+        .transpose()?;
     build_web_fetch_client(remaining, Some(&destination))
         .map_err(|_| PublicDestinationClientError::Infrastructure)
 }
@@ -89,7 +93,7 @@ pub enum PublicDestinationClientError {
 
 async fn resolve_public_destination(
     url: &Url,
-    exchange_timeout: Duration,
+    exchange_timeout: Option<Duration>,
 ) -> Result<ResolvedPublicDestination, PublicDestinationClientError> {
     let host = url
         .host_str()
@@ -100,11 +104,14 @@ async fn resolve_public_destination(
     let addresses = if let Some(address) = parse_url_host_ip(host) {
         vec![SocketAddr::new(address, port)]
     } else {
-        let resolved =
-            tokio::time::timeout(exchange_timeout, tokio::net::lookup_host((host, port)))
+        let lookup = tokio::net::lookup_host((host, port));
+        let resolved = match exchange_timeout {
+            Some(timeout) => tokio::time::timeout(timeout, lookup)
                 .await
-                .map_err(|_| PublicDestinationClientError::Infrastructure)?
-                .map_err(|_| PublicDestinationClientError::Infrastructure)?;
+                .map_err(|_| PublicDestinationClientError::Infrastructure)?,
+            None => lookup.await,
+        }
+        .map_err(|_| PublicDestinationClientError::Infrastructure)?;
         resolved
             .take(MAX_RESOLVED_ADDRESSES + 1)
             .collect::<Vec<_>>()
@@ -124,8 +131,9 @@ async fn resolve_public_destination(
 }
 
 #[doc(hidden)]
+/// Builds the pinned transport client; `None` omits its exchange timeout.
 pub fn build_web_fetch_client(
-    exchange_timeout: Duration,
+    exchange_timeout: Option<Duration>,
     destination: Option<&ResolvedPublicDestination>,
 ) -> Result<Client, ReqwestWebFetchConstructionError> {
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -137,8 +145,10 @@ pub fn build_web_fetch_client(
         .no_proxy()
         .redirect(Policy::none())
         .retry(reqwest::retry::never())
-        .pool_max_idle_per_host(0)
-        .timeout(exchange_timeout);
+        .pool_max_idle_per_host(0);
+    if let Some(timeout) = exchange_timeout {
+        builder = builder.timeout(timeout);
+    }
     if let Some(destination) = destination {
         builder = builder.resolve_to_addrs(&destination.host, &destination.addresses);
     }
