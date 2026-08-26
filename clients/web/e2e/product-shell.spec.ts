@@ -102,7 +102,7 @@ test('opens the product at Attention with generated-contract transport status', 
   await expect(page).toHaveURL(/\/attention$/)
   await expect(page).toHaveTitle('Attention · Signalbox')
   await expect(page.getByRole('heading', { name: 'Attention', level: 1 })).toBeVisible()
-  await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
   await expect(page.getByRole('link', { name: /Attention/ })).toHaveAttribute(
     'aria-current',
     'page',
@@ -202,7 +202,7 @@ test('retries a failed product bootstrap after the daemon recovers', async ({ pa
   await page.getByRole('button', { name: 'Retry contract' }).click()
 
   await expect(page.getByText('Timeline reads available')).toBeVisible()
-  await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
   expect(attempts).toBe(2)
   expect(problems.pageErrors).toEqual([])
   expect(
