@@ -20,7 +20,7 @@ use signalbox_domain::{
     RunnerGeneration, RunnerId, RunnerSandboxProfile, RunnerWorkingDirectory,
     SemanticTranscriptEntryId, SessionId, SessionInputPosition, SessionModelSettingsChanged,
     ToolApprovalResolution, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
-    TurnModelSettingsResolved,
+    TurnModelSettingsResolved, UserContent,
 };
 use sqlx::{PgConnection, PgPool, Row, types::Uuid};
 
@@ -120,8 +120,8 @@ pub enum DispatchedOutboxEventKind {
         turn: TurnId,
         /// Immutable per-session acceptance position.
         acceptance_position: SessionInputPosition,
-        /// Exact accepted text.
-        content: String,
+        /// Exact accepted ordered content.
+        content: UserContent,
     },
     /// A queued goal turn became intentionally ineligible.
     GoalTurnRetired {
@@ -553,6 +553,8 @@ pub enum OutboxCorruption {
     InvalidSequence,
     /// An input-accepted record carried an invalid positive position.
     InvalidAcceptancePosition,
+    /// An input-accepted record carried invalid ordered content satellites.
+    InvalidAcceptedInputContent,
     /// An event header used an unsupported storage version.
     UnsupportedStorageVersion,
     /// An event header named no admitted typed record family.
@@ -588,6 +590,7 @@ impl fmt::Display for OutboxCorruption {
             Self::MissingCommittedEventHeader => "outbox committed event header is missing",
             Self::InvalidSequence => "outbox sequence is invalid",
             Self::InvalidAcceptancePosition => "outbox input acceptance position is invalid",
+            Self::InvalidAcceptedInputContent => "outbox accepted input content is invalid",
             Self::UnsupportedStorageVersion => "outbox storage version is unsupported",
             Self::UnsupportedEventKind => "outbox event kind is unsupported",
             Self::MissingTypedRecord => "outbox typed event record is missing",
@@ -1029,7 +1032,10 @@ async fn load_event(
             // that also carries a `goal_turn` row.
             let row = sqlx::query(
                 "SELECT event.accepted_input_id, event.turn_id,
-                        event.acceptance_position, accepted.content_text
+                        event.acceptance_position,
+                        accepted_input_content_parts_json(
+                            accepted.accepted_input_id
+                        ) AS content_parts
                    FROM input_accepted_outbox_event AS event
                    JOIN accepted_input AS accepted
                      ON accepted.accepted_input_id = event.accepted_input_id
@@ -1042,8 +1048,9 @@ async fn load_event(
                     AND command.result_session_id = event.session_id
                     AND command.result_kind = 'applied'
                     AND command.result_accepted_input_id = event.accepted_input_id
-                    AND command.content_kind = 'text'
-                    AND command.content_text = accepted.content_text
+                    AND accepted_input_parts_match_command(
+                        accepted.accepted_input_id
+                    )
                    LEFT JOIN goal_turn AS goal
                      ON goal.session_id = event.session_id
                     AND goal.accepted_input_id = event.accepted_input_id
@@ -1096,11 +1103,13 @@ async fn load_event(
             let acceptance_position: Decimal = row.try_get("acceptance_position")?;
             let acceptance_position = input_position_from_numeric(acceptance_position)
                 .map_err(|_| OutboxCorruption::InvalidAcceptancePosition)?;
+            let content = crate::user_content::decode(row.try_get("content_parts")?)
+                .map_err(|_| OutboxCorruption::InvalidAcceptedInputContent)?;
             DispatchedOutboxEventKind::InputAccepted {
                 accepted_input: AcceptedInputId::from_uuid(row.try_get("accepted_input_id")?),
                 turn: TurnId::from_uuid(row.try_get("turn_id")?),
                 acceptance_position,
-                content: row.try_get("content_text")?,
+                content,
             }
         }
         OutboxEventDiscriminator::GoalTurnRetired => {
@@ -1401,30 +1410,10 @@ async fn load_event(
                                     AND result_frontier.member_count =
                                         boundary_frontier.member_count
                                         + round.request_count
-                                    AND NOT EXISTS (
-                                        SELECT 1
-                                          FROM context_frontier_member
-                                               AS boundary_member
-                                          LEFT JOIN context_frontier_member
-                                                    AS result_prefix
-                                            ON result_prefix.owning_session_id =
-                                               event.session_id
-                                           AND result_prefix.context_frontier_id =
-                                               event.frontier_id
-                                           AND result_prefix.member_position =
-                                               boundary_member.member_position
-                                           AND result_prefix.source_session_id =
-                                               boundary_member.source_session_id
-                                           AND result_prefix.semantic_entry_id =
-                                               boundary_member.semantic_entry_id
-                                         WHERE
-                                            boundary_member.owning_session_id =
-                                            event.session_id
-                                           AND
-                                            boundary_member.context_frontier_id =
-                                            round.boundary_frontier_id
-                                           AND
-                                            result_prefix.semantic_entry_id IS NULL
+                                    AND context_frontier_preserves_prefix(
+                                        event.session_id,
+                                        round.boundary_frontier_id,
+                                        event.frontier_id
                                     )
                                     AND NOT EXISTS (
                                         SELECT 1
@@ -2882,12 +2871,14 @@ pub(crate) enum ToolBatchOutboxState {
     RecoveryRequired(ToolAttemptId),
 }
 
-/// Acquires the global append allocator before another shared lock class.
+/// Acquires the global append allocator at an explicit transaction boundary.
 ///
-/// Appending an event takes this row through the header trigger. Transactions
-/// that will both append and take another cross-session lock acquire the
-/// allocator explicitly first so another writer cannot close a reverse-order
-/// cycle around that shared lock.
+/// Appending an event takes this row through the header trigger. Model-call
+/// transactions serialize on their ordering guard before either shared lock
+/// class, finish ordinary credential locking first, and call this boundary
+/// immediately before their outbox-bearing writes. Counted activation carries
+/// the same guard while its atomic activation event necessarily allocates
+/// before credential selection.
 pub(crate) async fn lock_sequence_allocator(
     connection: &mut PgConnection,
 ) -> Result<(), sqlx::Error> {

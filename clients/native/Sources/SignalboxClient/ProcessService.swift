@@ -731,7 +731,7 @@ public actor SignalboxProcessService: SignalboxProcessServiceProtocol {
           .importedConversationEntry, .importedConversationEnd, .modelAliasesStart,
           .modelAliasSummary, .modelAliasesEnd, .transcriptSnapshotStart,
           .transcriptTurn, .transcriptModelCallUsage, .transcriptModelCallsEnd,
-          .transcriptEntry, .transcriptTextEntry, .transcriptContent,
+          .transcriptEntry, .transcriptUserEntry, .transcriptTextEntry, .transcriptContent,
           .transcriptSnapshotEnd, .sessionEvent, .providerTextDelta:
           throw SignalboxProcessServiceError.unexpectedMessage(
             "The imported transcript sequence was malformed."

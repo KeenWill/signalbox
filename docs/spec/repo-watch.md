@@ -57,12 +57,16 @@ Webhook preemption of slow complete reconciliation is verified against PR #926
 reconciliation quanta ahead of and after a webhook drain are verified against
 this PR (`agent/daemon-live-bounded-repo-reconciliation`). Repeatable preemption
 while durable drain pages remain is verified against this PR
-(`agent/daemon-live-repeatable-webhook-preemption`). The approval-judge dispatch
-fence and unattended escalation release described below are verified against
-this PR (`agent/headless-approval-escalation`). The operator-commissioned
-dispatch fence and its unattended-escalation coverage are verified against this
-PR (`agent/commissioned-dispatch-fence`); its attended escalation park is
-verified against this PR (`agent/daemon-live-headless-approval-park`). External
+(`agent/daemon-live-repeatable-webhook-preemption`). The progressing-drain work
+budget and continuation wake are verified against this PR
+(`agent/daemon-live-webhook-progress-budget`). The approval-judge dispatch fence
+and unattended escalation release described below are verified against this PR
+(`agent/headless-approval-escalation`). The operator-commissioned dispatch fence
+is verified against this PR (`agent/commissioned-dispatch-fence`); its attended
+escalation park is verified against this PR
+(`agent/daemon-live-headless-approval-park`). Bounded cleanup of cancelled
+complete-poll fetches is verified against this PR
+(`agent/daemon-live-webhook-cancelled-fetch-bound`). External
 commissioned-session obligation blocking and blocker replacement are verified
 against this PR (`agent/daemon-convergence-sweep`). Conservative stale
 blocking-review dismissal is verified against this PR
@@ -179,9 +183,12 @@ task makes and starve the durable webhook drain. A webhook wake serializes with
 the same repository task, but may preempt the read-only provider sweep of an
 in-flight complete poll so admitted durable work cannot wait behind that slow
 sweep. Rule activation, dispatch, webhook projection, and cursor commit remain
-outside that cancellation region. The task joins the cancelled poll's spawned
-fetches, invalidates its partial pull-request freshness, drains webhook work,
-and returns the still-due complete poll through a fresh interruptible scheduler
+outside that cancellation region. The task gives the cancelled poll's spawned
+fetches at most five seconds to finish, invalidates its partial pull-request
+freshness, and drains webhook work. A fetch that cannot finish cancellation
+within that bound remains owned by the poller and is joined before another
+complete-poll fetch set can start; it cannot hold the webhook-aware scheduler.
+The still-due complete poll returns through a fresh interruptible scheduler
 pass. Each bounded drain page re-arms that pass while durable remainder exists,
 so a long provider sweep cannot become uninterruptible after the first wake;
 once a page observes no remainder, it leaves no continuation wake and the
@@ -1272,72 +1279,84 @@ replace the first body. Every new admission and equal durable replay publishes a
 coalescing in-memory wake after commit; the listener returns success only while
 that repository's drain task remains available to receive it. The wake is an
 accelerator over durable state, not a work inventory: the repository task drains
-durable pending deliveries on startup, when woken, and as part of every full
-poll for which no retry is already owed, and a wake arriving during a drain
-remains observable for a follow-up attempt. One pending page is bounded by both
-its row count and the exact payload bytes it may hold, and it reads those bodies
-one at a time, so a backlog of near-limit deliveries cannot retain far more than
-admission itself is allowed to; the oldest delivery is always read, so one body
-at the admission ceiling still drains, and every later body is discarded rather
-than allowed to overshoot, so a page retains no more than that ceiling. One
-drain visits a bounded number of pending pages and then re-arms that same wake,
-so a sustained stream is accelerated without holding the worker past an overdue
-full poll. Every drain call also has a sixty-second outer deadline spanning its
+durable pending deliveries in a bounded startup attempt before scheduler work is
+admitted, when woken, and as part of every full poll for which no retry is
+already owed, and a wake arriving during a drain remains observable for a
+follow-up attempt. One pending page is bounded by both its row count and the
+exact payload bytes it may hold, and it reads those bodies one at a time, so a
+backlog of near-limit deliveries cannot retain far more than admission itself is
+allowed to; the oldest delivery is always read, so one body at the admission
+ceiling still drains, and every later body is discarded rather than allowed to
+overshoot, so a page retains no more than that ceiling. One drain visits a
+bounded number of pending pages and then re-arms that same wake, so a sustained
+stream is accelerated without holding the worker past an overdue full poll. A
+progressing drain also yields after the deployment-owned
+`numeric_bounds.webhook_drain_work_budget` and re-arms that same wake after its
+last terminal delivery, so a slow but productive page returns before consuming
+the outer deadline and does not enter failure backoff. Configuring that policy
+as `"none"` disables the progress yield; the outer deadline still bounds a stuck
+operation. Every drain call also has a sixty-second outer deadline spanning its
 provider and database work. Expiry cancels that attempt, leaves unfinished
 deliveries pending, invalidates partial provider freshness, emits the closed
 `webhook_projection_drain_timed_out` cause, and, unless only post-terminal
 dispatch work expired, enters the same bounded projection backoff as another
 retryable drain failure. Post-terminal dispatch expiry instead arms its fixed
 dispatch follow-up. The serialized task is therefore returned to its scheduler
-after bounded child cleanup even when an inner operation never returns.
-Unfinished child fetches remain in the poller's shared set, which a later
-attempt must drain before it can spawn new work. A deadline reached by the
-pre-poll drain stops that poll before its provider sweep can advance the durable
-cursor past the still-pending delivery. A targeted completion already started by
-the cancelled drain retains its exact terminal request and cursor write. It
-records the disposition and projections as the durable recovery handoff before
-attempting the cursor write, and the next drain settles that completion and its
-shadow outcome before subsequent drain work. Cancellation discards the shadow
-only when it races a projected terminal write whose durability is unknown. The
-task retains that delivery identity and blocks cursor-advancing polls until the
-disposition is definitively observed or replayed. If an earlier delivery had
-already failed before a later operation reached the deadline, the drain emits
-that earlier closed cause at error level before reporting the timeout,
-preserving the first-failure guarantee for an error-only telemetry sink. The
+after bounded child cleanup even when an inner operation never returns. The
 enclosing webhook attempt has a seventy-second deadline so activation, lifecycle
 cutoffs, and dispatch reconciliation surrounding the drain cannot hold that task
-indefinitely either. Its cancellation drains child provider fetches for at most
-five seconds, invalidates partial freshness, emits the closed
-`webhook_attempt_timed_out` cause, and enters the same retry backoff. A cleanup
-that exceeds its own bound emits `webhook_cancelled_fetch_drain_timed_out`
-instead of preventing that retry from being scheduled. A terminal commit whose
-result is lost in transit is resolved by reading whether the row is already
-terminal, which cannot itself be ambiguous: if it is, the delivery counts as
-recorded and the shadow advances; if it is not, the record is re-attempted a
-bounded number of times before the delivery is left pending for the next drain.
-If every settling read is itself unavailable, the shadow is discarded rather
-than trusted, because a disposition may have landed without being reflected in
-that baseline. A durable disposition the shadow never accounted for is what this
-avoids. A delivery whose target-specific processing fails is deferred for the
-rest of that drain rather than failing it, so one persistently unprocessable
-receipt cannot pin the head of the queue and starve every later one; the attempt
-still reports the first such failure. Credential, transport, provider-throttle,
-and provider-outage failures stop the current page instead: they prove later
-targeted requests cannot make independent progress, so issuing one for every
-loaded peer would amplify the same outage. Those receipts remain durably pending
-for the bounded retry backoff. A signature-valid delivery whose event or action
-is outside the mapped set, including a broadly subscribed `workflow_job`, is
-still acknowledged successfully and is cheaply logged and recorded as ignored
-rather than treated as an intake failure. A targeted projection records its
-terminal disposition and exact projections as the durable recovery handoff
-before its cursor write. If that cursor write conflicts with an intervening full
-poll, the delivery remains terminal and the in-memory shadow is handed over to
-the competing durable cursor before later pending receipts are projected. A
-webhook-enabled shadow wake may also preempt the read-only provider sweep of an
-in-flight complete poll, without resetting that poll's deadline, so the durable
-delivery drains before bounded reconciliation resumes. After the delivery's
-bounded page drains, the still-due poll returns through the same interruptible
-scheduler path rather than entering an uninterruptible resumed sweep.
+indefinitely either. Its cancellation performs the same bounded child cleanup
+and shadow settlement described below, invalidates partial freshness, and emits
+the closed `webhook_attempt_timed_out` cause. Cancellation carries no failure of
+its own, so the step it interrupted decides the retry: a cancelled drain
+advances the projection backoff, a cancelled reconciliation after a committed
+drain clears that backoff and arms the fixed dispatch follow-up, and a
+cancellation before the drain began neither grows nor clears it. A cleanup that
+exceeds its own five-second bound emits
+`webhook_cancelled_fetch_drain_timed_out` instead of preventing that retry from
+being scheduled. The same cleanup bound applies when an admission wake or retry
+cancels a complete provider sweep. Unfinished child fetches remain in the
+poller's shared set, which a later attempt must drain before it can spawn new
+work. A deadline reached by the pre-poll drain stops that poll before its
+provider sweep can advance the durable cursor past the still-pending delivery. A
+targeted completion already started by the cancelled drain retains its exact
+terminal request and cursor write. It records the disposition and projections as
+the durable recovery handoff before attempting the cursor write, and the next
+drain settles that completion and its shadow outcome before subsequent drain
+work. Cancellation discards the shadow only when it races a projected terminal
+write whose durability is unknown. The task retains that delivery identity and
+blocks cursor-advancing polls until the disposition is definitively observed or
+replayed. If an earlier delivery had already failed before a later operation
+reached the deadline, the drain emits that earlier closed cause at error level
+before reporting the timeout, preserving the first-failure guarantee for an
+error-only telemetry sink. A terminal commit whose result is lost in transit is
+resolved by reading whether the row is already terminal, which cannot itself be
+ambiguous: if it is, the delivery counts as recorded and the shadow advances; if
+it is not, the record is re-attempted a bounded number of times before the
+delivery is left pending for the next drain. If every settling read is itself
+unavailable, the shadow is discarded rather than trusted, because a disposition
+may have landed without being reflected in that baseline. A durable disposition
+the shadow never accounted for is what this avoids. A delivery whose
+target-specific processing fails is deferred for the rest of that drain rather
+than failing it, so one persistently unprocessable receipt cannot pin the head
+of the queue and starve every later one; the attempt still reports the first
+such failure. Credential, transport, provider-throttle, and provider-outage
+failures stop the current page instead: they prove later targeted requests
+cannot make independent progress, so issuing one for every loaded peer would
+amplify the same outage. Those receipts remain durably pending for the bounded
+retry backoff. A signature-valid delivery whose event or action is outside the
+mapped set, including a broadly subscribed `workflow_job`, is still acknowledged
+successfully and is cheaply logged and recorded as ignored rather than treated
+as an intake failure. A targeted projection records its terminal disposition and
+exact projections as the durable recovery handoff before its cursor write. If
+that cursor write conflicts with an intervening full poll, the delivery remains
+terminal and the in-memory shadow is handed over to the competing durable cursor
+before later pending receipts are projected. A webhook-enabled shadow wake may
+also preempt the read-only provider sweep of an in-flight complete poll, without
+resetting that poll's deadline, so the durable delivery drains before bounded
+reconciliation resumes. After the delivery's bounded page drains, the still-due
+poll returns through the same interruptible scheduler path rather than entering
+an uninterruptible resumed sweep.
 
 **Implemented behavior.** A drain page attempts every loaded delivery after a
 target-specific or persistence failure, but stops at the first repository-wide
@@ -1348,69 +1367,68 @@ a wake, a retry, or a full poll. A delivery that fails before its terminal
 disposition is recorded remains pending, and its successful page peers still
 reach terminal state when the failure is isolatable: a targeted refresh the
 provider will not serve is one such failure, because that query runs before
-anything is recorded. A targeted commit runs before the disposition is recorded,
-so its failure leaves the delivery pending too. Once a targeted refresh's exact
-projections and disposition are durable, a later cursor-write failure does not
-reopen the delivery; the durable cursor becomes the next shadow baseline. A
-delivery whose disposition is already durable when a later step fails — the
-dispatch work that follows it — is terminal and is not loaded again; that
-failure carries the same delivery identity and closed cause at warning level,
-recorded where it happens because the delivery never reaches the drain page's
-deferral record. The repository task schedules a new drain attempt after five
-seconds without waiting for a full poll, another delivery, or a restart.
-Consecutive failures double that delay to a five-minute ceiling and a success
-returns it to five seconds, so a delivery that cannot be projected costs bounded
-repeated work rather than a fixed five-second loop. Only the drain advances that
-delay: an attempt whose drain succeeded and whose dispatch work then failed
-returns it to five seconds and keeps a retry armed there, because that work runs
-only from a later attempt and the delivery that would have woken one is already
-terminal. That follow-up is distinct from projection backoff: admission wakes
-remain enabled and full polls keep both drain steps while it is owed. A full
-poll whose drains succeeded and whose trailing cutoff or dispatch work then
-failed arms the same follow-up rather than waiting for the next poll, because
-that work runs over what the drain committed and no delivery is left pending to
-wake it. An attempt that failed before reaching the drain arms a retry at the
-current delay without advancing it, so unrelated dispatch failures cannot grow
-the projection delay. Taking a retry spends its deadline, so an attempt that
-then fails before its drain arms a fresh one rather than selecting itself again
-immediately, which the retry's priority over polling would otherwise cause. That
-fresh deadline keeps the kind the spent one had: the attempt that failed before
-its drain says nothing about projection, so a follow-up whose trailing work
-failed again stays a follow-up rather than becoming backoff that suppresses
-admission wakes and poll drains while projection is healthy. A deadline that
-expired while some other attempt ran is left expired, so the next pass takes it
-at once rather than having it pushed out again by a poll that keeps failing
-slowly. A poll whose pre-poll drain failed does not repeat it: the step after
-the poll is skipped, so work already known to be failing waits for that delay
-rather than repeating inside one attempt. A pre-poll drain that succeeded is
-still followed by the post-poll one, which is what catches deliveries admitted
-while the poll was running. A full poll that fails before its drains have run
-schedules that retry only when none is already owed, an admission wake is
-suppressed while one is, and a full poll omits both of its drain steps while one
-is, so neither a rapidly failing poll nor an authenticated replay stream can
-defer or bypass the backoff; a suppressed wake coalesces and is observed by the
-attempt that follows the retry. A poll taken during a backoff window therefore
-commits a cursor that a delivery still pending does not reflect. The shadow
-baseline that delivery seeded is marked superseded but retained, because
-replacement waits for an empty pending page, so its retry projects against that
-baseline rather than reseeding from the advanced cursor — the accepted cost is
-that divergence, taken against an unbounded repetition of work already failing.
-An overdue retry is taken ahead of an overdue poll, and a full poll that
-outlasts its own interval schedules the next one a whole interval from
-completion; without both, a poll deadline that is always already elapsed would
-win every scheduling decision and starve durable webhook work for as long as
-polling kept failing. An independent per-repository observer checks durable
-pending work every thirty seconds, reading delivery identity and receipt time
-only and never the admitted body. That cadence is anchored, so a slow inspection
-does not push the next one out by its own duration, and the inspection is
-bounded at ten seconds so a connection pool exhausted by wedged repositories
-produces a closed timeout cause rather than silence; once the oldest delivery
-has remained undispositioned for one minute it emits an error-level stall signal
-with the repository, delivery identity, receipt sequence, pending age, and
-closed stall cause. Because the observer is not the serialized drain task, a
-task wedged in polling, projection, disposition, or dispatch cannot silence that
-signal, and the observer's own inspection is cancelled by shutdown so an
-unresponsive database cannot hold daemon termination.
+anything is recorded. Once a targeted refresh's exact projections and
+disposition are durable, a later cursor-write failure does not reopen the
+delivery; the durable cursor becomes the next shadow baseline. A delivery whose
+disposition is already durable when a later step fails — the dispatch work that
+follows it — is terminal and is not loaded again; that failure carries the same
+delivery identity and closed cause at warning level, recorded where it happens
+because the delivery never reaches the drain page's deferral record. The
+repository task schedules a new drain attempt after five seconds without waiting
+for a full poll, another delivery, or a restart. Consecutive failures double
+that delay to a five-minute ceiling and a success returns it to five seconds, so
+a delivery that cannot be projected costs bounded repeated work rather than a
+fixed five-second loop. Only the drain advances that delay: an attempt whose
+drain succeeded and whose dispatch work then failed returns it to five seconds
+and keeps a retry armed there, because that work runs only from a later attempt
+and the delivery that would have woken one is already terminal. That follow-up
+is distinct from projection backoff: admission wakes remain enabled and full
+polls keep both drain steps while it is owed. A full poll whose drains succeeded
+and whose trailing cutoff or dispatch work then failed arms the same follow-up
+rather than waiting for the next poll, because that work runs over what the
+drain committed and no delivery is left pending to wake it. An attempt that
+failed before reaching the drain arms a retry at the current delay without
+advancing it, so unrelated dispatch failures cannot grow the projection delay.
+Taking a retry spends its deadline, so an attempt that then fails before its
+drain arms a fresh one rather than selecting itself again immediately, which the
+retry's priority over polling would otherwise cause. That fresh deadline keeps
+the kind the spent one had: the attempt that failed before its drain says
+nothing about projection, so a follow-up whose trailing work failed again stays
+a follow-up rather than becoming backoff that suppresses admission wakes and
+poll drains while projection is healthy. A deadline that expired while some
+other attempt ran is left expired, so the next pass takes it at once rather than
+having it pushed out again by a poll that keeps failing slowly. A poll whose
+pre-poll drain failed does not repeat it: the step after the poll is skipped, so
+work already known to be failing waits for that delay rather than repeating
+inside one attempt. A pre-poll drain that succeeded is still followed by the
+post-poll one, which is what catches deliveries admitted while the poll was
+running. A full poll that fails before its drains have run schedules that retry
+only when none is already owed, an admission wake is suppressed while one is,
+and a full poll omits both of its drain steps while one is, so neither a rapidly
+failing poll nor an authenticated replay stream can defer or bypass the backoff;
+a suppressed wake coalesces and is observed by the attempt that follows the
+retry. A poll taken during a backoff window therefore commits a cursor that a
+delivery still pending does not reflect. The shadow baseline that delivery
+seeded is marked superseded but retained, because replacement waits for an empty
+pending page, so its retry projects against that baseline rather than reseeding
+from the advanced cursor — the accepted cost is that divergence, taken against
+an unbounded repetition of work already failing. An overdue retry is taken ahead
+of an overdue poll, and a full poll that outlasts its own interval schedules the
+next one a whole interval from completion; without both, a poll deadline that is
+always already elapsed would win every scheduling decision and starve durable
+webhook work for as long as polling kept failing. An independent per-repository
+observer checks durable pending work every thirty seconds, reading delivery
+identity and receipt time only and never the admitted body. That cadence is
+anchored, so a slow inspection does not push the next one out by its own
+duration, and the inspection is bounded at ten seconds so a connection pool
+exhausted by wedged repositories produces a closed timeout cause rather than
+silence; once the oldest delivery has remained undispositioned for one minute it
+emits an error-level stall signal with the repository, delivery identity,
+receipt sequence, pending age, and closed stall cause. Because the observer is
+not the serialized drain task, a task wedged in polling, projection,
+disposition, or dispatch cannot silence that signal, and the observer's own
+inspection is cancelled by shutdown so an unresponsive database cannot hold
+daemon termination.
 
 **Implemented behavior.** Shadow mode never inserts a webhook-produced row into
 `repo_watch_event` and never mutates the cursor from a payload-derived patch.

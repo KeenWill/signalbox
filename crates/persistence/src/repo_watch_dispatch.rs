@@ -36,9 +36,9 @@ use crate::{
 };
 
 const CONFIGURATION_LOCK: &str = "repo-watch\u{1f}configuration";
-// numeric-bound: ceiling - bounds accepted repository-watch work without a model call
+// numeric-bound: guard - prevents a dispatch start that never calls a model from holding its slot forever
 const DISPATCH_START_LEASE_LIMIT: Duration = Duration::from_secs(5 * 60);
-// numeric-bound: tunable - preserves a positive lowered lease for tests and composition
+// numeric-bound: guard - prevents a lowered lease from expiring the start it just admitted
 const MINIMUM_DISPATCH_START_LEASE: Duration = Duration::from_millis(1);
 // numeric-bound: ceiling - one repository-watch rule can dispatch this many actions
 const UNSTARTED_DISPATCH_NUDGE_BATCH_SIZE: i64 = 32;

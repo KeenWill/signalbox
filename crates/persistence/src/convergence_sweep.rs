@@ -152,21 +152,27 @@ pub enum ConvergenceSweepFailureDisposition {
 }
 
 /// Delay bounds for one convergence-sweep failure lineage.
+///
+/// Both bounds are configurable and optional. An absent base schedules no
+/// claimable retry deadline at all, so the lineage stays unclaimed until an
+/// operator acts; an absent cap lets the exponential lineage grow unbounded.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConvergenceSweepRetryPolicy {
-    /// Delay used for the first retry in a failure lineage.
-    pub backoff_base: Duration,
-    /// Maximum delay permitted for a retry in the lineage.
-    pub backoff_cap: Duration,
+    /// Delay used for the first retry in a failure lineage, when configured.
+    pub backoff_base: Option<Duration>,
+    /// Maximum delay permitted for a retry in the lineage, when configured.
+    pub backoff_cap: Option<Duration>,
 }
 
 impl ConvergenceSweepRetryPolicy {
-    fn stored_backoff_base_seconds(self) -> i64 {
-        i64::try_from(self.backoff_base.as_secs()).unwrap_or(i64::MAX)
+    fn stored_backoff_base_seconds(self) -> Option<i64> {
+        self.backoff_base
+            .map(|base| i64::try_from(base.as_secs()).unwrap_or(i64::MAX))
     }
 
-    fn stored_backoff_cap_seconds(self) -> i64 {
-        i64::try_from(self.backoff_cap.as_secs()).unwrap_or(i64::MAX)
+    fn stored_backoff_cap_seconds(self) -> Option<i64> {
+        self.backoff_cap
+            .map(|cap| i64::try_from(cap.as_secs()).unwrap_or(i64::MAX))
     }
 }
 
@@ -892,8 +898,8 @@ impl PostgresConvergenceSweepStore {
                 observation: Some(observation),
                 failure: ConvergenceSweepFailureKind::NoModelActivity,
                 retry_policy: ConvergenceSweepRetryPolicy {
-                    backoff_base: Duration::ZERO,
-                    backoff_cap: Duration::ZERO,
+                    backoff_base: Some(Duration::ZERO),
+                    backoff_cap: Some(Duration::ZERO),
                 },
             },
             Some(expected_session),
@@ -1040,6 +1046,7 @@ impl PostgresConvergenceSweepStore {
                                 THEN least(consecutive_failures + 1, $5)
                             ELSE 1::smallint END) >= $5
                         THEN NULL
+                        WHEN $6::bigint IS NULL THEN 'infinity'::timestamptz
                         ELSE clock_timestamp() + least(
                             $6::bigint * (1::bigint << greatest(
                                 (CASE WHEN failure_kind = $3

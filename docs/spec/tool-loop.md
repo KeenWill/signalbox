@@ -32,6 +32,9 @@ and the unattended-escalation terminal path are verified against this PR
 The operator-attended park after an operator-commissioned approval escalation is
 verified against this PR (`agent/daemon-live-headless-approval-park`).
 
+The automatic non-executable denial of credential-suppressed tool arguments is
+verified against this PR (`agent/daemon-live-redacted-tool-recovery`).
+
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
 
@@ -62,16 +65,20 @@ against the implementing stack rooted at PR #193 (`agent/tool-loop-spec`); the
 verified through PR #258 (`agent/signalboxd-rename`), and the Tier 0 catalog
 extension through PR #265 (`agent/tool-batch-tier0`). The Tier 1 code-host
 catalog extension is verified through PR #270 (`agent/tool-batch-tier1`), the
-deterministic review-slog extension through PR #306 (`agent/review-slog-tools`),
-the failed-attempt operator event together with the credential-shaped code-host
-detail through PR #285 (`agent/dev-instance-code-host-credential`), the client
-decision surface through PR #291 (`agent/turn-control-verbs`), and
-runner-protocol batch reconstitution through PR #260
-(`agent/runner-protocol-domain`). Template-derived blanket creation was verified
-through PR #311 (`agent/session-templates-spec`), and the exact-origin
-`web_fetch` egress policy and complete bounded file-patch lookup through PR #330
-(`agent/audit-verified-fixes`). The exact-revision repository-read extension is
-verified through PR #348 (`agent/repository-read-tools`) at implementation ref
+review-thread aggregate retention bound through PR #1181
+(`agent/daemon-live-review-thread-result-budget`) and its scrubbed-result
+enforcement through this PR (`agent/daemon-live-review-thread-scrub-budget`),
+the deterministic review-slog extension through PR #306
+(`agent/review-slog-tools`), the failed-attempt operator event together with the
+credential-shaped code-host detail through PR #285
+(`agent/dev-instance-code-host-credential`), the client decision surface through
+PR #291 (`agent/turn-control-verbs`), and runner-protocol batch reconstitution
+through PR #260 (`agent/runner-protocol-domain`). Template-derived blanket
+creation was verified through PR #311 (`agent/session-templates-spec`), and the
+exact-origin `web_fetch` egress policy and complete bounded file-patch lookup
+through PR #330 (`agent/audit-verified-fixes`). The exact-revision
+repository-read extension is verified through PR #348
+(`agent/repository-read-tools`) at implementation ref
 `2a55dbb65440dfae31b339b6726fe5ace6dab24c`. The runner executable stack rooted
 at this foundation proposal extends the same laws to the runner locus. The
 explicit-approval `AlwaysConfirm` declaration is verified through PR #366
@@ -186,17 +193,20 @@ implemented decision sources are:
   automatic approval;
 - `SessionOverride` — an exact runner-placement tool override supplied automatic
   approval;
-- `Delegate` — an authority-checked approval-judge call decided the request; and
+- `Delegate` — an authority-checked approval-judge call decided the request;
 - `UserOverride` — a user-recorded one-shot override of a delegate denial
-  supplied approval when the session re-proposed the denied command.
+  supplied approval when the session re-proposed the denied command; and
+- `RuntimeSafety` — the provider credential boundary suppressed the complete
+  argument object, so the producing-call transaction recorded a fixed denial
+  before any executor could observe the request.
 
 A delegated decision names the exact direct model selection and dedicated model
 call that made it, and retains the judge rationale as nonempty text of at most
 4,096 bytes. A user decision instead names its exact durable command. A consumed
 user override names its override durable command and the exact delegate-denied
 request it overrides — user agency exercised in advance through that command.
-Automatic policy has no decider or rationale. Neither automated path can claim
-user agency (INV-020).
+Automatic policy and runtime-safety denial have no decider or rationale. None of
+the automated paths can claim user agency (INV-020).
 
 Each daemon tool mapping may declare one approval posture: `Auto`, `Delegated`,
 or `Human`. The selected posture is frozen into every resulting request. For
@@ -1288,7 +1298,12 @@ The declarations and compact result objects are:
 - `change_request_review_threads` accepts `repository` and `number`; it returns
   the first 100 threads and, within each, the first 100 comments. A thread
   carries opaque id, resolution and outdated posture, path, optional line,
-  comments, and `comments_truncated`; the outer result carries `truncated`.
+  comments, and `comments_truncated`; the outer result carries `truncated`. The
+  configured code-host result-text byte bound applies to the complete encoded,
+  credential-scrubbed result. Exhausting it retains an ordered
+  thread-and-comment prefix, marks a shortened comment page with
+  `comments_truncated`, and marks an omitted thread suffix with outer
+  `truncated`.
 - `change_request_thread_reply` accepts `repository`, `number`, an opaque
   `thread_id`, and nonempty `body`; it returns the created comment node id and
   URL. The named change request is the mutation's authority target: an opaque

@@ -2649,6 +2649,10 @@ mod tests {
     struct OfflineCodeHostTransport;
 
     impl CodeHostTransport for OfflineCodeHostTransport {
+        fn numeric_bounds(&self) -> crate::CodeHostNumericBounds {
+            crate::CodeHostNumericBounds::new(None, None, None, None, None, None)
+        }
+
         async fn execute(
             &mut self,
             _operation: crate::CodeHostOperation,
@@ -2840,7 +2844,10 @@ mod tests {
                     CredentialReference::new(SYNTHETIC_GITHUB_CREDENTIAL_REFERENCE),
                 ),
             },
-            GitHubCodeHostTransport::try_new().expect("offline code-host transport constructs"),
+            GitHubCodeHostTransport::try_new(crate::CodeHostNumericBounds::new(
+                None, None, None, None, None, None,
+            ))
+            .expect("offline code-host transport constructs"),
             GitHubEgressPolicy::github_api_only(),
             workspace.path(),
             git_identity(),
@@ -2913,9 +2920,15 @@ mod tests {
         )
         .expect("expected catalog bridge path is written");
         let credential = CredentialReference::new(SYNTHETIC_CLAUDE_CREDENTIAL_REFERENCE);
-        let mut config =
-            ClaudeCliConfig::new(&executable, bridge, workspace.path(), credential.clone());
-        config.exchange_timeout = BRIDGE_RESPONSE_TIMEOUT;
+        let mut config = ClaudeCliConfig::new(
+            &executable,
+            bridge,
+            workspace.path(),
+            credential.clone(),
+            None,
+            None,
+        );
+        config.exchange_timeout = Some(BRIDGE_RESPONSE_TIMEOUT);
         let runtime = ClaudeCliRuntime::new(config)
             .expect("offline Claude catalog capture runtime constructs");
         let mut operation = ModelOperation::new(

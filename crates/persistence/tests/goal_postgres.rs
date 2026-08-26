@@ -44,10 +44,11 @@ use signalbox_persistence::{
         PrepareContextCompactionRequest,
     },
     create_session::CreateSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels,
     goal::{
-        GoalCommandHandlingOutcome, GoalRepository, GoalRepositoryError, GoalTransitionOutcome,
+        GoalCommandHandlingOutcome, GoalExecutionFailureRecoveryCause, GoalRepository,
+        GoalRepositoryError, GoalTransitionOutcome,
     },
     goal_turn::{GoalTurnCandidates, GoalTurnContinuationOutcome},
     local_test_connection_options, migrate,
@@ -62,7 +63,7 @@ use signalbox_persistence::{
         ReplaceSessionDefaultsHandlingOutcome, ReplaceSessionDefaultsRepository,
     },
     scheduler::PostgresEligibilitySweep,
-    start_eligible_turn::StartEligibleTurnRepository,
+    start_eligible_turn::{CommitCompactionFailurePreviewOutcome, StartEligibleTurnRepository},
     startup::PostgresStartupScanRepository,
     submit_input::SubmitInputRepository,
 };
@@ -91,7 +92,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -348,6 +349,68 @@ async fn terminalize_goal_turn_as_failed(pool: &PgPool, value: u128) -> Result<(
     let StartupScanSessionOutcome::Recovered(_) = outcome else {
         panic!("prepared active goal turn must recover as failed");
     };
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn call_free_failure_recovery_cause_round_trips_as_a_closed_type()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = migrated_postgres().await?;
+    CreateSessionRepository::new(pool.clone(), credential_pin())
+        .handle(creation())
+        .await?;
+    let attached_turn = turn_candidates(0xb5f);
+    GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                command(ATTACH_COMMAND),
+                session(SESSION),
+                GoalUserAction::Attach(statement("finish the commissioned task")),
+            ),
+            Some(attached_turn),
+            |_| None,
+        )
+        .await?;
+    let activation = StartEligibleTurnRepository::new(pool.clone());
+    let preview = activation
+        .preview(session(SESSION), activation_identities(0xd5f))
+        .await?
+        .expect("the queued goal turn has an activation preview");
+    let targets = ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(
+        DirectModelSelection::from_uuid(Uuid::from_u128(0xa01)),
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(0xa02))),
+    )])
+    .expect("one fixture target forms a catalog");
+    let model_calls = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("compaction-failure-test-provider"),
+    );
+    let expected = GoalExecutionFailureRecoveryCause::ContextCompactionInputDoesNotFit;
+    let closure = activation
+        .commit_compaction_failure_preview(
+            preview,
+            &model_calls,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(0xe5f)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(0xe60)),
+            ),
+            Some(expected),
+        )
+        .await?;
+    assert_eq!(
+        closure,
+        CommitCompactionFailurePreviewOutcome::Failed(attached_turn.turn())
+    );
+
+    let actual = GoalRepository::new(pool.clone())
+        .execution_failure_recovery_cause(session(SESSION), attached_turn.turn())
+        .await?;
+
+    assert_eq!(actual, Some(expected));
+    pool.close().await;
+    drop(container);
     Ok(())
 }
 
@@ -799,7 +862,8 @@ async fn s_goal_inv048_inv053_goal_owned_input_activates_without_a_user_command(
             accepted_input: candidates.accepted_input(),
             turn: candidates.turn(),
             acceptance_position: SessionInputPosition::first(),
-            content: goal_content,
+            content: UserContent::try_text(goal_content)
+                .expect("the goal fixture content is admitted"),
         }
     );
 
@@ -1057,10 +1121,13 @@ async fn s_goal_inv048_resume_delivers_guidance_to_the_next_turn() -> Result<(),
             .await?;
 
     let resumed_content: String = sqlx::query_scalar(
-        "SELECT content_text
-           FROM accepted_input
-          WHERE accepted_input_id = $1
-            AND session_id = $2",
+        "SELECT part.text_value
+           FROM accepted_input AS accepted
+           JOIN accepted_input_content_part AS part
+             ON part.accepted_input_id = accepted.accepted_input_id
+            AND part.position = 0
+          WHERE accepted.accepted_input_id = $1
+            AND accepted.session_id = $2",
     )
     .bind(resumed_turn.accepted_input().into_uuid())
     .bind(Uuid::from_u128(SESSION))
@@ -2756,19 +2823,27 @@ async fn inv048_goal_turn_configuration_matches_its_defaults_epoch() -> Result<(
     sqlx::query(
         "INSERT INTO accepted_input
             (accepted_input_id, accepting_command_id, session_id,
-             content_kind, content_text, delivery_kind,
+             delivery_kind,
              expected_active_turn_id, expected_defaults_version,
              model_override_kind, replacement_model_kind,
              replacement_direct_model_selection_id, replacement_model_alias_id,
              acceptance_position, disposition_kind, origin_turn_id)
-         VALUES ($1, NULL, $2, 'text', $3, 'start_when_no_active_turn',
+         VALUES ($1, NULL, $2, 'start_when_no_active_turn',
                  NULL, 1, 'use_session_default', NULL, NULL, NULL,
-                 1, 'origin_of', $4)",
+                 1, 'origin_of', $3)",
     )
     .bind(accepted.into_uuid())
     .bind(Uuid::from_u128(SESSION))
-    .bind("misconfigured turn")
     .bind(turn.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO accepted_input_content_part
+            (accepted_input_id, position, part_kind, text_value)
+         VALUES ($1, 0, 'text', $2)",
+    )
+    .bind(accepted.into_uuid())
+    .bind("misconfigured turn")
     .execute(&mut *transaction)
     .await?;
     sqlx::query(
@@ -4336,6 +4411,7 @@ async fn s18_inv015_inv032_logically_terminal_child_admits_compaction() -> Resul
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 Uuid::from_u128(0xfa41),
             )),
+            input_includes_cache_tokens: false,
             credential_reference: String::from("cascade-compaction-test-provider"),
             call: ModelCallId::from_uuid(Uuid::from_u128(0xfa42)),
             compaction: ContextCompactionId::from_uuid(Uuid::from_u128(0xfa43)),

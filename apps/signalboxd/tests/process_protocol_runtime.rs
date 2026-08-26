@@ -4,6 +4,8 @@
     reason = "the standalone integration test uses assertion panics and explicit fixture expectations"
 )]
 
+mod support;
+
 use std::{
     collections::{HashSet, VecDeque},
     error::Error,
@@ -55,13 +57,17 @@ use signalbox_domain::{
     ToolName, ToolRequestId, ToolResponsePartIdentity, ToolRoundModelCallIdentities,
     ToolUsingAssistantResponse, TurnId,
 };
-use signalbox_model_provider_runtime::{RuntimeContextCompactionModel, RuntimeModelCallProvider};
+use signalbox_model_provider_runtime::{
+    RuntimeContextCompactionModel, RuntimeInputTokenCountError, RuntimeModelCallProvider,
+    RuntimeModelCallProviderError,
+};
 use signalbox_model_runtime::{
     AssistantPart, BoundaryLossEvidence, CancellationSignal, CompletionEvidence, CompletionFinish,
     DeliveryMode, ExchangeFacts, InputTokenCountOutcome, LossCause, MessagePart,
-    ModelInputTokenCounter, ModelOperation, ModelRuntime, Observation, ObservationFact,
-    ObservationSink, PreparationOutcome, ProviderReportedModel, Script, ScriptedModel,
-    ScriptedPrepared, TerminalEvidence, TerminalReport, TokenUsage, ToolCallsAtLoss,
+    ModelInputTokenCounter, ModelOperation, ModelRuntime, NativeErrorFacts, Observation,
+    ObservationFact, ObservationSink, PreparationOutcome, ProviderErrorEvidence, ProviderErrorKind,
+    ProviderReportedModel, Script, ScriptedModel, ScriptedPrepared, TerminalEvidence,
+    TerminalReport, TokenUsage, ToolCallsAtLoss,
 };
 use signalbox_persistence::{
     blob::BlobCatalogRepository,
@@ -72,7 +78,7 @@ use signalbox_persistence::{
     },
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::{PostgresModelCallRepository, PrepareInitialModelCallOutcome},
     scheduler::PostgresEligibilitySweep,
@@ -83,6 +89,7 @@ use signalbox_persistence::{
         FleetSoakCensus, FleetSoakCensusRepository, OperatorStatusConvergenceFixture,
         OperatorStatusFixtureRepository, OperatorStatusStaleReviewClearanceFixture,
     },
+    turn_liveness::TurnLivenessPersistenceBounds,
 };
 use signalbox_process_protocol::{
     BlobChunk, CanonicalBlobDigest, CanonicalDigest, CanonicalU64, CanonicalUuid, ClientFrame,
@@ -91,27 +98,29 @@ use signalbox_process_protocol::{
     DescendantTerminationScope, EffectiveModelSettings, ErrorCode, ErrorDetail, FastMode,
     GoalHistoryEvent, GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
     ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview, InputContent, InputDelivery,
-    MetadataActor, ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
-    ModelSettingsPrecedence, ModelSettingsSnapshot, OperatorStatusConvergenceVerdict,
-    OperatorStatusEndMessage, OperatorStatusMergeableState, OperatorStatusMessage,
-    OperatorStatusPendingStaleReviewClearanceMessage, OperatorStatusPullRequestConvergenceMessage,
-    OperatorStatusReviewDecision, ProtocolVersion, ReasoningLevel, RejectionDetail, RequestId,
-    ReviewConcernTerminalOutcome, ReviewDiffSide, ReviewExternalObjectKind, ReviewFindingEvent,
-    ReviewFindingInput, ReviewFindingStatus, ReviewImportTerminalOutcome,
-    ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome, ReviewJudgmentPlanMember,
-    ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus, ReviewOrchestrationCounts,
-    ReviewOrchestrationSnapshot, ReviewOrchestrationState, ReviewPassTerminalOutcome,
-    ReviewPublicationOutcome, ReviewPublicationTerminalOutcome, ReviewRepairOutcome,
-    ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject, ReviewWorkflow, ServerFrame,
-    ServerMessage, SessionEvent, SessionMetadata, SessionPlacement, SettingOverlay,
-    SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry, TranscriptTextEntry,
-    TurnState, UserInputContent, decode_server_line, encode_client_line,
+    MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MetadataActor, ModelChangeAdjustment, ModelSelection,
+    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot,
+    OperatorStatusConvergenceVerdict, OperatorStatusEndMessage, OperatorStatusMergeableState,
+    OperatorStatusMessage, OperatorStatusPendingStaleReviewClearanceMessage,
+    OperatorStatusPullRequestConvergenceMessage, OperatorStatusReviewDecision, ProtocolVersion,
+    ReasoningLevel, RejectionDetail, RequestId, ReviewConcernTerminalOutcome, ReviewDiffSide,
+    ReviewExternalObjectKind, ReviewFindingEvent, ReviewFindingInput, ReviewFindingStatus,
+    ReviewImportTerminalOutcome, ReviewJudgmentDisposition, ReviewJudgmentEffectTerminalOutcome,
+    ReviewJudgmentPlanMember, ReviewOrchestrationConcernInput, ReviewOrchestrationConcernStatus,
+    ReviewOrchestrationCounts, ReviewOrchestrationSnapshot, ReviewOrchestrationState,
+    ReviewPassTerminalOutcome, ReviewPublicationOutcome, ReviewPublicationTerminalOutcome,
+    ReviewRepairOutcome, ReviewRepairTerminalOutcome, ReviewSeverity, ReviewTargetSubject,
+    ReviewWorkflow, ServerFrame, ServerMessage, SessionEvent, SessionMetadata, SessionPlacement,
+    SettingOverlay, SystemPromptMember, SystemPromptText, ToolDecision, TranscriptEntry,
+    TranscriptTextEntry, TurnState, UserInputContent, decode_server_line, encode_client_line,
 };
 use signalboxd::{
     ActivatedTurnPass, BlobStorageClass, BlobStoreRegistry, ContextGuardedTurnPass,
-    ContextGuardedTurnPassError, FatalExecutionSupervisor, HubModelConfiguration,
-    LocalProcessListener, PostgresProviderModelExecution, ProcessProviderTextDeltaSink,
-    ProcessRuntime, ProcessRuntimeError, SessionTemplateConfiguration, TurnLivenessRuntime,
+    ContextGuardedTurnPassError, ExpiredPassRecoveryPolicy, FatalExecutionSupervisor,
+    HubModelConfiguration, LocalProcessListener, PostgresProviderModelExecution,
+    ProcessProviderTextDeltaSink, ProcessRuntime, ProcessRuntimeError, ReportedUsageCompaction,
+    ReportedUsageCompactionError, SessionTemplateConfiguration, TurnLivenessNumericBounds,
+    TurnLivenessRuntime,
 };
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use tempfile::TempDir;
@@ -145,6 +154,49 @@ fn test_session_credential_pin() -> signalbox_persistence::SessionCredentialPin 
     ])
     .expect("test credential pin is valid")
 }
+
+#[track_caller]
+fn exactly_one_credential_reference(references: &[String]) -> &str {
+    match references {
+        [reference] => reference.as_str(),
+        _ => panic!("the fixture pins exactly one credential family"),
+    }
+}
+
+#[track_caller]
+fn reported_usage_still_exceeded_turn(outcome: Result<(), ReportedUsageCompactionError>) -> TurnId {
+    match outcome {
+        Err(ReportedUsageCompactionError::Compaction {
+            turn,
+            cause_code: "reported_usage_context_still_exceeded",
+            ..
+        }) => turn,
+        other => panic!("expected a still-exceeded compaction failure, got {other:?}"),
+    }
+}
+
+#[track_caller]
+fn failed_automatic_compaction_turn(
+    outcome: Result<
+        (),
+        ContextGuardedTurnPassError<
+            RuntimeInputTokenCountError,
+            signalboxd::WorkspaceInstructionPreparedExecutionError<
+                signalboxd::PostgresProviderModelExecutionError<RuntimeModelCallProviderError>,
+            >,
+        >,
+    >,
+) -> TurnId {
+    match outcome {
+        Err(ContextGuardedTurnPassError::Compaction {
+            turn,
+            cause_code: "context_compaction_model",
+            ..
+        }) => turn,
+        other => panic!("expected a failed automatic compaction, got {other:?}"),
+    }
+}
+
 const MAX_SUBMITTED_INPUT_BYTES: usize = 1024 * 1024;
 const OVERSIZED_SUBMITTED_INPUT_BYTES: usize = MAX_SUBMITTED_INPUT_BYTES + 1;
 const STREAMING_DELTA_COUNT: usize = 192;
@@ -303,7 +355,7 @@ async fn postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -708,14 +760,10 @@ where
         Pass::failure_turn(error)
     }
 
-    /// Forwards the decorated pass's occupancy handoff.
-    ///
-    /// Every boundary default this decorator leaves in place is a capability it
-    /// silently removes from the pass it wraps, and this one fails invisibly:
-    /// the scheduler still expires the bounded pass, but with no handler it
-    /// cancels the execution without the daemon-owned recovery that records the
-    /// ambiguity park. A bounded occupancy would look enforced while leaving no
-    /// durable evidence that it was.
+    // The decorator must forward every boundary the inner pass overrides.
+    // Inheriting the trait defaults here silently drops the composed pass's
+    // occupancy-expiry handoff and its reserved dispatch-start lane, which the
+    // fleet-soak scenarios below depend on.
     fn occupancy_expiry_handler(&self) -> Option<Arc<dyn SchedulerPassExpiryHandler>> {
         self.inner.occupancy_expiry_handler()
     }
@@ -733,11 +781,6 @@ where
         }
     }
 
-    /// Forwards the decorated pass's reserved dispatch-start lane.
-    ///
-    /// The boundary default reroutes this to the ordinary pass, which would
-    /// keep the reserved admission lane held across already-active work the
-    /// wrapped pass knows how to release.
     fn run_dispatch_start(
         &mut self,
         session: SessionId,
@@ -816,7 +859,7 @@ impl RunningRuntime {
             || String::from(MODEL_CONFIGURATION),
             BlobStorageFixture::model_configuration,
         );
-        let model_configuration = HubModelConfiguration::parse(&configuration)?;
+        let model_configuration = support::parse_model_configuration(&configuration)?;
         let blob_store_registry = match blob_storage {
             BlobStorageFixtureMode::Disabled => None,
             BlobStorageFixtureMode::Enabled => BlobStoreRegistry::initialize_for_conformance(
@@ -876,7 +919,7 @@ impl RunningRuntime {
         &mut self,
         configuration: &str,
     ) -> Result<usize, Box<dyn Error>> {
-        let model_configuration = HubModelConfiguration::parse(configuration)?;
+        let model_configuration = support::parse_model_configuration(configuration)?;
         let template_configuration = session_template_configuration(&model_configuration)?;
         self.restart_with_templates(configuration, template_configuration)
             .await
@@ -923,7 +966,7 @@ impl RunningRuntime {
             reconciliation_witness.clone(),
         );
         let (eligibility_nudge, work_source) = InProcessEligibilityWorkSource::new(sweep);
-        let model_configuration = HubModelConfiguration::parse(configuration)?;
+        let model_configuration = support::parse_model_configuration(configuration)?;
         let mut runtime = ProcessRuntime::new_with_templates(
             listener,
             self.pool.clone(),
@@ -956,12 +999,13 @@ impl RunningRuntime {
             .expect("a running runtime has an installed task");
         runtime_task.abort();
         let killed = runtime_task.await;
+        let killed = killed.expect_err("the killed runtime task must not return normally");
         assert!(
-            matches!(&killed, Err(error) if error.is_cancelled()),
-            "the runtime task must stop by cancellation, not by returning: {killed:?}"
+            killed.is_cancelled(),
+            "the runtime task must stop by cancellation, got {killed}"
         );
 
-        let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+        let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
         let template_configuration = session_template_configuration(&model_configuration)?;
         self.restart_after_stop(MODEL_CONFIGURATION, template_configuration)
             .await
@@ -2227,6 +2271,7 @@ fn direct_compaction_request(
         target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(
             3,
         ))),
+        input_includes_cache_tokens: false,
         credential_reference: String::from("synthetic-compaction-transaction-credential"),
         call: ModelCallId::from_uuid(Uuid::from_u128(identity_base)),
         compaction: ContextCompactionId::from_uuid(Uuid::from_u128(identity_base + 1)),
@@ -2251,10 +2296,10 @@ async fn execute_streamed_turn_until(
     turn_id: CanonicalUuid,
     settle: TurnSettle,
 ) -> Result<ScriptedModel<ModelCallId>, Box<dyn Error>> {
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
     let probe = scripted.clone();
     let provider =
-        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
+        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog(), None)
             .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
@@ -2266,6 +2311,7 @@ async fn execute_streamed_turn_until(
                 ),
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                None,
             ),
             signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
@@ -2304,7 +2350,7 @@ async fn execute_recorded_turn(
 ) -> Result<RecordingCountedScriptedModel, Box<dyn Error>> {
     let probe = scripted.clone();
     let provider =
-        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog())
+        RuntimeModelCallProvider::new(scripted, model_configuration.runtime_model_catalog(), None)
             .with_text_delta_sink(runtime.provider_text_delta_sink());
     let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
@@ -2316,6 +2362,7 @@ async fn execute_recorded_turn(
                 ),
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                None,
             ),
             signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
@@ -2380,7 +2427,7 @@ async fn execute_guarded_turn(
 ) -> Result<RecordingCountedScriptedModel, Box<dyn Error>> {
     let probe = scripted.clone();
     let runtime_models = model_configuration.runtime_model_catalog();
-    let provider = RuntimeModelCallProvider::new(scripted, runtime_models.clone())
+    let provider = RuntimeModelCallProvider::new(scripted, runtime_models.clone(), None)
         .with_text_delta_sink(runtime.provider_text_delta_sink());
     let counter = provider.clone();
     let repository = PostgresModelCallRepository::new(
@@ -2396,6 +2443,7 @@ async fn execute_guarded_turn(
                 repository,
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                None,
             ),
             signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
@@ -2449,46 +2497,39 @@ fn completed_script(provider_model: &str, text: &str, usage: TokenUsage) -> Scri
     }))
 }
 
-// Fleet-soak foundation for issue #1027.
-//
-// The hung-call probe asserts the bounded-occupancy outcome directly: a
-// post-acceptance hang releases its authoritative pass at the stated occupancy
-// bound and reaches a durable typed ambiguity park, so the pre-fix hung-call
-// signature is no longer the expected state. Restart recovery separately
-// verifies the specification-mandated ambiguity park without inventing
-// automatic recovery authority. Slow/failing tools, boundary loss, an
+// Fleet-soak coverage for issue #1027. Slow/failing tools, boundary loss, an
 // unprovisioned workspace, and scheduled goal resumption are named follow-on
 // slices: they need the same fleet census but not more boot infrastructure.
 
-// numeric-bound: derived ceiling from SCHEDULER_PASS_ADMISSION_CAP
+// numeric-bound: test fixture - mirrors the `scheduler_pass_admission_cap`
+// numeric bound that `config/signalboxd.example.toml` supplies, which
+// `support::parse_model_configuration` splices into this fixture's
+// configuration. The cap is deployment configuration rather than a compiled
+// constant, so the derived ordinary limit below is stated against it.
+const FLEET_PASS_ADMISSION_CAP: usize = 16;
+// numeric-bound: derived ceiling from the configured pass admission cap.
 // One place inside the shared admission cap stays reserved for a
 // repository-watch dispatch start, so a fleet that saturates ordinary
 // scheduler capacity is one session smaller than the cap itself.
-const FLEET_SESSION_COUNT: usize = scheduler_ordinary_pass_limit();
+const FLEET_SESSION_COUNT: usize = scheduler_ordinary_pass_limit(FLEET_PASS_ADMISSION_CAP);
+// numeric-bound: test setup - preserves the ordinary production occupancy fixture
+const FLEET_BASELINE_OCCUPANCY_BOUND: Duration = Duration::from_secs(900);
 // numeric-bound: test deadline - exercises the production recovery path promptly
 const FLEET_OCCUPANCY_BOUND: Duration = Duration::from_secs(1);
-// numeric-bound: tunable - keeps each fault observation short in CI
+// numeric-bound: test deadline - keeps each fault observation short in CI
 const FLEET_ASSERTION_BOUND: Duration = Duration::from_secs(2);
-// numeric-bound: tunable - admits contended CI scheduling without weakening assertions
-const FLEET_SETUP_BOUND: Duration = Duration::from_secs(60);
-// numeric-bound: tunable - paces durable settlement reads without hammering the pool
-const FLEET_POLL_INTERVAL: Duration = Duration::from_millis(25);
-/// How long daemon-owned recovery may take to park an expired pass's turn.
-///
-/// Recovery does not terminalize on tenure: one admitted pass drives a whole
-/// model and tools loop, so reaching the ceiling is not evidence that the turn
-/// stopped. The turn's durable evidence must stand still across a whole
-/// conservative retry delay before recovery may park it, which makes the park
-/// owed one confirmation cycle after the occupancy bound elapses rather than one
-/// scheduling quantum. This bound is that cycle plus room for a contended read.
-// numeric-bound: ceiling - derived from EXPIRED_PASS_RECOVERY_CONSERVATIVE_RETRY_DELAY
-const FLEET_RECOVERY_CONFIRMATION_BOUND: Duration = Duration::from_secs(180);
+// numeric-bound: test setup - admits a full contended fleet inside two CI minutes
+const FLEET_SETUP_BOUND: Duration = Duration::from_secs(120);
 
 struct FleetPrepared {
     correlation: ModelCallId,
     inner: ScriptedPrepared<ModelCallId>,
 }
 
+/// How many scripted executions complete and how many hang.
+///
+/// The completions are served first: a scenario that stands a healthy baseline
+/// fleet up before injecting one fault gets the fault on the last execution.
 #[derive(Clone, Copy)]
 struct FleetModelCardinality {
     hanging: usize,
@@ -2498,14 +2539,6 @@ struct FleetModelCardinality {
 #[derive(Clone)]
 struct FleetScriptedModel {
     inner: ScriptedModel<ModelCallId>,
-    /// Completions this model owes before it may start hanging.
-    ///
-    /// Occupancy expiry cancels the pass it ends, so a lowered bound is fatal to
-    /// any pass that outlives it, not only to a deliberately hung one. Draining
-    /// the completing calls first is what keeps the hung call the only pass a
-    /// lowered bound can ever expire: a fleet that hung first would still be
-    /// executing its ordinary calls when the bound elapsed, and those cancelled
-    /// passes would never reach the terminal evidence the oracles read.
     completions_before_hangs: Arc<AtomicUsize>,
     hangs_remaining: Arc<AtomicUsize>,
     in_flight_hangs: Arc<AtomicUsize>,
@@ -2539,6 +2572,13 @@ impl FleetScriptedModel {
             .lock()
             .expect("the fleet completion lock is available")
             .clone()
+    }
+
+    fn record_completed_call(&self, correlation: ModelCallId) {
+        self.completed_calls
+            .lock()
+            .expect("the fleet completion lock is available")
+            .push(correlation);
     }
 }
 
@@ -2589,35 +2629,35 @@ impl ModelRuntime<ModelCallId> for FleetScriptedModel {
         sink: &mut (dyn ObservationSink<ModelCallId> + Send),
         cancellation: CancellationSignal,
     ) -> TerminalReport<ModelCallId> {
-        // Completions are drained before hangs; see `completions_before_hangs`.
+        let correlation = prepared.correlation;
         let completes = self
             .completions_before_hangs
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                 remaining.checked_sub(1)
             })
             .is_ok();
-        let hangs = !completes
-            && self
-                .hangs_remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok();
+        if completes {
+            let report = self.inner.execute(prepared.inner, sink, cancellation).await;
+            self.record_completed_call(correlation);
+            return report;
+        }
+        let hangs = self
+            .hangs_remaining
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .is_ok();
         if hangs {
             sink.observe(Observation {
-                correlation: prepared.correlation,
+                correlation,
                 fact: ObservationFact::SendCommenced,
             });
             self.in_flight_hangs.fetch_add(1, Ordering::SeqCst);
             let _guard = FleetHangGuard(Arc::clone(&self.in_flight_hangs));
             pending::<TerminalReport<ModelCallId>>().await
         } else {
-            let correlation = prepared.correlation;
             let report = self.inner.execute(prepared.inner, sink, cancellation).await;
-            self.completed_calls
-                .lock()
-                .expect("the fleet completion lock is available")
-                .push(correlation);
+            self.record_completed_call(correlation);
             report
         }
     }
@@ -2628,12 +2668,6 @@ struct CommissionedFleet {
     sessions: Vec<CanonicalUuid>,
 }
 
-/// Commissions `session_count` fleet sessions numbered from `first_index`.
-///
-/// The probes that need the whole fleet in one scheduler ask for all of it at
-/// once; the hung-call probe commissions its fault session separately, after a
-/// restart, so the index range keeps every fleet branch name distinct across
-/// both phases of the same database.
 async fn commission_fleet(
     runtime: &RunningRuntime,
     first_index: usize,
@@ -2667,6 +2701,53 @@ async fn commission_fleet(
     Ok(CommissionedFleet { sessions })
 }
 
+struct FleetRuntimeTasks {
+    shutdown: watch::Sender<bool>,
+    scheduler: JoinHandle<SchedulerLoopExit>,
+    turn_liveness: JoinHandle<()>,
+}
+
+impl FleetRuntimeTasks {
+    async fn stop(self) -> Result<(), Box<dyn Error>> {
+        self.shutdown.send_replace(true);
+        let scheduler_exit = timeout(Duration::from_secs(10), self.scheduler).await??;
+        timeout(Duration::from_secs(10), self.turn_liveness).await??;
+        if scheduler_exit != SchedulerLoopExit::Shutdown {
+            return Err(io::Error::other("fleet scheduler returned a non-shutdown exit").into());
+        }
+        Ok(())
+    }
+
+    async fn kill(self) -> Result<(), Box<dyn Error>> {
+        self.scheduler.abort();
+        self.turn_liveness.abort();
+        let scheduler = self.scheduler.await;
+        let turn_liveness = self.turn_liveness.await;
+        let scheduler = scheduler.expect_err("the killed scheduler task must not return normally");
+        let turn_liveness =
+            turn_liveness.expect_err("the killed turn-liveness task must not return normally");
+        assert!(
+            scheduler.is_cancelled(),
+            "the scheduler task must stop by cancellation, got {scheduler}"
+        );
+        assert!(
+            turn_liveness.is_cancelled(),
+            "the turn-liveness task must stop by cancellation, got {turn_liveness}"
+        );
+        Ok(())
+    }
+}
+
+async fn wait_for_fleet_shutdown(mut shutdown: watch::Receiver<bool>) {
+    while !*shutdown.borrow_and_update() {
+        if shutdown.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Commissions one extra session after a restart, as a readiness control that
+/// proves the replacement scheduler is admitting fresh work.
 async fn commission_fleet_control(
     runtime: &RunningRuntime,
 ) -> Result<CanonicalUuid, Box<dyn Error>> {
@@ -2695,31 +2776,71 @@ async fn commission_fleet_control(
     Ok(session_id)
 }
 
-/// Whether a fleet scheduler runs the daemon's turn-liveness scan beside it.
-///
-/// The scan's ambiguous-operation watchdog settles parked turns on its own, so
-/// it is a second recovery actor rather than passive observation. A probe whose
-/// subject is that settlement runs it; a probe whose subject is the park the
-/// settlement consumes must not, or the evidence under test is raced away by the
-/// daemon rather than asserted.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FleetTurnLiveness {
-    /// Runs the scan, including automatic reconciliation of ambiguous calls.
-    Scanning,
-    /// Leaves the scan out, so nothing but the probe settles a parked turn.
-    Quiescent,
-}
-
 fn start_fleet_scheduler(
     runtime: &mut RunningRuntime,
     model: FleetScriptedModel,
     occupancy_bound: SchedulerPassOccupancyBound,
-    liveness: FleetTurnLiveness,
-) -> Result<JoinHandle<SchedulerLoopExit>, Box<dyn Error>> {
-    let configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
-    let provider = RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog())
-        .with_text_delta_sink(runtime.provider_text_delta_sink());
-    let (execution, fatal) =
+) -> Result<FleetRuntimeTasks, Box<dyn Error>> {
+    let configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
+    let bounds = configuration.numeric_bounds();
+    let expired_pass_recovery_policy = ExpiredPassRecoveryPolicy::new(
+        bounds
+            .integer("expired_pass_recovery_attempts")
+            .flatten()
+            .and_then(|value| u32::try_from(value).ok()),
+        bounds
+            .duration("expired_pass_recovery_attempt_bound")
+            .flatten(),
+        bounds
+            .duration("expired_pass_recovery_lock_retry_delay")
+            .flatten(),
+        bounds
+            .duration("expired_pass_recovery_conservative_retry_delay")
+            .flatten(),
+    );
+    let turn_liveness_persistence_bounds = TurnLivenessPersistenceBounds::new(
+        bounds.duration("terminalization_lock_wait").flatten(),
+        bounds.duration("terminalization_acquire_wait").flatten(),
+        bounds.duration("terminalization_write_lock_wait").flatten(),
+    );
+    let turn_liveness_numeric_bounds = TurnLivenessNumericBounds::new(
+        bounds
+            .integer("terminalizations_per_liveness_scan")
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok()),
+        bounds
+            .duration("turn_liveness_recovery_attempt_bound")
+            .flatten(),
+        bounds
+            .integer("automatic_reconciliations_per_liveness_scan")
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok()),
+        turn_liveness_persistence_bounds,
+    );
+    let stale_active_turn_bound = bounds
+        .duration("stale_active_turn_bound")
+        .flatten()
+        .map(StaleActiveTurnBound::try_new)
+        .transpose()?;
+    let turn_liveness_scan_interval = bounds
+        .duration("turn_liveness_scan_interval")
+        .flatten()
+        .map(TurnLivenessScanInterval::try_new)
+        .transpose()?;
+    let automatic_reconciliation_attempt_budget = bounds
+        .integer("automatic_reconciliation_attempt_budget")
+        .flatten()
+        .and_then(|value| u32::try_from(value).ok());
+    let automatic_reconciliation_base_backoff = bounds
+        .duration("automatic_reconciliation_base_backoff")
+        .flatten();
+    let automatic_reconciliation_backoff_cap = bounds
+        .duration("automatic_reconciliation_backoff_cap")
+        .flatten();
+    let provider =
+        RuntimeModelCallProvider::new(model, configuration.runtime_model_catalog(), None)
+            .with_text_delta_sink(runtime.provider_text_delta_sink());
+    let (execution, fatal_execution) =
         FatalExecutionSupervisor::new(signalboxd::WorkspaceInstructionPreparedExecution::new(
             PostgresProviderModelExecution::new(
                 PostgresModelCallRepository::new(
@@ -2729,6 +2850,7 @@ fn start_fleet_scheduler(
                 ),
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                None,
             ),
             signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
@@ -2739,47 +2861,63 @@ fn start_fleet_scheduler(
         ),
         execution,
     )
-    .with_occupancy_recovery(runtime.pool.clone(), runtime.eligibility_nudge.clone());
+    .with_occupancy_recovery(
+        runtime.pool.clone(),
+        runtime.eligibility_nudge.clone(),
+        expired_pass_recovery_policy,
+        turn_liveness_persistence_bounds,
+    );
     let pass = WitnessedEligibilityPass::new(pass, runtime.reconciliation_witness());
     let mut scheduler =
         SchedulerLoop::new(runtime.take_work_source(), pass).with_occupancy_bound(occupancy_bound);
-    // The daemon's liveness scan runs beside the pass under test and stops with
-    // it, so an aborted or shut-down fleet scheduler never leaves a scan running
-    // against the same pool. Its quiescent and slot-held watchdogs stay purely
-    // observational under the production hard ceiling; its ambiguous-operation
-    // watchdog does not, which is why the scan is opt-in per probe.
-    let turn_liveness = match liveness {
-        FleetTurnLiveness::Scanning => {
-            let scan = TurnLivenessRuntime::new(
-                runtime.pool.clone(),
-                StaleActiveTurnBound::hard_ceiling(),
-                TurnLivenessScanInterval::baseline(),
-            );
-            let (scan_shutdown, scan_receiver) = watch::channel(false);
-            Some((scan_shutdown, tokio::spawn(scan.run(scan_receiver))))
-        }
-        FleetTurnLiveness::Quiescent => None,
-    };
-    Ok(tokio::spawn(async move {
-        let exit = scheduler.run_until(fatal.wait()).await;
-        if let Some((scan_shutdown, scan)) = turn_liveness {
-            scan_shutdown.send_replace(true);
-            let _ = scan.await;
-        }
-        exit
-    }))
+    let turn_liveness = TurnLivenessRuntime::new(
+        runtime.pool.clone(),
+        stale_active_turn_bound,
+        turn_liveness_scan_interval,
+        automatic_reconciliation_attempt_budget,
+        automatic_reconciliation_base_backoff,
+        automatic_reconciliation_backoff_cap,
+        turn_liveness_numeric_bounds,
+    );
+    let (shutdown, shutdown_receiver) = watch::channel(false);
+    let scheduler_shutdown = shutdown_receiver.clone();
+    let scheduler = tokio::spawn(async move {
+        scheduler
+            .run_until(async move {
+                tokio::select! {
+                    () = fatal_execution.wait() => {}
+                    () = wait_for_fleet_shutdown(scheduler_shutdown) => {}
+                }
+            })
+            .await
+    });
+    let turn_liveness = tokio::spawn(turn_liveness.run(shutdown_receiver));
+    Ok(FleetRuntimeTasks {
+        shutdown,
+        scheduler,
+        turn_liveness,
+    })
 }
 
 async fn wait_for_hangs(model: &FleetScriptedModel, expected: usize) -> Result<(), Box<dyn Error>> {
-    timeout(FLEET_SETUP_BOUND, async {
+    let observed = timeout(FLEET_SETUP_BOUND, async {
         while model.in_flight_hangs() != expected {
             tokio::task::yield_now().await;
         }
     })
-    .await?;
+    .await;
+    if observed.is_err() {
+        return Err(io::Error::other(format!(
+            "fleet hang setup expected {expected} in flight, observed {}",
+            model.in_flight_hangs()
+        ))
+        .into());
+    }
     Ok(())
 }
 
+/// Waits for one drained eligibility cycle, so a replacement scheduler's
+/// reconciliation pass is observed as completed rather than slept for.
 async fn wait_for_reconciliation(witness: &ReconciliationWitness) -> Result<(), Box<dyn Error>> {
     timeout(FLEET_SETUP_BOUND, async {
         while witness.completed_cycles() == 0 {
@@ -2790,11 +2928,19 @@ async fn wait_for_reconciliation(witness: &ReconciliationWitness) -> Result<(), 
     Ok(())
 }
 
-async fn abort_fleet_scheduler(
-    scheduler: JoinHandle<SchedulerLoopExit>,
-) -> Result<(), Box<dyn Error>> {
+/// Tears the scheduler and turn-liveness tasks down from whatever state they
+/// are in, so a panicking scenario still releases the fixture.
+async fn abort_fleet_scheduler(tasks: FleetRuntimeTasks) -> Result<(), Box<dyn Error>> {
+    let FleetRuntimeTasks {
+        shutdown,
+        scheduler,
+        turn_liveness,
+    } = tasks;
+    shutdown.send_replace(true);
     scheduler.abort();
+    turn_liveness.abort();
     let stopped = scheduler.await;
+    let liveness = turn_liveness.await;
     if !matches!(&stopped, Ok(SchedulerLoopExit::Shutdown))
         && !matches!(&stopped, Err(error) if error.is_cancelled())
     {
@@ -2803,92 +2949,13 @@ async fn abort_fleet_scheduler(
         ))
         .into());
     }
-    Ok(())
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FleetFatalShutdownOutcome {
-    Live,
-    Restarted,
-}
-
-enum FleetSchedulerWait {
-    Elapsed,
-    Stopped(Result<SchedulerLoopExit, tokio::task::JoinError>),
-}
-
-fn classify_fleet_scheduler_wait(
-    wait: FleetSchedulerWait,
-) -> Result<FleetFatalShutdownOutcome, Box<dyn Error>> {
-    match wait {
-        FleetSchedulerWait::Elapsed => Ok(FleetFatalShutdownOutcome::Live),
-        FleetSchedulerWait::Stopped(Ok(SchedulerLoopExit::Shutdown)) => {
-            Ok(FleetFatalShutdownOutcome::Restarted)
-        }
-        FleetSchedulerWait::Stopped(stopped) => Err(io::Error::other(format!(
-            "the fleet scheduler must stop by fatal-driven shutdown: {stopped:?}"
+    if !matches!(&liveness, Ok(())) && !matches!(&liveness, Err(error) if error.is_cancelled()) {
+        return Err(io::Error::other(format!(
+            "the fleet turn-liveness runtime must stop by cancellation or shutdown: {liveness:?}"
         ))
-        .into()),
+        .into());
     }
-}
-
-#[test]
-fn fleet_scheduler_wait_classifies_elapsed_as_live() -> Result<(), Box<dyn Error>> {
-    assert_eq!(
-        classify_fleet_scheduler_wait(FleetSchedulerWait::Elapsed)?,
-        FleetFatalShutdownOutcome::Live
-    );
     Ok(())
-}
-
-#[test]
-fn fleet_scheduler_wait_classifies_shutdown_as_restarted() -> Result<(), Box<dyn Error>> {
-    assert_eq!(
-        classify_fleet_scheduler_wait(FleetSchedulerWait::Stopped(Ok(
-            SchedulerLoopExit::Shutdown,
-        )))?,
-        FleetFatalShutdownOutcome::Restarted
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn fleet_scheduler_wait_rejects_join_error() {
-    let scheduler = tokio::spawn(pending::<SchedulerLoopExit>());
-    scheduler.abort();
-    let stopped = scheduler.await;
-    let error = classify_fleet_scheduler_wait(FleetSchedulerWait::Stopped(stopped))
-        .expect_err("a cancelled scheduler join must not select a fleet oracle");
-    assert!(
-        error
-            .to_string()
-            .contains("the fleet scheduler must stop by fatal-driven shutdown")
-    );
-}
-
-async fn restart_after_fatal_shutdown(
-    scheduler: &mut Option<JoinHandle<SchedulerLoopExit>>,
-    runtime: &mut RunningRuntime,
-) -> Result<FleetFatalShutdownOutcome, Box<dyn Error>> {
-    let stopped = timeout(
-        FLEET_ASSERTION_BOUND,
-        scheduler
-            .as_mut()
-            .expect("the fatal-driven fleet scheduler was installed"),
-    )
-    .await;
-    let wait = match stopped {
-        Ok(stopped) => {
-            scheduler.take();
-            FleetSchedulerWait::Stopped(stopped)
-        }
-        Err(_) => FleetSchedulerWait::Elapsed,
-    };
-    let outcome = classify_fleet_scheduler_wait(wait)?;
-    if outcome == FleetFatalShutdownOutcome::Restarted {
-        runtime.kill_and_restart().await?;
-    }
-    Ok(outcome)
 }
 
 async fn wait_for_completed_calls(
@@ -2977,78 +3044,28 @@ async fn wait_for_terminal_turns(
     Ok(())
 }
 
-/// Waits for the hung call's pass to be released and its turn durably parked.
-///
-/// The occupancy bound is what ends that pass, so the park is the first durable
-/// evidence that the bound was enforced rather than merely configured. Waiting
-/// for it rather than sleeping past it is what makes the oracle read a state the
-/// daemon reached, not one the clock allowed.
-///
-/// This wait spans a whole recovery confirmation cycle, so it paces its reads
-/// instead of spinning: an unpaced loop would spend minutes in contention with
-/// the very pool the daemon needs to re-observe the turn and record the park.
+/// Waits for exactly `hung_model_call` to reach its typed ambiguity park with
+/// its execution released, rather than counting parks across the database.
 async fn wait_for_ambiguity_park(
     repository: &FleetSoakCensusRepository,
     model: &FleetScriptedModel,
+    hung_model_call: ModelCallId,
+    bound: Duration,
 ) -> Result<(), Box<dyn Error>> {
-    let observed = timeout(FLEET_RECOVERY_CONFIRMATION_BOUND, async {
+    timeout(bound, async {
         loop {
-            let model_calls = repository.model_call_ids().await?;
-            let census = repository.census_for(&model_calls).await?;
-            if model.in_flight_hangs() == 0
-                && census.awaiting_model_call_recovery_turns() == 1
-                && census.ambiguous_model_calls() == 1
+            if repository
+                .has_ambiguous_recovery_park(hung_model_call)
+                .await?
+                && model.in_flight_hangs() == 0
             {
                 return Ok::<(), Box<dyn Error>>(());
             }
-            tokio::time::sleep(FLEET_POLL_INTERVAL).await;
+            tokio::task::yield_now().await;
         }
     })
-    .await;
-    if observed.is_err() {
-        let model_calls = repository.model_call_ids().await?;
-        let census = repository.census_for(&model_calls).await?;
-        return Err(io::Error::other(format!(
-            "the hung call never reached its ambiguity park: hangs={}, census={census:?}",
-            model.in_flight_hangs()
-        ))
-        .into());
-    }
-    observed.expect("the elapsed outcome was handled above")?;
-    Ok(())
-}
-
-/// Waits for automatic reconciliation to settle every listed ambiguous call.
-///
-/// The replacement daemon resolves each ambiguous operation against durable
-/// evidence, so the park each killed turn lands in is where it waits, not where
-/// it ends. Gating on the settled census rather than on elapsed time keeps the
-/// restart oracle an assertion about recovery instead of about scheduling luck.
-async fn wait_for_settled_turns(
-    repository: &FleetSoakCensusRepository,
-    model_calls: &[ModelCallId],
-) -> Result<(), Box<dyn Error>> {
-    let observed = timeout(FLEET_SETUP_BOUND, async {
-        loop {
-            let census = repository.census_for(model_calls).await?;
-            if census.terminal_turns() == i64::try_from(model_calls.len())?
-                && census.awaiting_model_call_recovery_turns() == 0
-            {
-                return Ok::<(), Box<dyn Error>>(());
-            }
-            tokio::time::sleep(FLEET_POLL_INTERVAL).await;
-        }
-    })
-    .await;
-    if observed.is_err() {
-        let census = repository.census_for(model_calls).await?;
-        return Err(io::Error::other(format!(
-            "automatic reconciliation left {} restarted turns unsettled: census={census:?}",
-            model_calls.len()
-        ))
-        .into());
-    }
-    observed.expect("the elapsed outcome was handled above")?;
+    .await
+    .map_err(|_| io::Error::other("fleet model call did not reach its ambiguity park"))??;
     Ok(())
 }
 
@@ -3056,7 +3073,6 @@ fn assert_hung_fleet_outcome(
     model: &FleetScriptedModel,
     census: FleetSoakCensus,
     hung_call_has_ambiguity_park: bool,
-    fatal_shutdown: FleetFatalShutdownOutcome,
 ) -> Result<(), Box<dyn Error>> {
     let active = census.active_turns();
     let terminal = census.terminal_turns();
@@ -3070,7 +3086,7 @@ fn assert_hung_fleet_outcome(
         || !hung_call_has_ambiguity_park
     {
         return Err(io::Error::other(format!(
-            "fleet liveness failed: fatal_shutdown={fatal_shutdown:?}, hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}, recovery_parks={}, ambiguous_calls={}, hung_call_has_ambiguity_park={hung_call_has_ambiguity_park}",
+            "fleet liveness failed: hangs={}, active={active}, terminal={terminal}, typed_terminal_calls={typed_terminal_calls}, recovery_parks={}, ambiguous_calls={}, hung_call_has_ambiguity_park={hung_call_has_ambiguity_park}",
             model.in_flight_hangs(),
             census.awaiting_model_call_recovery_turns(),
             census.ambiguous_model_calls()
@@ -3084,20 +3100,16 @@ fn assert_restarted_fleet_outcome(
     census: FleetSoakCensus,
     original_model: &FleetScriptedModel,
     replacement_model: &FleetScriptedModel,
-    control_model_call: ModelCallId,
 ) -> Result<(), Box<dyn Error>> {
-    let replacement_completions = replacement_model.completed_call_ids();
     if census.active_turns() != 0
         || census.terminal_turns() != i64::try_from(FLEET_SESSION_COUNT)?
         || census.awaiting_model_call_recovery_turns() != 0
         || census.terminal_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
-        || census.ambiguous_model_calls() != i64::try_from(FLEET_SESSION_COUNT)?
         || original_model.in_flight_hangs() != 0
         || replacement_model.in_flight_hangs() != 0
-        || replacement_completions.as_slice() != [control_model_call]
     {
         return Err(io::Error::other(format!(
-            "restart must release every original execution and let automatic reconciliation settle every ambiguous call into a terminal turn, while the replacement scheduler completes only its readiness control: census={census:?}, original_hangs={}, replacement_hangs={}, replacement_completions={replacement_completions:?}, control_model_call={control_model_call:?}",
+            "restart must release every original execution and reconcile every ambiguous operation into a terminal turn without a user decision: census={census:?}, original_hangs={}, replacement_hangs={}",
             original_model.in_flight_hangs(),
             replacement_model.in_flight_hangs()
         ))
@@ -3106,68 +3118,43 @@ fn assert_restarted_fleet_outcome(
     Ok(())
 }
 
-/// Issue #1027: a post-acceptance model hang releases its authoritative pass at
-/// the occupancy bound and reaches a durable typed ambiguity park.
-///
-/// The probe runs in two phases against one database because occupancy expiry
-/// cancels the pass it ends. The baseline fleet reaches terminal disposition
-/// first under the production ceiling, so nothing healthy is ever in flight when
-/// the lowered bound is in force; the single fault session commissioned after
-/// the restart is then the only pass that bound can expire, and the ambiguity
-/// park it lands in is attributable to the bound alone.
-///
-/// The park is owed a confirmation cycle, not a scheduling quantum: the bound
-/// releases the pass promptly, but daemon-owned recovery may not terminalize the
-/// turn until its durable evidence has stood still across a whole conservative
-/// retry delay. The scheduler therefore runs without the turn-liveness scan,
-/// whose ambiguous-operation watchdog would settle that park while this probe is
-/// reading it — the restart probe is where that settlement is the subject.
+/// Issue #1027: a post-acceptance model hang releases its authoritative pass
+/// and reaches a durable typed ambiguity park inside the occupancy bound.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposition()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
-    let mut scheduler = None;
+    let mut tasks: Option<FleetRuntimeTasks> = None;
     let scenario = AssertUnwindSafe(async {
         let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
+        let baseline_fleet = commission_fleet(&runtime, 0, FLEET_SESSION_COUNT - 1).await?;
         let model = FleetScriptedModel::new(FleetModelCardinality {
             hanging: 1,
             completing: FLEET_SESSION_COUNT - 1,
         });
-        let baseline_fleet = commission_fleet(&runtime, 0, FLEET_SESSION_COUNT - 1).await?;
-        scheduler = Some(start_fleet_scheduler(
+        tasks = Some(start_fleet_scheduler(
             &mut runtime,
             model.clone(),
-            SchedulerPassOccupancyBound::hard_ceiling(),
-            FleetTurnLiveness::Quiescent,
+            SchedulerPassOccupancyBound::try_new(FLEET_BASELINE_OCCUPANCY_BOUND)?,
         )?);
         let completed_calls = wait_for_completed_calls(&model, FLEET_SESSION_COUNT - 1).await?;
         wait_for_terminal_calls(&census_repository, &completed_calls).await?;
         wait_for_terminal_turns(&census_repository, &completed_calls).await?;
-        abort_fleet_scheduler(
-            scheduler
-                .take()
-                .expect("the baseline fleet scheduler was installed"),
-        )
-        .await?;
-        // The restart re-installs the eligibility work source a scheduler takes
-        // exactly once, so the fault phase gets its own scheduler rather than a
-        // second bound on the baseline's.
+        tasks
+            .take()
+            .expect("the baseline fleet scheduler was installed")
+            .stop()
+            .await?;
         runtime.restart().await?;
-
         let fault_fleet = commission_fleet(&runtime, FLEET_SESSION_COUNT - 1, 1).await?;
-        let occupancy_bound = SchedulerPassOccupancyBound::try_lowered(FLEET_OCCUPANCY_BOUND)?;
-        scheduler = Some(start_fleet_scheduler(
+        tasks = Some(start_fleet_scheduler(
             &mut runtime,
             model.clone(),
-            occupancy_bound,
-            FleetTurnLiveness::Quiescent,
+            SchedulerPassOccupancyBound::try_new(FLEET_OCCUPANCY_BOUND)?,
         )?);
         wait_for_hangs(&model, 1).await?;
-        wait_for_ambiguity_park(&census_repository, &model).await?;
-        let fatal_shutdown = restart_after_fatal_shutdown(&mut scheduler, &mut runtime).await?;
         let model_calls = census_repository.model_call_ids().await?;
-        let census = census_repository.census_for(&model_calls).await?;
         assert_eq!(
             baseline_fleet.sessions.len(),
             FLEET_SESSION_COUNT - 1,
@@ -3194,16 +3181,24 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
             ))
             .into());
         };
+        wait_for_ambiguity_park(
+            &census_repository,
+            &model,
+            *hung_model_call,
+            FLEET_ASSERTION_BOUND,
+        )
+        .await?;
+        let census = census_repository.census_for(&model_calls).await?;
         let hung_call_has_ambiguity_park = census_repository
             .has_ambiguous_recovery_park(*hung_model_call)
             .await?;
-        assert_hung_fleet_outcome(&model, census, hung_call_has_ambiguity_park, fatal_shutdown)
+        assert_hung_fleet_outcome(&model, census, hung_call_has_ambiguity_park)
     })
     .catch_unwind()
     .await;
 
-    let scheduler_cleanup = match scheduler {
-        Some(scheduler) => abort_fleet_scheduler(scheduler).await,
+    let scheduler_cleanup = match tasks {
+        Some(tasks) => abort_fleet_scheduler(tasks).await,
         None => Ok(()),
     };
     let runtime_cleanup = runtime.stop().await;
@@ -3225,35 +3220,28 @@ async fn fleet_soak_hung_model_call_has_bounded_pass_occupancy_and_typed_disposi
     }
 }
 
-/// INV-034: killing the daemon with a full fleet after every send leaves each
-/// model call ambiguous, and recovery must both release local scheduler
-/// ownership and settle every one of those turns.
-///
-/// Each killed turn still lands in the specification-mandated user-decision
-/// park, and every call stays durably recorded as ambiguous — the park is what a
-/// turn waits in, not what it ends in. The replacement daemon's automatic
-/// reconciliation then resolves each ambiguous operation against durable
-/// evidence and terminalizes its turn, so no turn is left parked and none is
-/// silently re-sent: the replacement scheduler completes only its own readiness
-/// control.
+/// Issue #1027 / INV-034: killing the daemon with a full fleet in model
+/// execution leaves every model call ambiguous. Ambiguous-operation
+/// reconciliation must release local scheduler ownership and then resume or
+/// terminalize every such turn once a replacement daemon takes over, without
+/// waiting on a user decision.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
-    let mut scheduler = None;
+    let mut tasks: Option<FleetRuntimeTasks> = None;
     let scenario = AssertUnwindSafe(async {
-        let fleet = commission_fleet(&runtime, 0, FLEET_SESSION_COUNT).await?;
         let census_repository = FleetSoakCensusRepository::new(runtime.pool.clone());
+        let fleet = commission_fleet(&runtime, 0, FLEET_SESSION_COUNT).await?;
         let hanging_model = FleetScriptedModel::new(FleetModelCardinality {
             hanging: FLEET_SESSION_COUNT,
             completing: 0,
         });
-        scheduler = Some(start_fleet_scheduler(
+        tasks = Some(start_fleet_scheduler(
             &mut runtime,
             hanging_model.clone(),
-            SchedulerPassOccupancyBound::hard_ceiling(),
-            FleetTurnLiveness::Scanning,
+            SchedulerPassOccupancyBound::try_new(FLEET_BASELINE_OCCUPANCY_BOUND)?,
         )?);
         wait_for_hangs(&hanging_model, FLEET_SESSION_COUNT).await?;
         let pre_kill_model_call_ids = census_repository.model_call_ids().await?;
@@ -3262,35 +3250,31 @@ async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
             FLEET_SESSION_COUNT,
             "pre-kill model-call cardinality mismatch"
         );
-        abort_fleet_scheduler(
-            scheduler
-                .take()
-                .expect("the first fleet scheduler was installed"),
-        )
-        .await?;
+        tasks
+            .take()
+            .expect("the first fleet scheduler was installed")
+            .kill()
+            .await?;
         wait_for_hangs(&hanging_model, 0).await?;
         let _recovered = runtime.kill_and_restart().await?;
+        // One script per recoverable turn plus the readiness control, so the
+        // fixture does not decide whether reconciliation reissues a call.
         let replacement_model = FleetScriptedModel::new(FleetModelCardinality {
             hanging: 0,
-            completing: FLEET_SESSION_COUNT,
+            completing: FLEET_SESSION_COUNT + 1,
         });
         let replacement_reconciliation = runtime.reconciliation_witness();
-        scheduler = Some(start_fleet_scheduler(
+        tasks = Some(start_fleet_scheduler(
             &mut runtime,
             replacement_model.clone(),
-            SchedulerPassOccupancyBound::hard_ceiling(),
-            FleetTurnLiveness::Scanning,
+            SchedulerPassOccupancyBound::try_new(FLEET_BASELINE_OCCUPANCY_BOUND)?,
         )?);
         wait_for_reconciliation(&replacement_reconciliation).await?;
         let control_session = commission_fleet_control(&runtime).await?;
         let control_model_call =
             wait_for_model_call_for_session(&census_repository, control_session).await?;
         wait_for_completed_call(&replacement_model, control_model_call).await?;
-        wait_for_settled_turns(&census_repository, &pre_kill_model_call_ids).await?;
-        // A settled census is read only after the fleet has had a further
-        // uninterrupted window: an extra resume or terminalization arriving late
-        // still has to show up in the straight-line oracle below.
-        tokio::time::sleep(FLEET_ASSERTION_BOUND).await;
+        wait_for_terminal_turns(&census_repository, &pre_kill_model_call_ids).await?;
         let census = census_repository
             .census_for(&pre_kill_model_call_ids)
             .await?;
@@ -3299,18 +3283,13 @@ async fn fleet_soak_kill_restart_resumes_or_terminalizes_every_active_turn()
             FLEET_SESSION_COUNT,
             "fleet session cardinality mismatch"
         );
-        assert_restarted_fleet_outcome(
-            census,
-            &hanging_model,
-            &replacement_model,
-            control_model_call,
-        )
+        assert_restarted_fleet_outcome(census, &hanging_model, &replacement_model)
     })
     .catch_unwind()
     .await;
 
-    let scheduler_cleanup = match scheduler {
-        Some(scheduler) => abort_fleet_scheduler(scheduler).await,
+    let scheduler_cleanup = match tasks {
+        Some(tasks) => abort_fleet_scheduler(tasks).await,
         None => Ok(()),
     };
     let runtime_cleanup = runtime.stop().await;
@@ -3615,6 +3594,7 @@ async fn complete_active_text_turn(
             },
         )]),
         InProcessAttemptDispatchGate::default(),
+        None,
     );
     assert!(matches!(
         service.execute(session).await?,
@@ -4428,9 +4408,7 @@ async fn s33_inv008_inv012_inv046_process_runtime_replaces_session_model_default
 async fn metadata_shape_failure_is_a_malformed_frame() -> Result<(), Box<dyn Error>> {
     let runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
-    let required_tags = (0..=256)
-        .map(|index| format!("tag-{index:03}"))
-        .collect::<Vec<_>>();
+    let required_tags = vec!["x".repeat(MAX_SESSION_METADATA_INDEXED_UTF8_BYTES + 1)];
     let frame = format!(
         "{{\"version\":1,\"request_id\":\"21\",\"request\":{{\"type\":\"list_session_metadata\",\"required_tags\":{},\"title_contains\":null,\"include_archived\":false,\"page_size\":\"50\",\"after_session_id\":null}}}}\n",
         serde_json::to_string(&required_tags)?
@@ -5500,7 +5478,7 @@ async fn park_turn_on_ambiguous_model_call(
     let session = SessionId::from_uuid(session_id.into_uuid());
     activate_turn(pool, session).await?;
 
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
     let calls = PostgresModelCallRepository::new(
         pool.clone(),
         model_configuration.target_catalog(),
@@ -6312,7 +6290,7 @@ async fn authorize_issued_model_call(
 > {
     let session = SessionId::from_uuid(session_id.into_uuid());
     activate_turn(pool, session).await?;
-    let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+    let targets = support::parse_model_configuration(MODEL_CONFIGURATION)?.target_catalog();
     let calls = PostgresModelCallRepository::new(
         pool.clone(),
         targets,
@@ -7477,7 +7455,7 @@ async fn s09_queued_inputs_deliver_in_acceptance_order_after_the_active_turn()
     .await?;
     assert_ne!(first_queued_turn, second_queued_turn);
 
-    let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+    let targets = support::parse_model_configuration(MODEL_CONFIGURATION)?.target_catalog();
     complete_active_text_turn(&runtime.pool, session, targets.clone()).await?;
     activate_expected_turn(&runtime.pool, session, first_queued_turn).await?;
     complete_active_text_turn(&runtime.pool, session, targets).await?;
@@ -8379,7 +8357,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
     let second_probe = execute_recorded_turn(
         &mut runtime,
         second_model,
-        HubModelConfiguration::parse(MODEL_CONFIGURATION)?,
+        support::parse_model_configuration(MODEL_CONFIGURATION)?,
         session_id,
         second_turn,
     )
@@ -8421,6 +8399,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 Uuid::from_u128(3),
             )),
+            input_includes_cache_tokens: false,
             credential_reference: String::from("synthetic-compaction-credential"),
             call: prepared_call,
             compaction: ContextCompactionId::from_uuid(Uuid::from_u128(0xcc22)),
@@ -8467,6 +8446,7 @@ async fn s01_s03_inv005_inv014_inv015_explicit_compaction_survives_restart_and_p
             target: ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(
                 Uuid::from_u128(3),
             )),
+            input_includes_cache_tokens: false,
             credential_reference: String::from("synthetic-compaction-credential"),
             call: in_flight_call,
             compaction: ContextCompactionId::from_uuid(Uuid::from_u128(0xcc27)),
@@ -8849,12 +8829,12 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
         )
         .await?;
     let second_turn = accepted_successor_turn(&mut successor, session_id, 2).await?;
-    let guarded_configuration = HubModelConfiguration::parse(
+    let guarded_configuration = support::parse_model_configuration(
         &MODEL_CONFIGURATION
             .replace("max_output_tokens = 256", "max_output_tokens = 1")
             .replace(
                 "context_window_tokens = 200000",
-                "context_window_tokens = 5",
+                "context_window_tokens = 4096",
             ),
     )?;
     let ordinary_runtime = RecordingCountedScriptedModel::following(
@@ -8863,7 +8843,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
             "automatic guard current reply",
             TokenUsage::unreported(),
         )],
-        [40, 4],
+        [8192, 4],
     );
     let summary_text = String::from("automatic guard summary");
     let summary_runtime = ScriptedModel::single(completed_script(
@@ -8938,28 +8918,125 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
     runtime.stop().await
 }
 
-#[track_caller]
-fn assert_context_still_exceeded<CountError, ExecutionError>(
-    outcome: Result<(), ContextGuardedTurnPassError<CountError, ExecutionError>>,
-    expected_turn: CanonicalUuid,
-) where
-    CountError: std::fmt::Debug,
-    ExecutionError: std::fmt::Debug,
-{
-    match outcome {
-        Err(ContextGuardedTurnPassError::ContextStillExceeded(actual_turn)) => {
-            assert_eq!(*actual_turn.as_uuid(), expected_turn.into_uuid());
-        }
-        other => panic!("expected ContextStillExceeded, got {other:?}"),
-    }
-}
-
-/// S01 / S03 / INV-014 / INV-015: one queued candidate retains its durable
-/// automatic-attempt marker across eligibility retries, so an oversized suffix
-/// cannot issue a paid successor compaction on every sweep.
+/// S01 / S03 / INV-014 / INV-015: provider-reported preflight rechecks the
+/// completed summary and closes the queued candidate call-free when reserved
+/// headroom is still unavailable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
-async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_turn()
+async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, first_turn) = submit_first_input(
+        &mut connection,
+        session_id,
+        String::from("reported usage historical request"),
+    )
+    .await?;
+    let saturated_usage = TokenUsage {
+        input_tokens: Some(5000),
+        output_tokens: Some(0),
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    };
+    let first_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "reported usage historical reply",
+        saturated_usage,
+    ));
+    let first_probe =
+        execute_streamed_turn(&mut runtime, first_runtime, session_id, first_turn).await?;
+    assert_eq!(first_probe.received_operations().len(), 1);
+
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            40,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::text(String::from("reported usage queued suffix")),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let configuration = support::parse_model_configuration(
+        &MODEL_CONFIGURATION
+            .replace("max_output_tokens = 256", "max_output_tokens = 1")
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 4096",
+            ),
+    )?;
+    let runtime_models = configuration.runtime_model_catalog();
+    let summary_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "reported usage summary remains saturated",
+        saturated_usage,
+    ));
+    let summary_probe = summary_runtime.clone();
+    let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+        Arc::new(RuntimeContextCompactionModel::new(
+            summary_runtime,
+            runtime_models.clone(),
+        ));
+    let repository = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("reported-usage-recheck-fixture"),
+    )
+    .with_session_credentials(configuration.credential_family_catalog());
+    let compaction = ReportedUsageCompaction::new(
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+        repository,
+        NoToolCatalog,
+        runtime_models,
+        configuration,
+        compaction_model,
+    );
+
+    let failed_turn = reported_usage_still_exceeded_turn(
+        compaction
+            .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()))
+            .await,
+    );
+
+    assert_eq!(*failed_turn.as_uuid(), queued_turn.into_uuid());
+    assert_eq!(summary_probe.received_operations().len(), 1);
+    let ordinary_call_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+            .bind(queued_turn.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(ordinary_call_count, 0);
+    let lifecycle: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, terminal_model_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        lifecycle,
+        (String::from("terminal"), Some(String::from("failed")), None)
+    );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S01 / S03 / INV-014 / INV-015: a failed automatic compaction closes the
+/// queued candidate call-free, so a later eligibility pass cannot dispatch
+/// the known-oversized ordinary request.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s01_s03_inv014_inv015_failed_automatic_compaction_closes_turn_call_free()
 -> Result<(), Box<dyn Error>> {
     let mut runtime = RunningRuntime::start().await?;
     let mut connection = Connection::connect(runtime.socket()).await?;
@@ -8995,25 +9072,30 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         )
         .await?;
     let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
-    let guarded_configuration = HubModelConfiguration::parse(
+    let guarded_configuration = support::parse_model_configuration(
         &MODEL_CONFIGURATION
             .replace("max_output_tokens = 256", "max_output_tokens = 1")
             .replace(
                 "context_window_tokens = 200000",
-                "context_window_tokens = 5",
+                "context_window_tokens = 4096",
             ),
     )?;
     let ordinary_runtime =
-        RecordingCountedScriptedModel::following(std::iter::empty::<Script>(), [40, 40, 40]);
+        RecordingCountedScriptedModel::following(std::iter::empty::<Script>(), [8192, 8192, 8192]);
     let ordinary_probe = ordinary_runtime.clone();
-    let summary_runtime = ScriptedModel::single(completed_script(
-        "fixture-model",
-        "one durable retry summary",
-        TokenUsage::unreported(),
+    let summary_runtime = ScriptedModel::single(Script::delivering(
+        TerminalEvidence::ProviderError(ProviderErrorEvidence {
+            exchange: ExchangeFacts::default(),
+            reported_model: None,
+            kind: ProviderErrorKind::Unrecognized,
+            non_acceptance_proven: true,
+            native: NativeErrorFacts::default(),
+            usage: TokenUsage::unreported(),
+        }),
     ));
     let summary_probe = summary_runtime.clone();
     let runtime_models = guarded_configuration.runtime_model_catalog();
-    let provider = RuntimeModelCallProvider::new(ordinary_runtime, runtime_models.clone())
+    let provider = RuntimeModelCallProvider::new(ordinary_runtime, runtime_models.clone(), None)
         .with_text_delta_sink(runtime.provider_text_delta_sink());
     let counter = provider.clone();
     let repository = PostgresModelCallRepository::new(
@@ -9029,6 +9111,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
                 repository,
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                None,
             ),
             signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
@@ -9044,9 +9127,7 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         .credentials()
         .map(|credential| credential.credential_reference().to_owned())
         .collect();
-    let [expected_compaction_credential] = pinned_references.as_slice() else {
-        panic!("the fixture pins exactly one credential family")
-    };
+    let expected_compaction_credential = exactly_one_credential_reference(&pinned_references);
     let mut pass = ContextGuardedTurnPass::new(
         StartEligibleTurnRepository::new(runtime.pool.clone()),
         guarded_repository,
@@ -9063,26 +9144,26 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
         Vec::new(),
     ));
     let session = SessionId::from_uuid(session_id.into_uuid());
-    let first_attempt = pass.run(session).await;
-    assert_context_still_exceeded(first_attempt, queued_turn);
+    let turn = failed_automatic_compaction_turn(pass.run(session).await);
+    assert_eq!(*turn.as_uuid(), queued_turn.into_uuid());
     let second_attempt = pass.run(session).await;
-    assert_context_still_exceeded(second_attempt, queued_turn);
+    assert!(second_attempt.is_ok());
     assert!(!fatal_execution.is_triggered());
-    assert_eq!(ordinary_probe.counted_operations().len(), 3);
+    assert_eq!(ordinary_probe.counted_operations().len(), 1);
     assert_eq!(ordinary_probe.prepared_operations().len(), 0);
     assert_eq!(summary_probe.received_operations().len(), 1);
     assert_eq!(
         summary_probe.received_operations()[0]
             .credential_reference
             .as_str(),
-        expected_compaction_credential.as_str()
+        expected_compaction_credential
     );
     let compaction_count: i64 =
         sqlx::query_scalar("SELECT count(*) FROM context_compaction WHERE session_id = $1")
             .bind(session_id.into_uuid())
             .fetch_one(&runtime.pool)
             .await?;
-    assert_eq!(compaction_count, 1);
+    assert_eq!(compaction_count, 0);
     let automatic_command_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM compact_session_command
           WHERE session_id = $1 AND automatic_for_turn_id = $2",
@@ -9092,6 +9173,37 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_only_once_per_queued_tur
     .fetch_one(&runtime.pool)
     .await?;
     assert_eq!(automatic_command_count, 1);
+    let compaction_call: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM context_compaction_model_call
+          WHERE session_id = $1",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        compaction_call,
+        (String::from("terminal"), Some(String::from("known_failed")))
+    );
+    let ordinary_call_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM model_call WHERE turn_id = $1")
+            .bind(queued_turn.into_uuid())
+            .fetch_one(&runtime.pool)
+            .await?;
+    assert_eq!(ordinary_call_count, 0);
+    let lifecycle: (String, Option<String>, Option<Uuid>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind, terminal_model_call_id
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(
+        lifecycle,
+        (String::from("terminal"), Some(String::from("failed")), None)
+    );
 
     drop(connection);
     runtime.stop().await
@@ -9157,11 +9269,12 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
         String::from("ambiguous guarded stage request"),
     )
     .await?;
-    let model_configuration = HubModelConfiguration::parse(MODEL_CONFIGURATION)?;
+    let model_configuration = support::parse_model_configuration(MODEL_CONFIGURATION)?;
     let runtime_models = model_configuration.runtime_model_catalog();
     let provider = RuntimeModelCallProvider::new(
         ScriptedModel::<ModelCallId>::following(std::iter::empty::<Script>()),
         runtime_models.clone(),
+        None,
     )
     .with_text_delta_sink(runtime.provider_text_delta_sink());
     let repository = PostgresModelCallRepository::new(
@@ -9176,6 +9289,7 @@ async fn s03_inv034_ambiguous_guarded_stage_raises_the_fatal_recovery_signal()
                 repository,
                 InProcessAttemptDispatchGate::default(),
                 provider,
+                None,
             ),
             signalboxd::WorkspaceInstructionRuntime::new(runtime.pool.clone(), None, Vec::new()),
         ));
@@ -9703,7 +9817,7 @@ impl ReviewRuntimeDriver {
             },
         )
         .await?;
-        let targets = HubModelConfiguration::parse(MODEL_CONFIGURATION)?.target_catalog();
+        let targets = support::parse_model_configuration(MODEL_CONFIGURATION)?.target_catalog();
         complete_active_text_turn(
             &self.pool,
             SessionId::from_uuid(session.into_uuid()),

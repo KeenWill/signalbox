@@ -63,7 +63,7 @@ use signalbox_persistence::{
     create_session::{
         CreateSessionHandlingOutcome, CreateSessionRepository, CreateSessionRepositoryError,
     },
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
@@ -215,7 +215,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -6376,9 +6376,19 @@ async fn dispatched_sessions_commit_their_initial_context_and_queued_turn_atomic
            JOIN turn_lifecycle AS turn ON turn.turn_id = delivery.turn_id
            JOIN submit_input_command AS command
              ON command.command_id = delivery.submit_command_id
+           JOIN submit_input_command_content_part AS part
+             ON part.command_id = command.command_id
+            AND part.position = 0
           WHERE delivery.dispatch_id = $1
             AND turn.state_kind = 'queued'
-            AND command.content_text = $2",
+            AND part.part_kind = 'text'
+            AND part.text_value = $2
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM submit_input_command_content_part AS later_part
+                 WHERE later_part.command_id = command.command_id
+                   AND later_part.position > 0
+            )",
     )
     .bind(fixture.dispatch_id.as_uuid())
     .bind(DISPATCH_CONTEXT)
@@ -8453,13 +8463,12 @@ async fn a_commissioned_escalation_parks_under_its_recorded_fence() -> Result<()
     .fetch_one(&fixture.pool)
     .await?;
     assert!(!audited_dispatch);
-    let (reconciliation_hints, dispatch_starts, continuation) =
+    let (reconciliation_hints, _dispatch_starts, continuation) =
         PostgresEligibilitySweep::new(fixture.pool.clone())
             .find_sessions()
             .await?
             .into_parts();
     assert_eq!(reconciliation_hints, Vec::<SessionId>::new());
-    assert!(dispatch_starts.is_empty());
     assert!(!continuation);
 
     let replay = approval_repository

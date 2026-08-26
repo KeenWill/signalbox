@@ -159,13 +159,6 @@ pub(crate) const STARTUP_RECOVERY: &str = "SELECT
                    AND NOT delegation_runtime_terminal
             )";
 
-/// Discovers the durable ambiguity waits that have no recovery row yet, one
-/// bounded keyset page at a time.
-///
-/// The scan covers both ambiguous shapes: a model call awaiting recovery and a
-/// tool attempt awaiting recovery. Exactly one of the two identities is set on
-/// a waiting turn, which the durable operation constraint also enforces on the
-/// row this statement writes.
 pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
             SELECT after_turn_id, high_turn_id
               FROM automatic_reconciliation_discovery_state
@@ -179,13 +172,13 @@ pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
                              FROM turn_lifecycle
                             WHERE state_kind = 'active'
                               AND active_phase_kind IN (
-                                    'awaiting_model_call_recovery',
-                                    'awaiting_tool_recovery'
+                                  'awaiting_model_call_recovery',
+                                  'awaiting_tool_recovery'
                               )
                               AND NOT delegation_runtime_terminal
                               AND num_nonnulls(
-                                    recovery_model_call_id,
-                                    recovery_tool_attempt_id
+                                  recovery_model_call_id,
+                                  recovery_tool_attempt_id
                               ) = 1
                             ORDER BY turn_id DESC
                             LIMIT 1
@@ -199,13 +192,13 @@ pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
               FROM turn_lifecycle, bounds
              WHERE state_kind = 'active'
                AND active_phase_kind IN (
-                    'awaiting_model_call_recovery',
-                    'awaiting_tool_recovery'
+                   'awaiting_model_call_recovery',
+                   'awaiting_tool_recovery'
                )
                AND NOT delegation_runtime_terminal
                AND num_nonnulls(
-                    recovery_model_call_id,
-                    recovery_tool_attempt_id
+                   recovery_model_call_id,
+                   recovery_tool_attempt_id
                ) = 1
                AND (bounds.after_turn_id IS NULL OR turn_id > bounds.after_turn_id)
                AND turn_id <= bounds.high_turn_id
@@ -215,8 +208,7 @@ pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
             INSERT INTO automatic_reconciliation
                 (turn_id, session_id, model_call_id, tool_attempt_id)
             SELECT turn_id, session_id, recovery_model_call_id,
-                   recovery_tool_attempt_id
-              FROM page
+                   recovery_tool_attempt_id FROM page
             ON CONFLICT (turn_id) DO NOTHING
             RETURNING turn_id
          )
@@ -241,7 +233,7 @@ pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
 /// Supersession is the only scan here that must reinspect rows it already
 /// passed: a recovery becomes superseded by a change to `turn_lifecycle`, not
 /// by anything this statement wrote, so a row left behind the cursor can
-/// acquire that disposition afterwards - an operator resolving an exhausted
+/// acquire that disposition afterwards — an operator resolving an exhausted
 /// wait, or a delegation cascade making the turn runtime-terminal. Advancing
 /// the cursor alone does not guarantee it is ever reread: while at least one
 /// window of higher-id recoveries keeps arriving between scans, the page never
@@ -253,11 +245,6 @@ pub(crate) const AUTOMATIC_RECONCILIATION_DISCOVERY: &str = "WITH discovery AS (
 /// defer the wrap. A row *below* the mark still enters its page on the state it
 /// holds when that page is read, so a disposition acquired mid-lap is not
 /// missed.
-///
-/// The correlation names the exact operation the recovery row claims: a
-/// model-call wait matches a model-call recovery and a tool-attempt wait
-/// matches a tool-attempt recovery, so a turn that moved from one ambiguous
-/// shape to the other supersedes the recovery it left behind.
 pub(crate) const AUTOMATIC_RECONCILIATION_SUPERSESSION: &str = "WITH cursor AS (
             SELECT after_turn_id, high_turn_id
               FROM automatic_reconciliation_supersession_state
@@ -279,8 +266,8 @@ pub(crate) const AUTOMATIC_RECONCILIATION_SUPERSESSION: &str = "WITH cursor AS (
               FROM cursor
          ), page AS (
             SELECT recovery.turn_id, recovery.session_id, recovery.model_call_id,
-                   recovery.tool_attempt_id, recovery.state_kind,
-                   recovery.attempt_count
+                   recovery.tool_attempt_id,
+                   recovery.state_kind, recovery.attempt_count
               FROM automatic_reconciliation AS recovery, bounds
              WHERE recovery.state_kind IN ('scheduled', 'attempting', 'exhausted')
                AND (bounds.after_turn_id IS NULL OR recovery.turn_id > bounds.after_turn_id)
@@ -297,20 +284,12 @@ pub(crate) const AUTOMATIC_RECONCILIATION_SUPERSESSION: &str = "WITH cursor AS (
                    AND lifecycle.state_kind = 'active'
                    AND NOT lifecycle.delegation_runtime_terminal
                    AND (
-                        (
-                            lifecycle.active_phase_kind =
-                                'awaiting_model_call_recovery'
-                            AND page.tool_attempt_id IS NULL
-                            AND lifecycle.recovery_model_call_id =
-                                page.model_call_id
-                        )
-                        OR (
-                            lifecycle.active_phase_kind =
-                                'awaiting_tool_recovery'
-                            AND page.model_call_id IS NULL
-                            AND lifecycle.recovery_tool_attempt_id =
-                                page.tool_attempt_id
-                        )
+                        lifecycle.active_phase_kind = 'awaiting_model_call_recovery'
+                        AND lifecycle.recovery_model_call_id = page.model_call_id
+                        AND page.tool_attempt_id IS NULL
+                     OR lifecycle.active_phase_kind = 'awaiting_tool_recovery'
+                        AND lifecycle.recovery_tool_attempt_id = page.tool_attempt_id
+                        AND page.model_call_id IS NULL
                    )
             )
          ), attempts AS (
@@ -345,13 +324,23 @@ pub(crate) const AUTOMATIC_RECONCILIATION_SUPERSESSION: &str = "WITH cursor AS (
 
 /// Claims one due window of automatic reconciliations.
 ///
-/// The attempt budget (`$2`) and the retry ladder (`$3`..`$7`, in seconds) are
-/// bound by the caller from `AutomaticReconciliationAttempt` rather than written
-/// here. They were literals, which meant the schedule this daemon actually
-/// enforces lived only in this string: the Rust ladder had no production reader,
-/// so the two could diverge in either direction with nothing failing. The CASE
-/// has one arm per admitted attempt, so its arity is part of the contract - the
-/// caller asserts it against the budget at compile time.
+/// The attempt budget (`$2`) and the retry ladder (`$3`..`$7`, in milliseconds)
+/// are bound by the caller from `AutomaticReconciliationAttempt` rather than
+/// written here. They were literals, which meant the schedule this daemon
+/// actually enforces lived only in this string: the Rust ladder had no
+/// production reader, so the two could diverge in either direction with nothing
+/// failing.
+///
+/// Milliseconds rather than seconds because the failure path schedules its own
+/// retry in milliseconds. Seconds here truncated every sub-second configured
+/// backoff to zero, which is not a short abandonment deadline but an immediate
+/// one, so the two paths disagreed for exactly the policies a second cannot
+/// express.
+///
+/// The CASE has one arm per admitted attempt, so its arity is part of the
+/// contract: a configured budget above it would reach the `ELSE` arm and reuse
+/// the last deadline while the failure path kept computing the true schedule.
+/// The daemon refuses such a budget at configuration admission.
 pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                 SELECT turn_id
                   FROM automatic_reconciliation
@@ -365,14 +354,17 @@ pub(crate) const AUTOMATIC_RECONCILIATION_CLAIM: &str = "WITH due AS (
                 UPDATE automatic_reconciliation AS recovery
                    SET attempt_count = recovery.attempt_count + 1,
                        state_kind = 'attempting',
-                       next_attempt_at = statement_timestamp()
-                           + (CASE recovery.attempt_count + 1
-                                WHEN 1 THEN $3::bigint
-                                WHEN 2 THEN $4::bigint
-                                WHEN 3 THEN $5::bigint
-                                WHEN 4 THEN $6::bigint
-                                ELSE $7::bigint
-                              END * interval '1 second')
+                       next_attempt_at = CASE
+                           WHEN $3::bigint IS NULL THEN 'infinity'::timestamptz
+                           ELSE statement_timestamp()
+                               + (CASE recovery.attempt_count + 1
+                                    WHEN 1 THEN $3::bigint
+                                    WHEN 2 THEN $4::bigint
+                                    WHEN 3 THEN $5::bigint
+                                    WHEN 4 THEN $6::bigint
+                                    ELSE $7::bigint
+                                  END * interval '1 millisecond')
+                       END
                   FROM due
                  WHERE recovery.turn_id = due.turn_id
              RETURNING recovery.session_id, recovery.turn_id,

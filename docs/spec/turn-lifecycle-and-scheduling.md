@@ -10,7 +10,12 @@ ceiling was re-verified against this PR
 claiming and shutdown-preemptible watchdog batches are verified against this PR
 (`agent/daemon-live-restart-recovery-accounting`). Signal-driven scheduler
 draining is verified against this PR
-(`agent/daemon-live-graceful-shutdown-drain`).
+(`agent/daemon-live-graceful-shutdown-drain`). Suspension of admitted-pass
+occupancy deadlines during that bounded drain is verified against this PR
+(`agent/daemon-live-shutdown-pass-drain`). The sixty-minute occupancy ceiling
+and model-exchange-derived shutdown drain are verified against this PR
+(`agent/daemon-live-runtime-bounds`). Operation-boundary shutdown checkpointing
+is verified against this PR (`agent/daemon-live-shutdown-checkpoint`).
 
 The expired-pass recovery lock classification and retry budgets were re-verified
 against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
@@ -33,7 +38,8 @@ producing calls was re-verified against this PR
 (`agent/cancelled-outbox-completed-call`).
 
 The deployment-owned scheduler pass limit is verified against this PR
-(`agent/scheduler-pass-pause`).
+(`agent/scheduler-pass-pause`). Deployment-owned scheduler and liveness bounds
+are verified against this PR (`agent/bounds-required-config-protocol`).
 
 Repository-watch dispatch-start admission, nudge coalescing, and its reserved
 capacity within the unchanged scheduler ceiling are verified against this PR
@@ -500,19 +506,16 @@ the sweep (INV-007).
   gives the handoff the identity of any model call or tool attempt it later
   starts. The handoff marks the correlated cancellation so fatal supervision
   does not mistake the scheduler's bounded drop for an unrelated failure, then
-  spends four bounded database attempts, the first immediate and the rest at
-  two-minute intervals, across correlating the turn and recovering it. Each
+  spends four bounded database attempts, the first immediate and the rest at the
+  configured cadence, across correlating the turn and recovering it. Each
   operation has a three-second ceiling, which is wider than the repository's
   ordered connection, scheduler-row, and write-lock budgets so those can return
   typed failures instead of being masked by the wrapper. A lock refusal is
   preserved as its typed turn-liveness cause even when the shared startup
-  transition raises it from its nested session or turn work. When a fresh
-  observation proves that the same exact turn still owns a live operation, the
-  refusal is a concurrently held live claim and the handoff leaves it alone
-  rather than spending recovery attempts. Other lock refusals retry after six
-  seconds, spacing the four attempts across tens-of-seconds commit handoffs
-  under outbox contention. Any other database, ambiguous, or non-infrastructure
-  failure retains the two-minute cadence.
+  transition raises it from its nested session or turn work. Other lock refusals
+  retry after six seconds, spacing the four attempts across tens-of-seconds
+  commit handoffs under outbox contention. Any other database, ambiguous, or
+  non-infrastructure failure retains the two-minute cadence.
 
   Expiry bounds a pass's tenure, which is not the claim that its turn stopped
   progressing: one admitted pass drives a whole model/tools loop, including
@@ -524,10 +527,12 @@ the sweep (INV-007).
   and the session's turn-progress frontier — stood still between two
   observations. A turn seen once is not yet settled; a turn whose evidence
   advanced is nudged instead of recovered, and a session whose slot has passed
-  to another turn ends the handoff.
+  to another turn ends the handoff. When a fresh observation proves that the
+  same exact turn still owns a live operation, a lock refusal is concurrent live
+  execution and the handoff leaves it alone rather than spending recovery
+  attempts.
 
-  Every terminal handoff nudges the session back into eligibility admission. A
-  nudge ends the handoff only where a fresh pass can act on it. A running turn
+  A nudge ends the handoff only where a fresh pass can act on it. A running turn
   still holding a live tool round is resumed by the admitted pass, which then
   owns it, leaving the outer watchdog's far longer ceiling as its only later
   judge. A turn that durable progress left running *without* a tool round clears
@@ -538,14 +543,15 @@ the sweep (INV-007).
   still, rather than being stranded until the outer watchdog. A resumability
   read that does not settle is treated as a resumption, since no failed read may
   make a turn terminalizable on this shorter interval while a pass may already
-  be driving it.
+  be driving it. Every terminal handoff nudges the session back into eligibility
+  admission.
 
   The outer watchdog below remains responsible if those attempts all fail.
   Stateful pass data, including identity generators, is never cloned per
   admitted pass; only the detached expiry handler is cloned.
 
-  With Prometheus export enabled, the loop publishes scheduler occupancy and
-  oldest-pass telemetry through the registry owned by
+  With Prometheus export enabled, the loop publishes the scheduler occupancy
+  observations owned by
   [configuration and credentials](configuration-and-credentials.md#telemetry-export).
   Age is calculated at scrape time, so it advances while a pass is stalled even
   when the scheduler emits no event.
@@ -635,7 +641,9 @@ transaction reconstitutes and classifies the exact current durable shape; the
 watchdog invents no parallel terminal transition. This is the outer backstop for
 pass-expiry recovery whose bounded database attempts all failed and for a
 prior-process running turn that survives startup classification. The
-fifteen-minute scheduler-pass ceiling remains the tighter same-process bound.
+sixty-minute scheduler-pass ceiling is a final same-process safety bound; the
+liveness watchdog remains responsible for reclaiming a wedged pass from
+unchanged durable evidence before that ceiling.
 
 **Staleness.** No lifecycle table stores an activity timestamp, and this page
 introduces none: a stored clock would be one more thing to keep true. Staleness
@@ -753,19 +761,12 @@ slow to finish; it may not stop watching. What deferral does not cost is the
 turn: one left alone had nothing change, so it is observed unchanged and comes
 due again on a later scan, waiting rather than being forgotten.
 
-**Constants.** The staleness hard safety ceiling is 30 minutes and the scan
-interval is one minute; both are compiled in. The quiescent bound is supplied at
-the runtime's composition site rather than reloaded from the ceiling, so the
-bound that decides quiescent turns is also the bound its audit line reports. The
-slot-held watchdog does not use that parameter: it always runs at the separate
-30-minute hard ceiling. A shorter quiescent bound is constructible only through
-a checked constructor that refuses zero, refuses precision finer than a whole
-second, and refuses anything above the compiled ceiling — the single place the
-ceiling is enforced as the only maximum, and the reason no caller can raise it.
-signalboxd composes the ceiling itself: no operator setting lowers it, and
-whether one should exist is an
-[open question](../open-questions.md#turn-lifecycle) it shares with the other
-scheduling cadences.
+**Deployment bounds.** The required daemon configuration owns the staleness
+bound and scan interval. Either may be `"none"`: no scan interval leaves the
+liveness task idle until shutdown, while no staleness bound leaves automatic
+ambiguity reconciliation active without stale-turn terminalization. Finite
+values pass checked constructors that reject zero, subsecond precision, and an
+unrepresentable timer range; no compiled policy value remains.
 
 **Terminalization.** A due turn ends through the same committed failed-turn
 transition startup recovery commits, through the same reviewed statement and so
@@ -849,35 +850,38 @@ durable inventory for the next; no claimed attempt spends its deadline queued
 behind another session's locked transaction. The recovery row binds the exact
 session, turn, and one ambiguous model call or tool attempt; each claim inserts
 a one-based attempt row. Failed attempts end with the typed outcome
-`infrastructure_failure` or `integrity_failure`, and recovery becomes due after
-120, 240, 480, 960, then 1,800 seconds. If a daemon disappears while an attempt
-is `attempting`, its recorded deadline lets the next daemon classify it as an
-infrastructure failure before continuing. Every inventory or application
-transaction carries three bounds rather than one wall-clock deadline, because
-the daemon abandoning a transaction queues a `ROLLBACK` instead of cancelling
-the statement the backend is running: giving up client-side leaves the pooled
-connection checked out for the full real wait, so the database-side budget is
-the one that must expire first. Reaching a pooled connection is bounded at 250
-milliseconds, which is safe to abandon because no transaction has begun; any one
-statement then waits at most one second for a contended row under a PostgreSQL
-lock budget, whose expiry is an ordinary infrastructure failure that spends an
-attempt and writes nothing; and a five-second whole-transaction deadline sits
-above both as the last resort for a backend that has stopped answering at all.
-Opening the transaction and installing that lock budget are the one stretch no
-database-side budget covers, since the budget is what they install, so they run
-where the five-second deadline cannot cancel them: it abandons the daemon's wait
-while the pair runs to completion and releases its connection through an
-ordinary rollback. Without that the deadline would be the only bound over a
-`BEGIN` already on the wire, which is the strand the three bounds exist to
-prevent rather than a smaller failure. A claimed attempt whose transaction is
-abandoned remains durably `attempting` until its recorded deadline makes it
-classifiable. An explicitly recorded fifth failure becomes exhausted on the next
-watchdog scan without waiting out that final ambiguity deadline; the deadline
-remains necessary when the daemon cannot tell whether the fifth attempt
-committed.
+`infrastructure_failure` or `integrity_failure`, and recovery becomes due on the
+deployment's configured retry ladder — 120, 240, 480, 960, then 1,800 seconds as
+shipped. The budget and that ladder are bound into the claim statement from the
+deployment's policy rather than written into the statement, so the schedule the
+daemon enforces cannot drift from the one the configuration states. If a daemon
+disappears while an attempt is `attempting`, its recorded deadline lets the next
+daemon classify it as an infrastructure failure before continuing.
+
+Each of these transactions carries layered bounds rather than one wall-clock
+deadline, because a daemon that abandons a transaction queues a `ROLLBACK`
+instead of cancelling the statement the backend is running: giving up
+client-side would leave the pooled connection checked out for the whole real
+wait, so a database-side budget must expire first. Reaching a pooled connection
+is bounded on its own, which is safe to abandon because no transaction has
+begun. Opening the transaction and installing its lock budget are the one
+stretch no database-side budget covers — the budget is what they install — so
+they run beyond cancellation: a caller that gives up abandons its own wait while
+that stretch completes and releases its connection through an ordinary rollback.
+From there any one statement waits at most the lock budget for a contended row,
+whose expiry is an ordinary infrastructure failure that spends an attempt and
+writes nothing. The attempt's configured wall-clock bound applies as the
+reconciliation deadline outside the uncancellable `BEGIN` stretch, as the last
+resort for a backend that has stopped answering at all; it is raised to a floor
+above the acquisition and lock budgets so it can never undercut them, and
+`COMMIT` is never interrupted. A claimed attempt whose transaction is abandoned
+remains durably `attempting` until its recorded deadline makes it classifiable.
+An explicitly recorded fifth failure becomes exhausted on the next watchdog scan
+without waiting out that final ambiguity deadline; the deadline remains
+necessary when the daemon cannot tell whether the fifth attempt committed.
 
 Each inventory, reconciliation, and failure-record stage observes daemon
-shutdown ahead of its own deadline. A requested stop therefore ends the batch
+shutdown ahead of its deadline. A requested stop therefore ends the batch
 without waiting behind the remaining scan population; a cancelled stage's
 ordinary transaction drop or durable attempt deadline remains the recovery
 authority. The slot-held watchdog applies the same shutdown preemption between
@@ -1406,17 +1410,21 @@ closed, the dispatcher stops starting transactions, the scheduler stops
 admitting passes, and the turn-liveness pass stops scanning. Finite request
 handlers, the current dispatcher transaction, in-flight scheduler passes, and an
 in-flight turn-liveness inventory read or terminalization share a bounded grace
-window equal to the fifteen-minute scheduler-pass occupancy ceiling plus thirty
-seconds for component cleanup. This lets every admitted pass finish or reach its
-ordinary occupancy terminalization before shutdown may abort it. A clean exit
-closes the fenced pool, waits on the guard session's exclusive
-current-generation fence so even detached pool sessions have ended, removes only
-this daemon's identity-pinned and revalidated socket, and releases the advisory
-locks by closing its dedicated guard connection. Window expiry abandons
-remaining tasks, warns, and skips the unbounded pool drain; process exit
-releases its sessions. Why signal-driven shutdown is polish, not correctness:
-abrupt exit at any point is safe because durable rows plus the next guarded
-startup scan recover work and the durable outbox cursor redelivers an
+window equal to the configured longest expected model exchange plus thirty
+seconds for component cleanup. Once shutdown is observed, an admitted scheduler
+pass stops spending its ordinary occupancy deadline and may use the shared grace
+window to finish the model or tool operation it has already issued; the
+occupancy handler cannot cancel it during that drain. After that operation's
+result reaches its durable boundary, the pass checkpoints the active turn and
+returns without issuing another operation. A successor resumes the same active
+turn from that boundary. A clean exit closes the fenced pool, waits on the guard
+session's exclusive current-generation fence so even detached pool sessions have
+ended, removes only this daemon's identity-pinned and revalidated socket, and
+releases the advisory locks by closing its dedicated guard connection. Window
+expiry abandons remaining tasks, warns, and skips the unbounded pool drain;
+process exit releases its sessions. Why signal-driven shutdown is polish, not
+correctness: abrupt exit at any point is safe because durable rows plus the next
+guarded startup scan recover work and the durable outbox cursor redelivers an
 uncommitted offer (INV-032, INV-034), so the grace window buys only latency.
 Repositories and services are cheap per-invocation clones over the shared pool;
 no shared locked service instance exists.
@@ -1554,10 +1562,10 @@ from child transcript state nor depend on process-local wake memory.
   watchdog-ended turn from a restart-recovered one in the rows rather than only
   in the operator log, is an
   [open question](../open-questions.md#turn-lifecycle).
-- Operator control of scan gating, sweep interval, the turn-liveness staleness
-  bound, and fairness is an
-  [open question](../open-questions.md#turn-lifecycle); the process-wide
-  advisory singleton guard is specified by
+- Per-session scan gating and fairness remain an
+  [open question](../open-questions.md#turn-lifecycle); deployment configuration
+  now owns the sweep interval and turn-liveness staleness and scan bounds. The
+  process-wide advisory singleton guard is specified by
   [process-protocol](process-protocol.md).
 - LISTEN/NOTIFY remains the documented multi-process extension only; the
   baseline is single-process nudge plus sweep.

@@ -1040,9 +1040,10 @@ impl<Runner: ProcessRunner> SandboxedCommandRunner<Runner> {
                 #[cfg(target_os = "linux")]
                 let git_administration =
                     working_directory_identity.as_ref().and_then(|directory| {
-                        pin_linked_worktree_administration(
+                        pin_mapped_linked_worktree(
                             &self.workspace_identity,
                             directory,
+                            &arguments.working_directory,
                             &arguments.program,
                             &arguments.arguments,
                         )
@@ -1272,7 +1273,7 @@ struct PinnedLinkedWorktreeAdministration {
 #[cfg(target_os = "linux")]
 #[derive(Debug)]
 struct GitWorktreeIdentity {
-    administration: WorkspaceDirectoryIdentity,
+    administration: PinnedLinkedWorktreeAdministration,
     worktree: WorkspaceDirectoryIdentity,
 }
 
@@ -1494,6 +1495,7 @@ impl<Runner: ProcessRunner> CommandExecution for UnsandboxedCommandRunner<Runner
                 OsString::from("GIT_DIR"),
                 git_worktree
                     .administration
+                    .directory
                     .bind_source
                     .as_os_str()
                     .to_owned(),
@@ -1540,6 +1542,30 @@ fn pin_sandbox_linked_worktree(
         }
         worktree = worktree.parent().ok()?;
     }
+}
+
+/// Pins the administration directory a sandbox launch maps below `/workspace`.
+///
+/// The sandbox binds that directory over its own workspace-relative path and
+/// names the requested working directory as the worktree, so only a marker at
+/// that directory is mapped: an ancestor worktree would leave `GIT_WORK_TREE`
+/// naming a subdirectory of its own repository. Recognition, suppression, and
+/// repository identity are the hardened ones the unsandboxed path applies —
+/// this only narrows which candidate is examined, so the single candidate is
+/// trivially the first `.git` entry.
+#[cfg(target_os = "linux")]
+fn pin_mapped_linked_worktree(
+    workspace: &WorkspaceIdentity,
+    working_directory_identity: &WorkspaceDirectoryIdentity,
+    working_directory: &str,
+    program: &str,
+    arguments: &[String],
+) -> Option<PinnedLinkedWorktreeAdministration> {
+    if Path::new(program).file_name()? != "git" || git_arguments_select_repository(arguments) {
+        return None;
+    }
+    let relative_worktree = normalized_relative_path(Path::new(working_directory))?;
+    pin_linked_worktree_at_candidate(workspace, working_directory_identity, &relative_worktree)
 }
 
 #[cfg(target_os = "linux")]
@@ -1603,84 +1629,11 @@ fn pin_linked_worktree_at_candidate(
     workspace: &WorkspaceIdentity,
     worktree: &WorkspaceDirectoryIdentity,
     relative_worktree: &Path,
-) -> Option<WorkspaceDirectoryIdentity> {
+) -> Option<PinnedLinkedWorktreeAdministration> {
     let effective_uid = rustix::process::geteuid().as_raw();
     if descriptor_uid(&worktree._directory)? != effective_uid {
         return None;
     }
-    let relative = linked_worktree_administration_relative(workspace, worktree, effective_uid)?;
-    let administration = workspace
-        .pin_relative_directory(&relative)
-        .and_then(WorkspaceDirectoryIdentity::inherit)
-        .ok()?;
-    if descriptor_uid(&administration._directory)? != effective_uid {
-        return None;
-    }
-    let host_worktree = worktree.bind_source.canonicalize().ok()?;
-    repair_linked_worktree_backlink(&administration, relative_worktree, &host_worktree)?;
-    Some(administration)
-}
-
-#[cfg(target_os = "linux")]
-/// Pins the administration directory a sandboxed linked worktree needs bound.
-///
-/// This is the sandbox's counterpart to [`pin_sandbox_linked_worktree`], and it
-/// differs in what it owes the caller and in what it must not do. It reports
-/// the administration directory's workspace-relative path, because the bind
-/// destination inside the sandbox is that path below `/workspace` rather than a
-/// host descriptor path; and it leaves the worktree's `gitdir` backlink alone,
-/// because inside the sandbox that backlink already names the path Git will
-/// see. Rewriting it to a host path there would break the very mapping this
-/// exists to describe.
-///
-/// The marker read, the ownership checks, and the repository-selection guard
-/// are the ones the direct path applies, because the reasons for them do not
-/// change with confinement: the marker is workspace content either way, and an
-/// explicit `--git-dir`, `-C`, `init`, or `clone` is the caller's own choice of
-/// repository either way.
-fn pin_linked_worktree_administration(
-    workspace: &WorkspaceIdentity,
-    working_directory: &WorkspaceDirectoryIdentity,
-    program: &str,
-    arguments: &[String],
-) -> Option<PinnedLinkedWorktreeAdministration> {
-    if Path::new(program).file_name()? != "git" || git_arguments_select_repository(arguments) {
-        return None;
-    }
-    let effective_uid = rustix::process::geteuid().as_raw();
-    if descriptor_uid(&working_directory._directory)? != effective_uid {
-        return None;
-    }
-    let relative =
-        linked_worktree_administration_relative(workspace, working_directory, effective_uid)?;
-    let directory = workspace
-        .pin_relative_directory(&relative)
-        .and_then(WorkspaceDirectoryIdentity::inherit)
-        .ok()?;
-    if descriptor_uid(&directory._directory)? != effective_uid {
-        return None;
-    }
-    Some(PinnedLinkedWorktreeAdministration {
-        relative_path: PathBuf::from(relative),
-        directory,
-    })
-}
-
-#[cfg(target_os = "linux")]
-/// Resolves one worktree's `.git` marker to a workspace-relative administration
-/// path.
-///
-/// The marker is workspace content, so it is read through the pinned directory
-/// descriptor rather than by path, bounded by
-/// [`GIT_DIRECTORY_MARKER_MAX_BYTES`], and accepted only from a file the
-/// effective user owns. A marker written inside the sandbox names `/workspace`
-/// and one written on the host names the injected root; both describe the same
-/// directory, so both prefixes resolve here.
-fn linked_worktree_administration_relative(
-    workspace: &WorkspaceIdentity,
-    worktree: &WorkspaceDirectoryIdentity,
-    effective_uid: u32,
-) -> Option<String> {
     let marker = read_bounded_regular_file(
         &worktree._directory,
         GIT_ADMINISTRATION_MARKER,
@@ -1700,7 +1653,20 @@ fn linked_worktree_administration_relative(
         .strip_prefix(SANDBOX_WORKSPACE)
         .ok()
         .or_else(|| target.strip_prefix(&workspace.canonical_path).ok())?;
-    Some(relative.to_str()?.to_owned())
+    let relative = relative.to_str()?;
+    let administration = workspace
+        .pin_relative_directory(relative)
+        .and_then(WorkspaceDirectoryIdentity::inherit)
+        .ok()?;
+    if descriptor_uid(&administration._directory)? != effective_uid {
+        return None;
+    }
+    let host_worktree = worktree.bind_source.canonicalize().ok()?;
+    repair_linked_worktree_backlink(&administration, relative_worktree, &host_worktree)?;
+    Some(PinnedLinkedWorktreeAdministration {
+        relative_path: PathBuf::from(relative),
+        directory: administration,
+    })
 }
 
 #[cfg(target_os = "linux")]
@@ -4853,7 +4819,7 @@ mod tests {
         )
         .ok_or_else(|| std::io::Error::other("pinned linked worktree"))?;
         assert_eq!(
-            pinned.administration.bind_source.canonicalize()?,
+            pinned.administration.directory.bind_source.canonicalize()?,
             administration.canonicalize()?
         );
         assert_eq!(
@@ -4925,6 +4891,11 @@ mod tests {
                 administration.display()
             ),
         )?;
+        // A host-created linked worktree also records the backlink that proves
+        // this administration directory belongs to this worktree. Mapping
+        // verifies it exactly as direct execution does.
+        let host_backlink = format!("{}\n", worktree.join(GIT_ADMINISTRATION_MARKER).display());
+        std::fs::write(administration.join(GIT_WORKTREE_BACKLINK), &host_backlink)?;
         let runner = FakeRunner::returning(
             BwrapAvailability::Available,
             successful_sandbox_process(b"complete"),
@@ -4991,6 +4962,10 @@ mod tests {
                 .arguments
                 .windows(git_worktree.len())
                 .any(|arguments| arguments == git_worktree)
+        );
+        assert_eq!(
+            std::fs::read_to_string(administration.join(GIT_WORKTREE_BACKLINK))?,
+            host_backlink
         );
         Ok(())
     }

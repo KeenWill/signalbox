@@ -34,7 +34,6 @@ use crate::{
         ToolLoopRepositoryError, load_active_batch_from_connection, persist_ended_attempt,
         persist_result_entries, persist_tool_recovery_wait,
     },
-    turn_liveness::{recoverable_candidate_matches, slot_held_candidate_matches},
 };
 
 /// Which fresh startup-recovery identity collided durably.
@@ -209,12 +208,6 @@ pub(crate) enum TransactionDecision {
     Rollback(StartupScanSessionOutcome),
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ExpectedRecoveryCandidate {
-    SlotHeld(StaleTurnCandidate),
-    Running(StaleTurnCandidate),
-}
-
 /// PostgreSQL inventory and authoritative per-session recovery adapter.
 #[derive(Clone, Debug)]
 pub struct PostgresStartupScanRepository {
@@ -263,8 +256,7 @@ impl PostgresStartupScanRepository {
         Generator: StartupScanIdGenerator + Send,
     {
         let mut transaction = self.pool.begin().await?;
-        let decision =
-            recover_in_transaction(&mut transaction, session, None, identities, ids).await;
+        let decision = recover_in_transaction(&mut transaction, session, identities, ids).await;
 
         match decision {
             Ok(TransactionDecision::Commit(outcome)) => {
@@ -286,132 +278,6 @@ impl PostgresStartupScanRepository {
             }
         }
     }
-
-    /// Recovers only while the exact watchdog observation remains current
-    /// under the session scheduler lock.
-    pub async fn recover_candidate<Generator>(
-        &self,
-        candidate: StaleTurnCandidate,
-        identities: AcceptedInputTurnFailureIdentities,
-        ids: &mut Generator,
-    ) -> Result<Option<StartupScanSessionOutcome>, StartupScanRepositoryError>
-    where
-        Generator: StartupScanIdGenerator + Send,
-    {
-        let mut transaction = self.pool.begin().await?;
-        bound_candidate_recovery_lock_wait(&mut transaction).await?;
-        let decision = recover_in_transaction(
-            &mut transaction,
-            candidate.session(),
-            Some(ExpectedRecoveryCandidate::SlotHeld(candidate)),
-            identities,
-            ids,
-        )
-        .await;
-        match decision {
-            Ok(TransactionDecision::Commit(outcome)) => {
-                transaction.commit().await.map_err(|error| {
-                    let commit_ambiguous = commit_failure_is_ambiguous(&error);
-                    StartupScanRepositoryError::from_database(error, commit_ambiguous)
-                })?;
-                Ok(Some(outcome))
-            }
-            Ok(TransactionDecision::Rollback(StartupScanSessionOutcome::NoActiveTurn)) => {
-                transaction.rollback().await?;
-                Ok(None)
-            }
-            Ok(TransactionDecision::Rollback(outcome)) => {
-                transaction.rollback().await?;
-                Ok(Some(outcome))
-            }
-            Err(error) => {
-                if let Err(rollback_error) = transaction.rollback().await {
-                    return Err(rollback_error.into());
-                }
-                Err(error)
-            }
-        }
-    }
-
-    /// Recovers only while one exact running-turn observation remains current
-    /// under the session scheduler lock.
-    pub async fn recover_running_candidate<Generator>(
-        &self,
-        candidate: StaleTurnCandidate,
-        identities: AcceptedInputTurnFailureIdentities,
-        ids: &mut Generator,
-    ) -> Result<Option<StartupScanSessionOutcome>, StartupScanRepositoryError>
-    where
-        Generator: StartupScanIdGenerator + Send,
-    {
-        let mut transaction = self.pool.begin().await?;
-        bound_candidate_recovery_lock_wait(&mut transaction).await?;
-        let decision = recover_in_transaction(
-            &mut transaction,
-            candidate.session(),
-            Some(ExpectedRecoveryCandidate::Running(candidate)),
-            identities,
-            ids,
-        )
-        .await;
-        match decision {
-            Ok(TransactionDecision::Commit(outcome)) => {
-                transaction.commit().await.map_err(|error| {
-                    let commit_ambiguous = commit_failure_is_ambiguous(&error);
-                    StartupScanRepositoryError::from_database(error, commit_ambiguous)
-                })?;
-                Ok(Some(outcome))
-            }
-            Ok(TransactionDecision::Rollback(StartupScanSessionOutcome::NoActiveTurn)) => {
-                transaction.rollback().await?;
-                Ok(None)
-            }
-            Ok(TransactionDecision::Rollback(outcome)) => {
-                transaction.rollback().await?;
-                Ok(Some(outcome))
-            }
-            Err(error) => {
-                if let Err(rollback_error) = transaction.rollback().await {
-                    return Err(rollback_error.into());
-                }
-                Err(error)
-            }
-        }
-    }
-}
-
-/// How long a live-traffic candidate recovery waits for a contended row.
-///
-/// Matches the write budget the quiescent terminalizer already uses for the same
-/// scheduler row.
-// numeric-bound: ceiling - bounds one candidate recovery's wait for a busy row
-const CANDIDATE_RECOVERY_LOCK_WAIT: &str = "1s";
-
-/// Bounds a candidate recovery's row waits inside the database.
-///
-/// `recover_in_transaction` takes the inventoried strongest-mode row lock on the
-/// session scheduler row, and takes it unqualified — it neither skips a locked
-/// row nor refuses to wait. Both candidate callers also wrap this transaction in a
-/// client-side timeout, but that bounds only the daemon: dropping the future
-/// queues a `ROLLBACK` rather than sending a `CancelRequest`, so the backend
-/// keeps waiting for the lock and the pooled connection stays checked out for
-/// the full real wait while the caller has already given up and will retry.
-/// Under live traffic — which is new exposure, since this transaction
-/// previously ran only at startup with no concurrency — that turns contention
-/// into connection exhaustion.
-///
-/// `lock_timeout` bounds the database work itself and raises `55P03`
-/// (`lock_not_available`), which classifies as ordinary infrastructure back
-/// pressure with nothing read or written. It is set before the first statement
-/// so it can only interrupt a lock wait, never a commit.
-async fn bound_candidate_recovery_lock_wait(
-    connection: &mut PgConnection,
-) -> Result<(), StartupScanRepositoryError> {
-    sqlx::query("SELECT set_config('lock_timeout', $1, true)")
-        .bind(CANDIDATE_RECOVERY_LOCK_WAIT)
-        .execute(connection)
-        .await?;
-    Ok(())
 }
 
 impl StartupScanRepository for PostgresStartupScanRepository {
@@ -437,7 +303,6 @@ impl StartupScanRepository for PostgresStartupScanRepository {
 async fn recover_in_transaction<Generator>(
     connection: &mut PgConnection,
     requested_session: SessionId,
-    expected_candidate: Option<ExpectedRecoveryCandidate>,
     identities: AcceptedInputTurnFailureIdentities,
     ids: &mut Generator,
 ) -> Result<TransactionDecision, StartupScanRepositoryError>
@@ -478,22 +343,6 @@ where
         ));
     }
 
-    if let Some(candidate) = expected_candidate {
-        let matches = match candidate {
-            ExpectedRecoveryCandidate::SlotHeld(candidate) => {
-                slot_held_candidate_matches(connection, candidate).await?
-            }
-            ExpectedRecoveryCandidate::Running(candidate) => {
-                recoverable_candidate_matches(connection, candidate).await?
-            }
-        };
-        if !matches {
-            return Ok(TransactionDecision::Rollback(
-                StartupScanSessionOutcome::NoActiveTurn,
-            ));
-        }
-    }
-
     let decision = recover_locked_session(
         connection,
         requested_session,
@@ -506,12 +355,7 @@ where
     .await
     .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))?;
 
-    // Only the startup scan records the restart origin. A candidate recovery
-    // shares this classifier but runs against live traffic, and the record
-    // names the waits a restart created rather than the waits the daemon
-    // recovered while running.
-    if let (None, Some(turn), TransactionDecision::Commit(outcome)) =
-        (expected_candidate, active_turn, &decision)
+    if let (Some(turn), TransactionDecision::Commit(outcome)) = (active_turn, &decision)
         && startup_recovery_created_ambiguous_wait(outcome)
     {
         sqlx::query(
@@ -529,7 +373,6 @@ where
     Ok(decision)
 }
 
-/// Reports whether a recovered outcome left the turn on an ambiguity wait.
 fn startup_recovery_created_ambiguous_wait(outcome: &StartupScanSessionOutcome) -> bool {
     match outcome {
         StartupScanSessionOutcome::RecoveredModelCall(outcome) => matches!(
@@ -547,11 +390,6 @@ fn startup_recovery_created_ambiguous_wait(outcome: &StartupScanSessionOutcome) 
     }
 }
 
-/// Recovers one exact slot-held observation inside a caller's transaction.
-///
-/// `None` means the observation no longer holds under the lock, which the
-/// turn-liveness caller reports as an ordinary supersession rather than as
-/// authority to recover whichever turn is active now.
 pub(crate) async fn recover_observed_slot_held_in_transaction<Generator>(
     connection: &mut PgConnection,
     candidate: StaleTurnCandidate,
@@ -561,18 +399,51 @@ pub(crate) async fn recover_observed_slot_held_in_transaction<Generator>(
 where
     Generator: StartupScanIdGenerator + Send,
 {
-    match recover_in_transaction(
+    let requested_session = candidate.session();
+    let session_uuid = session_id_to_uuid(requested_session);
+    let observed_active_turn: Option<Uuid> = sqlx::query_scalar(
+        "SELECT turn_id
+           FROM turn_lifecycle
+          WHERE session_id = $1
+            AND state_kind = 'active'
+            AND NOT delegation_runtime_terminal",
+    )
+    .bind(session_uuid)
+    .fetch_optional(&mut *connection)
+    .await?;
+    if observed_active_turn != Some(turn_id_to_uuid(candidate.turn())) {
+        return Ok(None);
+    }
+    lock_delegated_turn_terminal_frontier(connection, requested_session, candidate.turn())
+        .await
+        .map_err(map_model_call_error)?;
+    let (session_exists, scheduler_session, active_turn) =
+        sqlx::query_as::<_, (bool, Option<Uuid>, Option<Uuid>)>(
+            crate::lock_inventory::STARTUP_RECOVERY,
+        )
+        .bind(session_uuid)
+        .fetch_one(&mut *connection)
+        .await?;
+    if active_turn != Some(turn_id_to_uuid(candidate.turn())) {
+        return Ok(None);
+    }
+    let locked =
+        crate::turn_liveness::read_exact_slot_held_candidate(connection, requested_session).await?;
+    if locked != Some(candidate) {
+        return Ok(None);
+    }
+    recover_locked_session(
         connection,
-        candidate.session(),
-        Some(ExpectedRecoveryCandidate::SlotHeld(candidate)),
+        requested_session,
         identities,
+        session_exists,
+        scheduler_session,
+        active_turn,
         ids,
     )
-    .await?
-    {
-        TransactionDecision::Rollback(StartupScanSessionOutcome::NoActiveTurn) => Ok(None),
-        decision => Ok(Some(decision)),
-    }
+    .await
+    .map(Some)
+    .map_err(|error| error.with_corruption_turn(active_turn.map(turn_id_from_uuid)))
 }
 
 async fn recover_locked_session<Generator>(

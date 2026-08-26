@@ -134,16 +134,18 @@ const WEBHOOK_DRAIN_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
 // room for an in-flight bounded provider request while ensuring a task wedge
 // becomes an operator-visible error well before the next full poll.
 const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
-// The drain phase of the serialized repository task must return to its scheduler
-// even when one drain step never does. Individual provider requests have their own deadline,
+// The serialized repository task must return to its scheduler even when one
+// drain step never does. Individual provider requests have their own deadline,
 // but a drain can perform many requests and database operations; without this
 // outer bound, admission wakes and retries remain coalesced behind it forever.
 // Pending delivery records are durable, so cancellation leaves the unfinished
 // work for the existing bounded backoff path to retry.
 const WEBHOOK_DRAIN_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(60);
 // Reconciliation before or after the drain is durable and replayable, but it
-// shares the same serialized task. Give the drain deadline and its bounded
-// child cleanup room to report before the enclosing attempt is cancelled.
+// runs on the same serialized repository task. Give the drain deadline and its
+// bounded child cleanup room to report before the enclosing attempt is
+// cancelled.
+// numeric-bound: ceiling - caps an attempt's hold on the repository task
 const WEBHOOK_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(70);
 // Every shared child-set join uses this bound. A later attempt may retry the
 // join, but it never spawns alongside survivors or wedges the scheduler while
@@ -152,6 +154,7 @@ const WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 // Shutdown gives a retained targeted completion a short grace period, then
 // aborts and joins it so a wedged database operation cannot prevent the
 // repository supervisor from stopping.
+// numeric-bound: guard - prevents a wedged targeted completion from stalling supervisor shutdown forever
 const WEBHOOK_TARGETED_COMPLETION_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 // The monitor reads through the shared daemon pool, whose connections wedged
 // repositories can hold all of. An unbounded acquisition would leave the
@@ -172,8 +175,6 @@ const WEBHOOK_DRAIN_PAGE_LIMIT: usize = 1;
 // records before returning to the webhook-aware outer loop. The remaining work
 // is durable and re-arms that loop; bounding the phase prevents an event backlog
 // from owning the serialized repository task indefinitely.
-// numeric-bound: ceiling - bounds reconciliation work ahead of webhook wake observation
-const REPOSITORY_RECONCILIATION_QUANTUM: usize = 16;
 // How many times one terminal record may be re-attempted while PostgreSQL keeps
 // losing its commit result. Each attempt is settled by a read, so this bounds a
 // flapping connection rather than a genuinely undecided outcome.
@@ -335,6 +336,26 @@ pub struct RepositoryWatchRuntime {
     webhook: Option<RepoWatchWebhookRuntime>,
 }
 
+/// Deployment-owned work policies for the repository-watch scheduler.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RepositoryWatchNumericBounds {
+    reconciliation_quantum: Option<usize>,
+    webhook_drain_work_budget: Option<Duration>,
+}
+
+impl RepositoryWatchNumericBounds {
+    /// Groups the repository-watch policies loaded from required configuration.
+    pub const fn new(
+        reconciliation_quantum: Option<usize>,
+        webhook_drain_work_budget: Option<Duration>,
+    ) -> Self {
+        Self {
+            reconciliation_quantum,
+            webhook_drain_work_budget,
+        }
+    }
+}
+
 impl RepositoryWatchRuntime {
     /// Constructs all repository-specific clients without reading credentials.
     pub fn try_new(
@@ -344,7 +365,12 @@ impl RepositoryWatchRuntime {
         models: HubModelConfiguration,
         credential_pin: signalbox_persistence::SessionCredentialPin,
         eligibility_nudge: InProcessEligibilityNudge,
+        numeric_bounds: RepositoryWatchNumericBounds,
     ) -> Result<Self, RepositoryWatchRuntimeConstructionError> {
+        let RepositoryWatchNumericBounds {
+            reconciliation_quantum,
+            webhook_drain_work_budget,
+        } = numeric_bounds;
         let mut tasks = Vec::with_capacity(configuration.repositories().len());
         let mut webhook_workers = HashMap::new();
         let payload_purge = WebhookPayloadPurgeSchedule::starting_now();
@@ -374,12 +400,29 @@ impl RepositoryWatchRuntime {
                     webhook_work,
                     webhook_nudge,
                     payload_purge: payload_purge.clone(),
+                    reconciliation_quantum,
+                    webhook_drain_work_budget,
                 },
             )?);
         }
         let webhook = RepoWatchWebhookRuntime::try_new(pool, configuration, webhook_workers)
             .map_err(|_| RepositoryWatchRuntimeConstructionError)?;
         Ok(Self { tasks, webhook })
+    }
+
+    /// Completes each repository's bounded startup webhook attempt before the
+    /// daemon admits scheduler work.
+    pub async fn prepare_startup(&mut self) -> Result<(), RepositoryWatchRuntimeError> {
+        let outcomes = futures_util::future::join_all(
+            self.tasks
+                .iter_mut()
+                .map(RepositoryWatchTask::prepare_startup),
+        )
+        .await;
+        if outcomes.into_iter().any(std::convert::identity) {
+            return Err(RepositoryWatchRuntimeError::RepositoryTaskExited);
+        }
+        Ok(())
     }
 
     /// Runs every repository task until the daemon broadcasts shutdown.
@@ -488,7 +531,17 @@ async fn supervise_repository_tasks(
     let _ = task_shutdown.send(true);
     while tasks.join_next().await.is_some() {}
     for poller in &pollers {
-        poller.drain_fetches().await;
+        if !poller
+            .drain_fetches_within(WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT)
+            .await
+        {
+            tracing::error!(
+                repository = %poller.repository.as_str(),
+                timeout_seconds = WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT.as_secs(),
+                cause_code = "webhook_cancelled_fetch_drain_timed_out",
+                "repository-watch supervisor fetch cleanup exceeded its deadline"
+            );
+        }
     }
     result
 }
@@ -829,6 +882,43 @@ impl WebhookAttemptOutcome {
     }
 }
 
+/// Which step of a webhook attempt is running.
+///
+/// The enclosing attempt deadline can expire in any of them, and cancellation
+/// carries no failure of its own to classify. Recording the step lets a
+/// cancelled attempt report the same outcome that step's own failure would
+/// have, so a wedge outside the drain does not advance the projection backoff
+/// that only drain failures are meant to grow.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WebhookAttemptPhase {
+    /// Activation and the leading reconciliation that precede the drain.
+    BeforeDrain,
+    /// The drain itself, which owns the durable pending deliveries.
+    Drain,
+    /// The cutoff and dispatch reconciliation that follow a committed drain.
+    AfterDrain,
+}
+
+impl WebhookAttemptPhase {
+    /// The outcome a cancellation during this step reports.
+    const fn cancelled_outcome(self, error: RepositoryWatchAttemptError) -> WebhookAttemptOutcome {
+        match self {
+            Self::BeforeDrain => WebhookAttemptOutcome::FailedBeforeDrain(error),
+            Self::Drain => WebhookAttemptOutcome::DrainFailed(error),
+            Self::AfterDrain => WebhookAttemptOutcome::DrainedThenFailed(error),
+        }
+    }
+
+    /// The operator-facing label for the cancelled step.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::BeforeDrain => "before_drain",
+            Self::Drain => "drain",
+            Self::AfterDrain => "after_drain",
+        }
+    }
+}
+
 /// Whether a full polling attempt performs its own webhook drain step.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum WebhookDrain {
@@ -933,8 +1023,11 @@ fn initial_poll_deadline(now: Instant, interval: Duration, durable_cursor_exists
     }
 }
 
-fn repository_reconciliation_quantum_exhausted(processed: usize) -> bool {
-    processed >= REPOSITORY_RECONCILIATION_QUANTUM
+fn repository_reconciliation_quantum_exhausted(
+    processed: usize,
+    reconciliation_quantum: Option<usize>,
+) -> bool {
+    reconciliation_quantum.is_some_and(|quantum| processed >= quantum)
 }
 
 /// Awaits `work`, leaving it cancellable by shutdown.
@@ -969,6 +1062,7 @@ async fn monitor_webhook_drain(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut next_inspection = Instant::now() + WEBHOOK_DRAIN_MONITOR_INTERVAL;
+    let mut progress = WebhookDrainProgress::default();
     loop {
         select! {
             biased;
@@ -995,7 +1089,12 @@ async fn monitor_webhook_drain(
         // every child before aborting the set, so the daemon could not stop.
         if run_until_shutdown(
             &mut shutdown,
-            inspect_webhook_drain(&repository, &store, WEBHOOK_DRAIN_STALL_THRESHOLD),
+            inspect_webhook_drain(
+                &repository,
+                &store,
+                WEBHOOK_DRAIN_STALL_THRESHOLD,
+                &mut progress,
+            ),
         )
         .await
         .is_none()
@@ -1005,10 +1104,37 @@ async fn monitor_webhook_drain(
     }
 }
 
+#[derive(Default)]
+struct WebhookDrainProgress {
+    // This is observation state, not recovery authority: pending receipts remain
+    // durable. A fresh daemon deliberately observes one full threshold before
+    // declaring an old queue head stalled.
+    unchanged_head: Option<(NonZeroU64, Instant)>,
+}
+
+impl WebhookDrainProgress {
+    fn observe(&mut self, receipt_sequence: NonZeroU64, observed_at: Instant) -> Option<Duration> {
+        match self.unchanged_head {
+            Some((previous_sequence, unchanged_since)) if previous_sequence == receipt_sequence => {
+                Some(observed_at.saturating_duration_since(unchanged_since))
+            }
+            _ => {
+                self.unchanged_head = Some((receipt_sequence, observed_at));
+                None
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.unchanged_head = None;
+    }
+}
+
 async fn inspect_webhook_drain(
     repository: &RepositorySlug,
     store: &PostgresRepoWatchWebhookStore,
     stall_threshold: Duration,
+    progress: &mut WebhookDrainProgress,
 ) {
     // Identity and receipt only, never the admitted body. This runs on a fixed
     // cadence for every webhook repository, so loading a pending page here
@@ -1021,7 +1147,10 @@ async fn inspect_webhook_drain(
     );
     let oldest = match inspection.await {
         Ok(Ok(Some(oldest))) => oldest,
-        Ok(Ok(None)) => return,
+        Ok(Ok(None)) => {
+            progress.clear();
+            return;
+        }
         Err(_) => {
             tracing::error!(
                 repository = %repository.as_str(),
@@ -1042,7 +1171,10 @@ async fn inspect_webhook_drain(
         }
     };
     let pending_for = oldest.pending_for();
-    if pending_for < stall_threshold {
+    let Some(stalled_for) = progress.observe(oldest.receipt().sequence(), Instant::now()) else {
+        return;
+    };
+    if pending_for < stall_threshold || stalled_for < stall_threshold {
         return;
     }
     tracing::error!(
@@ -1051,6 +1183,7 @@ async fn inspect_webhook_drain(
         delivery_id = %oldest.key().delivery_id(),
         receipt_sequence = oldest.receipt().sequence().get(),
         pending_seconds = pending_for.as_secs(),
+        stalled_seconds = stalled_for.as_secs(),
         cause_code = "webhook_projection_drain_stalled",
         "durable repository-watch webhook delivery remains undispositioned"
     );
@@ -1079,8 +1212,12 @@ struct RepositoryWatchTask {
     webhook_drain_first_failure: Option<RepositoryWatchAttemptError>,
     webhook_drain_projection_failure: Option<RepositoryWatchAttemptError>,
     webhook_drain_timed_out: bool,
+    webhook_attempt_phase: WebhookAttemptPhase,
     payload_purge: WebhookPayloadPurgeSchedule,
     rules_activated: bool,
+    startup_webhook_retry: Option<WebhookDrainRetry>,
+    reconciliation_quantum: Option<usize>,
+    webhook_drain_work_budget: Option<Duration>,
 }
 
 /// One process-wide schedule for the expired-payload purge.
@@ -1112,6 +1249,8 @@ struct RepositoryWatchTaskContext {
     webhook_work: Option<watch::Receiver<()>>,
     webhook_nudge: Option<Arc<watch::Sender<()>>>,
     payload_purge: WebhookPayloadPurgeSchedule,
+    reconciliation_quantum: Option<usize>,
+    webhook_drain_work_budget: Option<Duration>,
 }
 
 fn record_dispatch_start_nudge_outcome(
@@ -1158,6 +1297,8 @@ impl RepositoryWatchTask {
             webhook_work,
             webhook_nudge,
             payload_purge,
+            reconciliation_quantum,
+            webhook_drain_work_budget,
         } = context;
         let credential_reference = configuration.credential_reference();
         let credentials = FileCredentialAccess::new_bounded(
@@ -1194,8 +1335,12 @@ impl RepositoryWatchTask {
             webhook_drain_first_failure: None,
             webhook_drain_projection_failure: None,
             webhook_drain_timed_out: false,
+            webhook_attempt_phase: WebhookAttemptPhase::BeforeDrain,
             payload_purge,
             rules_activated: false,
+            startup_webhook_retry: None,
+            reconciliation_quantum,
+            webhook_drain_work_budget,
         })
     }
 
@@ -1229,8 +1374,10 @@ impl RepositoryWatchTask {
         if *shutdown.borrow() {
             return;
         }
-        let mut webhook_retry = WebhookDrainRetry::default();
-        if self.webhook_work.is_some() {
+        let prepared_webhook_retry = self.startup_webhook_retry.take();
+        let startup_was_prepared = prepared_webhook_retry.is_some();
+        let mut webhook_retry = prepared_webhook_retry.unwrap_or_default();
+        if self.webhook_work.is_some() && !startup_was_prepared {
             let Some(outcome) = self.run_webhook_attempt_until_shutdown(&mut shutdown).await else {
                 return;
             };
@@ -1294,8 +1441,7 @@ impl RepositoryWatchTask {
                         PollAttemptWait::Completed(result) => result,
                         PollAttemptWait::Shutdown => {
                             // A cancelled full poll may own spawned PR fetches.
-                            self.poller.drain_fetches().await;
-                            self.poller.invalidate_freshness();
+                            self.finish_cancelled_webhook_attempt().await;
                             return;
                         }
                         PollAttemptWait::Continue => {
@@ -1304,7 +1450,7 @@ impl RepositoryWatchTask {
                             continue;
                         }
                         PollAttemptWait::WebhookRetry => {
-                            self.poller.drain_fetches().await;
+                            let _ = self.poller.drain_fetches_bounded().await;
                             self.poller.invalidate_freshness();
                             webhook_retry.consume();
                             let Some(outcome) =
@@ -1436,6 +1582,24 @@ impl RepositoryWatchTask {
                 }
             }
         }
+    }
+
+    async fn prepare_startup(&mut self) -> bool {
+        if self.webhook_work.is_none() {
+            self.startup_webhook_retry = Some(WebhookDrainRetry::default());
+            return false;
+        }
+        let outcome = self
+            .run_webhook_attempt_with_deadline(WEBHOOK_ATTEMPT_TIMEOUT)
+            .await;
+        let mut webhook_retry = WebhookDrainRetry::default();
+        let must_stop = self.record_webhook_attempt(
+            WebhookAttemptTrigger::Startup,
+            outcome,
+            &mut webhook_retry,
+        );
+        self.startup_webhook_retry = Some(webhook_retry);
+        must_stop
     }
 
     async fn run_webhook_attempt_until_shutdown(
@@ -1827,6 +1991,7 @@ impl RepositoryWatchTask {
 
     async fn run_webhook_attempt(&mut self) -> WebhookAttemptOutcome {
         self.poller.begin_attempt();
+        self.webhook_attempt_phase = WebhookAttemptPhase::BeforeDrain;
         let outcome = async {
             if !self.rules_activated {
                 if let Err(error) = self.activate_rules().await {
@@ -1844,7 +2009,10 @@ impl RepositoryWatchTask {
             } else {
                 self.process_dispatches().await.err()
             };
-            match self.process_webhook_deliveries_with_timeout().await {
+            self.webhook_attempt_phase = WebhookAttemptPhase::Drain;
+            let drained = self.process_webhook_deliveries_with_timeout().await;
+            self.webhook_attempt_phase = WebhookAttemptPhase::AfterDrain;
+            match drained {
                 WebhookDrainOutcome::Drained => {}
                 WebhookDrainOutcome::ProjectionFailed(error) => {
                     return WebhookAttemptOutcome::DrainFailed(error);
@@ -1883,20 +2051,33 @@ impl RepositoryWatchTask {
         match timeout(deadline, self.run_webhook_attempt()).await {
             Ok(outcome) => outcome,
             Err(_) => {
+                let phase = self.webhook_attempt_phase;
                 self.finish_cancelled_webhook_attempt().await;
                 let error = RepositoryWatchAttemptError::WebhookAttemptTimedOut;
                 tracing::error!(
                     repository = %self.repository.as_str(),
                     timeout_seconds = deadline.as_secs(),
+                    cancelled_phase = phase.label(),
                     cause_code = error.cause_code(),
                     "repository-watch webhook attempt exceeded its deadline"
                 );
-                WebhookAttemptOutcome::DrainFailed(error)
+                // Cancellation carries no failure of its own, so the cancelled
+                // step decides the outcome: only a drain the deadline
+                // interrupted has earned the growing projection backoff.
+                phase.cancelled_outcome(error)
             }
         }
     }
 
-    async fn finish_cancelled_webhook_attempt(&self) {
+    /// Performs the cleanup every cancelled webhook attempt owes its successor.
+    ///
+    /// Cancellation itself must not wedge the repository task, so the poller's
+    /// shared child fetch set is joined under its own bound; a later attempt
+    /// drains that same set before it can spawn, preserving the
+    /// no-interleaving policy. Either deadline can cancel a projected terminal
+    /// write, so the carried shadow is settled here rather than at one call
+    /// site.
+    async fn finish_cancelled_webhook_attempt(&mut self) {
         if timeout(
             WEBHOOK_CANCELLED_FETCH_DRAIN_TIMEOUT,
             self.poller.drain_fetches(),
@@ -1912,9 +2093,26 @@ impl RepositoryWatchTask {
             );
         }
         self.poller.invalidate_freshness();
+        // Only a projected terminal write can make the carried shadow
+        // ambiguous. A targeted cursor commit is retained separately and
+        // settled before another drain, so its delivery keeps the pre-commit
+        // shadow needed to reproduce its projections.
+        if let Some(key) = self.webhook_projected_terminal_in_flight.take() {
+            self.webhook_shadow = None;
+            self.webhook_shadow_superseded = false;
+            self.webhook_terminal_ambiguous = Some(key);
+        }
     }
 
     async fn process_webhook_deliveries(&mut self) -> WebhookDrainOutcome {
+        self.process_webhook_deliveries_with_budget(self.webhook_drain_work_budget)
+            .await
+    }
+
+    async fn process_webhook_deliveries_with_budget(
+        &mut self,
+        work_budget: Option<Duration>,
+    ) -> WebhookDrainOutcome {
         self.webhook_drain_first_failure = None;
         self.webhook_drain_projection_failure = None;
         if let Some(Err(error)) = self.settle_webhook_targeted_completion().await {
@@ -1934,6 +2132,7 @@ impl RepositoryWatchTask {
         else {
             return WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Persistence);
         };
+        let started_at = Instant::now();
         let mut deferred: HashSet<RepoWatchWebhookDeliveryKey> = HashSet::new();
         let mut first_failure: Option<RepositoryWatchAttemptError> = None;
         let mut dispatch_failure: Option<RepositoryWatchAttemptError> = None;
@@ -1989,7 +2188,7 @@ impl RepositoryWatchTask {
                 if deferred.contains(&delivery.key()) {
                     continue;
                 }
-                match self
+                let terminalized = match self
                     .process_webhook_delivery(delivery, &mut page, &mut dispatch_failure)
                     .await
                 {
@@ -1997,6 +2196,7 @@ impl RepositoryWatchTask {
                         if self.webhook_terminal_ambiguous == Some(delivery.key()) {
                             self.webhook_terminal_ambiguous = None;
                         }
+                        true
                     }
                     Err(error) => {
                         if error.stops_webhook_page() {
@@ -2029,11 +2229,23 @@ impl RepositoryWatchTask {
                             first_failure = Some(error);
                             self.webhook_drain_projection_failure = Some(error);
                         }
+                        false
                     }
-                }
+                };
                 if chronological_first.is_none() {
                     chronological_first = first_failure.or(dispatch_failure);
                     self.webhook_drain_first_failure = chronological_first;
+                }
+                if terminalized && work_budget.is_some_and(|budget| started_at.elapsed() >= budget)
+                {
+                    self.request_webhook_drain_continuation();
+                    tracing::info!(
+                        repository = %self.repository.as_str(),
+                        work_budget_seconds = work_budget.map_or(0, |budget| budget.as_secs()),
+                        cause_code = "webhook_projection_drain_work_budget_exhausted",
+                        "progressing repository-watch webhook drain yielded before its deadline"
+                    );
+                    break 'drain;
                 }
             }
             pages += 1;
@@ -2088,21 +2300,11 @@ impl RepositoryWatchTask {
             Err(_) => {
                 self.webhook_drain_timed_out = true;
                 // A future implementation may use the poller's bounded child
-                // fetch set while hydrating a delivery. The shared cleanup
-                // helper joins that set under its own bound so cancellation
-                // itself cannot wedge the repository task, and the poller's
-                // next attempt drains the same shared set before it can spawn,
-                // preserving the no-interleaving policy.
+                // fetch set while hydrating a delivery. The shared cancellation
+                // cleanup bounds that join and settles the carried shadow, so
+                // the poller's next attempt drains the same shared set before
+                // it can spawn, preserving the no-interleaving policy.
                 self.finish_cancelled_webhook_attempt().await;
-                // Only a projected terminal write can make the carried shadow
-                // ambiguous. A targeted cursor commit is retained separately
-                // and settled before another drain, so its delivery keeps the
-                // pre-commit shadow needed to reproduce its projections.
-                if let Some(key) = self.webhook_projected_terminal_in_flight.take() {
-                    self.webhook_shadow = None;
-                    self.webhook_shadow_superseded = false;
-                    self.webhook_terminal_ambiguous = Some(key);
-                }
                 let first_failure = self.webhook_drain_first_failure.take();
                 let projection_failure = self.webhook_drain_projection_failure.take();
                 if let Some(first_failure) = first_failure {
@@ -2711,6 +2913,7 @@ impl RepositoryWatchTask {
     }
 
     async fn process_cutoffs(&self) -> Result<(), RepositoryWatchAttemptError> {
+        // numeric-bound: guard - prevents a repeatedly quarantined lease from looping the repository task forever
         const MAX_EXPIRED_START_LEASES_PER_ATTEMPT: usize = 32;
         for _ in 0..MAX_EXPIRED_START_LEASES_PER_ATTEMPT {
             match self
@@ -2745,10 +2948,6 @@ impl RepositoryWatchTask {
                 Err(_) => return Err(RepositoryWatchAttemptError::Persistence),
             }
         }
-        // Lifecycle cutoffs have no per-attempt ceiling of their own, so the
-        // shared reconciliation quantum is what returns a backlog to the
-        // webhook-aware outer loop. The remaining work is durable and the
-        // yield re-arms this repository's own wake.
         let mut processed = 0_usize;
         loop {
             match self
@@ -2914,7 +3113,7 @@ impl RepositoryWatchTask {
     }
 
     fn yield_after_reconciliation_quantum(&self, phase: &'static str, processed: usize) -> bool {
-        if !repository_reconciliation_quantum_exhausted(processed) {
+        if !repository_reconciliation_quantum_exhausted(processed, self.reconciliation_quantum) {
             return false;
         }
         self.request_webhook_drain_continuation();
@@ -4482,6 +4681,11 @@ impl GitHubRepositoryPoller {
     /// fetch remains able to hold resources or mutate shared freshness state.
     async fn drain_fetches(&self) {
         self.fetches.lock().await.shutdown().await;
+    }
+
+    /// Bounds cleanup after a caller cancels a poll that may own child fetches.
+    async fn drain_fetches_within(&self, deadline: Duration) -> bool {
+        timeout(deadline, self.drain_fetches()).await.is_ok()
     }
 
     async fn collect_pull_request_fetches(
@@ -7081,7 +7285,7 @@ mod tests {
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
         net::{TcpListener, TcpStream},
-        sync::{Notify, watch},
+        sync::{Notify, oneshot, watch},
         task::{JoinHandle, JoinSet},
         time::{Instant, sleep},
     };
@@ -7092,18 +7296,18 @@ mod tests {
         MAX_CHECK_SUITES_PER_COMMIT_CHECK_RUN_SEARCH, MAX_CONCURRENT_PULL_REQUEST_FETCHES,
         MAX_CONSECUTIVE_SKIPPED_PULL_REQUEST_POLLS, MAX_POLL_WIRE_BYTES, MergeableState, PAGE_SIZE,
         PollAttemptWait, PollCache, PreparedTargetedRefresh, PullRequestSettlement, PullResponse,
-        REPOSITORY_RECONCILIATION_QUANTUM, ReactionContent, RepoWatchAuthorLogin,
-        RepoWatchBranchHead, RepoWatchConvergenceAssessment, RepoWatchConvergenceAssessmentInput,
-        RepoWatchCursorGeneration, RepoWatchObservation, RepoWatchPullRequestLifecycle,
-        RepoWatchReactionObservation, RepoWatchReviewDecision, RepoWatchReviewObservation,
-        RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState, RepoWatchWorkflowRunAttempt,
-        RepoWatchWorkflowRunObservation, RepositorySlug, RepositoryWatchAttemptError,
-        RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
-        RepositoryWatchRuntimeError, RepositoryWatchTask, RepositoryWatchWake, ResourceKey,
-        ReviewState, TargetedPollOutcome, TargetedPullRequest, TargetedRefreshSettlement, Url,
-        UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_RETRY_DELAY,
-        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WEBHOOK_PENDING_PAGE_SIZE, WebhookAttemptOutcome,
-        WebhookDrain, WebhookDrainOutcome, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
+        ReactionContent, RepoWatchAuthorLogin, RepoWatchBranchHead, RepoWatchConvergenceAssessment,
+        RepoWatchConvergenceAssessmentInput, RepoWatchCursorGeneration, RepoWatchObservation,
+        RepoWatchPullRequestLifecycle, RepoWatchReactionObservation, RepoWatchReviewDecision,
+        RepoWatchReviewObservation, RepoWatchStaleReviewClearanceCandidate, RepoWatchThreadState,
+        RepoWatchWorkflowRunAttempt, RepoWatchWorkflowRunObservation, RepositorySlug,
+        RepositoryWatchAttemptError, RepositoryWatchChildExit,
+        RepositoryWatchRuntimeConstructionError, RepositoryWatchRuntimeError, RepositoryWatchTask,
+        RepositoryWatchWake, ResourceKey, ReviewState, TargetedPollOutcome, TargetedPullRequest,
+        TargetedRefreshSettlement, Url, UuidV7RepoWatchEventIdGenerator,
+        WEBHOOK_DRAIN_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY,
+        WEBHOOK_PENDING_PAGE_SIZE, WebhookAttemptOutcome, WebhookAttemptPhase, WebhookDrain,
+        WebhookDrainOutcome, WebhookDrainProgress, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
         WebhookPollInterrupt, WebhookShadowBaseline, WorkflowName, WorkflowResponse,
         await_poll_or_interrupt, commit_check_run_search_is_complete, derive_repo_watch_events,
         dispatch_context_json, initial_poll_deadline, inspect_webhook_drain, next_cadence_deadline,
@@ -7125,7 +7329,7 @@ mod tests {
     };
     use signalbox_model_runtime::CredentialReference;
     use signalbox_persistence::{
-        disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+        disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
         disposable_test_container_labels, local_test_connection_options, migrate,
         repo_watch::{
             PostgresRepoWatchStore, RepoWatchCommitRequest, RepoWatchCursorCandidate,
@@ -7301,7 +7505,7 @@ mod tests {
             .with_user(DATABASE_USER)
             .with_password(DATABASE_PASSWORD)
             .with_cmd(disposable_postgres_server_args())
-            .with_mount(disposable_postgres_state_tmpfs())
+            .with_mount(disposable_postgres_state_tmpfs_from_example()?)
             .with_tag(POSTGRES_IMAGE_TAG)
             .with_labels(disposable_test_container_labels())
             .start()
@@ -7449,6 +7653,7 @@ mod tests {
                 webhook_drain_first_failure: None,
                 webhook_drain_projection_failure: None,
                 webhook_drain_timed_out: false,
+                webhook_attempt_phase: WebhookAttemptPhase::BeforeDrain,
                 repository,
                 interval: POLL_INTERVAL,
                 poller,
@@ -7460,6 +7665,9 @@ mod tests {
                 eligibility_nudge,
                 webhook_store: PostgresRepoWatchWebhookStore::new(pool.clone()),
                 webhook_work: None,
+                startup_webhook_retry: None,
+                reconciliation_quantum: None,
+                webhook_drain_work_budget: None,
                 payload_purge: WebhookPayloadPurgeSchedule::starting_now(),
                 rules_activated: true,
             },
@@ -8789,10 +8997,10 @@ mod tests {
     fn complete_pull_request_responses() -> Vec<ScriptedResponse> {
         complete_typed_observation_responses()
             .into_iter()
-            // Drops the pull-request listing and the branch page ahead of the
-            // detail fetch, and the workflow pages behind the reaction fetches:
-            // a targeted refresh reads exactly one pull request's detail through
-            // its review-comment reactions.
+            // The per-pull-request slice of the complete sweep: everything from
+            // the pull detail through the review-comment reactions, with the
+            // repository listing and branch page ahead of it and the workflow
+            // queries behind it excluded.
             .skip(2)
             .take(11)
             .collect()
@@ -10025,6 +10233,26 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
+    async fn startup_preparation_drains_pending_webhook_work_before_runtime_admission()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let admitted = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&admitted).await?;
+        let (_sender, receiver) = watch::channel(());
+        let mut fixture = webhook_task(&pool).await?;
+        fixture.task.webhook_work = Some(receiver);
+
+        let must_stop = fixture.task.prepare_startup().await;
+
+        assert!(!must_stop);
+        assert!(webhook_disposition_exists(&webhook_store, admitted.key()).await?);
+        assert!(fixture.task.startup_webhook_retry.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
     async fn a_retry_drains_the_delivery_a_projection_error_retained() -> Result<(), Box<dyn Error>>
     {
         let (_container, pool) = migrated_postgres().await?;
@@ -10063,6 +10291,32 @@ mod tests {
         const REQUEST: &[u8] = b"GET /resource HTTP/1.1\r\nHost: localhost\r\n\r\n";
 
         assert!(scripted_request_is_complete(REQUEST));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn a_progressing_drain_yields_before_its_outer_deadline_and_rearms()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
+        let first = submitted_review_admission(FIRST_WEBHOOK_DELIVERY, FIRST_WEBHOOK_REVIEW)?;
+        let second = submitted_review_admission(SECOND_WEBHOOK_DELIVERY, SECOND_WEBHOOK_REVIEW)?;
+        webhook_store.admit(&first).await?;
+        webhook_store.admit(&second).await?;
+        let (sender, receiver) = watch::channel(());
+        let mut fixture = webhook_task(&pool).await?;
+        fixture.task.webhook_nudge = Some(Arc::new(sender));
+
+        let outcome = fixture
+            .task
+            .process_webhook_deliveries_with_budget(Some(Duration::ZERO))
+            .await;
+
+        assert_eq!(outcome, WebhookDrainOutcome::Drained);
+        assert!(webhook_disposition_exists(&webhook_store, first.key()).await?);
+        assert!(!webhook_disposition_exists(&webhook_store, second.key()).await?);
+        assert!(receiver.has_changed()?);
+        Ok(())
     }
 
     #[tokio::test]
@@ -10230,6 +10484,27 @@ mod tests {
         Ok(())
     }
 
+    /// Only a cancelled drain has earned the growing projection backoff, so an
+    /// attempt deadline reached outside the drain reports the step it
+    /// interrupted rather than a drain failure.
+    #[test]
+    fn a_cancelled_attempt_reports_the_step_the_deadline_interrupted() {
+        let error = RepositoryWatchAttemptError::WebhookAttemptTimedOut;
+
+        assert_eq!(
+            WebhookAttemptPhase::BeforeDrain.cancelled_outcome(error),
+            WebhookAttemptOutcome::FailedBeforeDrain(error)
+        );
+        assert_eq!(
+            WebhookAttemptPhase::Drain.cancelled_outcome(error),
+            WebhookAttemptOutcome::DrainFailed(error)
+        );
+        assert_eq!(
+            WebhookAttemptPhase::AfterDrain.cancelled_outcome(error),
+            WebhookAttemptOutcome::DrainedThenFailed(error)
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires ephemeral PostgreSQL"]
     async fn a_webhook_attempt_deadline_cancels_any_wedged_phase_and_retries()
@@ -10253,9 +10528,16 @@ mod tests {
             .run_webhook_attempt_with_deadline(Duration::from_millis(50))
             .await;
 
+        // The projection wedge is reached by the cutoff and dispatch
+        // reconciliation that now precedes the drain, so the deadline cancels
+        // the attempt while it is still `BeforeDrain`. The phase matters to the
+        // retry accounting rather than to the recovery: a cancellation before
+        // the drain began neither grows nor clears the projection backoff.
         assert_eq!(
             timed_out,
-            WebhookAttemptOutcome::DrainFailed(RepositoryWatchAttemptError::WebhookAttemptTimedOut)
+            WebhookAttemptOutcome::FailedBeforeDrain(
+                RepositoryWatchAttemptError::WebhookAttemptTimedOut
+            )
         );
         assert!(!webhook_disposition_exists(&webhook_store, admission.key()).await?);
         let unlocked: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
@@ -10505,7 +10787,9 @@ mod tests {
             .with_writer(captured.clone())
             .finish();
 
-        inspect_webhook_drain(&repository, &store, Duration::ZERO)
+        let mut progress = WebhookDrainProgress::default();
+        inspect_webhook_drain(&repository, &store, Duration::ZERO, &mut progress).await;
+        inspect_webhook_drain(&repository, &store, Duration::ZERO, &mut progress)
             .with_subscriber(subscriber)
             .await;
 
@@ -10514,6 +10798,28 @@ mod tests {
         assert!(telemetry.contains("cause_code=\"webhook_projection_drain_stalled\""));
         assert!(telemetry.contains(&admission.key().delivery_id().to_string()));
         Ok(())
+    }
+
+    #[test]
+    fn advancing_webhook_head_resets_the_stall_clock() {
+        let first_sequence = NonZeroU64::new(41).expect("fixture sequence is positive");
+        let next_sequence = NonZeroU64::new(42).expect("fixture sequence is positive");
+        let started_at = Instant::now();
+        let mut progress = WebhookDrainProgress::default();
+
+        assert_eq!(progress.observe(first_sequence, started_at), None);
+        assert_eq!(
+            progress.observe(first_sequence, started_at + Duration::from_secs(31)),
+            Some(Duration::from_secs(31))
+        );
+        assert_eq!(
+            progress.observe(next_sequence, started_at + Duration::from_secs(32)),
+            None
+        );
+        assert_eq!(
+            progress.observe(next_sequence, started_at + Duration::from_secs(90)),
+            Some(Duration::from_secs(58))
+        );
     }
 
     #[tokio::test]
@@ -11582,11 +11888,20 @@ mod tests {
 
     #[test]
     fn reconciliation_yields_at_the_audited_quantum() {
+        let quantum = checked_in_example_configuration()
+            .expect("checked-in example parses")
+            .numeric_bounds()
+            .integer("repository_reconciliation_quantum")
+            .flatten()
+            .and_then(|value| usize::try_from(value).ok())
+            .expect("example reconciliation quantum fits usize");
         assert!(!repository_reconciliation_quantum_exhausted(
-            REPOSITORY_RECONCILIATION_QUANTUM - 1
+            quantum - 1,
+            Some(quantum),
         ));
         assert!(repository_reconciliation_quantum_exhausted(
-            REPOSITORY_RECONCILIATION_QUANTUM
+            quantum,
+            Some(quantum),
         ));
     }
 
@@ -11925,6 +12240,47 @@ mod tests {
             Arc::strong_count(&fixture.poller),
             1,
             "a drained poller has no child still holding it"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cancelled_fetch_cleanup_returns_at_its_deadline() {
+        let fixture = poller_fixture(
+            Url::parse("http://provider.invalid/").expect("fixture base forms a URL"),
+        )
+        .expect("poller is constructed");
+        let (started_sender, started_receiver) = oneshot::channel();
+        let (release_sender, release_receiver) = oneshot::channel();
+        {
+            let mut fetches = fixture.poller.fetches.lock().await;
+            fetches.spawn_blocking(move || {
+                started_sender
+                    .send(())
+                    .expect("the fixture awaits the blocking child");
+                release_receiver
+                    .blocking_recv()
+                    .expect("the fixture releases the blocking child");
+                Err(RepositoryWatchAttemptError::Persistence)
+            });
+        }
+        started_receiver
+            .await
+            .expect("the blocking child reports readiness");
+
+        let timed_out = fixture
+            .poller
+            .drain_fetches_within(Duration::from_millis(10))
+            .await;
+
+        assert!(!timed_out);
+        release_sender
+            .send(())
+            .expect("the blocking child still awaits release");
+        assert!(
+            fixture
+                .poller
+                .drain_fetches_within(Duration::from_secs(1))
+                .await
         );
     }
 

@@ -3927,9 +3927,9 @@ private enum SynchronizationFixture {
         "source_session_id":"\(sourceSessionID)",
         "entry_id":"\(entryID)",
         "entry":{
-          "type":"user",
-          "accepted_input_id":"\(acceptedInput)",
-          "turn_id":"\(turnID)"
+          "type":"assistant",
+          "turn_id":"\(turnID)",
+          "model_call_id":"\(modelCall)"
         }
       }
       """
