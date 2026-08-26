@@ -3,8 +3,8 @@
 The bounded browser session descriptor and historical timeline foundation are
 verified against this PR (`agent/web-session-timeline`). The bounded
 lexical-search projection and query boundary are verified against this PR
-(`agent/web-product-surface-search`), which carries the
-`agent/web-search-usage` boundary it extends.
+(`agent/web-product-surface-search`), which carries the `agent/web-search-usage`
+boundary it extends.
 
 Dedicated-compaction usage as the next queued-turn headroom baseline is verified
 against this PR (`agent/daemon-live-compaction-source-headroom`).
