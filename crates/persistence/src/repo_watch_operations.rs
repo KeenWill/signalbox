@@ -125,12 +125,26 @@ impl From<RepoWatchOperationsCorruption> for RepoWatchOperationsError {
 #[derive(Clone, Debug)]
 pub struct PostgresRepoWatchOperations {
     pool: PgPool,
+    automatic_resume_attempt_budget: Option<u32>,
 }
 
 impl PostgresRepoWatchOperations {
+    /// Binds the operator projection to the deployment's automatic-resume
+    /// attempt budget.
+    ///
+    /// The pull-request session reads carry the same attention summaries the
+    /// fleet projection serves, so this must be the budget the daemon's resume
+    /// planner applies (`automatic_resume_attempt_budget`); reading a
+    /// different number makes the projection report a session as needing its
+    /// operator while the daemon still owes it resumes, or the reverse. `None`
+    /// is the configured unbounded budget, under which automatic resumption
+    /// never exhausts.
     #[must_use]
-    pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub const fn new(pool: PgPool, automatic_resume_attempt_budget: Option<u32>) -> Self {
+        Self {
+            pool,
+            automatic_resume_attempt_budget,
+        }
     }
 
     async fn read_transaction(
@@ -358,7 +372,13 @@ impl PostgresRepoWatchOperations {
             .iter()
             .map(|row| row.try_get::<Uuid, _>("session_id"))
             .collect::<Result<Vec<_>, _>>()?;
-        let summaries = load_summaries(&mut transaction, Some(&identities), None).await?;
+        let summaries = load_summaries(
+            &mut transaction,
+            Some(&identities),
+            None,
+            self.automatic_resume_attempt_budget,
+        )
+        .await?;
         let mut summaries = summaries
             .into_iter()
             .map(|summary| (summary.session, summary))

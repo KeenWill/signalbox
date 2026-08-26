@@ -29,7 +29,7 @@ use signalbox_domain::{
     WorkflowName,
 };
 use signalbox_persistence::{
-    MIGRATOR, disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    MIGRATOR, disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     repo_watch::{
         PostgresRepoWatchStore, RepoWatchCommitOutcome, RepoWatchCommitRequest,
@@ -82,6 +82,10 @@ const CHECK_SUITE_ID: u64 = 51;
 const CHECK_RUN_ID: u64 = 52;
 const ISSUE_COMMENT_ID: u64 = 61;
 const REVIEW_COMMENT_ID: u64 = 62;
+/// This operator read turns on the durable pull-request projection, never on
+/// how many automatic resumptions a deployment still owes, so it states the
+/// unbounded automatic-resume budget instead of a number its story never uses.
+const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -89,7 +93,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -113,7 +117,7 @@ async fn postgres_before_content_identity()
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -610,9 +614,10 @@ async fn pull_request_pages_read_the_current_projection_without_decoding_the_cur
         .await?;
     drop(connection);
 
-    let page = PostgresRepoWatchOperations::new(fixture.pool.clone())
-        .pull_requests(fixture.repository.clone(), None)
-        .await?;
+    let page =
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+            .pull_requests(fixture.repository.clone(), None)
+            .await?;
 
     assert_eq!(page.pull_requests.len(), 1);
     assert_eq!(

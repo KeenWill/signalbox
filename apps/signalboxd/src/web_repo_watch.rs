@@ -61,9 +61,18 @@ struct RepoWatchApiState {
     snapshot_reader_budget: Option<Arc<Semaphore>>,
 }
 
+/// Binds the repository-watch projections to the deployment's
+/// automatic-resume attempt budget.
+///
+/// These projections carry the same attention summaries the fleet projection
+/// serves, so they must read the budget the daemon's resume planner applies
+/// (`automatic_resume_attempt_budget`) rather than a different number. `None`
+/// is the configured unbounded budget, under which automatic resumption never
+/// exhausts — never a stand-in for an unread setting.
 pub(crate) fn router(
     pool: Option<PgPool>,
     snapshot_reader_budget: Option<Arc<Semaphore>>,
+    automatic_resume_attempt_budget: Option<u32>,
 ) -> Router {
     Router::new()
         .route("/repository-watch/repositories", get(repository_statuses))
@@ -72,7 +81,9 @@ pub(crate) fn router(
         .route("/repository-watch/sessions", get(pull_request_sessions))
         .route("/repository-watch/activity", get(activity))
         .with_state(RepoWatchApiState {
-            operations: pool.map(PostgresRepoWatchOperations::new),
+            operations: pool.map(|pool| {
+                PostgresRepoWatchOperations::new(pool, automatic_resume_attempt_budget)
+            }),
             snapshot_reader_budget,
         })
 }
@@ -1147,6 +1158,12 @@ mod tests {
         session_cursor, timestamp_from_units, unix_microseconds, validate_activity_window,
     };
 
+    /// This test turns on query rejection ahead of any database read, never on
+    /// how many automatic resumptions a deployment still owes, so it states the
+    /// unbounded automatic-resume budget instead of a number its story never
+    /// uses.
+    const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
+
     #[tokio::test]
     async fn oversized_repository_projection_fails_closed_with_a_bounded_error() {
         let response = bounded_projection_response(vec![b'x'; MAX_JSON_BODY_BYTES]);
@@ -1224,7 +1241,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_typed_query_returns_the_json_api_error_contract() {
-        let response = super::router(None, None)
+        let response = super::router(None, None, UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
             .oneshot(
                 Request::builder()
                     .uri(

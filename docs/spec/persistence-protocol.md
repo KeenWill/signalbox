@@ -6,7 +6,23 @@ and model-call correlation were verified against PR #810
 
 The durable automatic model-call reconciliation state, attempt history, and
 final-state authority were verified against this PR
-(`agent/turn-lifecycle-hardening`).
+(`agent/turn-lifecycle-hardening`). Their generalization to exact model-call or
+tool-attempt operations is verified against this PR
+(`agent/daemon-live-tool-recovery-reconcile`). The server-enforced
+automatic-reconciliation transaction deadline is verified against this PR
+(`agent/daemon-live-server-bounded-reconciliation`). Recursive-frontier prefix
+validation is verified against this PR
+(`agent/daemon-live-frontier-validation-materialization`). Context-compaction
+evidence validation is verified against this PR
+(`agent/daemon-live-context-compaction-validation`). Compaction-leaf selection
+before recursive turn-start validation is verified against this PR
+(`agent/daemon-live-compaction-leaf-validation-scope`). Deferred immutable
+tool-round validation scope is verified against this PR
+(`agent/daemon-live-deferred-round-validation-scope`). Immutable frontier-header
+ancestry before exact prefix-member fallback is verified against this PR
+(`agent/daemon-live-frontier-ancestry-fast-path`). Successor compaction
+validation from its immutable predecessor and bounded current suffix is verified
+against this PR (`agent/daemon-live-current-compaction-validation-scope`).
 
 The program-journal append transaction, reconstitution boundary, lock inventory,
 and migration were verified against this PR (`agent/program-substrate-journal`).
@@ -14,9 +30,9 @@ and migration were verified against this PR (`agent/program-substrate-journal`).
 The immutable blob-derivation family and migration inventory are verified
 against this PR (`agent/web-blob-delivery`).
 
-The restore-safety search-path pin on check-reachable functions, and the
+The restore-safety search-path pin on check-reachable functions, and the lexical
 catalogue test holding it, were verified against this PR
-(`agent/restore-safe-check-functions`).
+(`agent/daemon-live-restore-call-lexing`).
 
 The delegate denial-reason storage — the superseded decision-shape constraint
 and its byte-precise checks — was verified against this PR
@@ -169,8 +185,8 @@ remains at SQLx defaults until an operational slice selects limits.
 ## Migrations
 
 Schema change is a forward-only, versioned SQL file set in
-`crates/persistence/migrations/` — one hundred seven files, `202607180001`
-through `202608250700` — embedded by `sqlx::migrate!` as the static `MIGRATOR`
+`crates/persistence/migrations/` — one hundred twenty-seven files, `202607180001`
+through `202608251000` — embedded by `sqlx::migrate!` as the static `MIGRATOR`
 and applied through one `migrate(pool)` operation. SQLx's `_sqlx_migrations`
 ledger records applied files with checksums (the integration tests read the
 ledger directly); serialization of concurrent migration runs is SQLx dependency
@@ -208,10 +224,13 @@ operation and fails only during restore; `202608200001` retrofits the pin onto
 the check-reachable set the earlier migrations create, and the
 `search_path_postgres` catalogue test (INV-070) derives the reachable set from
 the dependency catalogue — including functions reached only through a
-user-defined operator — and fails on any unpinned member or on empty discovery,
-so a future migration cannot reintroduce the gap. Why: a backup that cannot
-restore is a silent failure that surfaces only during recovery, so restorability
-is part of the schema's contract rather than an operational afterthought.
+user-defined operator — then closes transitively over lexically call-shaped body
+references. Quoted identifiers and comments between a function name and its
+opening parenthesis remain calls; names inside comments or strings and bare
+aliases do not. The test fails on any unpinned member or on empty discovery, so
+a future migration cannot reintroduce the gap. Why: a backup that cannot restore
+is a silent failure that surfaces only during recovery, so restorability is part
+of the schema's contract rather than an operational afterthought.
 
 Prefix reservation across concurrent stacks: the bottom pull request of any
 stack that will add migrations declares a reserved prefix block — a date plus a
@@ -414,8 +433,14 @@ Representation rules, all enforced in the schema:
   equal-content identities) without changing any frontier identity or resolved
   sequence. Deferred completeness checks reject missing prefixes, cycles,
   inherited duplicates, gaps, and a resolved count different from the header.
-  Why: append-derived histories store and load each immutable suffix once while
-  preserving the complete-snapshot contract.
+  High-frequency model-call, continuation, turn-start, and terminal-frontier
+  prefix-preservation checks first walk the checked frontier's immutable header
+  ancestry. Reaching the named prefix proves the common append-derived case
+  without expanding complete memberships; an independently constructed frontier
+  falls back to materializing each compared recursive membership once before
+  matching its ordered members. Why: append-derived histories store and load
+  each immutable suffix once while the fallback preserves the exact
+  complete-snapshot contract.
 - Closed variant sets are `text` discriminators under `CHECK` constraints, with
   variant payload columns constrained present exactly when the discriminator
   requires them (for example `turn_lifecycle_state_payload_shape`). The
@@ -440,6 +465,10 @@ Representation rules, all enforced in the schema:
   final-state assertion only for an exact `reconciled` row binding that terminal
   turn, session, and ambiguous model call; every frontier, attempt, call, and
   outbox proof remains required.
+- Migration `202608210601` renames that ledger to `automatic_reconciliation` and
+  makes its operation identity exactly one of model call or tool attempt. Its
+  final-state authority matches both nullable operation columns exactly; tool
+  reconciliation retains the same five-attempt state and history algebra.
 - Migration `202608080100` closes runner placement history over
   `runner_lost_before_pin`, `pre_pin_replaced`, sourced `runner_lost`, and
   `abandoned` records. Each event retains the complete facts required by its
@@ -681,7 +710,10 @@ Representation rules, all enforced in the schema:
   `imported_session_seed` naming its exact seed frontier, and
   turn/attempt/semantic-entry writes re-assert the complete turn final state
   (origin entry, frontier prefix relationships, live-attempt cardinality,
-  failure-entry correlation). Every invalid-interrupt rejection additionally
+  failure-entry correlation). Tool-round construction and every correlated
+  evidence write queue that immutable round's own complete validator; later
+  turn-state checks validate the mutable lifecycle shape without rescanning
+  historical round frontiers. Every invalid-interrupt rejection additionally
   correlates the active phase its receipt claims: the stopping rejections
   through the prior applied interrupt's stopped attempt, and the parked-approval
   rejection directly against its named turn's recorded `awaiting_tool_approval`
@@ -1001,15 +1033,15 @@ Locks per transaction, in acquisition order:
   capacity-row or cursor-row lock; or take a capacity-row lock while holding a
   cursor-row lock.
 
-- **Automatic model-call reconciliation**: `claim_due` first locks the singleton
+- **Automatic operation reconciliation**: discovery locks the singleton
   discovery-cursor row `FOR UPDATE` and retains it through discovery,
-  normalization, supersession maintenance, and claiming. Discovery may insert
-  recovery rows after that cursor lock. Each discovery lap fixes its highest
-  eligible turn identity before paging, then wraps after reaching that bound, so
-  a turn that becomes eligible behind the cursor is reached on the next lap.
-  Runtime-terminal delegated turns are excluded and superseded.
-  Abandoned-attempt settlement examines and updates at most 64 due
-  recovery/attempt pairs from one materialized page. Supersession maintenance
+  abandoned-attempt normalization, supersession maintenance, and claiming.
+  Discovery may insert recovery rows after that cursor lock. Each discovery lap
+  fixes its highest eligible turn identity before paging, then wraps after
+  reaching that bound, so a turn that becomes eligible behind the cursor is
+  reached on the next lap. Runtime-terminal delegated turns are excluded and
+  superseded. Abandoned-attempt settlement examines and updates one bounded due
+  recovery/attempt pair from one materialized page. Supersession maintenance
   later locks its own singleton cursor row `FOR UPDATE`, then examines and
   updates at most 64 recovery rows from one materialized keyset page. Each
   supersession lap likewise fixes its highest pending recovery identity before
@@ -1021,17 +1053,17 @@ Locks per transaction, in acquisition order:
   reach it. A recovery below the lap's bound is paged on the state it holds when
   that page is read, so a disposition acquired mid-lap is still seen. Exhaustion
   parks at most 64 `scheduled` recoveries that spent the whole attempt budget
-  and whose turn still holds the exact matching `awaiting_model_call_recovery`
-  wait; a recovery whose turn no longer holds that wait is left for supersession
-  rather than parked, because an exhaustion park raises an operator alert that
-  cannot be retracted. Rows over the window are reached by the next scan, since
-  every row this statement selects is also written. `attempting` recoveries are
-  never exhausted directly: settlement returns them to `scheduled` first, which
-  is what closes their attempt-history row. Claiming finally locks at most 64
-  due recovery rows `FOR UPDATE SKIP LOCKED`, increments their durable attempt
-  ordinal, sets the exact backoff deadline, and inserts the attempt rows in the
-  same transaction. The attempt budget and the retry ladder claiming applies are
-  bound from the domain attempt type, not written into the statement. No
+  and whose turn still holds the exact matching recovery wait; a recovery whose
+  turn no longer holds that wait is left for supersession rather than parked,
+  because an exhaustion park raises an operator alert that cannot be retracted.
+  Rows over the window are reached by the next scan, since every row this
+  statement selects is also written. `attempting` recoveries are never exhausted
+  directly: settlement returns them to `scheduled` first, which is what closes
+  their attempt-history row. Claiming finally locks one due recovery row
+  `FOR UPDATE SKIP LOCKED`, increments its durable attempt ordinal, sets the
+  exact backoff deadline, and inserts the attempt rows in the same transaction.
+  The attempt budget and the retry ladder claiming applies are bound from the
+  deployment's configured policy, not written into the statement. No
   reconciliation path may acquire either cursor row while holding a recovery-row
   lock in the reverse of this order. Applying a claim first performs the
   immutable delegated-parent lookup. When the claimed session is a delegated
@@ -1039,9 +1071,16 @@ Locks per transaction, in acquisition order:
   ascending session-identity order; it then takes the child's
   `session_scheduler` row `FOR UPDATE`, reconstitutes the complete scheduling
   projection, and uses the existing reconciliation-required write transaction. A
-  nondelegated claim takes only the scheduler lock. Operator reconciliation uses
-  the same endpoint-before-scheduler prefix, so automatic reconciliation never
-  introduces the reverse child-scheduler-to-parent-session order.
+  nondelegated claim takes only the scheduler lock. Every daemon-owned claim,
+  application, and failure-record transaction installs PostgreSQL's local
+  `lock_timeout` before it reads or writes anything, so the only statement that
+  budget can interrupt is one waiting for a row and never the commit; opening
+  the transaction and installing that budget run beyond client cancellation, and
+  the caller's configured deadline sits above both as the last resort, floored
+  so it cannot expire before the database-side budgets report. Operator
+  reconciliation uses the same endpoint-before-scheduler prefix, so automatic
+  reconciliation never introduces the reverse child-scheduler-to-parent-session
+  order.
 
 - **Tool-loop transactions** (user decision, attempt prepare, attempt
   authorization, preflight failure, result commit, crash classification, result
@@ -1452,16 +1491,17 @@ equal-content frontier and typed outbox record. The reconciliation marker and
 accepted successor carry the exact interrupt proof. The attempt trigger rejects
 every update to an ended attempt.
 
-The periodic daemon also discovers an unstopped model-call wait without an
-interrupt into the automatic reconciliation tables. A claimed attempt records
-its ordinal before the terminal transaction. Under the scheduler lock, the
-adapter reconstitutes the same exact ambiguous call and ended attempt, derives
-fresh frontier and pending-steering reclassification identities, and persists
-the existing `reconciliation_required` lifecycle and outbox shapes. The
-`reconciled` recovery row is the typed authority admitted by the deferred
-final-state assertion when no applied interrupt exists. It asserts nothing about
-the provider's outcome; the terminal call remains `ambiguous`. A lost daemon
-leaves `attempting` durable, which a later claim pass classifies as
+The periodic daemon also discovers an unstopped model-call or tool-attempt wait
+without an interrupt into the automatic reconciliation tables. A claimed attempt
+records its ordinal before the terminal transaction. Under the scheduler lock,
+the adapter reconstitutes the exact ambiguous operation and ended turn attempt,
+derives fresh frontier and pending-steering reclassification identities, and
+persists the existing model-call or proposal-ordered tool
+`reconciliation_required` lifecycle and outbox shapes. The `reconciled` recovery
+row is the typed authority admitted by the deferred final-state assertion when
+no applied interrupt exists. It asserts nothing about the physical outcome; the
+model call or tool attempt remains `ambiguous`. A lost daemon leaves
+`attempting` durable, which a later claim pass classifies as
 `infrastructure_failure` after its deadline before retrying.
 
 ## Corruption taxonomy
@@ -1639,7 +1679,16 @@ unchanged proposal-order and single-result checks admit it as the
 `await_session` result without admitting a second result for the same request.
 Tool-batch outbox decoding and context-compaction evidence count that foreground
 correlation as one tool result; a background result has no tool-result
-correlation and counts as neither one.
+correlation and counts as neither one. Each immutable compaction validates its
+summary's tool balance exactly when it commits. A root compaction replays
+summary structure so imported and independently rooted frontiers retain their
+exact model-visible order. A successor trusts its immutable predecessor's
+validated boundary, excludes the consumed local summary chain, and validates
+only the retained/current suffix through typed source-session and entry keys. A
+later turn first isolates the one immutable compaction leaf, rejects it from
+frontier header counts when it is shorter than the turn's terminal predecessor,
+and performs recursive prefix validation only for that one remaining candidate;
+historical compaction results are never expanded by a turn-start commit.
 
 An accepted background wait reserves one future recipient delivery position
 until its child result exists. Message and later-wait admission under the same

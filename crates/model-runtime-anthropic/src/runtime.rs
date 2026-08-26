@@ -47,6 +47,7 @@ pub struct AnthropicRuntime<A> {
     credentials: A,
     version_header: HeaderValue,
     sse_record_limit: usize,
+    native_message_limit: Option<usize>,
     model_capabilities: ModelCapabilityCatalog,
 }
 
@@ -186,10 +187,9 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
     ///   connect failure provably precede any request byte, which is what
     ///   lets [`UnsentCause::ConnectFailed`] claim proven-unsent.
     ///
-    /// The caller may leave the separate connect timeout unset, but every
-    /// exchange has a positive whole-exchange timeout that covers connection
-    /// establishment, response headers, and buffered or streamed body
-    /// delivery.
+    /// The caller may leave the connect or whole-exchange timeout unset. A
+    /// configured whole-exchange timeout covers connection establishment,
+    /// response headers, and buffered or streamed body delivery.
     pub fn new(
         config: AnthropicConfig,
         credentials: A,
@@ -197,7 +197,10 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
         if config.sse_record_limit == 0 {
             return Err(AnthropicConstructionError::InvalidSseRecordLimit);
         }
-        if config.exchange_timeout.is_zero() {
+        if config
+            .exchange_timeout
+            .is_some_and(|timeout| timeout.is_zero())
+        {
             return Err(AnthropicConstructionError::InvalidExchangeTimeout);
         }
         // Parse and validate the caller's base independently. Appending first
@@ -277,8 +280,10 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             .no_proxy()
             .redirect(Policy::none())
             .retry(reqwest::retry::never())
-            .pool_max_idle_per_host(0)
-            .timeout(config.exchange_timeout);
+            .pool_max_idle_per_host(0);
+        if let Some(timeout) = config.exchange_timeout {
+            builder = builder.timeout(timeout);
+        }
         if let Some(timeout) = config.connect_timeout {
             builder = builder.connect_timeout(timeout);
         }
@@ -295,6 +300,7 @@ impl<A: CredentialAccess> AnthropicRuntime<A> {
             credentials,
             version_header,
             sse_record_limit: config.sse_record_limit,
+            native_message_limit: config.native_message_limit,
             model_capabilities: config.model_capabilities,
         })
     }
@@ -758,7 +764,7 @@ impl<C: Clone + Send + Sync, A: CredentialAccess> ModelRuntime<C> for AnthropicR
         // evidence (error messages, raw bodies, transport detail) is
         // credential-sanitized before it leaves the adapter boundary, using
         // the exact preparation-time value.
-        let evidence = redact_evidence(evidence, &credential);
+        let evidence = redact_evidence(evidence, &credential, self.native_message_limit);
         TerminalReport {
             correlation,
             evidence,

@@ -89,8 +89,8 @@ const COMMAND_KIND_DEFINITIONS: [CommandKindDefinition; 15] = [
         kind: CommandKind::SubmitInput,
         spelling: SUBMIT_INPUT_KIND,
         typed_table: "submit_input_command",
-        minimum_version: 1,
-        maximum_version: 2,
+        minimum_version: 3,
+        maximum_version: 3,
     },
     CommandKindDefinition {
         kind: CommandKind::DecideToolRequest,
