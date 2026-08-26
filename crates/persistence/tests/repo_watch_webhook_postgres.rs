@@ -62,6 +62,9 @@ const MATCHED_IDENTITY: [u8; 32] = [0x31; 32];
 const WEBHOOK_ONLY_IDENTITY: [u8; 32] = [0x32; 32];
 const POLL_ONLY_IDENTITY: [u8; 32] = [0x33; 32];
 const HISTORICAL_IDENTITY: [u8; 32] = [0x35; 32];
+const SHADOW_POLL_IDENTITY: [u8; 32] = [0x36; 32];
+const PROMOTION_IDENTITY: [u8; 32] = [0x37; 32];
+const BACKSTOP_POLL_IDENTITY: [u8; 32] = [0x38; 32];
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -200,11 +203,11 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     sqlx::query(
         "INSERT INTO repo_watch_cursor (
             repository, generation, storage_version, cursor_payload
-         ) VALUES ($1, 1, 2, $2)",
+         ) VALUES ($1, 1, 3, $2)",
     )
     .bind(REPOSITORY)
     .bind(sqlx::types::Json(serde_json::json!({
-        "storage_version": 2,
+        "storage_version": 3,
         "signal_reviewers": [],
         "event_identity_frontier": [],
         "state": {
@@ -243,6 +246,99 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Seeds the shadow interval and the promotion that ends it.
+///
+/// One poll event lands while the repository is still measuring parity, the
+/// webhook-produced event that follows is the durable evidence that this
+/// repository began committing deliveries, and the last poll event is what the
+/// backstop sweep produces afterwards. Each is placed relative to the fixture
+/// delivery's own receipt, so every one of them falls inside the shadow window
+/// the view opens at that receipt.
+async fn seed_promotion_boundary_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO repo_watch_cursor (
+            repository, generation, storage_version, cursor_payload
+         ) VALUES ($1, 1, 3, $2)",
+    )
+    .bind(REPOSITORY)
+    .bind(sqlx::types::Json(serde_json::json!({
+        "storage_version": 3,
+        "signal_reviewers": [],
+        "event_identity_frontier": [],
+        "state": {
+            "pull_requests": [],
+            "workflow_runs": [],
+            "branch_heads": []
+        }
+    })))
+    .execute(&mut *transaction)
+    .await?;
+    insert_produced_event(
+        &mut transaction,
+        Uuid::from_u128(0xA01),
+        1,
+        SHADOW_POLL_IDENTITY,
+        "poll",
+        1,
+    )
+    .await?;
+    insert_produced_event(
+        &mut transaction,
+        Uuid::from_u128(0xA02),
+        2,
+        PROMOTION_IDENTITY,
+        "webhook",
+        2,
+    )
+    .await?;
+    insert_produced_event(
+        &mut transaction,
+        Uuid::from_u128(0xA03),
+        3,
+        BACKSTOP_POLL_IDENTITY,
+        "poll",
+        3,
+    )
+    .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+/// Seeds one event of the named producer, recorded the given number of seconds
+/// after the repository's first webhook receipt.
+async fn insert_produced_event(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    event_id: Uuid,
+    ordinal: i32,
+    identity: [u8; 32],
+    producer: &str,
+    seconds_after_receipt: i32,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "INSERT INTO repo_watch_event (
+            event_id, repository, cursor_generation, event_ordinal,
+            event_version, content_identity_version, content_identity,
+            producer, target_kind, event_kind, conclusion,
+            workflow_branch, workflow_name, recorded_at
+         )
+         SELECT $1, $2, 1, $3, 1, 1, $4, $5, 'branch',
+                'branch_workflow_run_completed', 'success', 'main', 'checks',
+                min(delivery.received_at) + make_interval(secs => $6)
+           FROM repo_watch_webhook_delivery AS delivery
+          WHERE delivery.repository = $2",
+    )
+    .bind(event_id)
+    .bind(REPOSITORY)
+    .bind(ordinal)
+    .bind(identity.as_slice())
+    .bind(producer)
+    .bind(f64::from(seconds_after_receipt))
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 /// Seeds one poll-produced event. Exactly one content-identity version is
 /// storable, so the version the parity view filters on is not a fixture axis.
 /// Seeds one poll event of a family webhooks are not designed to reproduce.
@@ -251,11 +347,11 @@ async fn seed_poll_only_family_event(pool: &PgPool) -> Result<(), Box<dyn Error>
     sqlx::query(
         "INSERT INTO repo_watch_cursor (
             repository, generation, storage_version, cursor_payload
-         ) VALUES ($1, 1, 2, $2)",
+         ) VALUES ($1, 1, 3, $2)",
     )
     .bind(REPOSITORY)
     .bind(sqlx::types::Json(serde_json::json!({
-        "storage_version": 2,
+        "storage_version": 3,
         "signal_reviewers": [],
         "event_identity_frontier": [],
         "state": {
@@ -909,6 +1005,43 @@ async fn an_uncaused_divergence_fails_the_parity_gate() -> Result<(), Box<dyn Er
     .await?;
 
     assert_eq!(unexplained, 1);
+    Ok(())
+}
+
+/// Parity measures the shadow experiment, and promotion ends it.
+///
+/// The complete sweep keeps running under primary mode as the backstop, while a
+/// primary delivery records no event projection for one of its rows to match.
+/// An unbounded poll side would therefore report every later backstop row as an
+/// uncaused `poll_only` divergence and permanently fail the gate the experiment
+/// reports, so rows the repository produced before its own promotion keep their
+/// classification and rows produced after it are out of the measurement.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn promotion_bounds_the_poll_side_of_parity() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = PostgresRepoWatchWebhookStore::new(pool.clone());
+    let key = delivery_key(0x604);
+    admit_fixture(&store, key).await?;
+    store
+        .record_terminal(key, &projected_request(Vec::new())?)
+        .await?;
+    seed_promotion_boundary_events(&pool).await?;
+
+    let measured = sqlx::query_as::<_, (String, Option<String>, Option<Vec<u8>>)>(
+        "SELECT status, cause, content_identity FROM repo_watch_webhook_parity",
+    )
+    .fetch_all(&pool)
+    .await?;
+
+    assert_eq!(
+        measured,
+        vec![(
+            "poll_only".to_owned(),
+            None,
+            Some(SHADOW_POLL_IDENTITY.to_vec())
+        )]
+    );
     Ok(())
 }
 

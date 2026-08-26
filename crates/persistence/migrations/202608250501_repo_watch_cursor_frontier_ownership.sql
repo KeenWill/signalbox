@@ -10,17 +10,30 @@
 -- change after merge and a completed check run's conclusion can change under an
 -- unchanged run identity and completion generation.
 --
--- The live frontier is reset rather than migrated. Decoding a version-two entry
--- as unowned would be version-tolerant decoding, which AGENTS.md forbids under
--- pre-alpha compatibility, and the same one-way hash rules out reconstructing
--- ownership from what version two stored.
+-- Every carried entry keeps its stream identity and its sequence. Replacing the
+-- frontier with an empty one would restart every recurring stream at sequence
+-- one, and the next occurrence on a stream that already produced events would
+-- then mint a content identity a durable row already holds; the commit
+-- coalesces exactly that occurrence, so the event and every dispatch it would
+-- have caused are lost without a trace, once per pre-migration occurrence the
+-- stream repeats under unchanged identified content.
 --
--- The cost is one repeat identification pass. Recurring streams restart at
--- sequence one, so the next occurrence on a stream that already produced events
--- mints a content identity a durable row may already hold. That is the same
--- cost 202608150001_repo_watch_event_content_identity.sql took when it reset
--- the frontier for storage version two, and it is bounded: it is paid once per
--- repository, on the first poll after this migration.
+-- 202608150001_repo_watch_event_content_identity.sql is not a precedent for
+-- paying that cost. It stamped every row that existed then with
+-- content-identity version zero and minted version one alone from then on, and
+-- coalescing searches version one, so nothing its reset could collide with
+-- existed. This migration has no such separation: the version-one rows a reset
+-- would collide with are the ones already stored.
+--
+-- A carried entry names no owning pull request, because version two stored
+-- none and the one-way hash cannot recover one. Writing that member here is
+-- the one-time migration carrying a live database across a shape change, not
+-- the version-tolerant decoding AGENTS.md forbids under pre-alpha
+-- compatibility: the decoder still refuses an entry that omits it. A carried
+-- stream's next occurrence overwrites the member with the pull request that
+-- produced it, so ownership is accurate from the first advance onward and only
+-- a stream that never recurs again keeps null. Nothing reads the member
+-- meanwhile.
 
 DROP TRIGGER repo_watch_cursor_is_append_only ON repo_watch_cursor;
 
@@ -32,7 +45,19 @@ UPDATE repo_watch_cursor
        cursor_payload = jsonb_set(
            jsonb_set(cursor_payload, '{storage_version}', '3'::jsonb, false),
            '{event_identity_frontier}',
-           '[]'::jsonb,
+           (
+               SELECT coalesce(
+                          jsonb_agg(
+                              carried.entry
+                                  || '{"pull_request_number": null}'::jsonb
+                              ORDER BY carried.position
+                          ),
+                          '[]'::jsonb
+                      )
+                 FROM jsonb_array_elements(
+                          cursor_payload -> 'event_identity_frontier'
+                      ) WITH ORDINALITY AS carried(entry, position)
+           ),
            true
        );
 

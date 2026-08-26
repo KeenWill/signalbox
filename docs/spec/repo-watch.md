@@ -50,7 +50,10 @@ verified against PR #896 (`agent/webhook-projection-drain`); the drain attempt
 deadline is verified against this PR
 (`agent/daemon-live-webhook-drain-deadline`). Webhook preemption of slow
 complete reconciliation is verified against PR #926
-(`agent/webhook-projection-preemption-review`). The approval-judge dispatch
+(`agent/webhook-projection-preemption-review`). Primary webhook intake, the
+producer each event row records, the parity view's promotion bound, and the
+frontier entry's ownership member are verified against this PR
+(`agent/webhook-primary-mode`). The approval-judge dispatch
 fence and unattended escalation release described below are verified against
 this PR (`agent/headless-approval-escalation`). The operator-commissioned
 dispatch fence and its unattended-escalation coverage are verified against this
@@ -349,10 +352,20 @@ stored entry came from. The compatibility constraint it places on future change
 is that every version-three entry carries the member, null included, and a
 reader requires it. Decoding a version-two entry as unowned instead would be the
 version-tolerant decoding the pre-alpha compatibility rule forbids, so
-`202608250501` rewrites every durable cursor to version three with an empty
-frontier, exactly as `202608150001` did for version two. The accepted cost is
-one repeat identification pass per repository, paid on the first comparison
-after the migration.
+`202608250501` writes the member onto every stored entry as the one-time
+migration that carries a live database across the shape change. That migration
+keeps each entry's stream identity and its occurrence sequence. Replacing the
+frontier with an empty one would restart every recurring stream at sequence one,
+and the next occurrence on a stream that already produced events would then mint
+a content identity a durable row already holds, which a commit coalesces — so
+that event and every dispatch it would have caused would be lost without a
+trace. `202608150001` is no precedent for taking that cost: it stamped every row
+that existed then with content-identity version zero and minted version one
+alone from then on, and coalescing searches version one, so nothing its own
+reset could collide with existed. A carried entry names no owning pull request,
+since version two stored none and the one-way hash cannot recover one; the
+stream's next occurrence overwrites the member with the pull request that
+produced it, so only a stream that never recurs again keeps null.
 
 No lifecycle releases a stream today, and none may be added without deciding
 which subject provably produces no further occurrence. A merged pull request is
@@ -1469,8 +1482,9 @@ disposition *before* the cursor write, so no disposition row can name the
 generation its own write produces; the generation a delivery reached is carried
 by `repo_watch_event.cursor_generation` on the rows it wrote, which is where a
 reader already looks for it. The `repo_watch_webhook_parity` view joins those
-identities to version-one poll-produced `repo_watch_event` rows since that
-repository's first shadow receipt and reports `matched`, `webhook_only`,
+identities to the version-one poll-produced `repo_watch_event` rows that
+repository recorded between its first shadow receipt and its own promotion — its
+first webhook-produced row — and reports `matched`, `webhook_only`,
 `poll_only`, or `not_directly_mapped`, each divergent row alongside a `cause`
 drawn from one closed vocabulary: `compressed_transition`, `context_drift`,
 `poll_only_family`, and `cross_drain_shadow_gap`. A delivery records the cause
@@ -1604,8 +1618,17 @@ can match, because the next poll starts from the cursor that commit already
 advanced and cannot re-derive the occurrence. The targeted queries a delivery
 issued are still recorded, and those reach the parity view as
 `not_directly_mapped`, which names no divergence. Shadow mode is what parity
-measures, so a repository that has selected primary mode contributes no new
-divergence rows to it.
+measures, and withholding the projection alone does not end the measurement: the
+complete sweep keeps running as the backstop, so a fact whose delivery was
+missed or unmapped still lands as a poll-produced row with no projection to
+match it. The view's poll side is therefore bounded above by the repository's
+own promotion, which is its first webhook-produced row — the durable evidence
+that it began committing deliveries, unforgeable before promotion because the
+producer constraint admitted `poll` alone, and needing no separate mode record
+that a reverted configuration could leave stranded. A repository contributes no
+divergence row recorded at or after its promotion, and the rows its shadow
+interval produced keep their classification and their causes, so the measurement
+that authorized the promotion stays readable afterwards.
 
 The commit reuses the two-step durable handoff a shadow-mode targeted refresh
 already uses: the terminal disposition and exact projections are recorded first,
