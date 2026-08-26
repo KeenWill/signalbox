@@ -606,9 +606,14 @@ async fn pull_request_pages_read_the_current_projection_without_decoding_the_cur
     sqlx::query("SET session_replication_role = replica")
         .execute(&mut *connection)
         .await?;
+    // The payload keeps only its storage version, which no decode accepts as a
+    // cursor. Copying that version from the column rather than naming a literal
+    // keeps the row inside the table's payload/column agreement check, so the
+    // corruption stays undecodable across a storage-version bump instead of
+    // failing the write the next bump lands.
     sqlx::query(
         "UPDATE repo_watch_cursor
-            SET cursor_payload = '{\"storage_version\":2}'::jsonb
+            SET cursor_payload = jsonb_build_object('storage_version', storage_version)
           WHERE repository = $1 AND generation = $2",
     )
     .bind(fixture.repository.as_str())
