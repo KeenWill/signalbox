@@ -75,7 +75,9 @@ complete-poll fetches is verified against this PR
 commissioned-session obligation blocking and blocker replacement are verified
 against this PR (`agent/daemon-convergence-sweep`). Conservative stale
 blocking-review dismissal is verified against this PR
-(`agent/dispatch-autonomy-review-clearance`).
+(`agent/dispatch-autonomy-review-clearance`). The bounded repository-watch
+operator projections are verified against this PR
+(`agent/web-repo-watch-projection`).
 
 ## Configuration and credential boundary
 
@@ -1749,6 +1751,44 @@ projection and the view derives `poll_only_family` on the poll side;
 `compressed_transition` and `context_drift` are admitted by the durable
 vocabulary and are not emitted, so a divergence whose real explanation is either
 one is reported without a cause.
+
+## Operator read projection
+
+**Implemented behavior.** Repository-watch operations are available through a
+typed, read-only application port backed by the existing durable cursor, event,
+evaluation, dispatch, release, obligation, held-slot, webhook, and commissioned
+dispatch records. Each call uses one repeatable-read, read-only transaction.
+Current repository, pull-request, held-work, queued-work, and correlated-session
+pages return at most 64 rows per collection. Event and webhook history return at
+most 100 rows per collection and continue with durable keyset positions rather
+than an offset or fixed terminal limit. A pull request's correlated session
+summaries are loaded as one bounded set in that transaction; constructing the
+page never follows each session separately.
+
+**Implemented behavior.** The projection retains separate typed facts for the
+last observed event, last event that matched an actionable rule, last dispatch
+attempt, and last achieved-and-released automation settlement. It reports held
+slots and outstanding obligations separately, including the held release
+blockers and whether an obligation is ready, occupied by a watch dispatch, held
+by a live independently commissioned session, cooling down, or parked. The
+external hold is its own reported state because that session owns no dispatch
+identity, and readiness is conjoined from the durable outstanding-obligation
+view rather than recomputed, so this read cannot report an obligation ready that
+admission refuses. Repository health includes explicit five-minute and one-hour
+webhook windows, latest and one-hour maximum projection latency, and event-kind
+counts. Activity times come from durable record timestamps; neither session age
+nor activity time is inferred from a UUID.
+
+**Implemented behavior.** Pull-request provider state comes from the normalized
+durable cursor and reports lifecycle, draft state, mergeability, completed-check
+status, current-head review decision, stale-review count, unresolved-thread
+count, and current open-stack relationships. Automation convergence is not a
+synonym for provider mergeability or checks: a current-head seal requires the
+latest dispatch to have been released, the goal generation bound to every
+dispatched action turn to have a terminal achieved event, and the dispatch's
+delivered-state event head to equal the current normalized head. An achieved
+release against an older delivered head is reported as a stale seal; held,
+queued, non-converged, and unattempted states remain distinct.
 
 ## Open edges
 

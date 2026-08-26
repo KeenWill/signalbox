@@ -798,7 +798,6 @@ pub(crate) const fn repo_watch_webhook_disposition_to_str(
 
 /// Paired with the encoder above so a renamed or added disposition cannot
 /// update the writer while leaving a reader interpreting the old spelling.
-#[cfg(feature = "test-support")]
 pub(crate) fn repo_watch_webhook_disposition_from_str(
     value: &str,
 ) -> Option<RepoWatchWebhookDisposition> {
