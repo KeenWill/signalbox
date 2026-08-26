@@ -60,6 +60,7 @@ mod credential_pools;
 mod daemon_tools;
 mod fenced_database;
 mod goal_mode;
+mod imported_source_blobs;
 mod local_socket;
 pub mod model_adapter;
 mod process_runtime;

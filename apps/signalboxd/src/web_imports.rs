@@ -1,6 +1,6 @@
 //! Production browser adapter for bounded imported-conversation discovery.
 
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -22,6 +22,10 @@ use signalbox_domain::{
     ModelSelectionRequest, SessionConfigurationDefaults,
 };
 use signalbox_persistence::{
+    conversation_import::{
+        ImportedConversationRepository, ImportedConversationRepositoryError,
+        ImportedRawBlobStorageError,
+    },
     conversation_import_discovery::{
         ImportedContinuationReference, ImportedConversationDescriptor,
         ImportedConversationDiscoveryError, ImportedConversationDiscoveryRepository,
@@ -47,7 +51,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::{
-    HubModelConfiguration,
+    BlobStoreRegistry, HubModelConfiguration,
+    imported_source_blobs::ImportedSourceBlobStorage,
     web_http::{
         application_error, decode_bounded_json, decode_bounded_utf8, transport_error,
         validate_json_mutation, validate_text_mutation,
@@ -63,12 +68,29 @@ const DEFAULT_IMPORT_WINDOW_RADIUS: u32 = 25;
 struct WebImportState {
     pool: PgPool,
     model_configuration: HubModelConfiguration,
+    imported_conversations: ImportedConversationRepository,
 }
 
-pub(crate) fn router(pool: PgPool, model_configuration: HubModelConfiguration) -> Router {
+pub(crate) fn router(
+    pool: PgPool,
+    model_configuration: HubModelConfiguration,
+    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
+) -> Router {
+    // Continuations reconstitute the imported aggregate from immutable blob
+    // storage, so the browser adapter shares the daemon's publication adapter
+    // rather than reading raw bytes the database no longer holds.
+    let imported_conversations = ImportedConversationRepository::with_blob_storage(
+        pool.clone(),
+        Arc::new(ImportedSourceBlobStorage::new(
+            pool.clone(),
+            blob_store_registry,
+            model_configuration.conversation_import_max_source_bytes(),
+        )),
+    );
     let state = WebImportState {
         pool,
         model_configuration,
+        imported_conversations,
     };
     let mutation = Router::new()
         .route("/{conversation}/continuations", post(continue_import))
@@ -330,9 +352,10 @@ async fn execute_continuation(
     state: &WebImportState,
     request: CanonicalContinuationRequest,
 ) -> Response {
-    let repository = ImportedSessionRepository::new(
+    let repository = ImportedSessionRepository::with_imported_conversations(
         state.pool.clone(),
         state.model_configuration.session_credential_pin(),
+        state.imported_conversations.clone(),
     );
     match repository.load(request.command_id).await {
         Ok(Some(recorded)) => {
@@ -639,7 +662,13 @@ fn imported_session_error(error: ImportedSessionRepositoryError) -> Response {
             "continuation_commit_ambiguous",
             "continuation acknowledgement is ambiguous; retry the exact command",
         ),
-        ImportedSessionRepositoryError::Database(_) => application_error(
+        ImportedSessionRepositoryError::Database(_)
+        | ImportedSessionRepositoryError::ImportedConversation(
+            ImportedConversationRepositoryError::Database(_)
+            | ImportedConversationRepositoryError::BlobStorage(
+                ImportedRawBlobStorageError::Unavailable,
+            ),
+        ) => application_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "continuation_unavailable",
             "imported continuation is temporarily unavailable",
@@ -647,6 +676,7 @@ fn imported_session_error(error: ImportedSessionRepositoryError) -> Response {
         ImportedSessionRepositoryError::DifferentCommandKind { .. } => conflicting_reuse(),
         ImportedSessionRepositoryError::Preparation(_)
         | ImportedSessionRepositoryError::IdentityCollision(_)
+        | ImportedSessionRepositoryError::ImportedConversation(_)
         | ImportedSessionRepositoryError::Corruption(_) => application_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "continuation_corrupt",

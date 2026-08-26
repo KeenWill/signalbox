@@ -89,7 +89,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 
 use crate::{
-    BillingKind, HubModelConfiguration, WebBlobRuntime, WebImageDerivativeKind,
+    BillingKind, BlobStoreRegistry, HubModelConfiguration, WebBlobRuntime, WebImageDerivativeKind,
     blob_read_runtime::{open_recorded_blob_range, open_recorded_blob_verified},
     configuration::ModelCallInputUsage,
     web_blob_runtime::WebBlobRuntimeError,
@@ -281,6 +281,7 @@ impl WebHttpRuntime {
         pool: PgPool,
         blobs: Option<WebBlobRuntime>,
         model_configuration: HubModelConfiguration,
+        blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     ) -> Result<Self, WebHttpRuntimeError> {
         let snapshot_reader_budget = super::process_runtime::shared_snapshot_reader_budget(
             pool.options().get_max_connections(),
@@ -292,6 +293,7 @@ impl WebHttpRuntime {
             pool,
             blobs,
             model_configuration,
+            blob_store_registry,
             snapshot_reader_budget,
         )
         .await
@@ -303,6 +305,7 @@ impl WebHttpRuntime {
         pool: PgPool,
         blobs: Option<WebBlobRuntime>,
         model_configuration: HubModelConfiguration,
+        blob_store_registry: Option<Arc<BlobStoreRegistry>>,
         snapshot_reader_budget: Arc<Semaphore>,
     ) -> Result<Self, WebHttpRuntimeError> {
         Self::bind_production(
@@ -310,6 +313,7 @@ impl WebHttpRuntime {
             pool,
             blobs,
             model_configuration,
+            blob_store_registry,
             Some(snapshot_reader_budget),
         )
         .await
@@ -320,6 +324,7 @@ impl WebHttpRuntime {
         pool: PgPool,
         blobs: Option<WebBlobRuntime>,
         model_configuration: HubModelConfiguration,
+        blob_store_registry: Option<Arc<BlobStoreRegistry>>,
         snapshot_reader_budget: Option<Arc<Semaphore>>,
     ) -> Result<Self, WebHttpRuntimeError> {
         let (follow_shutdown, follow_shutdown_receiver) = watch::channel(false);
@@ -328,6 +333,7 @@ impl WebHttpRuntime {
             Some(pool),
             blobs,
             Some(model_configuration),
+            blob_store_registry,
             snapshot_reader_budget,
             Some(follow_shutdown_receiver),
         );
@@ -401,6 +407,7 @@ pub fn production_router(
     pool: Option<PgPool>,
     blobs: Option<WebBlobRuntime>,
     model_configuration: Option<HubModelConfiguration>,
+    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
 ) -> Router {
     let snapshot_reader_budget = pool.as_ref().and_then(|pool| {
         super::process_runtime::shared_snapshot_reader_budget(
@@ -413,6 +420,7 @@ pub fn production_router(
         pool,
         blobs,
         model_configuration,
+        blob_store_registry,
         snapshot_reader_budget,
         None,
     )
@@ -423,6 +431,7 @@ fn production_router_with_budget(
     pool: Option<PgPool>,
     blobs: Option<WebBlobRuntime>,
     model_configuration: Option<HubModelConfiguration>,
+    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     snapshot_reader_budget: Option<Arc<Semaphore>>,
     shutdown: Option<watch::Receiver<bool>>,
 ) -> Router {
@@ -502,9 +511,10 @@ fn production_router_with_budget(
     // Imported-conversation reads need both a pool and hub model settings; the
     // bootstrap and session surfaces stay routable without either.
     let api = match (pool, model_configuration) {
-        (Some(pool), Some(model_configuration)) => {
-            api.nest("/imports", web_imports::router(pool, model_configuration))
-        }
+        (Some(pool), Some(model_configuration)) => api.nest(
+            "/imports",
+            web_imports::router(pool, model_configuration, blob_store_registry),
+        ),
         _ => api,
     };
     let api = api.fallback(api_not_found);
@@ -3427,6 +3437,7 @@ mod tests {
             pool,
             None,
             models,
+            None,
         )
         .await
         .expect("the production test server binds");
@@ -3490,6 +3501,7 @@ mod tests {
             pool,
             None,
             models,
+            None,
         )
         .await;
         let error = outcome
@@ -3505,7 +3517,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3526,7 +3538,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3736,7 +3748,7 @@ mod tests {
             .header(header::HOST, "127.0.0.1")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(Some(assets.path().to_path_buf()), None, None, None)
+        let response = production_router(Some(assets.path().to_path_buf()), None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3754,7 +3766,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3792,7 +3804,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3810,7 +3822,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3829,7 +3841,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4081,7 +4093,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4102,7 +4114,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4120,7 +4132,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let unsupported = production_router(None, None, None, None)
+        let unsupported = production_router(None, None, None, None, None)
             .oneshot(unsupported)
             .await
             .expect("the production router responds");
@@ -4140,7 +4152,7 @@ mod tests {
                 .header(header::HOST, "localhost")
                 .body(Body::empty())
                 .expect("the request is valid");
-        let partial = production_router(None, None, None, None)
+        let partial = production_router(None, None, None, None, None)
             .oneshot(partial)
             .await
             .expect("the production router responds");
@@ -4160,7 +4172,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let oversized = production_router(None, None, None, None)
+        let oversized = production_router(None, None, None, None, None)
             .oneshot(oversized)
             .await
             .expect("the production router responds");
@@ -4177,7 +4189,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4197,7 +4209,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4217,7 +4229,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4236,7 +4248,7 @@ mod tests {
                 .header(header::HOST, "localhost")
                 .body(Body::empty())
                 .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4462,7 +4474,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4486,7 +4498,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4512,7 +4524,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4538,7 +4550,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4599,7 +4611,7 @@ mod tests {
         .header(header::HOST, host)
         .body(Body::empty())
         .expect("the request is valid");
-        production_router(None, None, None, None)
+        production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds")
@@ -4680,7 +4692,7 @@ mod tests {
             .header(header::HOST, host)
             .body(Body::empty())
             .expect("the request is valid");
-        production_router(None, None, None, None)
+        production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds")

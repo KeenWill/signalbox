@@ -12,6 +12,7 @@ use std::{
     fs,
     num::NonZeroU32,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use rust_decimal::Decimal;
@@ -22,7 +23,7 @@ use signalbox_application::{
 use signalbox_conversation_import_claude_code::ClaudeCodeJsonlConverter;
 use signalbox_conversation_import_codex::CodexRolloutJsonlConverter;
 use signalbox_domain::{
-    ImportedConversation, ImportedConversationFormat, ImportedConversationId,
+    BlobDigest, ImportedConversation, ImportedConversationFormat, ImportedConversationId,
     ImportedConversationReconstitutionFailure, ImportedRawRecordHash, ImportedRawRecordPosition,
     ImportedRawSourceRecord, ImportedRecordEntryPosition, ImportedSourceAttestation,
     ImportedSourceMetadata, ImportedSpeaker, ImportedStructuredObjectMember,
@@ -35,6 +36,7 @@ use signalbox_persistence::{
     conversation_import::{
         ImportedConversationCorruption, ImportedConversationIdentityCollision,
         ImportedConversationRepository, ImportedConversationRepositoryError,
+        corrupt_integration_imported_blob,
     },
     conversation_import_discovery::{
         ImportedConversationDiscoveryRepository, ImportedConversationPageRequest,
@@ -245,6 +247,39 @@ async fn postgres_before_frontier_prefixes()
     Ok((container, pool))
 }
 
+async fn postgres_before_import_blob_migration()
+-> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
+    let container = Postgres::default()
+        .with_db_name(DATABASE_NAME)
+        .with_user(DATABASE_USER)
+        .with_password(DATABASE_PASSWORD)
+        .with_fsync_enabled()
+        .with_tag(POSTGRES_IMAGE_TAG)
+        .with_labels(disposable_test_container_labels())
+        .start()
+        .await?;
+    let host = container.get_host().await?;
+    let port = container.get_host_port_ipv4(5432).await?;
+    let database_url =
+        format!("postgres://{DATABASE_USER}:{DATABASE_PASSWORD}@{host}:{port}/{DATABASE_NAME}");
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect_with(local_test_connection_options(&database_url)?)
+        .await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .take_while(|migration| migration.version < 202608260001)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+    Ok((container, pool))
+}
+
 #[derive(Clone, Copy)]
 /// Named behavior facts returned by the plumbing-only resume fixture.
 ///
@@ -275,22 +310,80 @@ fn imported_seed_facts() -> ImportedSeedFacts {
     }
 }
 
+#[track_caller]
+fn assert_attested_source_result_kind(
+    content: &ImportedTranscriptContent,
+    expected_source_type: &str,
+) {
+    let ImportedTranscriptContent::ToolResult {
+        content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(blocks)),
+        ..
+    } = content
+    else {
+        panic!("fixture expected an attested block-valued tool result");
+    };
+    let [ImportedToolResultBlock::SourceResultBlock { source_type }] = blocks.as_ref() else {
+        panic!("fixture expected exactly one source-result block");
+    };
+    let ImportedSourceAttestation::Attested(source_type) = source_type else {
+        panic!("fixture expected an attested source-result type");
+    };
+    assert_eq!(source_type.as_str(), expected_source_type);
+}
+
 async fn insert_imported_source_scaffolding(
     transaction: &mut Transaction<'_, sqlx::Postgres>,
 ) -> Result<ImportedSeedFacts, sqlx::Error> {
     let facts = imported_seed_facts();
-    sqlx::raw_sql(
+    insert_catalogued_raw_source(transaction, vec![0x11; 32], 1).await?;
+    sqlx::query(
+        "INSERT INTO imported_conversation
+            (imported_conversation_id, storage_version, source_format,
+             converter_version, source_digest, declared_raw_record_count,
+             declared_entry_count, display_title, display_title_state)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 3,
+                 NULL, 'underivable')",
+    )
+    .bind(facts.conversation)
+    .bind(vec![0x22_u8; 32])
+    .execute(&mut **transaction)
+    .await?;
+    insert_imported_source_members(transaction).await?;
+    Ok(facts)
+}
+
+async fn insert_pre_blob_imported_source_scaffolding(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+) -> Result<ImportedSeedFacts, sqlx::Error> {
+    let facts = imported_seed_facts();
+    sqlx::query(
         "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
-         VALUES (decode(repeat('11', 32), 'hex'), decode('01', 'hex'));
-         INSERT INTO imported_conversation
+         VALUES ($1, $2)",
+    )
+    .bind(vec![0x11_u8; 32])
+    .bind(vec![0x01_u8])
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
              declared_entry_count)
-         VALUES
-            ('10000000-0000-4000-8000-000000000039', 1,
-             'claude_code_session_jsonl', 1,
-             decode(repeat('22', 32), 'hex'), 1, 3);
-         INSERT INTO imported_conversation_raw_record
+         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 3)",
+    )
+    .bind(facts.conversation)
+    .bind(vec![0x22_u8; 32])
+    .execute(&mut **transaction)
+    .await?;
+    insert_imported_source_members(transaction).await?;
+    Ok(facts)
+}
+
+async fn insert_imported_source_members(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "INSERT INTO imported_conversation_raw_record
             (imported_conversation_id, raw_record_position, content_hash,
              conversion_digest, normalized_value_encoding,
              declared_entry_count)
@@ -316,7 +409,44 @@ async fn insert_imported_source_scaffolding(
     )
     .execute(&mut **transaction)
     .await?;
-    Ok(facts)
+    Ok(())
+}
+
+async fn insert_catalogued_raw_source(
+    transaction: &mut Transaction<'_, sqlx::Postgres>,
+    content_hash: Vec<u8>,
+    byte_length: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ('integration', '0000696d-706f-7274-6564-5f736f757263')
+         ON CONFLICT DO NOTHING",
+    )
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO blob (digest, byte_length)
+         VALUES ($1, $2)",
+    )
+    .bind(&content_hash)
+    .bind(byte_length)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO blob_replica (digest, store_name, object_key)
+         VALUES ($1, 'integration', 'sha256/fixture/' || encode($1, 'hex'))",
+    )
+    .bind(&content_hash)
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO imported_raw_source_record (content_hash)
+         VALUES ($1)",
+    )
+    .bind(content_hash)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
 }
 
 /// Applies every migration at or after `version` to a pool deliberately held
@@ -333,10 +463,23 @@ async fn apply_migrations_from(pool: &PgPool, version: i64) -> Result<(), Box<dy
         .await?;
     for migration in MIGRATOR
         .iter()
-        .filter(|migration| migration.version >= version)
+        .filter(|migration| migration.version >= version && migration.version < 202608260001)
     {
         connection.apply("_sqlx_migrations", migration).await?;
     }
+    Ok(())
+}
+
+async fn apply_exact_migration(pool: &PgPool, version: i64) -> Result<(), Box<dyn Error>> {
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    let migration = MIGRATOR
+        .iter()
+        .find(|migration| migration.version == version)
+        .ok_or("fixture migration is absent")?;
+    connection.apply("_sqlx_migrations", migration).await?;
     Ok(())
 }
 
@@ -505,7 +648,8 @@ async fn inv015_frontier_prefix_migration_preserves_existing_complete_snapshots(
     let mut transaction = pool.begin().await?;
     // This database stands before the rename migration, so the fixture must
     // write the spelling that its CHECK constraints still admit.
-    let seed = insert_imported_resume_seed_scaffolding_with_creation_cause(
+    let seed = insert_pre_blob_imported_source_scaffolding(&mut transaction).await?;
+    insert_imported_session_scaffolding_with_creation_cause(
         &mut transaction,
         RETIRED_CREATION_CAUSE,
     )
@@ -603,6 +747,398 @@ async fn inv015_frontier_prefix_migration_preserves_existing_complete_snapshots(
             (second_frontier, 2, seed.semantic_prefix[1]),
         ]
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-090: the pre-production import convergence migration resets existing
+/// imported aggregates, removes the byte column, and installs only the final
+/// blob-reference schema.
+#[tokio::test]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv090_one_time_import_migration_installs_only_the_final_schema()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool) = postgres_before_import_blob_migration().await?;
+    let mut transaction = pool.begin().await?;
+    // The synthetic delegated child omits its spawning tool round. Remove only
+    // those provenance FKs before inserting the fixture; they are reinstalled
+    // as NOT VALID after this transaction commits, so the migration still sees
+    // and exercises their real cascade shape.
+    sqlx::raw_sql(
+        "ALTER TABLE session
+             DROP CONSTRAINT session_spawning_request_fk;
+         ALTER TABLE session_delegation
+             DROP CONSTRAINT session_delegation_parent_request_fk;
+         ALTER TABLE tool_request
+             DROP CONSTRAINT tool_request_round_fk;
+         ALTER TABLE session_delegation_event DISABLE TRIGGER USER;
+         ALTER TABLE session_delegation_initial_task DISABLE TRIGGER USER;
+         ALTER TABLE decide_tool_request_command DISABLE TRIGGER USER;
+         ALTER TABLE tool_approval_decision DISABLE TRIGGER USER;
+         DO $$
+         DECLARE
+             foreign_key record;
+         BEGIN
+             FOR foreign_key IN
+                 SELECT conname
+                   FROM pg_constraint
+                  WHERE conrelid = 'session_delegation_event'::regclass
+                    AND contype = 'f'
+                    AND confrelid IN (
+                        'tool_request'::regclass,
+                        'turn_lifecycle'::regclass
+                    )
+             LOOP
+                 EXECUTE format(
+                     'ALTER TABLE session_delegation_event DROP CONSTRAINT %I',
+                     foreign_key.conname
+                 );
+             END LOOP;
+         END;
+         $$;",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    let imported = insert_pre_blob_imported_source_scaffolding(&mut transaction).await?;
+    insert_imported_session_scaffolding(&mut transaction).await?;
+    insert_imported_semantic_prefix(&mut transaction, imported).await?;
+    insert_exact_seed_members(&mut transaction, imported).await?;
+    sqlx::query(
+        "INSERT INTO imported_session_seed
+            (session_id, seed_context_frontier_id)
+         VALUES ($1, $2)",
+    )
+    .bind(imported.session)
+    .bind(imported.seed_frontier)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::raw_sql(
+        "INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ('30000000-0000-4000-8000-000000000065',
+                 'replace_session_metadata', 1, transaction_timestamp());
+         INSERT INTO replace_session_metadata_command
+            (command_id, command_kind, storage_version, session_id,
+             actor_kind, issuer_kind, replacement_archived, result_kind,
+             rejection_kind, result_session_id)
+         VALUES ('30000000-0000-4000-8000-000000000065',
+                 'replace_session_metadata', 1,
+                 '40000000-0000-4000-8000-000000000039',
+                 'user', 'user', false, 'rejected', 'session_not_found',
+                 '40000000-0000-4000-8000-000000000039');
+         INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ('30000000-0000-4000-8000-000000000064',
+                 'create_session', 1, transaction_timestamp());
+         INSERT INTO session
+            (session_id, creation_cause, ancestry_kind)
+         VALUES ('40000000-0000-4000-8000-000000000064',
+                 'user_initiated', 'none');
+         INSERT INTO session_scheduler (session_id)
+         VALUES ('40000000-0000-4000-8000-000000000064');
+         INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES ('40000000-0000-4000-8000-000000000064', 1, 'direct',
+                 '50000000-0000-4000-8000-000000000064', NULL);
+         INSERT INTO session_current_defaults (session_id, current_version)
+         VALUES ('40000000-0000-4000-8000-000000000064', 1);
+         INSERT INTO create_session_command
+            (command_id, command_kind, storage_version, creation_cause,
+             ancestry_kind, initial_defaults_version, model_selection_kind,
+             direct_model_selection_id, model_alias_id, result_kind,
+             created_session_id)
+         VALUES ('30000000-0000-4000-8000-000000000064',
+                 'create_session', 1, 'user_initiated', 'none', 1, 'direct',
+                 '50000000-0000-4000-8000-000000000064', NULL, 'applied',
+                 '40000000-0000-4000-8000-000000000064');",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    // The synthetic delegated child needs only enough provenance for this
+    // migration regression.
+    sqlx::raw_sql(
+        "INSERT INTO session
+            (session_id, creation_cause, ancestry_kind, spawning_tool_request_id)
+         VALUES ('40000000-0000-4000-8000-000000000066',
+                 'delegated', 'none',
+                 '80000000-0000-4000-8000-000000000066');
+         INSERT INTO session_scheduler (session_id)
+         VALUES ('40000000-0000-4000-8000-000000000066');
+         INSERT INTO session_defaults_version
+            (session_id, version, model_selection_kind,
+             direct_model_selection_id, model_alias_id)
+         VALUES ('40000000-0000-4000-8000-000000000066', 1, 'direct',
+                 '50000000-0000-4000-8000-000000000066', NULL);
+         INSERT INTO session_current_defaults (session_id, current_version)
+         VALUES ('40000000-0000-4000-8000-000000000066', 1);
+         INSERT INTO session_placement_event
+            (session_id, version, prior_version, event_kind, placement_path,
+             root_global_read_intent, provenance_command_id, recorded_at)
+         SELECT '40000000-0000-4000-8000-000000000066', 1, NULL,
+                'created', placement_path, root_global_read_intent,
+                provenance_command_id, transaction_timestamp()
+           FROM session_placement_event
+          WHERE session_id = '40000000-0000-4000-8000-000000000039'
+            AND version = 1;
+         INSERT INTO session_current_placement (session_id, current_version)
+         VALUES ('40000000-0000-4000-8000-000000000066', 1);
+         INSERT INTO session_delegation
+            (spawning_tool_request_id, parent_session_id, parent_turn_id,
+             child_session_id, policy_kind)
+         VALUES ('80000000-0000-4000-8000-000000000066',
+                 '40000000-0000-4000-8000-000000000039',
+                 '90000000-0000-4000-8000-000000000066',
+                 '40000000-0000-4000-8000-000000000066', 'background');
+         INSERT INTO session_delegation_event
+            (spawning_tool_request_id, event_ordinal, event_kind,
+             provenance_kind, provenance_session_id, provenance_turn_id,
+             provenance_tool_request_id)
+         VALUES ('80000000-0000-4000-8000-000000000066', 1, 'spawned',
+                 'tool_request',
+                 '40000000-0000-4000-8000-000000000039',
+                 '90000000-0000-4000-8000-000000000066',
+                 '80000000-0000-4000-8000-000000000066');
+         INSERT INTO turn_lifecycle
+            (turn_id, session_id, origin_kind, origin_accepted_input_id,
+             acceptance_position, state_kind)
+         VALUES ('90000000-0000-4000-8000-000000000067',
+                 '40000000-0000-4000-8000-000000000066',
+                 'delegation', NULL, 1, 'queued');
+         INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             delegated_task_spawning_tool_request_id)
+         VALUES ('40000000-0000-4000-8000-000000000066',
+                 '60000000-0000-4000-8000-000000000066',
+                 'delegated_task',
+                 '80000000-0000-4000-8000-000000000066');
+         INSERT INTO session_delegation_initial_task
+            (spawning_tool_request_id, child_session_id, turn_id,
+             semantic_entry_id, admission_position, defaults_version,
+             requested_model_kind, requested_direct_model_selection_id,
+             frozen_model_kind, frozen_direct_model_selection_id, task_content)
+         VALUES ('80000000-0000-4000-8000-000000000066',
+                 '40000000-0000-4000-8000-000000000066',
+                 '90000000-0000-4000-8000-000000000067',
+                 '60000000-0000-4000-8000-000000000066',
+                 1, 1, 'direct',
+                 '50000000-0000-4000-8000-000000000066',
+                 'direct',
+                 '50000000-0000-4000-8000-000000000066',
+                 'delegated migration fixture task');
+         WITH header AS (
+             INSERT INTO delegation_outbox_event
+                (event_kind, storage_version, session_id)
+             VALUES ('delegation_update', 1,
+                     '40000000-0000-4000-8000-000000000039')
+             RETURNING event_sequence, event_kind, storage_version, session_id
+         )
+         INSERT INTO delegation_update_outbox_event
+            (event_sequence, event_kind, storage_version, session_id,
+             update_kind, spawning_tool_request_id, child_session_id,
+             policy_kind, delegation_event_ordinal, delegation_event_kind)
+         SELECT event_sequence, event_kind, storage_version, session_id,
+                'child_spawned',
+                '80000000-0000-4000-8000-000000000066',
+                '40000000-0000-4000-8000-000000000066',
+                'background', 1, 'spawned'
+           FROM header;
+         INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ('30000000-0000-4000-8000-000000000066',
+                 'goal', 1, transaction_timestamp());
+         INSERT INTO goal_command
+            (command_id, command_kind, storage_version, session_id,
+             operation_kind, statement, result_kind, rejection_kind)
+         VALUES ('30000000-0000-4000-8000-000000000066',
+                 'goal', 1,
+                 '40000000-0000-4000-8000-000000000066',
+                 'attach', 'delegated fixture goal',
+                 'rejected', 'session_not_found');
+         INSERT INTO tool_request
+            (request_id, session_id, turn_id, producing_model_call_id,
+             request_ordinal, tool_name, arguments_kind, arguments_text)
+         VALUES ('80000000-0000-4000-8000-000000000068',
+                 '40000000-0000-4000-8000-000000000039',
+                 '90000000-0000-4000-8000-000000000068',
+                 'a0000000-0000-4000-8000-000000000068',
+                 0, 'fixture_tool', 'json', '{}');
+         INSERT INTO durable_command
+            (command_id, command_kind, storage_version, claimed_at)
+         VALUES ('30000000-0000-4000-8000-000000000068',
+                 'decide_tool_request', 1, transaction_timestamp());
+         INSERT INTO decide_tool_request_command
+            (command_id, command_kind, storage_version, request_id,
+             decision_kind, result_kind)
+         VALUES ('30000000-0000-4000-8000-000000000068',
+                 'decide_tool_request', 1,
+                 '80000000-0000-4000-8000-000000000068',
+                 'approve', 'applied');
+         INSERT INTO tool_approval_decision
+            (request_id, decision_kind, decision_source, user_command_id)
+         VALUES ('80000000-0000-4000-8000-000000000068',
+                 'approve', 'user_command',
+                 '30000000-0000-4000-8000-000000000068');",
+    )
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    sqlx::raw_sql(
+        "ALTER TABLE session_delegation_event ENABLE TRIGGER USER;
+         ALTER TABLE session_delegation_initial_task ENABLE TRIGGER USER;
+         ALTER TABLE decide_tool_request_command ENABLE TRIGGER USER;
+         ALTER TABLE tool_approval_decision ENABLE TRIGGER USER;
+         ALTER TABLE tool_request
+             ADD CONSTRAINT tool_request_round_fk
+             FOREIGN KEY (producing_model_call_id, turn_id, session_id)
+             REFERENCES tool_round(producing_model_call_id, turn_id, session_id)
+             ON UPDATE RESTRICT ON DELETE RESTRICT
+             DEFERRABLE INITIALLY DEFERRED NOT VALID;
+         ALTER TABLE tool_request
+             ADD CONSTRAINT tool_request_fixture_session_fk
+             FOREIGN KEY (session_id) REFERENCES session(session_id)
+             ON UPDATE RESTRICT ON DELETE RESTRICT
+             DEFERRABLE INITIALLY DEFERRED NOT VALID;
+         ALTER TABLE session
+             ADD CONSTRAINT session_spawning_request_fk
+             FOREIGN KEY (spawning_tool_request_id)
+             REFERENCES tool_request(request_id)
+             ON UPDATE RESTRICT ON DELETE RESTRICT
+             DEFERRABLE INITIALLY DEFERRED NOT VALID;
+         ALTER TABLE session_delegation
+             ADD CONSTRAINT session_delegation_parent_request_fk
+             FOREIGN KEY (spawning_tool_request_id, parent_turn_id, parent_session_id)
+             REFERENCES tool_request(request_id, turn_id, session_id)
+             ON UPDATE RESTRICT ON DELETE RESTRICT
+             DEFERRABLE INITIALLY DEFERRED NOT VALID;
+         ALTER TABLE session_delegation_event
+             ADD CONSTRAINT session_delegation_event_provenance_tool_request_fk
+             FOREIGN KEY (
+                 provenance_tool_request_id,
+                 provenance_turn_id,
+                 provenance_session_id
+             ) REFERENCES tool_request(request_id, turn_id, session_id)
+             ON UPDATE RESTRICT ON DELETE RESTRICT
+             DEFERRABLE INITIALLY DEFERRED NOT VALID;
+         ALTER TABLE session_delegation_event
+             ADD CONSTRAINT session_delegation_event_provenance_turn_fk
+             FOREIGN KEY (provenance_turn_id, provenance_session_id)
+             REFERENCES turn_lifecycle(turn_id, session_id)
+             ON UPDATE RESTRICT ON DELETE RESTRICT
+             DEFERRABLE INITIALLY DEFERRED NOT VALID;",
+    )
+    .execute(&pool)
+    .await?;
+    let before: (i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM imported_conversation),
+            (SELECT count(*) FROM imported_raw_source_record),
+            (SELECT count(*) FROM session)",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(before, (1, 1, 3));
+
+    apply_exact_migration(&pool, 202608260001).await?;
+    sqlx::raw_sql(
+        "ALTER TABLE tool_request
+             DROP CONSTRAINT tool_request_fixture_session_fk;
+         ALTER TABLE session
+             VALIDATE CONSTRAINT session_spawning_request_fk;
+         ALTER TABLE session_delegation
+             VALIDATE CONSTRAINT session_delegation_parent_request_fk;
+         ALTER TABLE session_delegation_event
+             VALIDATE CONSTRAINT session_delegation_event_provenance_tool_request_fk;
+         ALTER TABLE session_delegation_event
+             VALIDATE CONSTRAINT session_delegation_event_provenance_turn_fk;
+         ALTER TABLE tool_request
+             VALIDATE CONSTRAINT tool_request_round_fk;",
+    )
+    .execute(&pool)
+    .await?;
+
+    let after: (i64, i64, i64, i64, i64, i64, i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM imported_conversation),
+            (SELECT count(*) FROM imported_raw_source_record),
+            (SELECT count(*) FROM session
+              WHERE ancestry_kind = 'imported_conversation'),
+            (SELECT count(*) FROM session
+              WHERE session_id = '40000000-0000-4000-8000-000000000064'),
+            (SELECT count(*) FROM durable_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000064'),
+            (SELECT count(*) FROM replace_session_metadata_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000065'),
+            (SELECT count(*) FROM durable_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000065'),
+            (SELECT count(*) FROM session
+              WHERE session_id = '40000000-0000-4000-8000-000000000066'),
+            (SELECT count(*) FROM goal_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000066'),
+            (SELECT count(*) FROM durable_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000066')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(after, (0, 0, 0, 1, 1, 0, 0, 0, 0, 0));
+    let decision_after: (i64, i64, i64, i64) = sqlx::query_as(
+        "SELECT
+            (SELECT count(*) FROM tool_request
+              WHERE request_id = '80000000-0000-4000-8000-000000000068'),
+            (SELECT count(*) FROM tool_approval_decision
+              WHERE request_id = '80000000-0000-4000-8000-000000000068'),
+            (SELECT count(*) FROM decide_tool_request_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000068'),
+            (SELECT count(*) FROM durable_command
+              WHERE command_id = '30000000-0000-4000-8000-000000000068')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(decision_after, (0, 0, 0, 0));
+    let raw_bytes_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM information_schema.columns
+             WHERE table_schema = 'public'
+               AND table_name = 'imported_raw_source_record'
+               AND column_name = 'raw_bytes')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(!raw_bytes_exists);
+    let blob_reference_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+              FROM pg_constraint
+             WHERE conname = 'imported_raw_source_record_blob_fk')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(blob_reference_exists);
+    let display_title_state_default: Option<String> = sqlx::query_scalar(
+        "SELECT column_default
+           FROM information_schema.columns
+          WHERE table_schema = 'public'
+            AND table_name = 'imported_conversation'
+            AND column_name = 'display_title_state'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(display_title_state_default, None);
+    let pending_insert = sqlx::query(
+        "INSERT INTO imported_conversation
+            (imported_conversation_id, storage_version, source_format,
+             converter_version, source_digest, declared_raw_record_count,
+             declared_entry_count, display_title, display_title_state)
+         VALUES ('10000000-0000-4000-8000-000000000064', 1,
+                 'claude_code_session_jsonl', 1,
+                 decode(repeat('64', 32), 'hex'), 1, 1, NULL, 'pending')",
+    )
+    .execute(&pool)
+    .await;
+    assert!(pending_insert.is_err());
 
     pool.close().await;
     drop(container);
@@ -1047,20 +1583,33 @@ async fn s28_inv039_committed_seed_rejects_late_prefix_inserts() -> Result<(), B
     Ok(())
 }
 
-/// S28 / INV-038: exact reingestion resolves the immutable winner, raw blobs
-/// deduplicate by content hash, and restart loading reconstructs every
-/// addressable imported-conversation frontier.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result<(), Box<dyn Error>>
-{
+struct ImportRoundTripFixture {
+    container: ContainerAsync<Postgres>,
+    pool: PgPool,
+    database_url: String,
+    winner: ImportedConversationId,
+    inserted: ImportConversationOutcome,
+    replayed: ImportConversationOutcome,
+    stored: ImportedConversation,
+}
+
+impl ImportRoundTripFixture {
+    async fn finish(self) {
+        self.pool.close().await;
+        drop(self.container);
+    }
+}
+
+async fn import_round_trip_fixture() -> Result<ImportRoundTripFixture, Box<dyn Error>> {
     let (container, pool, database_url) = migrated_postgres().await?;
+    let source_result_kind = "future-result-kind";
     let source = concat!(
         "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",",
-        "\"content\":[{\"type\":\"future-result-kind\",\"payload\":{\"exact\":1}}]}]}}\r\n",
+        "\"content\":[{\"type\":\"<source-result-kind>\",\"payload\":{\"exact\":1}}]}]}}\r\n",
         "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",",
-        "\"content\":[{\"type\":\"future-result-kind\",\"payload\":{\"exact\":1}}]}]}}"
-    );
+        "\"content\":[{\"type\":\"<source-result-kind>\",\"payload\":{\"exact\":1}}]}]}}"
+    )
+    .replace("<source-result-kind>", source_result_kind);
     let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x100));
     let repository = ImportedConversationRepository::new(pool.clone());
     let mut service = ImportConversationService::new(
@@ -1069,38 +1618,63 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
         repository,
     );
 
-    assert_eq!(
-        service.execute(source.as_bytes()).await?,
-        ImportConversationOutcome::Inserted {
-            conversation: winner
-        }
-    );
-    assert_eq!(
-        service.execute(source.as_bytes()).await?,
-        ImportConversationOutcome::AlreadyImported {
-            conversation: winner
-        }
-    );
+    let inserted = service.execute(source.as_bytes()).await?;
+    let replayed = service.execute(source.as_bytes()).await?;
     let (_, _, repository) = service.into_parts();
     let stored = repository
         .load(winner)
         .await?
         .expect("inserted imported conversation must load");
+
+    Ok(ImportRoundTripFixture {
+        container,
+        pool,
+        database_url,
+        winner,
+        inserted,
+        replayed,
+        stored,
+    })
+}
+
+/// S28 / INV-038: exact reingestion resolves the immutable imported winner.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_exact_reingestion_resolves_the_immutable_winner() -> Result<(), Box<dyn Error>>
+{
+    let fixture = import_round_trip_fixture().await?;
+
+    assert_eq!(
+        fixture.inserted,
+        ImportConversationOutcome::Inserted {
+            conversation: fixture.winner
+        }
+    );
+    assert_eq!(
+        fixture.replayed,
+        ImportConversationOutcome::AlreadyImported {
+            conversation: fixture.winner
+        }
+    );
+
+    fixture.finish().await;
+    Ok(())
+}
+
+/// S28 / INV-038: imported raw bytes deduplicate by content identity while
+/// every ordered occurrence and semantic frontier reconstitutes.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_imported_raw_blobs_deduplicate_and_reconstitute() -> Result<(), Box<dyn Error>>
+{
+    let fixture = import_round_trip_fixture().await?;
+    let source_result_kind = "future-result-kind";
+
+    let stored = &fixture.stored;
     assert_eq!(stored.raw_records().len(), 2);
     assert_eq!(stored.entries().len(), 2);
     assert_eq!(stored.frontiers().count(), 2);
-    assert!(matches!(
-        stored.entries()[0].content(),
-        ImportedTranscriptContent::ToolResult {
-            content: ImportedSourceAttestation::Attested(ImportedToolResultValue::Blocks(blocks)),
-            ..
-        } if matches!(
-            blocks.as_ref(),
-            [ImportedToolResultBlock::SourceResultBlock {
-                source_type: ImportedSourceAttestation::Attested(value)
-            }] if value.as_str() == "future-result-kind"
-        )
-    ));
+    assert_attested_source_result_kind(stored.entries()[0].content(), source_result_kind);
     assert_eq!(
         stored.raw_records()[0].bytes(),
         stored.raw_records()[1].bytes()
@@ -1113,40 +1687,63 @@ async fn s28_inv038_import_round_trip_is_idempotent_and_restart_safe() -> Result
             (SELECT count(*) FROM imported_conversation_raw_record),
             (SELECT count(*) FROM imported_transcript_entry)",
     )
-    .fetch_one(&pool)
+    .fetch_one(&fixture.pool)
     .await?;
     assert_eq!(counts, (1, 1, 2, 2));
+
+    fixture.finish().await;
+    Ok(())
+}
+
+/// INV-038: the final imported raw-record and entry relations remain
+/// append-only after blob convergence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv038_converged_import_relations_remain_append_only() -> Result<(), Box<dyn Error>> {
+    let fixture = import_round_trip_fixture().await?;
+
     assert!(
         sqlx::query(
             "UPDATE imported_raw_source_record
-                SET raw_bytes = raw_bytes",
+                SET content_hash = content_hash",
         )
-        .execute(&pool)
+        .execute(&fixture.pool)
         .await
         .is_err(),
         "raw source records must reject updates"
     );
     assert!(
         sqlx::query("TRUNCATE TABLE imported_transcript_entry")
-            .execute(&pool)
+            .execute(&fixture.pool)
             .await
             .is_err(),
         "imported entries must reject statement-level truncate"
     );
 
-    pool.close().await;
+    fixture.finish().await;
+    Ok(())
+}
+
+/// S28 / INV-038: restart loading reconstructs the exact imported aggregate
+/// from catalogued raw blobs.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s28_inv038_imported_blob_round_trip_survives_pool_restart() -> Result<(), Box<dyn Error>> {
+    let fixture = import_round_trip_fixture().await?;
+
+    fixture.pool.close().await;
     let restarted_pool = PgPoolOptions::new()
         .max_connections(2)
-        .connect_with(local_test_connection_options(&database_url)?)
+        .connect_with(local_test_connection_options(&fixture.database_url)?)
         .await?;
     let restarted = ImportedConversationRepository::new(restarted_pool.clone())
-        .load(winner)
+        .load(fixture.winner)
         .await?
         .expect("durable imported conversation must survive pool restart");
-    assert_eq!(restarted, stored);
+    assert_eq!(restarted, fixture.stored);
 
     restarted_pool.close().await;
-    drop(container);
+    drop(fixture.container);
     Ok(())
 }
 
@@ -1626,7 +2223,7 @@ async fn s28_inv038_reingestion_rejects_converter_projection_drift() -> Result<(
 async fn s28_inv002_inv038_reingestion_does_not_mask_raw_corruption() -> Result<(), Box<dyn Error>>
 {
     let (container, pool, _database_url) = migrated_postgres().await?;
-    let source = br#"{"type":"summary","value":null}"#;
+    let source = br#"{"type":"summary","summary":"corruption-only"}"#;
     let winner = ImportedConversationId::from_uuid(Uuid::from_u128(0x750));
     let repository = ImportedConversationRepository::new(pool.clone());
     let mut service = ImportConversationService::new(
@@ -1641,31 +2238,20 @@ async fn s28_inv002_inv038_reingestion_does_not_mask_raw_corruption() -> Result<
         }
     );
 
-    sqlx::query("ALTER TABLE imported_raw_source_record DISABLE TRIGGER USER")
-        .execute(&pool)
+    let digest: Vec<u8> = sqlx::query_scalar("SELECT content_hash FROM imported_raw_source_record")
+        .fetch_one(&pool)
         .await?;
-    sqlx::query(
-        "UPDATE imported_raw_source_record
-            SET raw_bytes = raw_bytes || $1",
-    )
-    .bind(vec![b' '])
-    .execute(&pool)
-    .await?;
-    sqlx::query("ALTER TABLE imported_raw_source_record ENABLE TRIGGER USER")
-        .execute(&pool)
-        .await?;
+    let digest = BlobDigest::from_bytes(digest.try_into().map_err(|_| "fixture digest size")?);
+    corrupt_integration_imported_blob(digest, Arc::from(b"corrupt".as_slice()))?;
 
     let error = service
         .execute(source)
         .await
         .expect_err("reingestion must expose existing raw corruption");
+    corrupt_integration_imported_blob(digest, Arc::from(source.as_slice()))?;
     assert!(matches!(
         error,
-        ImportConversationError::Store(ImportedConversationRepositoryError::Corruption(
-            ImportedConversationCorruption::Domain(
-                ImportedConversationReconstitutionFailure::RawRecordHashMismatch { .. }
-            )
-        ))
+        ImportConversationError::Store(ImportedConversationRepositoryError::BlobStorage(_))
     ));
 
     pool.close().await;
@@ -1814,21 +2400,15 @@ async fn inv001_late_entry_identity_constraint_is_typed_collision() -> Result<()
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1)",
+             declared_entry_count, display_title, display_title_state)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1,
+                 NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0xa10))
     .bind(vec![0x10_u8; 32])
     .execute(&mut *transaction)
     .await?;
-    sqlx::query(
-        "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
-         VALUES ($1, $2)",
-    )
-    .bind(vec![0x11_u8; 32])
-    .bind(vec![0x12_u8])
-    .execute(&mut *transaction)
-    .await?;
+    insert_catalogued_raw_source(&mut transaction, vec![0x11_u8; 32], 1).await?;
     sqlx::query(
         "INSERT INTO imported_conversation_raw_record
             (imported_conversation_id, raw_record_position, content_hash,
@@ -1888,8 +2468,9 @@ async fn inv038_incomplete_import_header_cannot_commit() -> Result<(), Box<dyn E
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1)",
+             declared_entry_count, display_title, display_title_state)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 1, $2, 1, 1,
+                 NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x400))
     .bind(vec![0_u8; 32])
@@ -1916,14 +2497,7 @@ async fn inv038_incomplete_import_header_cannot_commit() -> Result<(), Box<dyn E
 async fn s28_inv038_unowned_raw_source_record_cannot_commit() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let mut transaction = pool.begin().await?;
-    sqlx::query(
-        "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
-         VALUES ($1, $2)",
-    )
-    .bind(vec![0x41_u8; 32])
-    .bind(vec![0x42_u8])
-    .execute(&mut *transaction)
-    .await?;
+    insert_catalogued_raw_source(&mut transaction, vec![0x41_u8; 32], 1).await?;
 
     assert!(
         transaction.commit().await.is_err(),
@@ -1939,17 +2513,17 @@ async fn s28_inv038_unowned_raw_source_record_cannot_commit() -> Result<(), Box<
     Ok(())
 }
 
-/// INV-038: physical raw records are nonempty at the schema boundary.
+/// INV-038: catalogued raw records are nonempty at the schema boundary.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv038_empty_raw_record_is_schema_rejected() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let error = sqlx::query(
-        "INSERT INTO imported_raw_source_record (content_hash, raw_bytes)
+        "INSERT INTO blob (digest, byte_length)
          VALUES ($1, $2)",
     )
     .bind(vec![0_u8; 32])
-    .bind(Vec::<u8>::new())
+    .bind(0_i64)
     .execute(&pool)
     .await
     .expect_err("empty raw source records must violate the schema");
@@ -1957,7 +2531,7 @@ async fn inv038_empty_raw_record_is_schema_rejected() -> Result<(), Box<dyn Erro
         error
             .as_database_error()
             .and_then(sqlx::error::DatabaseError::constraint),
-        Some("imported_raw_source_record_bytes_nonempty")
+        Some("blob_byte_length_positive_u64")
     );
 
     pool.close().await;
@@ -1976,8 +2550,9 @@ async fn inv002_inv038_unsupported_format_version_pair_is_schema_rejected()
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES ($1, 1, 'claude_code_session_jsonl', 3, $2, 1, 1)",
+             declared_entry_count, display_title, display_title_state)
+         VALUES ($1, 1, 'claude_code_session_jsonl', 3, $2, 1, 1,
+                 NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x4ff))
     .bind(vec![0_u8; 32])
@@ -1994,8 +2569,9 @@ async fn inv002_inv038_unsupported_format_version_pair_is_schema_rejected()
         "INSERT INTO imported_conversation
             (imported_conversation_id, storage_version, source_format,
              converter_version, source_digest, declared_raw_record_count,
-             declared_entry_count)
-         VALUES ($1, 1, 'codex_rollout_jsonl', 2, $2, 1, 1)",
+             declared_entry_count, display_title, display_title_state)
+         VALUES ($1, 1, 'codex_rollout_jsonl', 2, $2, 1, 1,
+                 NULL, 'underivable')",
     )
     .bind(Uuid::from_u128(0x4fe))
     .bind(vec![1_u8; 32])
