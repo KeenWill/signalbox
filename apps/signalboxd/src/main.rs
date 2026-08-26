@@ -2065,6 +2065,7 @@ async fn run_hub(
                     );
                     let _ = listener.cleanup();
                     let _ = runner_listener.cleanup();
+                    drop(blob_executor);
                     disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
                         .await;
                     drop(blob_store_registry);
@@ -2086,6 +2087,7 @@ async fn run_hub(
                     );
                     let _ = listener.cleanup();
                     let _ = runner_listener.cleanup();
+                    drop(blob_executor);
                     disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
                         .await;
                     drop(blob_store_registry);
@@ -2113,6 +2115,7 @@ async fn run_hub(
             );
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
+            drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
@@ -2219,6 +2222,7 @@ async fn run_hub(
                 );
                 let _ = listener.cleanup();
                 let _ = runner_listener.cleanup();
+                drop(blob_executor);
                 disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
                 drop(blob_store_registry);
                 let _ = database.close().await;
@@ -2239,6 +2243,7 @@ async fn run_hub(
             );
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
+            drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
@@ -2250,6 +2255,7 @@ async fn run_hub(
             if let Some(registry) = blob_store_registry.as_ref() {
                 registry.disarm_staging_sweep();
             }
+            drop(blob_executor);
             drop(blob_store_registry);
             let _ = database.close().await;
             return Ok(ShutdownOutcome::GuardLost);
