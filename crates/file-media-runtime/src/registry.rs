@@ -202,7 +202,18 @@ impl FileMediaRegistry {
                 match sanitize_probe(reader, raw)? {
                     SanitizedProbe::NoMatch => {}
                     SanitizedProbe::Candidate(candidate) => {
-                        if candidate.evidence_bytes <= self.ceilings.validation_source_bytes {
+                        // A retained candidate must be re-examinable inside the
+                        // envelope `validate_candidate` will grant, and that envelope
+                        // is the clamped pair rather than the deployment ceiling
+                        // alone. For a reader whose declared validation envelope is
+                        // the smaller of the two, the ceiling by itself would keep
+                        // evidence validation can never cover.
+                        if candidate.evidence_bytes
+                            <= self
+                                .ceilings
+                                .validation_source_bytes
+                                .min(reader.validation().source_bytes())
+                        {
                             candidates.push(candidate);
                         }
                     }
