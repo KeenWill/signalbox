@@ -25,8 +25,10 @@ twice-daily schedule and workflow-self-change trigger were verified through PR
 tool-authority preamble is verified against this PR
 (`agent/phantom-prohibition`). The composition root's pinned-version startup
 probe is verified against this PR (`agent/daemon-live-codex-pin-preflight`). The
-`signalboxd` names this page states for the composition root, its telemetry, and
-the production `FileCredentialAccess` were verified through PR #258
+Codex CLI adapter's preservation of malformed string-carried tool arguments is
+verified against this PR (`agent/daemon-live-codex-malformed-tool-arguments`).
+The `signalboxd` names this page states for the composition root, its telemetry,
+and the production `FileCredentialAccess` were verified through PR #258
 (`agent/signalboxd-rename`); the Anthropic and OpenAI adapter-scoped file
 catalogs are verified against this PR (`agent/credential-pools-parser`). The
 Anthropic adapter's server-side `fallback`-block recognition was verified
@@ -874,14 +876,31 @@ remain definitive completion material for the provider-independent structured
 decoder above to classify. The decoded envelope is checked against the shared
 JSON nesting bound independently of the escaped outer event; envelope decode
 errors are content-silent. The envelope distinguishes completion from refusal.
-Within the envelope each tool call carries its argument object as JSON text
+Within the envelope each tool call carries its provider-supplied argument text
 inside a string: strict structured-output validation refuses any schema object
 that does not supply `additionalProperties: false` and require all its
 properties, so a free-form argument object is not expressible in the output
-schema and the live API rejects one as `invalid_json_schema`. The adapter parses
-the string, requires exactly one JSON object within the provider nesting bound,
-and passes the contained text onward, so tool argument JSON still reaches the
-caller byte-verbatim when it is credential-shape clean. Caller JSON remains raw
+schema and the live API rejects one as `invalid_json_schema`. The adapter
+requires the contained text to stay within the shared JSON nesting bound, which
+the line-level and agent-message-level checks cannot see because string content
+does not nest the outer JSON, and reports over-depth text as boundary loss; it
+judges neither syntax nor shape, so malformed and non-object argument text
+passes onward byte-verbatim when it is credential-shape clean rather than
+becoming boundary loss. Preserved text becomes proposal material the
+provider-independent decoders classify, and those decoders impose no
+argument-size ceiling of their own: a direct runtime caller decodes the
+preserved text at any size this adapter's event limit admits. The 1 MiB
+normalized-argument ceiling [tool-loop](tool-loop.md) states is the
+`RuntimeModelCallProvider` bridge's, applied as it normalizes each runtime
+proposal while classifying a terminal report; this adapter's event limit is the
+looser of the two, so on that path argument text above the ceiling fails its
+model call as unrepresentable tool material before any tool round instead of
+reaching one as `invalid_arguments`. `decode_tool_arguments` returns exactly its
+typed `JsonSyntax` or `SchemaMismatch` failure, and `decode_structured_json`
+returns `JsonSyntax`, `SchemaMismatch`, or — where the caller supplies a domain
+validator — `DomainInvalid`. Neither performs a model call or a repair round,
+and it is the tool loop that projects an ordinary proposal's typed failure as
+its `invalid_arguments` result for the next model round. Caller JSON remains raw
 through serialization, preserving deep admitted values and their numeric
 lexemes. Buffered delivery retains its content without deltas; streamed delivery
 feeds raw bounded CLI reasoning and final-envelope text through the stateful
