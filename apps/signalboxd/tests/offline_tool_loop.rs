@@ -387,7 +387,12 @@ impl ToolLoopFixture {
     ) -> (
         FixtureExecution<Catalog, Executor>,
         Arc<ScriptedModel<ModelCallId>>,
-    ) {
+    )
+    where
+        Catalog: signalbox_application::ToolCatalog + Clone + Send + 'static,
+        Executor: ToolExecutor + Clone + Send + 'static,
+        Executor::Error: Send + 'static,
+    {
         let runtime = Arc::new(ScriptedModel::<ModelCallId>::following(scripts));
         let provider = RuntimeModelCallProvider::new(
             RecordingScriptedModel {
@@ -405,7 +410,12 @@ impl ToolLoopFixture {
                 InProcessAttemptDispatchGate::default(),
                 provider,
             )
-            .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor),
+            .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor)
+            .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+                self.pool.clone(),
+                None,
+                Vec::new(),
+            )),
             runtime,
         )
     }
@@ -448,6 +458,11 @@ impl ToolLoopFixture {
                 provider,
             )
             .with_tool_loop(self.tool_dispatch_gate.clone(), catalog, executor)
+            .with_workspace_instructions(signalboxd::WorkspaceInstructionRuntime::new(
+                self.pool.clone(),
+                None,
+                Vec::new(),
+            ))
             .with_approval_judge(judge, None, configuration),
             runtime,
             judge_runtime,
@@ -2052,10 +2067,11 @@ async fn delegated_park_resumes_into_fresh_judge_composition() -> Result<(), Box
     first_execution
         .execute(Box::new(fixture.activated.clone()))
         .await?;
-    let (scheduled, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
-        .find_sessions()
-        .await?
-        .into_parts();
+    let (scheduled, _dispatch_starts, continuation) =
+        PostgresEligibilitySweep::new(fixture.pool.clone())
+            .find_sessions()
+            .await?
+            .into_parts();
     let resumable = PostgresToolLoopRepository::new(fixture.pool.clone())
         .find_resumable_turn(fixture.session)
         .await?;
@@ -2830,10 +2846,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
         "max_bytes": 131072
     })
     .to_string();
-    let expected_user_content = format!(
-        r#"[{{"type":"text","text":{}}}]"#,
-        serde_json::to_string(FIXTURE_USER_CONTENT)?
-    );
+    let expected_user_content = r#"[{"type":"text","text":"offline tool-loop request"}]"#;
     let expected_tool_use_content = format!(
         "{}\n{arguments}",
         signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME
@@ -3747,10 +3760,11 @@ async fn s02_s10_inv005_inv006_restart_leaves_approval_turn_parked() -> Result<(
     fixture
         .decide(request, ToolApprovalDecision::Approve)
         .await?;
-    let (resumable, continuation) = PostgresEligibilitySweep::new(fixture.pool.clone())
-        .find_sessions()
-        .await?
-        .into_parts();
+    let (resumable, _dispatch_starts, continuation) =
+        PostgresEligibilitySweep::new(fixture.pool.clone())
+            .find_sessions()
+            .await?
+            .into_parts();
     assert!(!continuation);
     assert_eq!(resumable, vec![fixture.session]);
     let (restarted_execution, restarted_runtime) = fixture.execution(

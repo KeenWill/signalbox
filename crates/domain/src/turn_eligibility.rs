@@ -25,10 +25,11 @@ use crate::{
     AcceptedInputQueueOrderError, AcceptedInputQueuePriority, AcceptedInputQueueWork,
     AcceptedInputStartingLineage, AcceptedInputTurnStart, ActiveTurnPhase,
     AppliedInterruptCommandResult, AttemptEnd, CancellationStopDisposition, ChildWait,
-    ContextFrontierId, ContextFrontierProjection, CurrentTurnAttempt, DelegationContent,
-    DelegationWaitMode, DeliveryRequest, DirectModelSelection, EndedTurnAttempt,
-    InitialSemanticTranscriptEntryPayload, ModelCallDisposition, NonEmptyIssuedOperationRefs,
-    OriginConfiguration, ReconstitutedImportedSession, ReconstitutedModelCall,
+    ContextFrontierId, ContextFrontierProjection, ContextFrontierProjectionFailure,
+    CurrentTurnAttempt, DelegationContent, DelegationWaitMode, DeliveryRequest,
+    DirectModelSelection, EndedTurnAttempt, InitialSemanticTranscriptEntryPayload,
+    ModelCallDisposition, NonEmptyIssuedOperationRefs, OriginConfiguration,
+    ReconstitutedImportedSession, ReconstitutedModelCall,
     ResolvedContextFrontierReconstitutionInput, ResolvedContextFrontierSnapshot,
     SemanticTranscriptEntry, SemanticTranscriptEntryId, SemanticTranscriptEntryPayload,
     SemanticTranscriptEntryReconstitutionInput, SemanticTranscriptEntryRef, Session, SessionId,
@@ -121,8 +122,8 @@ pub enum AcceptedInputTurnSchedulingRecordState {
         reconciling_attempt_end: TerminalAttemptEndReconstitutionInput,
         /// The exact ambiguous physical call.
         ambiguous_call: crate::ModelCallId,
-        /// The later or already-applied interrupt that requires reconciliation.
-        interrupt: AppliedInterruptCommandResult,
+        /// The applied interrupt, absent for daemon-owned automatic recovery.
+        interrupt: Option<AppliedInterruptCommandResult>,
         /// The equal-content terminal frontier identifying the turn boundary.
         terminal_frontier: ContextFrontierId,
     },
@@ -548,6 +549,41 @@ enum StoredActiveTurnPhase {
         interrupted_tool_attempt: Option<crate::ToolAttemptId>,
         source_frontier: Option<ContextFrontierId>,
     },
+}
+
+/// Complete independently stored evidence for one delegated model-call
+/// recovery wait. The delegated activation aggregate validates every field
+/// before exposing canonical recovery history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DelegatedModelCallRecoveryReconstitutionInput {
+    phase: ActiveTurnSchedulingReconstitutionInput,
+    pinned_target: crate::PinnedProviderTargetReconstitutionInput,
+    call: crate::ModelCallReconstitutionInput,
+    source_snapshot: ResolvedContextFrontierReconstitutionInput,
+    pending_steering: Vec<PendingSteeringInput>,
+    consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+}
+
+impl DelegatedModelCallRecoveryReconstitutionInput {
+    /// Supplies the stored phase, pinned target, exact ambiguous call, and the
+    /// resolved snapshot named by that call.
+    pub const fn new(
+        phase: ActiveTurnSchedulingReconstitutionInput,
+        pinned_target: crate::PinnedProviderTargetReconstitutionInput,
+        call: crate::ModelCallReconstitutionInput,
+        source_snapshot: ResolvedContextFrontierReconstitutionInput,
+        pending_steering: Vec<PendingSteeringInput>,
+        consumed_steering: Vec<ConsumedSteeringReconstitutionInput>,
+    ) -> Self {
+        Self {
+            phase,
+            pinned_target,
+            call,
+            source_snapshot,
+            pending_steering,
+            consumed_steering,
+        }
+    }
 }
 
 impl ActiveTurnSchedulingReconstitutionInput {
@@ -2416,12 +2452,23 @@ impl AcceptedInputSchedulingProjection {
     /// Returns accepted-input origins retained by the exact base from which
     /// the earliest queued turn would be rendered.
     ///
-    /// This is absent while a turn is active or when no queued turn exists.
-    /// It deliberately excludes the queued turn's own origin; callers can
-    /// append queued origins in [`Self::turns`] order to project each eventual
-    /// rendered frontier without manufacturing semantic entries or frontier
-    /// identities.
-    pub fn earliest_queued_rendered_base_origins(&self) -> Option<Vec<AcceptedInputId>> {
+    /// The base is reported as the model would see it: when it carries a
+    /// context summary, the entries that summary hides are not retained
+    /// origins, exactly as the live-execution path projects its own frontier
+    /// before collecting origins. Counting hidden origins here would sum
+    /// attachments no render ever clones, and a submission whose visible
+    /// frontier fits the byte bound would be durably rejected because a
+    /// summarized-away one did not.
+    ///
+    /// The outer absence means a turn is active or no queued turn exists. The
+    /// inner failure means the base's own summary range is unprojectable, a
+    /// durable corruption the caller must surface rather than read as an empty
+    /// base. It excludes the queued turn's own origin; callers can append
+    /// queued origins in [`Self::turns`] order to project each eventual
+    /// frontier.
+    pub fn earliest_queued_rendered_base_origins(
+        &self,
+    ) -> Option<Result<Vec<AcceptedInputId>, ContextFrontierProjectionFailure>> {
         if self.active_turn().is_some() {
             return None;
         }
@@ -2454,7 +2501,7 @@ impl AcceptedInputSchedulingProjection {
                 .filter(|latest| terminal.is_semantic_prefix_of(latest))
                 .or(Some(terminal))
         };
-        Self::rendered_frontier_origins(base, &self.semantic_entries)
+        Self::projected_rendered_frontier_origins(base, &self.semantic_entries)
     }
 
     /// Returns the rendered base origins for a queued turn rooted directly at
@@ -2480,13 +2527,22 @@ impl AcceptedInputSchedulingProjection {
         snapshot: Option<&ResolvedContextFrontierSnapshot>,
         semantic_entries: &BTreeMap<SemanticTranscriptEntryRef, SemanticTranscriptEntry>,
     ) -> Option<Vec<AcceptedInputId>> {
+        Self::projected_rendered_frontier_origins(snapshot, semantic_entries)?.ok()
+    }
+
+    fn projected_rendered_frontier_origins(
+        snapshot: Option<&ResolvedContextFrontierSnapshot>,
+        semantic_entries: &BTreeMap<SemanticTranscriptEntryRef, SemanticTranscriptEntry>,
+    ) -> Option<Result<Vec<AcceptedInputId>, ContextFrontierProjectionFailure>> {
         let complete_entries = snapshot
             .into_iter()
             .flat_map(ResolvedContextFrontierSnapshot::ordered_entries)
             .map(|reference| semantic_entries.get(&reference).cloned())
             .collect::<Option<Vec<_>>>()?;
-        let projection =
-            ContextFrontierProjection::from_complete_entries(&complete_entries).ok()?;
+        let projection = match ContextFrontierProjection::from_complete_entries(&complete_entries) {
+            Ok(projection) => projection,
+            Err(failure) => return Some(Err(failure)),
+        };
         let entries_by_reference = complete_entries
             .iter()
             .map(|entry| (entry.reference(), entry))
@@ -2518,7 +2574,7 @@ impl AcceptedInputSchedulingProjection {
                 origins.push(accepted_input);
             }
         }
-        Some(origins)
+        Some(Ok(origins))
     }
 
     /// Borrows one complete resolved snapshot from this checked projection.
@@ -2556,6 +2612,29 @@ impl AcceptedInputSchedulingProjection {
             recovery.attempt,
             recovery.source_snapshot,
             interrupt,
+            identities,
+        )
+    }
+
+    /// Closes the active model-call recovery wait under a daemon-owned durable
+    /// attempt while preserving its exact ambiguity set.
+    pub fn apply_automatic_model_call_reconciliation(
+        self,
+        attempt: std::num::NonZeroU32,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredModelCallTurn, crate::ModelCallClosureError> {
+        let active_turn = self
+            .active_turn_execution()
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        let recovery = self
+            .active_model_call_recovery
+            .ok_or(crate::ModelCallClosureError::AttemptStateMismatch)?;
+        crate::model_execution::apply_automatic_model_call_reconciliation(
+            active_turn.into(),
+            recovery.call,
+            recovery.attempt,
+            recovery.source_snapshot,
+            attempt,
             identities,
         )
     }
@@ -3267,6 +3346,26 @@ impl ActivatedTurn {
         }
     }
 
+    /// Applies one daemon-owned reconciliation attempt to a checked
+    /// origin-agnostic model-call recovery wait.
+    pub fn apply_automatic_model_call_reconciliation(
+        self,
+        call: crate::EndedModelCall,
+        attempt: EndedTurnAttempt,
+        source_snapshot: ResolvedContextFrontierSnapshot,
+        recovery_attempt: std::num::NonZeroU32,
+        identities: crate::AmbiguousModelCallTurnIdentities,
+    ) -> Result<crate::ReconciliationRequiredModelCallTurn, crate::ModelCallClosureError> {
+        crate::model_execution::apply_automatic_model_call_reconciliation(
+            self,
+            call,
+            attempt,
+            source_snapshot,
+            recovery_attempt,
+            identities,
+        )
+    }
+
     /// Cancels this turn while it is parked on exact runner-loss evidence.
     pub fn apply_interrupt_to_runner_recovery(
         self,
@@ -3594,6 +3693,103 @@ impl PreparedDelegatedTurnActivation {
         }
         self.turn.phase = phase.canonical_evidence_free_phase()?;
         Some((self.turn, self.starting_entries, self.starting_snapshot))
+    }
+
+    /// Reconstitutes a delegated ambiguous model-call wait from its complete
+    /// stored evidence. The returned call, attempt, and snapshots are checked
+    /// against the delegated origin and its pinned configuration.
+    pub fn with_reconstituted_model_call_recovery(
+        mut self,
+        input: DelegatedModelCallRecoveryReconstitutionInput,
+    ) -> Option<(
+        ActivatedTurn,
+        crate::EndedModelCall,
+        EndedTurnAttempt,
+        ResolvedContextFrontierSnapshot,
+        ResolvedContextFrontierSnapshot,
+    )> {
+        let ActiveTurnSchedulingReconstitutionInput {
+            owning_turn,
+            current_attempt: Some(current_attempt),
+            state:
+                StoredActiveTurnPhase::AwaitingModelCallRecovery {
+                    call: recovery_call,
+                    attempt_end,
+                },
+            executing_tool_batch: None,
+        } = input.phase
+        else {
+            return None;
+        };
+        if owning_turn != self.turn.turn
+            || input.call.id() != recovery_call
+            || input.call.turn() != owning_turn
+            || input.call.attempt() != current_attempt
+            || input.call.selection() != *self.turn.configuration.effective().model()
+            || input.call.state()
+                != crate::ModelCallReconstitutionState::Terminal(ModelCallDisposition::Ambiguous)
+        {
+            return None;
+        }
+        let pinned = input.pinned_target.reconstitute_for_turn(owning_turn)?;
+        let source_snapshot = input.source_snapshot.reconstitute()?;
+        if !self
+            .starting_snapshot
+            .is_semantic_prefix_of(&source_snapshot)
+        {
+            return None;
+        }
+        let crate::ReconstitutedModelCall::Ended(call) =
+            input.call.reconstitute(&source_snapshot, pinned).ok()?
+        else {
+            return None;
+        };
+        let running_attempt = CurrentTurnAttempt::prepared(current_attempt)
+            .begin_running()
+            .ok()?;
+        let attempt = match attempt_end.end() {
+            AttemptEnd::WithoutStop {
+                disposition:
+                    disposition @ (UnstoppedAttemptDisposition::Ambiguous
+                    | UnstoppedAttemptDisposition::Lost),
+            } => running_attempt.end_without_stop(*disposition).ok()?,
+            AttemptEnd::AfterCancellation {
+                cause,
+                disposition:
+                    disposition @ (CancellationStopDisposition::Ambiguous
+                    | CancellationStopDisposition::Lost),
+            } => {
+                let interrupt = attempt_end.interrupt()?;
+                if interrupt.session() != self.turn.session
+                    || interrupt.proof() != *cause
+                    || cause.predecessor() != owning_turn
+                {
+                    return None;
+                }
+                running_attempt
+                    .request_cancellation(*cause)
+                    .and_then(|attempt| attempt.end_after_cancellation(*cause, *disposition))
+                    .ok()?
+            }
+            _ => return None,
+        };
+        self.turn.phase = ActiveTurnPhase::AwaitingRecoveryDecision {
+            ambiguous_operations: NonEmptyIssuedOperationRefs::singleton(
+                crate::IssuedOperationRef::ModelCall(recovery_call),
+            ),
+            applied_interrupt: attempt_end.interrupt().map(|interrupt| interrupt.proof()),
+        };
+        self.turn = self
+            .turn
+            .with_pending_steering(input.pending_steering)?
+            .with_consumed_steering(input.consumed_steering)?;
+        Some((
+            self.turn.into(),
+            call,
+            attempt,
+            source_snapshot,
+            self.starting_snapshot,
+        ))
     }
 }
 
@@ -6648,21 +6844,24 @@ fn reconstitute_inner(
                         cause,
                         disposition:
                             CancellationStopDisposition::Ambiguous | CancellationStopDisposition::Lost,
-                    } => {
+                    } => interrupt.is_some_and(|interrupt| {
                         *cause == interrupt.proof()
-                            && reconciling_attempt_end.interrupt() == Some(*interrupt)
-                    }
+                            && reconciling_attempt_end.interrupt() == Some(interrupt)
+                    }),
                     _ => false,
                 };
-                let successor = records_by_turn.get(&interrupt.successor());
-                if interrupt.session() != session
-                    || interrupt.proof().predecessor() != turn
-                    || !attempt_end_matches
-                    || successor.is_none_or(|successor| {
-                        successor.stored_session != session
-                            || successor.accepted_input.id() != interrupt.accepted_input()
-                            || successor.order != interrupt.successor_order()
-                    })
+                let interrupt_matches = interrupt.is_none_or(|interrupt| {
+                    let successor = records_by_turn.get(&interrupt.successor());
+                    interrupt.session() == session
+                        && interrupt.proof().predecessor() == turn
+                        && successor.is_some_and(|successor| {
+                            successor.stored_session == session
+                                && successor.accepted_input.id() == interrupt.accepted_input()
+                                && successor.order == interrupt.successor_order()
+                        })
+                });
+                if !attempt_end_matches
+                    || !interrupt_matches
                     || attempt_owners.insert(*reconciling_attempt, turn).is_some()
                 {
                     return Err(
@@ -7394,8 +7593,8 @@ fn terminal_record_interrupt(
         AcceptedInputTurnSchedulingRecordState::TerminalReconciliationRequired {
             interrupt,
             ..
-        }
-        | AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
+        } => *interrupt,
+        AcceptedInputTurnSchedulingRecordState::TerminalToolReconciliationRequired {
             interrupt,
             ..
         } => Some(*interrupt),
@@ -12516,7 +12715,7 @@ mod tests {
                     interrupt,
                 ),
                 ambiguous_call: continuation_call,
-                interrupt,
+                interrupt: Some(interrupt),
                 terminal_frontier: terminal_frontier.id(),
             },
         );

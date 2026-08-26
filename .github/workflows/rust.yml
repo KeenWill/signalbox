@@ -20,17 +20,31 @@ permissions:
 
 env:
   RUSTFLAGS: "-D warnings"
+  # CI never reuses incremental artifacts across runs; they are pure write
+  # amplification on the self-hosted runners' scratch NVMe (measured 2026-08-22).
+  CARGO_INCREMENTAL: "0"
+  # Line tables keep backtraces and coverage useful at a fraction of the
+  # debuginfo bytes written per build.
+  CARGO_PROFILE_DEV_DEBUG: "line-tables-only"
+  CARGO_PROFILE_TEST_DEBUG: "line-tables-only"
 
 jobs:
   # Keep the required `validate` and `postgres-integration` checks present on
-  # every pull-request head. Their aggregate jobs below accept skipped heavy
-  # work only when this job proves every changed path is Markdown or under
-  # `docs/`; pushes to main always run the complete workflow.
+  # every pull-request head. Their aggregate jobs below accept skipped Rust
+  # work only when this job proves no changed path can reach the Rust build:
+  # every path is either non-binding Markdown/`docs/` prose or browser-client
+  # source under `clients/web/` (the generated contract under
+  # `clients/web/src/generated/` is Rust output and keeps the full bar, as
+  # does `clients/web`'s own workflow file). Pushes to main always run the
+  # complete workflow. `clients/web/**` changes are gated by `web.yml`, which
+  # triggers on exactly that path set.
   rust-change-scope:
     name: Rust change scope
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.paths.outputs.docs_only }}
+      web_only: ${{ steps.paths.outputs.web_only }}
+      skip_rust: ${{ steps.paths.outputs.skip_rust }}
     steps:
       - name: Check out repository history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -45,8 +59,12 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           docs_only=false
+          web_only=false
+          skip_rust=false
           if [ "$EVENT_NAME" = pull_request ]; then
-            docs_only=true
+            docs=0
+            web=0
+            rust=0
             changed_paths="$RUNNER_TEMP/rust-changed-files"
             git diff --no-renames --name-only -z \
               "$BASE_SHA...$HEAD_SHA" > "$changed_paths"
@@ -57,19 +75,35 @@ jobs:
                 AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
                   | docs/domain-spine.md | docs/invariants.md \
                   | docs/scenarios.md | docs/style.md)
-                  docs_only=false
-                  break
+                  rust=$((rust + 1))
                   ;;
                 docs/* | *.md)
+                  docs=$((docs + 1))
+                  ;;
+                # Generated browser-contract output is produced from Rust and
+                # checked against it by the workspace tests.
+                clients/web/src/generated/*)
+                  rust=$((rust + 1))
+                  ;;
+                clients/web/*)
+                  web=$((web + 1))
                   ;;
                 *)
-                  docs_only=false
-                  break
+                  rust=$((rust + 1))
                   ;;
               esac
             done < "$changed_paths"
+            if [ "$rust" -eq 0 ]; then
+              skip_rust=true
+              [ "$web" -eq 0 ] && docs_only=true
+              [ "$docs" -eq 0 ] && web_only=true
+            fi
+            echo "changed paths: docs=$docs web=$web rust-reaching=$rust" \
+              "-> skip_rust=$skip_rust"
           fi
           echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+          echo "web_only=$web_only" >> "$GITHUB_OUTPUT"
+          echo "skip_rust=$skip_rust" >> "$GITHUB_OUTPUT"
 
   contract-checks:
     runs-on: ubuntu-latest
@@ -157,6 +191,8 @@ jobs:
         run: python3 scripts/test_check_docs_consistency.py
       - name: Test the PostgreSQL suite manifest reader
         run: python3 scripts/test_postgres_integration_suites.py
+      - name: Test the convergence reconciler
+        run: python3 tooling/convergence-reconciler/test_reconcile.py
       - name: Test the built-executable resolver
         run: python3 tooling/test_resolve_cargo_bin.py
       - name: Test the lifecycle watchdog
@@ -195,7 +231,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            b06959f36036e230c03336ab06eaae6003a9e295e26390d88145694120b97781
+            af2d01a4beb4b7d7db060ab43dd89087b5032ed5c4e323296c2ad23e4a22f448
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -210,7 +246,7 @@ jobs:
           }
   rust-checks:
     needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: signalbox
     # The self-hosted pool starts with cold caches; give the workspace check
     # headroom until they warm.
@@ -221,10 +257,56 @@ jobs:
         with:
           fetch-depth: 1
           persist-credentials: false
+      - name: Use the node-local cargo target cache
+        # Self-hosted runners expose a persistent per-node cache directory
+        # through /home/runner/_work/_ci-cache, provisioned by the runner pod
+        # template outside this repository. Each run gets its own target dir,
+        # cloned copy-on-write (reflink, same XFS filesystem) from the last
+        # published run with the same lockfile/toolchain key, so concurrent
+        # runs never share a cargo lock and nothing one run writes leaks into
+        # another. GitHub-hosted runners have no such directory and keep the
+        # default. Run dirs older than a day are pruned across every key and
+        # job, except the directory a key's "latest" seed points at.
+        id: nodecache
+        shell: bash
+        run: |
+          cache=/home/runner/_work/_ci-cache
+          if [ -d "$cache/target" ]; then
+            # Prune expired run dirs under every key/job, keeping current seeds.
+            find "$cache/target" -mindepth 4 -maxdepth 4 -type d -path '*/runs/*' -mtime +0 -print0 2>/dev/null \
+              | while IFS= read -r -d '' dir; do
+                  base="$(dirname "$(dirname "$dir")")"
+                  seed="$(readlink -f "$base/latest" 2>/dev/null || true)"
+                  [ "$dir" = "$seed" ] || rm -rf "$dir"
+                done
+            find "$cache/target" -mindepth 1 -maxdepth 3 -type d -empty -delete 2>/dev/null || true
+            key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
+            job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
+            base="$cache/target/$key/$job"
+            mkdir -p "$base/runs"
+            target="$base/runs/${{ github.run_id }}-${{ github.run_attempt }}"
+            rm -rf "$target"
+            if [ -d "$base/latest" ] && cp --reflink=always --no-preserve=timestamps -a "$base/latest/." "$target" 2>/dev/null; then
+              echo "seeded $target from the last published run (reflink)"
+            else
+              rm -rf "$target"; mkdir -p "$target"
+              echo "no seed available; fresh target dir $target"
+            fi
+            touch "$target"
+            echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+            echo "NODECACHE_BASE=$base" >> "$GITHUB_ENV"
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "no node-local cache directory; using the default target dir"
+          fi
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # With the node-local target dir active, uploading/extracting target
+          # archives through the GitHub cache is pure write amplification.
+          cache-targets: ${{ steps.nodecache.outputs.active != 'true' }}
           shared-key: rust
           save-if: false
       - name: Check workspace
@@ -238,6 +320,19 @@ jobs:
   # repository contracts, checker tests, formatting, and Rust compilation run
   # concurrently. This aggregate keeps the required `validate` check bound to
   # every command it covered before the split.
+      - name: Publish this run's target dir as the cache seed
+        # Seeds come only from pushes and same-repository pull requests, never
+        # from forks; a unique temporary link keeps concurrent publishers from
+        # racing each other before the atomic rename.
+        if: >-
+          success() && steps.nodecache.outputs.active == 'true'
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository)
+        shell: bash
+        run: |
+          tmp="$NODECACHE_BASE/latest.tmp.${{ github.run_id }}-${{ github.run_attempt }}"
+          ln -sfn "$CARGO_TARGET_DIR" "$tmp" && mv -T "$tmp" "$NODECACHE_BASE/latest"
+          echo "cache seed -> $CARGO_TARGET_DIR"
   validate-checks:
     if: ${{ always() }}
     needs:
@@ -250,11 +345,11 @@ jobs:
           CONTRACT_RESULT: ${{ needs.contract-checks.result }}
           CHECKER_RESULT: ${{ needs.checker-and-format-tests.result }}
           RUST_RESULT: ${{ needs.rust-checks.result }}
-          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
+          SKIP_RUST: ${{ needs.rust-change-scope.outputs.skip_rust }}
         run: |
           test "$CONTRACT_RESULT" = success
           test "$CHECKER_RESULT" = success
-          if [ "$DOCS_ONLY" = true ]; then
+          if [ "$SKIP_RUST" = true ]; then
             test "$RUST_RESULT" = skipped
           else
             test "$RUST_RESULT" = success
@@ -266,7 +361,7 @@ jobs:
   # share a target directory, so this job carries its own rust-cache entry.
   workspace-tests:
     needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -275,19 +370,55 @@ jobs:
         with:
           persist-credentials: false
       - name: Install Bubblewrap
-        run: sudo apt-get install --yes bubblewrap
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
       - name: Enable unprivileged user namespaces for Bubblewrap
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Delegate the file-media task controller
+        run: |
+          sudo mkdir /sys/fs/cgroup/signalbox-file-media-ci
+          sudo sh -c 'echo +pids +memory > /sys/fs/cgroup/cgroup.subtree_control'
+          sudo mkdir /sys/fs/cgroup/signalbox-file-media-ci/runner
+          sudo sh -c 'echo +pids +memory > /sys/fs/cgroup/signalbox-file-media-ci/cgroup.subtree_control'
+          sudo chown -R "$USER" /sys/fs/cgroup/signalbox-file-media-ci
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # This job's shared cache contains a stale nested target path
+          # (`target/tests/target`) that rust-cache traverses after restore and
+          # reports as ENOENT. Keep registry/git dependency caching, but build
+          # test artifacts in the fresh hosted-runner target directory.
+          cache-targets: false
           shared-key: rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run tests
         env:
           SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"
-        run: cargo test --no-fail-fast --workspace --all-targets --all-features
+          SIGNALBOX_FILE_MEDIA_CGROUP_ROOT: /sys/fs/cgroup/signalbox-file-media-ci
+        # Process-heavy integration targets can exhaust the hosted runner's
+        # file-descriptor limit under libtest's unrestricted CPU-sized pool.
+        # Four concurrent tests matches the explicit cap used by the
+        # PostgreSQL jobs and retains parallel execution without false EMFILE
+        # failures.
+        run: |
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          runner_home="$HOME"
+          runner_path="$PATH"
+          test_command='status=0
+            cargo test --no-fail-fast --workspace --all-targets --all-features \
+              -- --test-threads=4 || status=$?
+            cargo test --no-fail-fast -p signalbox-file-media-processor-runtime \
+              --features test-worker --test isolation -- --ignored || status=$?
+            exit "$status"'
+          sudo --preserve-env=CI,PATH,CARGO_HOME,RUSTUP_HOME,RUSTFLAGS,CARGO_INCREMENTAL,CARGO_PROFILE_DEV_DEBUG,CARGO_PROFILE_TEST_DEBUG,SIGNALBOX_RUN_BWRAP_INTEGRATION,SIGNALBOX_FILE_MEDIA_CGROUP_ROOT \
+            sh -c '
+              echo $$ > "$SIGNALBOX_FILE_MEDIA_CGROUP_ROOT/runner/cgroup.procs"
+              exec setpriv --reuid="$1" --regid="$2" --init-groups \
+                env HOME="$3" PATH="$5" sh -c "$4"
+            ' sh "$runner_uid" "$runner_gid" "$runner_home" "$test_command" "$runner_path"
       - name: Test generated browser contract runtime
         run: node --test crates/web-contract/tests/generated_roundtrip.mjs
       # `--all-targets` excludes doctests, so the domain's compile_fail
@@ -310,10 +441,10 @@ jobs:
         env:
           CHECKS_RESULT: ${{ needs.validate-checks.result }}
           TESTS_RESULT: ${{ needs.workspace-tests.result }}
-          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
+          SKIP_RUST: ${{ needs.rust-change-scope.outputs.skip_rust }}
         run: |
           test "$CHECKS_RESULT" = success
-          if [ "$DOCS_ONLY" = true ]; then
+          if [ "$SKIP_RUST" = true ]; then
             test "$TESTS_RESULT" = skipped
           else
             test "$TESTS_RESULT" = success
@@ -325,7 +456,7 @@ jobs:
     name: Domain instruction counts (report only)
     continue-on-error: true
     needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: signalbox
     timeout-minutes: 20
     steps:
@@ -336,10 +467,46 @@ jobs:
           persist-credentials: false
       # The pinned Signalbox runner image includes Valgrind, so this public-repo
       # job needs neither root access nor an unpinned package installation.
+      - name: Use the node-local cargo target cache
+        # Self-hosted runners expose a persistent per-node cache directory
+        # through /home/runner/_work/_ci-cache, provisioned by the runner pod
+        # template outside this repository. Each run gets its own target dir,
+        # cloned copy-on-write (reflink, same XFS filesystem) from the last
+        # successful run with the same lockfile/toolchain key, so concurrent
+        # runs never share a cargo lock and nothing one run writes leaks into
+        # another. GitHub-hosted runners have no such directory and keep the
+        # default. Run dirs untouched for a day are pruned at job start.
+        id: nodecache
+        shell: bash
+        run: |
+          cache=/home/runner/_work/_ci-cache
+          if [ -d "$cache/target" ]; then
+            key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
+            job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
+            base="$cache/target/$key/$job"
+            mkdir -p "$base/runs"
+            find "$base/runs" -mindepth 1 -maxdepth 1 -type d -mtime +0 -exec rm -rf {} + 2>/dev/null || true
+            target="$base/runs/${{ github.run_id }}-${{ github.run_attempt }}"
+            if [ -d "$base/latest" ] && cp --reflink=always -a "$base/latest/." "$target" 2>/dev/null; then
+              echo "seeded $target from the last successful run (reflink)"
+            else
+              rm -rf "$target"; mkdir -p "$target"
+              echo "no seed available; fresh target dir $target"
+            fi
+            echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+            echo "NODECACHE_BASE=$base" >> "$GITHUB_ENV"
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "no node-local cache directory; using the default target dir"
+          fi
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # With the node-local target dir active, uploading/extracting target
+          # archives through the GitHub cache is pure write amplification.
+          cache-targets: ${{ steps.nodecache.outputs.active != 'true' }}
           shared-key: rust
           save-if: false
       - name: Install Gungraun runner
@@ -376,12 +543,25 @@ jobs:
   # directories, and the linked search paths, which is everything the run job
   # needs; it deliberately does not carry the source tree, so the run job
   # checks the sources out and passes `--workspace-remap`.
+      - name: Publish this run's target dir as the cache seed
+        # Seeds come only from pushes and same-repository pull requests, never
+        # from forks; a unique temporary link keeps concurrent publishers from
+        # racing each other before the atomic rename.
+        if: >-
+          success() && steps.nodecache.outputs.active == 'true'
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository)
+        shell: bash
+        run: |
+          tmp="$NODECACHE_BASE/latest.tmp.${{ github.run_id }}-${{ github.run_attempt }}"
+          ln -sfn "$CARGO_TARGET_DIR" "$tmp" && mv -T "$tmp" "$NODECACHE_BASE/latest"
+          echo "cache seed -> $CARGO_TARGET_DIR"
   postgres-integration-build:
     name: postgres-integration (build)
     needs: rust-change-scope
-    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    if: needs.rust-change-scope.outputs.skip_rust != 'true'
     runs-on: signalbox-docker
-    # Generous by design: this job now absorbs all five suites' compilation,
+    # Generous by design: this job now absorbs all six suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
     timeout-minutes: 35
@@ -402,14 +582,50 @@ jobs:
           printf 'matrix=%s\n' \
             "$(python3 scripts/postgres_integration_suites.py --matrix)" \
             >> "$GITHUB_OUTPUT"
+      - name: Use the node-local cargo target cache
+        # Self-hosted runners expose a persistent per-node cache directory
+        # through /home/runner/_work/_ci-cache, provisioned by the runner pod
+        # template outside this repository. Each run gets its own target dir,
+        # cloned copy-on-write (reflink, same XFS filesystem) from the last
+        # successful run with the same lockfile/toolchain key, so concurrent
+        # runs never share a cargo lock and nothing one run writes leaks into
+        # another. GitHub-hosted runners have no such directory and keep the
+        # default. Run dirs untouched for a day are pruned at job start.
+        id: nodecache
+        shell: bash
+        run: |
+          cache=/home/runner/_work/_ci-cache
+          if [ -d "$cache/target" ]; then
+            key="${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}"
+            job="${{ github.job }}${{ strategy.job-index != '' && format('-{0}', strategy.job-index) || '' }}"
+            base="$cache/target/$key/$job"
+            mkdir -p "$base/runs"
+            find "$base/runs" -mindepth 1 -maxdepth 1 -type d -mtime +0 -exec rm -rf {} + 2>/dev/null || true
+            target="$base/runs/${{ github.run_id }}-${{ github.run_attempt }}"
+            if [ -d "$base/latest" ] && cp --reflink=always -a "$base/latest/." "$target" 2>/dev/null; then
+              echo "seeded $target from the last successful run (reflink)"
+            else
+              rm -rf "$target"; mkdir -p "$target"
+              echo "no seed available; fresh target dir $target"
+            fi
+            echo "CARGO_TARGET_DIR=$target" >> "$GITHUB_ENV"
+            echo "NODECACHE_BASE=$base" >> "$GITHUB_ENV"
+            echo "active=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "active=false" >> "$GITHUB_OUTPUT"
+            echo "no node-local cache directory; using the default target dir"
+          fi
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          # With the node-local target dir active, uploading/extracting target
+          # archives through the GitHub cache is pure write amplification.
+          cache-targets: ${{ steps.nodecache.outputs.active != 'true' }}
           shared-key: rust
           save-if: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -476,24 +692,43 @@ jobs:
           path: ${{ runner.temp }}/terminal-client.tar.zst
           if-no-files-found: error
           retention-days: 1
+      - name: Upload the approval-judge-eval archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-integration-archive-approval-judge-eval
+          path: ${{ runner.temp }}/approval-judge-eval.tar.zst
+          if-no-files-found: error
+          retention-days: 1
 
   # The dedicated Docker fleet gives each shard an isolated DinD daemon. The
   # build and run jobs share the same runner image and absolute work-path shape,
   # which keeps paths embedded in nextest archives valid across their pods.
   # Each test starts its own pinned PostgreSQL container through testcontainers,
-  # so four test processes can run without sharing database state.
+  # so concurrent test processes never share database state.
   #
   # The matrix is generated from `.github/postgres-integration-suites.toml`:
   # one runner per shard, so a suite declaring one shard costs one runner and
   # still travels the same archive-and-partition path a sharded suite does.
-  # Persistence, runner, and signalboxd are sharded according to their measured
-  # test-execution cost. Program-runtime and terminal-client remain whole
-  # because each finishes in about a minute.
+  # Persistence is sharded according to its measured test-execution cost; every
+  # other suite runs whole because it fits well inside the job timeout.
   #
-  # Runner cost, stated plainly: this asks for more runners than the matrix it
-  # replaces. The run matrix currently expands to twelve shards after the one
-  # shared build. The shards compile nothing and run for minutes; the build's
-  # single cache key replaces the old per-suite keys that evicted one another.
+  # The run matrix currently expands to eight shards after the one shared
+  # build.
+  # The shards compile nothing and run for minutes; the build's single cache
+  # key replaces the old per-suite keys that evicted one another.
+      - name: Publish this run's target dir as the cache seed
+        # Seeds come only from pushes and same-repository pull requests, never
+        # from forks; a unique temporary link keeps concurrent publishers from
+        # racing each other before the atomic rename.
+        if: >-
+          success() && steps.nodecache.outputs.active == 'true'
+          && (github.event_name != 'pull_request'
+              || github.event.pull_request.head.repo.full_name == github.repository)
+        shell: bash
+        run: |
+          tmp="$NODECACHE_BASE/latest.tmp.${{ github.run_id }}-${{ github.run_attempt }}"
+          ln -sfn "$CARGO_TARGET_DIR" "$tmp" && mv -T "$tmp" "$NODECACHE_BASE/latest"
+          echo "cache seed -> $CARGO_TARGET_DIR"
   postgres-integration-run:
     name: >-
       postgres-integration
@@ -504,18 +739,15 @@ jobs:
     # workspace: their permission and atomicity contracts require local /tmp.
     env:
       TMPDIR: /tmp
-    # Measured against the shards rather than guessed. The former three
-    # persistence partitions were balanced but had grown to roughly 8m15s each;
-    # runner took about eight minutes whole, and signalboxd about five. The
-    # manifest splits those suites more finely without changing test selection.
+    # Measured against the shards rather than guessed. With database state in
+    # memory and sixteen tests per shard, the recombined shards run about two
+    # to nine minutes clean.
     #
-    # Ten minutes did not leave room for the slow path. A shard whose tests
-    # actually fail runs about two minutes longer than a clean one (9.68m
-    # observed against a 7.4m median), so the cap sat within noise of exactly
-    # the runs whose results matter most — and a job the cap kills is reported
-    # as `cancelled`, which reads as an infrastructure problem and hides the
-    # test failure underneath it. Fifteen minutes is about twice the median,
-    # leaves the p90 at half the cap, and still bounds a genuinely hung job.
+    # A shard whose tests actually fail runs about two minutes longer than a
+    # clean one, and a job the cap kills is reported as `cancelled`, which
+    # reads as an infrastructure problem and hides the test failure underneath
+    # it. Fifteen minutes leaves the longest clean shard two-thirds of the cap
+    # and still bounds a genuinely hung job.
     timeout-minutes: 15
     strategy:
       fail-fast: false
@@ -530,7 +762,7 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        uses: taiki-e/install-action@b6ff580856c41316412a0b9b60540fbc6f8c82cc # v2.86.7
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive
@@ -542,7 +774,10 @@ jobs:
       # `--run-ignored only` is `-- --ignored`, `--no-fail-fast` is unchanged,
       # and the archive fixes the package and feature selection at build time.
       # nextest runs each test in its own process rather than on a shared
-      # thread pool; eight concurrent tests is the cap. One per-test retry
+      # thread pool; sixteen concurrent tests is the cap. Each test can consume
+      # a 512 MiB PostgreSQL tmpfs, so the cap permits 8 GiB of tmpfs per job
+      # before PostgreSQL process memory; re-check the externally provisioned
+      # signalbox-docker pod memory limit before raising it. One per-test retry
       # absorbs a transient container-start failure without rerunning a whole
       # shard, while a repeat failure still fails the gate.
       - name: Run the ${{ matrix.suite }} partition
@@ -551,6 +786,10 @@ jobs:
           PARTITION: ${{ matrix.partition }}
           PARTITIONS: ${{ matrix.partitions }}
           FILTER: ${{ matrix.filter }}
+          # nextest runs each ignored integration test in its own libtest
+          # process. Keep deeply composed scheduler fixtures from exhausting
+          # the platform's smaller default test-thread stack.
+          RUST_MIN_STACK: "8388608"
         run: >-
           cargo nextest run
           --archive-file "$RUNNER_TEMP/archive/$SUITE.tar.zst"
@@ -559,7 +798,7 @@ jobs:
           --run-ignored only
           --no-fail-fast
           --retries 1
-          --test-threads 8
+          --test-threads 16
           -E "$FILTER"
 
   # Preserve the existing required-check name while the suites build once and
@@ -576,9 +815,9 @@ jobs:
         env:
           BUILD_RESULT: ${{ needs.postgres-integration-build.result }}
           RUN_RESULT: ${{ needs.postgres-integration-run.result }}
-          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
+          SKIP_RUST: ${{ needs.rust-change-scope.outputs.skip_rust }}
         run: |
-          if [ "$DOCS_ONLY" = true ]; then
+          if [ "$SKIP_RUST" = true ]; then
             test "$BUILD_RESULT" = skipped
             test "$RUN_RESULT" = skipped
           else

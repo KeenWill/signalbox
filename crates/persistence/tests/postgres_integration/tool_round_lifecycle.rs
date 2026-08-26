@@ -1333,6 +1333,14 @@ async fn s07_s10_inv012_inv028_parked_approval_interrupt_records_typed_rejection
         ),
         "the confirmed tool round must be parked before the interrupt"
     );
+    assert_eq!(
+        signalbox_persistence::turn_liveness::PostgresTurnLivenessRepository::new(pool.clone())
+            .slot_held_active_turns(None)
+            .await?
+            .candidates(),
+        [],
+        "the slot-held watchdog never treats an approval wait as daemon-owned work"
+    );
 
     let interrupt = input_with_delivery(
         seed + 23,
@@ -1472,6 +1480,7 @@ async fn s07_s10_inv012_inv028_parked_approval_rejection_requires_a_recorded_app
         .fail_prepared_call(
             terminal.session,
             terminal.call,
+            None,
             FailedModelCallTurnIdentities::new(
                 SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(terminal_seed + 14)),
                 ContextFrontierId::from_uuid(Uuid::from_u128(terminal_seed + 15)),
@@ -1819,7 +1828,7 @@ async fn swept_sessions(pool: &PgPool) -> Result<Vec<SessionId>, Box<dyn Error>>
     let mut sweep = PostgresEligibilitySweep::new(pool.clone());
     let mut sessions = Vec::new();
     loop {
-        let (page, continuation) = sweep.find_sessions().await?.into_parts();
+        let (page, _dispatch_starts, continuation) = sweep.find_sessions().await?.into_parts();
         sessions.extend(page);
         if !continuation {
             break;
