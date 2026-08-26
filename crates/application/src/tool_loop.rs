@@ -836,6 +836,10 @@ pub enum ToolExecutionServiceOutcome {
     ContinuationTargetUnavailable(Box<FailedModelCallTurn>),
     /// Continuation credential-pool exhaustion closed the turn atomically.
     ContinuationPoolExhausted(Box<signalbox_domain::CredentialPoolExhaustedModelCallTurn>),
+    /// Reported usage closed the turn before an oversized continuation.
+    ContinuationContextCompactionRequired(
+        Box<signalbox_domain::ContextHeadroomExhaustedModelCallTurn>,
+    ),
 }
 
 const fn is_fatal_executor_failure_class(failure: OperatorFailureClass) -> bool {
@@ -2005,6 +2009,17 @@ where
                     return Ok(ToolExecutionServiceOutcome::ContinuationPoolExhausted(
                         exhausted,
                     ));
+                }
+                Ok(PrepareToolContinuationOutcome::ContextCompactionRequired(required)) => {
+                    report_tool_turn_terminalization(
+                        required.failed(),
+                        "continuation_context_compaction_required",
+                    );
+                    return Ok(
+                        ToolExecutionServiceOutcome::ContinuationContextCompactionRequired(
+                            required,
+                        ),
+                    );
                 }
                 Err(error) => return Err(ToolExecutionServiceError::Continuation(error)),
             }

@@ -71,12 +71,12 @@ pub struct ConversationListQuery {
 
 impl ConversationListQuery {
     /// Constructs the ordinary first page of the default unified view.
-    pub fn default_page() -> Self {
+    pub fn default_page(page_size: u64) -> Self {
         Self {
             title_contains: None,
             origin: ConversationOriginFilter::All,
             include_archived: false,
-            page_size: 50,
+            page_size,
             after: None,
         }
     }
@@ -89,6 +89,28 @@ impl ConversationListQuery {
         page_size: u64,
         after: Option<ConversationListCursor>,
     ) -> Result<Self, ConversationListQueryError> {
+        Self::try_new_with_page_limits(
+            title_contains,
+            origin,
+            include_archived,
+            page_size,
+            after,
+            None,
+            None,
+        )
+    }
+
+    /// Validates the exact title filter and deployment page-size policies.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_page_limits(
+        title_contains: Option<String>,
+        origin: ConversationOriginFilter,
+        include_archived: bool,
+        page_size: u64,
+        after: Option<ConversationListCursor>,
+        min_page_size: Option<u64>,
+        max_page_size: Option<u64>,
+    ) -> Result<Self, ConversationListQueryError> {
         if let Some(query) = title_contains.as_deref() {
             if query.is_empty() {
                 return Err(ConversationListQueryError::EmptyTitleSearch);
@@ -100,7 +122,9 @@ impl ConversationListQuery {
                 return Err(ConversationListQueryError::TitleSearchExceedsUtf8Bytes);
             }
         }
-        if !(1..=100).contains(&page_size) {
+        if min_page_size.is_some_and(|minimum| page_size < minimum)
+            || max_page_size.is_some_and(|maximum| page_size > maximum)
+        {
             return Err(ConversationListQueryError::PageSizeOutOfRange);
         }
         Ok(Self {
@@ -330,11 +354,27 @@ mod tests {
     #[test]
     fn query_rejects_page_sizes_outside_the_inclusive_bound() {
         assert_eq!(
-            ConversationListQuery::try_new(None, ConversationOriginFilter::All, false, 0, None),
+            ConversationListQuery::try_new_with_page_limits(
+                None,
+                ConversationOriginFilter::All,
+                false,
+                1,
+                None,
+                Some(2),
+                Some(7),
+            ),
             Err(ConversationListQueryError::PageSizeOutOfRange)
         );
         assert_eq!(
-            ConversationListQuery::try_new(None, ConversationOriginFilter::All, false, 101, None),
+            ConversationListQuery::try_new_with_page_limits(
+                None,
+                ConversationOriginFilter::All,
+                false,
+                8,
+                None,
+                Some(2),
+                Some(7),
+            ),
             Err(ConversationListQueryError::PageSizeOutOfRange)
         );
     }
@@ -360,12 +400,12 @@ mod tests {
 
     #[test]
     fn default_page_selects_the_unfiltered_non_archived_unified_view() {
-        let query = ConversationListQuery::default_page();
+        let query = ConversationListQuery::default_page(5);
 
         assert_eq!(query.title_contains(), None);
         assert_eq!(query.origin(), ConversationOriginFilter::All);
         assert!(!query.include_archived());
-        assert_eq!(query.page_size(), 50);
+        assert_eq!(query.page_size(), 5);
         assert_eq!(query.after(), None);
     }
 
@@ -458,7 +498,7 @@ mod tests {
             response: Ok(()),
             observed: std::sync::Mutex::new(Vec::new()),
         });
-        let query = ConversationListQuery::default_page();
+        let query = ConversationListQuery::default_page(5);
 
         service
             .execute(query.clone())
@@ -482,7 +522,7 @@ mod tests {
         });
 
         let error = service
-            .execute(ConversationListQuery::default_page())
+            .execute(ConversationListQuery::default_page(5))
             .await
             .expect_err("fake lister fails");
 

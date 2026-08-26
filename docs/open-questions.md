@@ -185,24 +185,12 @@ per-turn provenance. The following extensions remain undecided:
   replace the conservative ambiguous outcome with trustworthy evidence,
   including its polling posture and evidence classes, remains undecided. Later
   scope. (S02)
-- **Operator control of scheduling and liveness cadence.** The scheduler's sweep
-  interval, per-session scan gating, fairness between contending sessions, and
-  the turn-liveness staleness bound and scan interval are all compiled constants
-  today
-  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)), and
-  almost none of them has anywhere to validate a supplied value. Only the
-  turn-liveness staleness bound has a lowering constructor that enforces its
-  compiled ceiling; the sweep interval's constructor refuses a zero or
-  unrepresentable duration and no more, so it fixes no maximum; and the scan
-  interval, per-session scan gating, and fairness expose no constructor at all.
-  The enforcement points for a configuration surface would therefore have to be
-  built rather than merely called. Undecided with them: whether signalboxd
-  should carry such settings at all; whether they arrive as one operational
-  surface or one constant at a time; and, for each, whether its compiled value
-  is a ceiling that may only be lowered or an ordinary default that may move
-  either way — settled so far only for the staleness bound. Leaning: one
-  surface, introduced when a deployment needs a value the compiled one cannot
-  serve, rather than pre-emptively. Later scope. (S01, S02)
+- **Per-session scheduler scan gating and fairness.** Deployment configuration
+  now owns the scheduler sweep and turn-liveness cadences
+  ([turn-lifecycle-and-scheduling](spec/turn-lifecycle-and-scheduling.md)). What
+  remains undecided is whether one session may tune its own scan gate and how
+  contending sessions share a deployment-wide pass budget. Later scope. (S01,
+  S02)
 - **Terminalizing a turn that holds pending steering.** Every steering row bound
   to a turn must be closed before that turn terminalizes, and the interrupt and
   model-call terminal paths satisfy that by reclassifying the steering into a
@@ -234,48 +222,6 @@ per-turn provenance. The following extensions remain undecided:
   direct reconciliation only for fatal mismatch at a closed aggregate boundary;
   whether an interrupt-only path may bypass `StopRequested` remains undecided.
   Later scope. (S07)
-
-### Automatic context compaction
-
-This is a blocking condition rather than an open design question. Automatic
-context compaction ships with a known defect on its primary path, accepted on
-the grounds that the code sits unused until something depends on it. That ground
-disappears the moment anything relies on it, so the condition is recorded here
-rather than only in the review thread that raised it.
-
-**The defect.** The compaction request wraps accumulated plain-text history in
-JSON with provenance metadata and reserves the same `max_output_tokens` as the
-ordinary call, and is never counted against `context_window_tokens`. It can
-therefore be *larger* than the input that already overflowed the window. The
-provider may reject the summary call for context overflow; that call is then
-terminalized, and the per-turn automatic marker prevents a second attempt.
-
-**The consequence.** A session that crosses its context window has its queued
-turn stalled with its single automatic attempt consumed and no path forward
-inside the running daemon — which is the exact situation automatic compaction
-exists to rescue. Nothing durable is corrupted, no summary boundary is written
-wrong, and no transcript entries are lost: the failed call is recorded as
-legitimate terminal non-Completed evidence. The session is stalled, not damaged.
-
-**The trigger is the common case, not an edge of it.** Compaction is invoked
-precisely when history is large. History large enough that wrapping it in JSON
-with metadata overflows the window is the middle of that condition rather than
-its boundary.
-
-**The condition.** Automatic context compaction must not be relied on until the
-summary call is guaranteed to fit. Anything built on top of it, and any workflow
-that assumes a long-running session will rescue itself, is blocked on that fix
-rather than merely improved by it. Explicit compaction is unaffected by this
-particular defect.
-
-**Shape of the fix.** Count the summary request against `context_window_tokens`
-before triggering it, or select a compaction strategy guaranteed to fit — for
-example bounding the history actually wrapped rather than reserving the full
-`max_output_tokens` on top of unbounded input. Scheduled as a follow-up pull
-request against a quiet `main` rather than inside the compaction stack.
-
-Raised as a review finding and dispositioned with this condition attached:
-https://github.com/KeenWill/signalbox/pull/314#discussion_r3670652441
 
 ## Session organization, visibility, and retention
 
@@ -515,15 +461,6 @@ Statement lineage, transition authority, scheduler continuation, and the bounded
 automatic resumption of an execution-failure block are specified in
 [goal mode](spec/goal-mode.md). The questions below remain open.
 
-- **Re-arming automatic resumption across a daemon restart.** A pending
-  automatic resumption lives only in the daemon process that armed it. The goal
-  event history records how many attempts a run has spent but not when any of
-  them was recorded, so a restart during a backoff loses the pending attempt and
-  the goal stays blocked until an operator resumes it; a goal blocked before
-  that behavior shipped is in the same position. Deciding this needs a durable
-  record of when a failure was appended, which no present goal table carries,
-  and a reader that re-arms from it at startup. Blocks unattended recovery of a
-  goal whose backoff spanned a restart.
 - **Separating consecutive execution failures from distant ones.** The run an
   attempt budget is derived from ends only at a goal event, so consecutive
   execution failures separated by successful turns count together: a pursuit

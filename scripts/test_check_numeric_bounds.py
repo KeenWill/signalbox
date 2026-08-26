@@ -13,6 +13,11 @@ CHECKER = Path(__file__).resolve().parent / "check_numeric_bounds.py"
 ENFORCED_FILE = Path("crates/application/src/lib.rs")
 ENFORCED_MODULE_FILE = Path("crates/application/src/scheduler.rs")
 OUTSIDE_FILE = Path("crates/domain/src/lib.rs")
+DAEMON_FILE = Path("apps/signalboxd/src/lib.rs")
+PERSISTENCE_FILE = Path("crates/persistence/src/lib.rs")
+PREEXISTING_UNCLASSIFIED_FILE = Path(
+    "apps/signalboxd/src/blob_storage_configuration.rs"
+)
 
 
 def run_checker_tree(sources: dict[Path, str]) -> subprocess.CompletedProcess[str]:
@@ -35,25 +40,45 @@ def run_checker(path: Path, text: str) -> subprocess.CompletedProcess[str]:
 
 
 class NumericBoundCheckerTests(unittest.TestCase):
-    def test_direct_ceiling_declaration_passes(self) -> None:
+    def test_direct_guard_declaration_passes(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: ceiling - protects against retained input growth\n"
+            "// numeric-bound: guard - protects against retained input growth\n"
             "const MAX_INPUT_BYTES: usize = 1024;\n",
         )
 
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("1 enforced", result.stdout)
 
-    def test_direct_tunable_declaration_passes(self) -> None:
+    def test_direct_ceiling_declaration_fails(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: ceiling - protects against retained input growth\n"
+            "const MAX_INPUT_BYTES: usize = 1024;\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("no numeric-bound declaration", result.stdout)
+
+    def test_direct_tunable_declaration_fails(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
             "// numeric-bound: tunable - controls the ordinary wait\n"
             "const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);\n",
         )
 
-        self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("1 enforced", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("no numeric-bound declaration", result.stdout)
+
+    def test_direct_interval_declaration_fails(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: interval - controls the ordinary wait\n"
+            "const DEFAULT_TIMEOUT: Duration = Duration::from_secs(1);\n",
+        )
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("no numeric-bound declaration", result.stdout)
 
     def test_missing_declaration_fails_with_location_and_name(self) -> None:
         result = run_checker(ENFORCED_FILE, "const MAX_INPUT_BYTES: usize = 1024;\n")
@@ -77,16 +102,51 @@ class NumericBoundCheckerTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1, result.stdout)
         self.assertIn("MAX_DELTA", result.stdout)
 
-    def test_valid_derived_ceiling_inherits_the_source_rationale(self) -> None:
+    def test_valid_derived_guard_inherits_the_source_rationale(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: ceiling - protects against oversized text\n"
+            "// numeric-bound: guard - protects against oversized text\n"
+            "const MAX_INPUT_CHARACTERS: usize = 1024;\n"
+            "// numeric-bound: derived guard from MAX_INPUT_CHARACTERS\n"
+            "const MAX_INPUT_BYTES: usize = MAX_INPUT_CHARACTERS * 4;\n",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_derived_ceiling_declaration_fails(self) -> None:
+        result = run_checker(
+            ENFORCED_FILE,
+            "// numeric-bound: guard - protects against oversized text\n"
             "const MAX_INPUT_CHARACTERS: usize = 1024;\n"
             "// numeric-bound: derived ceiling from MAX_INPUT_CHARACTERS\n"
             "const MAX_INPUT_BYTES: usize = MAX_INPUT_CHARACTERS * 4;\n",
         )
 
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("no numeric-bound declaration", result.stdout)
+
+    def test_daemon_bound_is_enforced(self) -> None:
+        result = run_checker(DAEMON_FILE, "const MAX_INPUT_BYTES: usize = 1024;\n")
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("apps/signalboxd/src/lib.rs:1", result.stdout)
+        self.assertIn("MAX_INPUT_BYTES", result.stdout)
+
+    def test_persistence_bound_is_enforced(self) -> None:
+        result = run_checker(PERSISTENCE_FILE, "const MAX_INPUT_BYTES: usize = 1024;\n")
+
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertIn("crates/persistence/src/lib.rs:1", result.stdout)
+        self.assertIn("MAX_INPUT_BYTES", result.stdout)
+
+    def test_preexisting_unclassified_candidate_stays_outside_blocking_scope(self) -> None:
+        result = run_checker(
+            PREEXISTING_UNCLASSIFIED_FILE,
+            "const MAX_S3_LOCATION_BYTES: usize = 2048;\n",
+        )
+
         self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn("1 outside blocking scope", result.stdout)
 
     def test_non_bound_false_positive_escape_requires_a_rationale(self) -> None:
         result = run_checker(
@@ -109,9 +169,9 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_derived_escape_fails_without_initializer_reference(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: ceiling - protects against oversized text\n"
+            "// numeric-bound: guard - protects against oversized text\n"
             "const MAX_INPUT_CHARACTERS: usize = 1024;\n"
-            "// numeric-bound: derived ceiling from MAX_INPUT_CHARACTERS\n"
+            "// numeric-bound: derived guard from MAX_INPUT_CHARACTERS\n"
             "const MAX_INPUT_BYTES: usize = 4096;\n",
         )
 
@@ -124,11 +184,11 @@ class NumericBoundCheckerTests(unittest.TestCase):
             "mod first {\n"
             "    // numeric-bound: not-a-bound - fixed decimal radix\n"
             "    const MAX_BASE: usize = 10;\n"
-            "    // numeric-bound: derived ceiling from MAX_BASE\n"
+            "    // numeric-bound: derived guard from MAX_BASE\n"
             "    const MAX_DERIVED_BYTES: usize = MAX_BASE * 4;\n"
             "}\n"
             "mod second {\n"
-            "    // numeric-bound: ceiling - protects against oversized text\n"
+            "    // numeric-bound: guard - protects against oversized text\n"
             "    const MAX_BASE: usize = 1024;\n"
             "}\n",
         )
@@ -141,11 +201,11 @@ class NumericBoundCheckerTests(unittest.TestCase):
         result = run_checker(
             ENFORCED_FILE,
             "mod first {\n"
-            "    // numeric-bound: derived ceiling from MAX_BASE\n"
+            "    // numeric-bound: derived guard from MAX_BASE\n"
             "    const MAX_DERIVED_BYTES: usize = MAX_BASE * 4;\n"
             "}\n"
             "mod second {\n"
-            "    // numeric-bound: ceiling - protects against oversized text\n"
+            "    // numeric-bound: guard - protects against oversized text\n"
             "    const MAX_BASE: usize = 1024;\n"
             "}\n",
         )
@@ -157,11 +217,11 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_derived_escape_resolves_a_source_from_an_enclosing_scope(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: ceiling - protects against oversized text\n"
+            "// numeric-bound: guard - protects against oversized text\n"
             "const MAX_BASE: usize = 1024;\n"
             "mod inner {\n"
             "    use super::MAX_BASE;\n"
-            "    // numeric-bound: derived ceiling from MAX_BASE\n"
+            "    // numeric-bound: derived guard from MAX_BASE\n"
             "    const MAX_DERIVED_BYTES: usize = MAX_BASE * 4;\n"
             "}\n",
         )
@@ -171,11 +231,11 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_derived_escape_fails_when_another_referenced_bound_differs_in_kind(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: ceiling - protects against oversized responses\n"
+            "// numeric-bound: guard - protects against oversized responses\n"
             "const MAX_RESPONSE_BYTES: usize = 1024;\n"
-            "// numeric-bound: tunable - controls retained preview detail\n"
+            "// numeric-bound: not-a-bound - fixed retained preview representation\n"
             "const MAX_PREVIEW_BYTES: usize = 64;\n"
-            "// numeric-bound: derived ceiling from MAX_RESPONSE_BYTES\n"
+            "// numeric-bound: derived guard from MAX_RESPONSE_BYTES\n"
             "const MAX_TOTAL_BYTES: usize = MAX_RESPONSE_BYTES + MAX_PREVIEW_BYTES;\n",
         )
 
@@ -186,9 +246,9 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_derived_escape_fails_when_a_contributor_cannot_be_resolved(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: ceiling - protects against oversized responses\n"
+            "// numeric-bound: guard - protects against oversized responses\n"
             "const MAX_LOCAL_BYTES: usize = 1024;\n"
-            "// numeric-bound: derived ceiling from MAX_LOCAL_BYTES\n"
+            "// numeric-bound: derived guard from MAX_LOCAL_BYTES\n"
             "const MAX_TOTAL_BYTES: usize = MAX_LOCAL_BYTES + MAX_IMPORTED_BYTES;\n",
         )
 
@@ -200,11 +260,11 @@ class NumericBoundCheckerTests(unittest.TestCase):
         result = run_checker(
             ENFORCED_FILE,
             "fn first() {\n"
-            "    // numeric-bound: derived ceiling from MAX_BASE\n"
+            "    // numeric-bound: derived guard from MAX_BASE\n"
             "    const MAX_DERIVED_BYTES: usize = MAX_BASE * 4;\n"
             "}\n"
             "fn second() {\n"
-            "    // numeric-bound: ceiling - protects against oversized text\n"
+            "    // numeric-bound: guard - protects against oversized text\n"
             "    const MAX_BASE: usize = 1024;\n"
             "}\n",
         )
@@ -216,9 +276,9 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_derived_escape_fails_on_a_path_qualified_source(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: ceiling - protects against oversized text\n"
+            "// numeric-bound: guard - protects against oversized text\n"
             "const MAX_BASE: usize = 1024;\n"
-            "// numeric-bound: derived ceiling from MAX_BASE\n"
+            "// numeric-bound: derived guard from MAX_BASE\n"
             "const MAX_DERIVED_BYTES: usize = other_crate::MAX_BASE * 4;\n",
         )
 
@@ -266,11 +326,11 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_derived_escape_fails_when_a_nested_local_import_shadows_the_source(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: tunable - controls the ordinary retained size\n"
+            "// numeric-bound: not-a-bound - fixed ordinary retained representation\n"
             "const MAX_BASE: usize = 64;\n"
             "mod inner {\n"
             "    use super::sibling::MAX_BASE;\n"
-            "    // numeric-bound: derived ceiling from MAX_BASE\n"
+            "    // numeric-bound: derived guard from MAX_BASE\n"
             "    const MAX_DERIVED_BYTES: usize = MAX_BASE * 4;\n"
             "}\n",
         )
@@ -282,9 +342,9 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_derived_escape_fails_on_a_qualified_repetition_of_the_source(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: ceiling - protects against oversized text\n"
+            "// numeric-bound: guard - protects against oversized text\n"
             "const MAX_BASE: usize = 1024;\n"
-            "// numeric-bound: derived ceiling from MAX_BASE\n"
+            "// numeric-bound: derived guard from MAX_BASE\n"
             "const MAX_TOTAL_BYTES: usize = MAX_BASE + other::MAX_BASE;\n",
         )
 
@@ -295,9 +355,9 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_derived_escape_resolves_a_source_declared_in_the_initializer(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: derived ceiling from MAX_BASE\n"
+            "// numeric-bound: derived guard from MAX_BASE\n"
             "const MAX_TOTAL_BYTES: usize = {\n"
-            "    // numeric-bound: ceiling - protects against oversized text\n"
+            "    // numeric-bound: guard - protects against oversized text\n"
             "    const MAX_BASE: usize = 1024;\n"
             "    MAX_BASE * 4\n"
             "};\n",
@@ -308,11 +368,11 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_derived_escape_fails_when_a_renaming_local_import_shadows_the_source(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: tunable - controls the ordinary retained size\n"
+            "// numeric-bound: not-a-bound - fixed ordinary retained representation\n"
             "const MAX_IMPORTED: usize = 1024;\n"
             "mod inner {\n"
             "    use super::MAX_BASE as MAX_IMPORTED;\n"
-            "    // numeric-bound: derived ceiling from MAX_IMPORTED\n"
+            "    // numeric-bound: derived guard from MAX_IMPORTED\n"
             "    const MAX_DERIVED_BYTES: usize = MAX_IMPORTED * 4;\n"
             "}\n",
         )
@@ -324,11 +384,11 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_derived_escape_fails_when_an_import_shadows_the_source(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: ceiling - protects against oversized text\n"
+            "// numeric-bound: guard - protects against oversized text\n"
             "const MAX_BASE: usize = 1024;\n"
             "mod inner {\n"
             "    use other::MAX_BASE;\n"
-            "    // numeric-bound: derived ceiling from MAX_BASE\n"
+            "    // numeric-bound: derived guard from MAX_BASE\n"
             "    const MAX_DERIVED_BYTES: usize = MAX_BASE * 4;\n"
             "}\n",
         )
@@ -359,12 +419,12 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_derived_escape_fails_on_a_sibling_block_inside_the_initializer(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: tunable - controls the ordinary retained size\n"
+            "// numeric-bound: not-a-bound - fixed ordinary retained representation\n"
             "const MAX_BASE: usize = 64;\n"
-            "// numeric-bound: derived ceiling from MAX_BASE\n"
+            "// numeric-bound: derived guard from MAX_BASE\n"
             "const MAX_TOTAL_BYTES: usize = {\n"
             "    {\n"
-            "        // numeric-bound: ceiling - protects against oversized text\n"
+            "        // numeric-bound: guard - protects against oversized text\n"
             "        const MAX_BASE: usize = 1024;\n"
             "    }\n"
             "    MAX_BASE * 4\n"
@@ -409,9 +469,9 @@ class NumericBoundCheckerTests(unittest.TestCase):
     def test_derived_escape_fails_without_a_value_use_of_the_source(self) -> None:
         result = run_checker(
             ENFORCED_FILE,
-            "// numeric-bound: derived ceiling from MAX_BASE\n"
+            "// numeric-bound: derived guard from MAX_BASE\n"
             "const MAX_TOTAL_BYTES: usize = {\n"
-            "    // numeric-bound: ceiling - protects against oversized text\n"
+            "    // numeric-bound: guard - protects against oversized text\n"
             "    const MAX_BASE: usize = 1024;\n"
             "    7\n"
             "};\n",

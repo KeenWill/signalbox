@@ -3,8 +3,9 @@
 use serde_json::{Value, json};
 
 use crate::code_host::{
+    CodeHostNumericBounds,
     arguments::{valid_cursor, valid_opaque_id, valid_revision},
-    result::{MAX_RESULT_ITEMS, valid_path, valid_required_text, valid_text},
+    result::{valid_path, valid_required_text, valid_text},
     review_slog::ESCALATION_MARKER,
 };
 
@@ -92,11 +93,17 @@ pub struct ReviewThreadInventoryFields {
 
 impl ReviewThreadInventoryItem {
     /// Validates one inventory item.
-    pub fn try_new(fields: ReviewThreadInventoryFields) -> Option<Self> {
+    pub fn try_new(
+        bounds: CodeHostNumericBounds,
+        fields: ReviewThreadInventoryFields,
+    ) -> Option<Self> {
         (valid_opaque_id(&fields.id)
             && valid_path(&fields.path)
-            && fields.author.as_deref().is_none_or(valid_required_text)
-            && valid_text(&fields.finding_title))
+            && fields
+                .author
+                .as_deref()
+                .is_none_or(|value| valid_required_text(bounds, value))
+            && valid_text(bounds, &fields.finding_title))
         .then_some(Self {
             id: fields.id,
             path: fields.path,
@@ -147,13 +154,14 @@ pub struct ThreadInventoryResult {
 impl ThreadInventoryResult {
     /// Validates one bounded inventory page and its honest continuation.
     pub fn try_new(
+        bounds: CodeHostNumericBounds,
         head_revision: String,
         threads: Vec<ReviewThreadInventoryItem>,
         truncated: bool,
         next_cursor: Option<String>,
     ) -> Option<Self> {
         (valid_revision(&head_revision)
-            && threads.len() <= MAX_RESULT_ITEMS
+            && bounds.permits_result_items(threads.len())
             && next_cursor.as_deref().is_none_or(valid_cursor)
             && truncated == next_cursor.is_some())
         .then_some(Self {

@@ -18,11 +18,11 @@ const HUB_FENCE_NAMESPACE: u64 = 1_396_852_273;
 
 /// Tunable effective ceiling for physical sessions in the fenced daemon pool.
 ///
-/// This is operational headroom rather than a hard safety boundary: the daemon
-/// admits up to sixteen scheduler passes concurrently while the process
-/// listener, runner, repository watch, outbox, and guard checks also require
-/// database progress.
-pub const FENCED_POOL_MAX_CONNECTIONS: u32 = 32;
+/// This is operational headroom rather than a hard safety boundary. Sixteen
+/// scheduler passes and eight admitted snapshot readers may hold half the pool;
+/// the remaining half lets the process listener, runner, repository watch,
+/// outbox, recovery, and guard checks make database progress under load.
+pub const FENCED_POOL_MAX_CONNECTIONS: u32 = 48;
 
 /// One positive durable hub-pool generation.
 ///
@@ -79,12 +79,18 @@ impl AdvancedHubFence<'_> {
     }
 
     /// Opens a pool whose every physical session retains this generation's
-    /// shared lock before SQLx can make that session available.
-    pub async fn connect_pool(&mut self, options: PgConnectOptions) -> Result<PgPool, sqlx::Error> {
+    /// shared lock before SQLx can make that session available. A configured
+    /// minimum is established before construction returns; `None` keeps SQLx's
+    /// zero-session floor.
+    pub async fn connect_pool(
+        &mut self,
+        options: PgConnectOptions,
+        min_connections: Option<u32>,
+    ) -> Result<PgPool, sqlx::Error> {
         self.connection.ping().await?;
         let generation = self.generation;
         let key = advisory_key(generation.get());
-        fenced_pool_options()
+        fenced_pool_options(min_connections)
             .after_connect(move |connection, _metadata| {
                 Box::pin(async move {
                     sqlx::query("SELECT pg_advisory_lock_shared($1)")
@@ -113,8 +119,12 @@ impl AdvancedHubFence<'_> {
     }
 }
 
-fn fenced_pool_options() -> PgPoolOptions {
-    PgPoolOptions::new().max_connections(FENCED_POOL_MAX_CONNECTIONS)
+fn fenced_pool_options(min_connections: Option<u32>) -> PgPoolOptions {
+    let options = PgPoolOptions::new().max_connections(FENCED_POOL_MAX_CONNECTIONS);
+    match min_connections {
+        Some(min_connections) => options.min_connections(min_connections),
+        None => options,
+    }
 }
 
 /// Waits out every pooled session from the prior generation, then advances the
@@ -297,9 +307,13 @@ mod tests {
     use super::{FENCED_POOL_MAX_CONNECTIONS, advisory_key, fenced_pool_options};
 
     #[test]
-    fn fenced_pool_applies_the_reserved_connection_capacity() {
+    fn fenced_pool_applies_the_preload_and_operational_capacity() {
         assert_eq!(
-            fenced_pool_options().get_max_connections(),
+            fenced_pool_options(Some(FENCED_POOL_MAX_CONNECTIONS)).get_min_connections(),
+            FENCED_POOL_MAX_CONNECTIONS
+        );
+        assert_eq!(
+            fenced_pool_options(Some(FENCED_POOL_MAX_CONNECTIONS)).get_max_connections(),
             FENCED_POOL_MAX_CONNECTIONS
         );
     }

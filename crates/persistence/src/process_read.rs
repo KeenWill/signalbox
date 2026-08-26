@@ -16,8 +16,9 @@ use signalbox_domain::{
     RunnerCapabilityClass, RunnerGeneration, RunnerId, RunnerSandboxProfile, RunnerSelector,
     RunnerWorkingDirectory, SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId,
     SessionReadScopeDecision, SessionReadScopeRefusal, ToolApprovalDecider, ToolApprovalDecision,
-    ToolAttemptId, ToolDecisionRationale, ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId,
-    TurnModelSettingsResolved, UserContent, VersionedSessionPlacement, WorkspaceRepositoryKey,
+    ToolApprovalResolutionReconstitutionInput, ToolAttemptId, ToolDecisionRationale,
+    ToolDenialReason, ToolRequestId, TurnAttemptId, TurnId, TurnModelSettingsResolved, UserContent,
+    VersionedSessionPlacement, WorkspaceRepositoryKey,
 };
 use sqlx::{PgPool, Postgres, Row, Transaction, postgres::PgRow, types::Uuid};
 
@@ -634,6 +635,10 @@ pub enum ProcessTurnState {
         ended_attempt: TurnAttemptId,
         /// Ambiguous tool attempt awaiting recovery.
         recovery_attempt: ToolAttemptId,
+        /// Durable automatic attempts already claimed.
+        automatic_reconciliation_attempts: u32,
+        /// True only after the automatic attempt budget is exhausted.
+        operator_action_required: bool,
     },
     /// The turn is parked on replacement of one exact lost runner placement.
     ActiveAwaitingRunnerRecovery {
@@ -1313,6 +1318,7 @@ pub struct ProcessTranscriptReader {
     entry_count: Option<u64>,
     next_entry_index: u64,
     summary: Option<ProcessTranscriptSummary>,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 }
 
 impl ProcessTranscriptReader {
@@ -1350,7 +1356,8 @@ impl ProcessTranscriptReader {
             let row = load_next_transcript_turn(self.transaction_mut()?, session, next_turn_after)
                 .await?;
             if let Some(row) = row {
-                let decoded = decode_transcript_turn(&row)?;
+                let decoded =
+                    decode_transcript_turn(&row, self.automatic_reconciliation_attempt_budget)?;
                 match (decoded.start_lineage, decoded.latest_frontier) {
                     (None, None) => {}
                     (Some(_), Some(frontier)) => {
@@ -1622,12 +1629,25 @@ impl From<ProcessReadCorruption> for ProcessReadError {
 #[derive(Clone, Debug)]
 pub struct ProcessReadRepository {
     pool: PgPool,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 }
 
 impl ProcessReadRepository {
     /// Uses the supplied pool for independent repeatable-read snapshots.
     pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            automatic_reconciliation_attempt_budget: None,
+        }
+    }
+
+    /// Applies the deployment's optional automatic reconciliation budget.
+    pub const fn with_automatic_reconciliation_attempt_budget(
+        mut self,
+        budget: Option<u32>,
+    ) -> Self {
+        self.automatic_reconciliation_attempt_budget = Some(budget);
+        self
     }
 
     /// Reads one complete current or named immutable session-defaults epoch.
@@ -2118,7 +2138,12 @@ impl ProcessReadRepository {
         }
 
         Ok(Some(
-            open_transcript_in_transaction(transaction, requested_session).await?,
+            open_transcript_in_transaction(
+                transaction,
+                requested_session,
+                self.automatic_reconciliation_attempt_budget,
+            )
+            .await?,
         ))
     }
 
@@ -2149,7 +2174,12 @@ impl ProcessReadRepository {
             .decide_cross_session_read(target_placement.placement())
         {
             SessionReadScopeDecision::Allowed => Ok(ProcessScopedTranscriptRead::Opened(Box::new(
-                open_transcript_in_transaction(transaction, target_session).await?,
+                open_transcript_in_transaction(
+                    transaction,
+                    target_session,
+                    self.automatic_reconciliation_attempt_budget,
+                )
+                .await?,
             ))),
             SessionReadScopeDecision::Refused(refusal) => {
                 transaction.commit().await?;
@@ -2188,6 +2218,7 @@ fn map_session_placement_read_error(
 async fn open_transcript_in_transaction(
     mut transaction: Transaction<'static, Postgres>,
     requested_session: SessionId,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
 ) -> Result<ProcessTranscriptReader, ProcessReadError> {
     let stored_cursor: Option<Decimal> = sqlx::query_scalar(
         "SELECT last_sequence
@@ -2232,6 +2263,7 @@ async fn open_transcript_in_transaction(
         entry_count: None,
         next_entry_index: 0,
         summary: None,
+        automatic_reconciliation_attempt_budget,
     })
 }
 
@@ -2886,6 +2918,8 @@ async fn load_next_transcript_turn(
                 AS automatic_reconciliation_attempt_count,
             automatic_reconciliation.model_call_id
                 AS automatic_reconciliation_model_call_id,
+            automatic_reconciliation.tool_attempt_id
+                AS automatic_reconciliation_tool_attempt_id,
             active_tool_round.boundary_frontier_id AS active_tool_round_frontier_id,
             logical_terminal.spawning_tool_request_id
                 AS logical_terminal_spawning_request_id,
@@ -2961,7 +2995,7 @@ async fn load_next_transcript_turn(
             AND recovery_call.turn_id = turn.turn_id
             AND recovery_call.session_id = turn.session_id
             AND recovery_call.state_kind = 'terminal'
-           LEFT JOIN automatic_model_call_reconciliation AS automatic_reconciliation
+           LEFT JOIN automatic_reconciliation AS automatic_reconciliation
              ON automatic_reconciliation.turn_id = turn.turn_id
             AND automatic_reconciliation.session_id = turn.session_id
            LEFT JOIN model_call AS terminal_call
@@ -3335,7 +3369,35 @@ fn decode_transcript_turn_model_settings(
     Ok(Some(event))
 }
 
-fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> {
+fn admitted_automatic_reconciliation_attempts(
+    attempts: i32,
+    exhausted: bool,
+    budget: Option<Option<u32>>,
+) -> Result<u32, ProcessReadError> {
+    let attempts = u32::try_from(attempts).map_err(|_| {
+        ProcessReadCorruption::Inconsistent("automatic reconciliation attempt count")
+    })?;
+    let admitted = if exhausted {
+        match budget {
+            Some(Some(budget)) => attempts == budget,
+            Some(None) => false,
+            None => attempts > 0,
+        }
+    } else {
+        budget.is_none_or(|budget| budget.is_none_or(|budget| attempts <= budget))
+    };
+    admitted
+        .then_some(attempts)
+        .ok_or(ProcessReadCorruption::Inconsistent(
+            "automatic reconciliation attempt budget",
+        ))
+        .map_err(Into::into)
+}
+
+fn decode_transcript_turn(
+    row: &PgRow,
+    automatic_reconciliation_attempt_budget: Option<Option<u32>>,
+) -> Result<DecodedTurn, ProcessReadError> {
     let turn = TurnId::from_uuid(required(row, "turn_id")?);
     let acceptance_position = decode_positive(
         required(row, "acceptance_position")?,
@@ -3461,20 +3523,11 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         row.try_get("automatic_reconciliation_state_kind")?;
     let automatic_reconciliation_attempts: Option<i32> =
         row.try_get("automatic_reconciliation_attempt_count")?;
-    let automatic_reconciliation_call: Option<Uuid> =
+    let automatic_reconciliation_model_call: Option<Uuid> =
         row.try_get("automatic_reconciliation_model_call_id")?;
+    let automatic_reconciliation_tool_attempt: Option<Uuid> =
+        row.try_get("automatic_reconciliation_tool_attempt_id")?;
     let active_tool_round_frontier: Option<Uuid> = row.try_get("active_tool_round_frontier_id")?;
-    if state_kind == "active"
-        && active_phase.as_deref() != Some("awaiting_model_call_recovery")
-        && (automatic_reconciliation_state.is_some()
-            || automatic_reconciliation_attempts.is_some()
-            || automatic_reconciliation_call.is_some())
-    {
-        return Err(ProcessReadCorruption::Inconsistent(
-            "automatic model-call reconciliation active phase",
-        )
-        .into());
-    }
 
     if !matches!(state_kind.as_str(), "queued" | "active" | "terminal") {
         return Err(ProcessReadCorruption::Unsupported {
@@ -3499,6 +3552,53 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             value: value.to_owned(),
         }
         .into());
+    }
+    let automatic_reconciliation_present = automatic_reconciliation_state.is_some()
+        || automatic_reconciliation_attempts.is_some()
+        || automatic_reconciliation_model_call.is_some()
+        || automatic_reconciliation_tool_attempt.is_some();
+    let terminal_reconciliation = state_kind == "terminal"
+        && terminal_disposition.as_deref() == Some("reconciliation_required");
+    if automatic_reconciliation_present {
+        if !matches!(
+            active_phase.as_deref(),
+            Some("awaiting_model_call_recovery" | "awaiting_tool_recovery")
+        ) && !terminal_reconciliation
+        {
+            return Err(ProcessReadCorruption::Inconsistent(
+                "automatic model-call reconciliation outside recovery wait",
+            )
+            .into());
+        }
+        if terminal_reconciliation {
+            let valid_terminal_automatic = matches!(
+                (
+                    automatic_reconciliation_state.as_deref(),
+                    automatic_reconciliation_attempts,
+                    automatic_reconciliation_model_call,
+                    automatic_reconciliation_tool_attempt,
+                ),
+                (
+                    Some("reconciled" | "superseded"),
+                    Some(attempts),
+                    model_call,
+                    tool_attempt,
+                ) if admitted_automatic_reconciliation_attempts(
+                        attempts,
+                        false,
+                        automatic_reconciliation_attempt_budget,
+                    ).is_ok()
+                    && model_call == terminal_call
+                    && tool_attempt == terminal_tool_attempt
+                    && model_call.is_some() != tool_attempt.is_some()
+            );
+            if !valid_terminal_automatic {
+                return Err(ProcessReadCorruption::Inconsistent(
+                    "terminal automatic model-call reconciliation state",
+                )
+                .into());
+            }
+        }
     }
     if let Some(value) = terminal_disposition.as_deref()
         && !matches!(
@@ -3743,6 +3843,44 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
         if latest_frontier == ContextFrontierId::from_uuid(starting_frontier) {
             return Err(ProcessReadCorruption::Inconsistent("tool recovery frontier").into());
         }
+        if automatic_reconciliation_model_call.is_some()
+            || automatic_reconciliation_tool_attempt
+                .is_some_and(|stored| stored != recovery_attempt)
+        {
+            return Err(ProcessReadCorruption::Inconsistent(
+                "automatic tool reconciliation attempt identity",
+            )
+            .into());
+        }
+        let (automatic_reconciliation_attempts, operator_action_required) = match (
+            automatic_reconciliation_state.as_deref(),
+            automatic_reconciliation_attempts,
+            automatic_reconciliation_tool_attempt,
+        ) {
+            (None, None, None) => (0, false),
+            (Some("scheduled" | "attempting"), Some(attempts), Some(_)) => (
+                admitted_automatic_reconciliation_attempts(
+                    attempts,
+                    false,
+                    automatic_reconciliation_attempt_budget,
+                )?,
+                false,
+            ),
+            (Some("exhausted"), Some(attempts), Some(_)) => (
+                admitted_automatic_reconciliation_attempts(
+                    attempts,
+                    true,
+                    automatic_reconciliation_attempt_budget,
+                )?,
+                true,
+            ),
+            _ => {
+                return Err(ProcessReadCorruption::Inconsistent(
+                    "active automatic tool reconciliation state",
+                )
+                .into());
+            }
+        };
         return project_logical_delegation_terminal(
             DecodedTurn {
                 turn: ProcessTranscriptTurn {
@@ -3752,6 +3890,8 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
                     state: ProcessTurnState::ActiveAwaitingToolRecovery {
                         ended_attempt: TurnAttemptId::from_uuid(ended_attempt),
                         recovery_attempt: ToolAttemptId::from_uuid(recovery_attempt),
+                        automatic_reconciliation_attempts,
+                        operator_action_required,
                     },
                 },
                 start_lineage,
@@ -3937,36 +4077,37 @@ fn decode_transcript_turn(row: &PgRow) -> Result<DecodedTurn, ProcessReadError> 
             None,
             None,
         ) => {
-            let call_frontier = recovery_model_call_frontier.ok_or(
-                ProcessReadCorruption::Inconsistent("recovery model call frontier"),
-            )?;
-            if automatic_reconciliation_call.is_some()
-                && automatic_reconciliation_call != Some(call)
+            if automatic_reconciliation_tool_attempt.is_some()
+                || automatic_reconciliation_model_call.is_some_and(|stored| stored != call)
             {
                 return Err(ProcessReadCorruption::Inconsistent(
-                    "automatic model-call reconciliation call correlation",
+                    "automatic model-call reconciliation call identity",
                 )
                 .into());
             }
+            let call_frontier = recovery_model_call_frontier.ok_or(
+                ProcessReadCorruption::Inconsistent("recovery model call frontier"),
+            )?;
             let (automatic_reconciliation_attempts, operator_action_required) = match (
                 automatic_reconciliation_state.as_deref(),
                 automatic_reconciliation_attempts,
+                automatic_reconciliation_model_call,
             ) {
-                (None, None) => (0, false),
-                (Some("scheduled" | "attempting"), Some(attempts)) => (
-                    u32::try_from(attempts).map_err(|_| {
-                        ProcessReadCorruption::Inconsistent(
-                            "automatic model-call reconciliation attempt count",
-                        )
-                    })?,
+                (None, None, None) => (0, false),
+                (Some("scheduled" | "attempting"), Some(attempts), Some(_)) => (
+                    admitted_automatic_reconciliation_attempts(
+                        attempts,
+                        false,
+                        automatic_reconciliation_attempt_budget,
+                    )?,
                     false,
                 ),
-                (Some("exhausted"), Some(attempts)) => (
-                    u32::try_from(attempts).map_err(|_| {
-                        ProcessReadCorruption::Inconsistent(
-                            "exhausted model-call reconciliation attempt count",
-                        )
-                    })?,
+                (Some("exhausted"), Some(attempts), Some(_)) => (
+                    admitted_automatic_reconciliation_attempts(
+                        attempts,
+                        true,
+                        automatic_reconciliation_attempt_budget,
+                    )?,
                     true,
                 ),
                 _ => {
@@ -5310,6 +5451,11 @@ fn decode_process_tool_approval(
     {
         return Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into());
     }
+    let runtime_safety_decision = ToolApprovalResolutionReconstitutionInput::runtime_safety(
+        ToolRequestId::from_uuid(Uuid::nil()),
+    )
+    .reconstitute()
+    .map_err(|_| ProcessReadCorruption::Inconsistent("runtime safety approval evidence"))?;
     match (
         source_kind,
         user_command,
@@ -5325,6 +5471,11 @@ fn decode_process_tool_approval(
             None,
             None,
         ) if decision == ToolApprovalDecision::Approve => Ok(None),
+        (ToolApprovalDecisionSourceStorageKind::RuntimeSafety, None, None, None, None)
+            if runtime_safety_decision.decision() == &decision =>
+        {
+            Ok(None)
+        }
         (ToolApprovalDecisionSourceStorageKind::UserCommand, Some(command), None, None, None) => {
             Ok(Some(ProcessToolApproval {
                 decision,
@@ -5387,6 +5538,7 @@ fn decode_process_tool_approval(
             | ToolApprovalDecisionSourceStorageKind::SessionBlanket
             | ToolApprovalDecisionSourceStorageKind::UserCommand
             | ToolApprovalDecisionSourceStorageKind::Delegate
+            | ToolApprovalDecisionSourceStorageKind::RuntimeSafety
             | ToolApprovalDecisionSourceStorageKind::UserOverride,
             ..,
         ) => Err(ProcessReadCorruption::Inconsistent("tool approval provenance shape").into()),
