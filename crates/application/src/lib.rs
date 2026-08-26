@@ -153,7 +153,6 @@ pub use scheduler::{
     InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
     SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
     SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_ordinary_pass_limit,
-    scheduler_pass_admission_cap,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{
@@ -206,11 +205,11 @@ pub use tool_loop_ports::{
     ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 pub use turn_liveness::{
-    ClaimedModelCallReconciliation, ExhaustedModelCallReconciliation,
-    ModelCallReconciliationAttempt, ModelCallReconciliationBatch,
-    ModelCallReconciliationFailureKind, ModelCallReconciliationOutcome, StaleActiveTurnBound,
-    StaleTurnCandidate, StaleTurnOutcome, TurnLivenessBoundError, TurnLivenessEvidence,
-    TurnLivenessLedger, TurnLivenessScanInterval,
+    AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
+    AutomaticReconciliationFailureKind, AutomaticReconciliationOperation,
+    AutomaticReconciliationOutcome, ClaimedAutomaticReconciliation,
+    ExhaustedAutomaticReconciliation, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
+    TurnLivenessBoundError, TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
