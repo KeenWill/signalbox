@@ -249,6 +249,14 @@ CREATE TRIGGER repo_watch_dispatch_release_projects_singleton_cooldown
 AFTER INSERT ON repo_watch_dispatch_release
 FOR EACH ROW EXECUTE FUNCTION project_repo_watch_singleton_cooldown();
 
+-- Re-point the outstanding-obligation read at the bounded held-dispatch and
+-- singleton-cooldown projections. The external-blocking session an
+-- independently commissioned live session leaves on the obligation
+-- (202608210401) still holds the obligation back and still names its blocker,
+-- so those terms and the trailing column stay exactly as they were: a replaced
+-- view may add trailing columns, never drop them, and a dropped readiness term
+-- would dispatch a second watch session against a pull request a live session
+-- already occupies.
 CREATE OR REPLACE VIEW repo_watch_outstanding_dispatch_obligation AS
 SELECT obligation.obligation_id, obligation.repository, obligation.rule_id,
        obligation.rule_version, obligation.singleton_scope,
@@ -257,12 +265,19 @@ SELECT obligation.obligation_id, obligation.repository, obligation.rule_id,
        obligation.first_event_id, obligation.latest_event_id, obligation.matched_event_count,
        obligation.owed_since, obligation.latest_match_at,
        occupying.dispatch_id AS occupying_dispatch_id,
-       occupying.session_ids AS occupying_session_ids, cooldown.eligible_at,
+       coalesce(
+           occupying.session_ids,
+           CASE WHEN external_blocker.session_id IS NULL THEN NULL
+                ELSE ARRAY[external_blocker.session_id]::uuid[] END
+       ) AS occupying_session_ids,
+       cooldown.eligible_at,
        occupying.dispatch_id IS NULL
+           AND external_blocker.session_id IS NULL
            AND (cooldown.eligible_at IS NULL OR cooldown.eligible_at <= clock_timestamp())
            AND obligation.parked_at IS NULL
            AND obligation.failed_attempts < repo_watch_dispatch_attempt_budget() AS ready,
-       obligation.failed_attempts, obligation.last_failed_attempt_at, obligation.parked_at
+       obligation.failed_attempts, obligation.last_failed_attempt_at, obligation.parked_at,
+       obligation.external_blocking_session_id
   FROM repo_watch_dispatch_obligation AS obligation
   LEFT JOIN LATERAL (
         SELECT held.dispatch_id,
@@ -281,6 +296,16 @@ SELECT obligation.obligation_id, obligation.repository, obligation.rule_id,
          ORDER BY held.held_since
          LIMIT 1
   ) AS occupying ON true
+  LEFT JOIN LATERAL (
+        SELECT obligation.external_blocking_session_id AS session_id
+         WHERE (
+               SELECT event.event_kind IN ('commissioned', 'resumed', 'superseded')
+                 FROM goal_event AS event
+                WHERE event.session_id = obligation.external_blocking_session_id
+                ORDER BY event.event_ordinal DESC
+                LIMIT 1
+           )
+  ) AS external_blocker ON true
   LEFT JOIN repo_watch_current_singleton_cooldown AS cooldown
     ON cooldown.rule_id = obligation.rule_id
    AND cooldown.rule_version = obligation.rule_version

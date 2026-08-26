@@ -68,83 +68,46 @@ impl<'de> Deserialize<'de> for ProtocolVersion {
 }
 
 /// Maximum encoded frame size, including its final newline.
-// numeric-bound: ceiling - protects process memory from oversized wire frames
+// numeric-bound: guard - protects process memory from oversized wire frames
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// Maximum decoded source bytes carried by one conversation-import append.
 ///
 /// The half-frame raw-byte bound leaves fixed headroom for canonical padded
 /// base64, the request envelope, and the maximum-width correlation identity.
-// numeric-bound: derived ceiling from MAX_FRAME_BYTES
+// numeric-bound: derived guard from MAX_FRAME_BYTES
 pub const MAX_CONVERSATION_IMPORT_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum decoded bytes carried by one immutable-blob append.
-// numeric-bound: derived ceiling from MAX_FRAME_BYTES
+// numeric-bound: derived guard from MAX_FRAME_BYTES
 pub const MAX_BLOB_CHUNK_BYTES: usize = MAX_FRAME_BYTES / 2;
 
 /// Maximum decoded bytes returned by one direct blob-range request.
-// numeric-bound: derived ceiling from MAX_FRAME_BYTES
+// numeric-bound: derived guard from MAX_FRAME_BYTES
 pub const MAX_BLOB_READ_BYTES: usize = MAX_FRAME_BYTES / 2;
 
-/// Tunable effective ceiling for concurrent process-protocol snapshot readers.
-///
-/// This operational admission bound is not a hard safety ceiling. The daemon
-/// additionally reserves pool connections outside snapshot work; this
-/// protocol-owned ceiling prevents a larger pool from expanding snapshot
-/// admission beyond the implemented contract.
-// numeric-bound: tunable - controls concurrent snapshot-reader admission
-pub const MAX_CONCURRENT_SNAPSHOT_READERS: usize = 8;
-
-/// Maximum replica count representable by the version-one deployment catalog.
-// numeric-bound: ceiling - restates blob-store's durable catalog capacity
-pub const MAX_BLOB_REPLICA_COUNT: u64 = signalbox_blob_store::MAX_BLOB_STORES as u64;
-
 /// Maximum number of simultaneously open JSON objects and arrays in one frame.
-// numeric-bound: ceiling - protects parser stack and latency from pathological nesting
+// numeric-bound: guard - protects parser stack and latency from pathological nesting
 pub const MAX_JSON_CONTAINER_DEPTH: usize = 127;
 
 /// Maximum UTF-8 bytes in one transcript content fragment.
-// numeric-bound: ceiling - protects frame memory and transcript storage
+// numeric-bound: guard - protects frame memory from pathological content fragmentation
 pub const MAX_CONTENT_FRAGMENT_BYTES: usize = 1024 * 1024;
 
 /// Maximum total UTF-8 bytes in one complete metadata object or filter.
-// numeric-bound: ceiling - protects metadata memory and storage
+// numeric-bound: guard - protects metadata row and frame memory from pathological text volume
 pub const MAX_SESSION_METADATA_TOTAL_UTF8_BYTES: usize = 262_144;
 
 /// Maximum UTF-8 bytes in one indexed metadata tag or attribute key.
-// numeric-bound: ceiling - protects index storage and comparison latency
+// numeric-bound: guard - protects database index keys from oversized values
 pub const MAX_SESSION_METADATA_INDEXED_UTF8_BYTES: usize = 1_024;
 
-/// Maximum exact tags in one complete metadata object.
-// numeric-bound: ceiling - protects metadata memory and index fan-out
-pub const MAX_SESSION_METADATA_TAGS: usize = 256;
-
-/// Maximum exact attributes in one complete metadata object.
-// numeric-bound: ceiling - protects metadata memory and index fan-out
-pub const MAX_SESSION_METADATA_ATTRIBUTES: usize = 256;
-
-/// Maximum exact required tags in one metadata-list filter.
-// numeric-bound: ceiling - protects filter memory and matching work
-pub const MAX_SESSION_METADATA_REQUIRED_TAGS: usize = 256;
-
-/// Maximum UTF-8 bytes in one session system prompt.
-// numeric-bound: ceiling - protects context memory and provider spend
-pub const MAX_SYSTEM_PROMPT_UTF8_BYTES: usize = 1_048_576;
-
-/// Maximum UTF-8 bytes in one imported-entry text preview.
-///
-/// An inspection row is a scannable line, not the entry's content authority:
-/// the transcript snapshot already carries attested imported text in full, and
-/// the immutable aggregate remains the authority for everything else.
-// numeric-bound: tunable - controls retained inspection-preview detail
-pub const MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES: usize = 256;
-
 /// Maximum entries in one deployment model-alias catalog.
-// numeric-bound: ceiling - protects catalog memory and frame size
+// numeric-bound: guard - protects model-alias catalog frame memory and wire size
 pub const MAX_MODEL_ALIAS_CATALOG_ENTRIES: usize = 10_000;
 
 /// Maximum entries in one deployment model-capability catalog.
-// numeric-bound: ceiling - protects catalog memory and frame size
+// numeric-bound: guard - protects model-capability catalog frame memory and wire size
 pub const MAX_MODEL_CAPABILITY_CATALOG_ENTRIES: usize = 10_000;
 
 /// Maximum canonical decimal USD amount text.
@@ -152,70 +115,66 @@ pub const MAX_MODEL_CAPABILITY_CATALOG_ENTRIES: usize = 10_000;
 pub const MAX_DOLLAR_AMOUNT_BYTES: usize = 30;
 
 /// Maximum UTF-8 bytes in one deployment-owned billing rate version.
-// numeric-bound: tunable - admits the deployment-owned rate version text
+// numeric-bound: guard - preserves the advertised billing-rate wire grammar
 pub const MAX_RATE_VERSION_UTF8_BYTES: usize = 128;
 
-/// Maximum concerns in one frozen review-orchestration attempt.
-// numeric-bound: ceiling - protects memory and work from runaway model concerns
-pub const MAX_REVIEW_ORCHESTRATION_CONCERNS: usize = 32;
-
 /// Maximum finding-indexed members in one review-orchestration request.
-// numeric-bound: ceiling - protects review request memory and wire size
+// numeric-bound: guard - protects review-request memory and wire size
 pub const MAX_REVIEW_ORCHESTRATION_MEMBERS: usize = 1_024;
 
 /// Maximum UTF-8 bytes in one operator-status repository slug.
 ///
 /// A slug is `owner/name`, and the provider admits 100 bytes on each side.
-// numeric-bound: ceiling - admits the widest provider repository slug
+// numeric-bound: guard - the operator-status wire grammar advertises accepting repository slugs only to this length
 pub const MAX_OPERATOR_STATUS_REPOSITORY_UTF8_BYTES: usize = 201;
 
 /// Maximum UTF-8 bytes in one operator-status repository-watch rule identity.
-// numeric-bound: ceiling - matches the durable rule-identity width
+// numeric-bound: guard - the operator-status wire grammar advertises accepting rule identities only to this length
 pub const MAX_OPERATOR_STATUS_RULE_ID_UTF8_BYTES: usize = 128;
 
 /// Maximum UTF-8 bytes in one operator-status branch name.
 ///
 /// Covers a held slot's branch origin and a convergence row's base branch.
-// numeric-bound: ceiling - admits the widest admitted git branch name
+// numeric-bound: guard - the operator-status wire grammar advertises accepting branch names only to this length
 pub const MAX_OPERATOR_STATUS_BRANCH_UTF8_BYTES: usize = 255;
 
 /// Maximum sessions named by one operator-status dispatch inventory.
 ///
 /// Bounds both a held slot's own sessions and the sessions occupying a queued
 /// obligation, which name the same dispatch-action inventory.
-// numeric-bound: ceiling - protects frame size from a runaway dispatch fan-out
+// numeric-bound: guard - protects decoded frame memory from a runaway dispatch session fan-out
 pub const MAX_OPERATOR_STATUS_DISPATCH_SESSIONS: usize = 32;
 
 /// Maximum independently failing release clauses on one held slot.
-// numeric-bound: ceiling - one per admitted release clause, which cannot repeat
+// numeric-bound: not-a-bound - the closed blocker enum's exact variant count, which one slot cannot repeat
 pub const MAX_OPERATOR_STATUS_HELD_SLOT_BLOCKERS: usize = 4;
 
 /// Maximum unresolved review threads counted by one convergence assessment.
-// numeric-bound: ceiling - matches the inventory persistence admits per assessment
+// numeric-bound: guard - refuses a thread count no durable assessment can have produced
 pub const MAX_OPERATOR_STATUS_UNRESOLVED_THREADS: u64 = 10_000;
 
 /// Maximum gating checks counted by one convergence assessment.
 ///
 /// Persistence admits the same inventory, so a divergence here would reject an
 /// otherwise valid projection and fail the whole snapshot.
-// numeric-bound: ceiling - matches the inventory persistence admits per assessment
+// numeric-bound: guard - bounds the non-green check names one convergence frame can carry
 pub const MAX_OPERATOR_STATUS_GATING_CHECKS: u64 = 10_000;
 
 /// Maximum UTF-8 bytes in one operator-status gating-check name.
-// numeric-bound: ceiling - matches the durable check-run name width
+// numeric-bound: guard - the operator-status wire grammar advertises accepting check names only to this length
 pub const MAX_OPERATOR_STATUS_CHECK_NAME_UTF8_BYTES: usize = 256;
 
 /// Maximum UTF-8 bytes in one operator-status review node identity.
-// numeric-bound: ceiling - matches the durable provider review node identity width
+// numeric-bound: guard - the operator-status wire grammar advertises accepting review node identities only to this length
 pub const MAX_OPERATOR_STATUS_REVIEW_NODE_ID_UTF8_BYTES: usize = 256;
 
 /// Maximum UTF-8 bytes in one operator-status reviewer login.
-// numeric-bound: ceiling - admits the widest provider login
+// numeric-bound: guard - the operator-status wire grammar advertises accepting reviewer logins only to this length
 pub const MAX_OPERATOR_STATUS_REVIEWER_UTF8_BYTES: usize = 44;
 
 /// Maximum UTF-8 bytes in one operator-status reviewer login's base, the
 /// spelling left once the optional App-bot suffix is set aside.
-// numeric-bound: ceiling - matches the durable login base width
+// numeric-bound: guard - the operator-status wire grammar advertises accepting a login base only to this length
 pub const MAX_OPERATOR_STATUS_REVIEWER_BASE_UTF8_BYTES: usize = 39;
 
 /// Literal suffix an App-bot reviewer login carries after its base.
@@ -572,16 +531,16 @@ impl InputContent {
 }
 
 /// Maximum number of ordered parts in one process-protocol user input.
-// numeric-bound: ceiling - bounds retained parts in one user input
+// numeric-bound: guard - prevents one submitted input from fragmenting into unbounded decoded parts
 pub const MAX_USER_INPUT_PARTS: usize = signalbox_domain::UserContent::MAX_PARTS;
 /// Maximum aggregate UTF-8 bytes across process-protocol text parts.
-// numeric-bound: ceiling - bounds aggregate retained user text
+// numeric-bound: guard - prevents one submitted input from exhausting wire-frame memory
 pub const MAX_USER_INPUT_TEXT_BYTES: usize = signalbox_domain::UserContent::MAX_TEXT_BYTES;
 /// Maximum encoded bytes in one process-protocol attachment media type.
-// numeric-bound: ceiling - bounds retained attachment media types
+// numeric-bound: guard - the user-input wire grammar advertises accepting media types only to this length
 pub const MAX_USER_INPUT_MEDIA_TYPE_BYTES: usize = signalbox_domain::DeclaredMediaType::MAX_BYTES;
 /// Maximum encoded bytes in one process-protocol attachment display filename.
-// numeric-bound: ceiling - bounds retained attachment display filenames
+// numeric-bound: guard - the user-input wire grammar advertises accepting display filenames only to this length
 pub const MAX_USER_INPUT_DISPLAY_FILENAME_BYTES: usize =
     signalbox_domain::AttachmentDisplayFilename::MAX_BYTES;
 
@@ -1451,19 +1410,18 @@ impl From<ContentFragment> for String {
     }
 }
 
-/// One exact bounded session system prompt on the wire.
+/// One exact session system prompt on the wire.
 ///
-/// A present prompt is nonempty, rejects U+0000, and carries at most
-/// [`MAX_SYSTEM_PROMPT_UTF8_BYTES`] UTF-8 bytes; absence is JSON null on the
-/// owning member, never empty text.
+/// A present prompt is nonempty and rejects U+0000; absence is JSON null on
+/// the owning member, never empty text. The daemon applies deployment policy.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct SystemPromptText(String);
 
 impl SystemPromptText {
-    /// Applies the nonempty, U+0000-free, bounded-bytes admission rules.
+    /// Applies the structural nonempty and U+0000-free admission rules.
     pub fn try_new(value: String) -> Result<Self, CanonicalValueError> {
-        if value.is_empty() || value.len() > MAX_SYSTEM_PROMPT_UTF8_BYTES || value.contains('\0') {
+        if value.is_empty() || value.contains('\0') {
             Err(CanonicalValueError::SystemPrompt)
         } else {
             Ok(Self(value))
@@ -2448,16 +2406,28 @@ impl SessionMetadata {
         attributes: Vec<(String, String)>,
         archived: bool,
     ) -> Result<Self, CanonicalValueError> {
+        Self::try_new_with_count_limits(title, tags, attributes, archived, None, None)
+    }
+
+    /// Validates canonical metadata and deployment tag and attribute policies.
+    pub fn try_new_with_count_limits(
+        title: Option<String>,
+        tags: Vec<String>,
+        attributes: Vec<(String, String)>,
+        archived: bool,
+        max_tags: Option<usize>,
+        max_attributes: Option<usize>,
+    ) -> Result<Self, CanonicalValueError> {
         let mut total_utf8_bytes = 0usize;
         if let Some(title) = title.as_deref() {
             validate_nonempty_metadata_text(title)?;
             add_metadata_utf8_bytes(&mut total_utf8_bytes, title)?;
         }
-        let tags = canonical_metadata_tags(tags, MAX_SESSION_METADATA_TAGS)?;
+        let tags = canonical_metadata_tags(tags, max_tags)?;
         for tag in &tags {
             add_metadata_utf8_bytes(&mut total_utf8_bytes, tag)?;
         }
-        let attributes = MetadataAttributes::try_new(attributes)?;
+        let attributes = MetadataAttributes::try_new(attributes, max_attributes)?;
         for (key, value) in &attributes.0 {
             add_metadata_utf8_bytes(&mut total_utf8_bytes, key)?;
             add_metadata_utf8_bytes(&mut total_utf8_bytes, value)?;
@@ -2543,8 +2513,11 @@ impl<'de> Deserialize<'de> for SessionMetadata {
 struct MetadataAttributes(BTreeMap<String, String>);
 
 impl MetadataAttributes {
-    fn try_new(values: Vec<(String, String)>) -> Result<Self, CanonicalValueError> {
-        if values.len() > MAX_SESSION_METADATA_ATTRIBUTES {
+    fn try_new(
+        values: Vec<(String, String)>,
+        maximum: Option<usize>,
+    ) -> Result<Self, CanonicalValueError> {
+        if maximum.is_some_and(|maximum| values.len() > maximum) {
             return Err(CanonicalValueError::Metadata);
         }
         let mut attributes = BTreeMap::new();
@@ -2575,11 +2548,6 @@ impl<'de> Visitor<'de> for MetadataAttributesVisitor {
     {
         let mut attributes = BTreeMap::new();
         while let Some((key, value)) = map.next_entry::<String, String>()? {
-            if attributes.len() == MAX_SESSION_METADATA_ATTRIBUTES {
-                return Err(serde::de::Error::custom(
-                    "too many session metadata attributes",
-                ));
-            }
             validate_nonempty_metadata_text(&key).map_err(serde::de::Error::custom)?;
             validate_indexed_metadata_text(&key).map_err(serde::de::Error::custom)?;
             validate_metadata_text(&value).map_err(serde::de::Error::custom)?;
@@ -2637,9 +2605,9 @@ fn add_metadata_utf8_bytes(total: &mut usize, value: &str) -> Result<(), Canonic
 
 fn canonical_metadata_tags(
     values: Vec<String>,
-    maximum: usize,
+    maximum: Option<usize>,
 ) -> Result<Vec<String>, CanonicalValueError> {
-    if values.len() > maximum {
+    if maximum.is_some_and(|maximum| values.len() > maximum) {
         return Err(CanonicalValueError::Metadata);
     }
     let mut tags = BTreeSet::new();
@@ -2653,52 +2621,13 @@ fn canonical_metadata_tags(
     Ok(tags.into_iter().collect())
 }
 
-struct MetadataTagsVisitor<const MAXIMUM: usize>;
-
-impl<'de, const MAXIMUM: usize> Visitor<'de> for MetadataTagsVisitor<MAXIMUM> {
-    type Value = Vec<String>;
-
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "at most {MAXIMUM} exact session metadata tag strings"
-        )
-    }
-
-    fn visit_seq<AccessT>(self, mut sequence: AccessT) -> Result<Self::Value, AccessT::Error>
-    where
-        AccessT: SeqAccess<'de>,
-    {
-        let mut tags = Vec::with_capacity(sequence.size_hint().unwrap_or_default().min(MAXIMUM));
-        while tags.len() < MAXIMUM {
-            match sequence.next_element::<String>()? {
-                Some(tag) => tags.push(tag),
-                None => return Ok(tags),
-            }
-        }
-        if sequence.next_element::<IgnoredAny>()?.is_some() {
-            return Err(serde::de::Error::custom("too many session metadata tags"));
-        }
-        Ok(tags)
-    }
-}
-
-fn deserialize_bounded_metadata_tags<'de, DeserializerT, const MAXIMUM: usize>(
-    deserializer: DeserializerT,
-) -> Result<Vec<String>, DeserializerT::Error>
-where
-    DeserializerT: Deserializer<'de>,
-{
-    deserializer.deserialize_seq(MetadataTagsVisitor::<MAXIMUM>)
-}
-
 fn deserialize_session_metadata_tags<'de, DeserializerT>(
     deserializer: DeserializerT,
 ) -> Result<Vec<String>, DeserializerT::Error>
 where
     DeserializerT: Deserializer<'de>,
 {
-    deserialize_bounded_metadata_tags::<DeserializerT, MAX_SESSION_METADATA_TAGS>(deserializer)
+    Vec::<String>::deserialize(deserializer)
 }
 
 fn deserialize_required_metadata_tags<'de, DeserializerT>(
@@ -2707,9 +2636,7 @@ fn deserialize_required_metadata_tags<'de, DeserializerT>(
 where
     DeserializerT: Deserializer<'de>,
 {
-    deserialize_bounded_metadata_tags::<DeserializerT, MAX_SESSION_METADATA_REQUIRED_TAGS>(
-        deserializer,
-    )
+    Vec::<String>::deserialize(deserializer)
 }
 
 /// Closed actor provenance carried by a metadata last-writer stamp.
@@ -2805,11 +2732,6 @@ impl MetadataLastWriter {
         self.actor
     }
 }
-
-/// Maximum Unicode scalars in one imported-conversation display title,
-/// restating the domain derivation bound on the wire.
-// numeric-bound: tunable - controls retained imported-title display detail
-pub const MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS: usize = 256;
 
 /// One closed conversation origin class.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3001,14 +2923,11 @@ fn validate_tool_approval_event_shape(
     Ok(())
 }
 
-/// Validates the wire restatement of the derived display-title shape:
-/// nonempty single-line text without U+0000, at most
-/// [`MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS`] Unicode scalars, and
-/// no leading or trailing ASCII space or tab.
+/// Validates the structural display-title shape: nonempty single-line text
+/// without U+0000 and no leading or trailing ASCII space or tab.
 fn validate_imported_display_title(title: &str) -> Result<(), FrameValidationError> {
     if title.is_empty()
         || title.contains(['\0', '\n', '\r'])
-        || title.chars().count() > MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS
         || title.starts_with([' ', '\t'])
         || title.ends_with([' ', '\t'])
     {
@@ -3072,7 +2991,7 @@ fn validate_review_orchestration_snapshot(
     snapshot: &ReviewOrchestrationSnapshot,
 ) -> Result<(), FrameValidationError> {
     validate_review_key(&snapshot.concern_set_version)?;
-    if snapshot.concerns.is_empty() || snapshot.concerns.len() > MAX_REVIEW_ORCHESTRATION_CONCERNS {
+    if snapshot.concerns.is_empty() || snapshot.concerns.len() > MAX_REVIEW_ORCHESTRATION_MEMBERS {
         return Err(FrameValidationError::ReviewShape);
     }
     let mut keys = HashSet::new();
@@ -3517,6 +3436,8 @@ pub enum ClientRequest {
     },
     /// List available static templates by name and version.
     ListTemplates {},
+    /// Read client-relevant deployment policy for this connection.
+    ReadDeploymentLimits {},
     /// List current sessions.
     ListSessions {},
     /// Read one coherent repository-watch operator-status snapshot.
@@ -4049,6 +3970,7 @@ impl ClientRequest {
             Self::CreateSession { .. }
             | Self::CreateSessionFromTemplate { .. }
             | Self::ListTemplates {}
+            | Self::ReadDeploymentLimits {}
             | Self::ListSessions {}
             | Self::ReadOperatorStatus {}
             | Self::UpdateSessionPlacement { .. }
@@ -4193,13 +4115,11 @@ impl ClientRequest {
         if let Self::ListSessionMetadata {
             required_tags,
             title_contains,
-            page_size,
             ..
         } = self
         {
-            let canonical_tags =
-                canonical_metadata_tags(required_tags.clone(), MAX_SESSION_METADATA_REQUIRED_TAGS)
-                    .map_err(|_| FrameValidationError::MetadataShape)?;
+            let canonical_tags = canonical_metadata_tags(required_tags.clone(), None)
+                .map_err(|_| FrameValidationError::MetadataShape)?;
             let mut total_utf8_bytes = 0usize;
             for tag in &canonical_tags {
                 add_metadata_utf8_bytes(&mut total_utf8_bytes, tag)
@@ -4211,26 +4131,17 @@ impl ClientRequest {
                 add_metadata_utf8_bytes(&mut total_utf8_bytes, query)
                     .map_err(|_| FrameValidationError::MetadataShape)?;
             }
-            if !(1..=100).contains(&page_size.value()) {
-                return Err(FrameValidationError::MetadataShape);
-            }
         }
         if let Self::ListConversations {
-            title_contains,
-            page_size,
+            title_contains: Some(query),
             ..
         } = self
         {
-            if let Some(query) = title_contains {
-                validate_nonempty_metadata_text(query)
-                    .map_err(|_| FrameValidationError::ConversationListShape)?;
-                let mut total_utf8_bytes = 0usize;
-                add_metadata_utf8_bytes(&mut total_utf8_bytes, query)
-                    .map_err(|_| FrameValidationError::ConversationListShape)?;
-            }
-            if !(1..=100).contains(&page_size.value()) {
-                return Err(FrameValidationError::ConversationListShape);
-            }
+            validate_nonempty_metadata_text(query)
+                .map_err(|_| FrameValidationError::ConversationListShape)?;
+            let mut total_utf8_bytes = 0usize;
+            add_metadata_utf8_bytes(&mut total_utf8_bytes, query)
+                .map_err(|_| FrameValidationError::ConversationListShape)?;
         }
         if let Self::CreateSessionFromTemplate { template_name, .. } = self {
             validate_session_template_name(template_name)?;
@@ -4260,7 +4171,7 @@ impl ClientRequest {
             }
         }
         if let Self::RecordReviewFindings { findings, .. } = self
-            && findings.len() > 32
+            && findings.len() > MAX_REVIEW_ORCHESTRATION_MEMBERS
         {
             return Err(FrameValidationError::ReviewShape);
         }
@@ -4305,7 +4216,7 @@ impl ClientRequest {
             validate_session_template_name(judgment_template_name)?;
             validate_session_template_name(repair_template_name)?;
             validate_session_template_name(publication_template_name)?;
-            if concerns.is_empty() || concerns.len() > MAX_REVIEW_ORCHESTRATION_CONCERNS {
+            if concerns.is_empty() || concerns.len() > MAX_REVIEW_ORCHESTRATION_MEMBERS {
                 return Err(FrameValidationError::ReviewShape);
             }
             let mut keys = HashSet::new();
@@ -4582,6 +4493,16 @@ pub enum RejectionDetail {
     SessionNotFound {
         /// Absent target.
         session_id: CanonicalUuid,
+    },
+    /// An attachment digest had no catalogued verified replica.
+    AttachmentBlobNotFound {
+        /// The unavailable immutable byte identity.
+        digest: CanonicalBlobDigest,
+    },
+    /// Distinct attachment bytes exceeded the deployment admission ceiling.
+    AttachmentByteBudgetExceeded {
+        /// Configured maximum aggregate byte count.
+        maximum_bytes: PositiveCanonicalU64,
     },
     /// The placement head advanced beyond the caller-observed version.
     SessionPlacementCurrentVersionMismatch {
@@ -4934,6 +4855,8 @@ impl RejectionDetail {
             | Self::BlobReadRangeOutOfBounds { .. }
             | Self::BulkIngestAlreadyInProgress { .. }
             | Self::SessionNotFound { .. }
+            | Self::AttachmentBlobNotFound { .. }
+            | Self::AttachmentByteBudgetExceeded { .. }
             | Self::UnsupportedReasoningLevel { .. }
             | Self::UnsupportedFastMode { .. }
             | Self::UnsupportedServiceTier { .. }
@@ -5083,10 +5006,16 @@ pub enum FailedModelCallDisposition {
     Cancelled,
 }
 
-/// Closed provider-error classifications exposed to clients.
+/// Closed terminal model-call failure classifications exposed to clients.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailedModelCallCause {
+    /// Distinct rendered attachments exceeded the deployment verification bound.
+    AttachmentTooLarge,
+    /// No recorded replica contained a required rendered attachment.
+    AttachmentMissing,
+    /// Recorded replicas failed attachment identity verification.
+    AttachmentCorrupt,
     /// The provider rejected the request credential.
     CredentialRejected,
     /// The credential lacked permission.
@@ -5132,8 +5061,7 @@ impl FailedTerminalModelCall {
         }
     }
 
-    /// Constructs one known-failed call with its closed provider-error
-    /// classification.
+    /// Constructs one known-failed call with its closed failure classification.
     pub const fn known_failed_with_cause(
         model_call_id: CanonicalUuid,
         cause: FailedModelCallCause,
@@ -5155,7 +5083,7 @@ impl FailedTerminalModelCall {
         self.disposition
     }
 
-    /// Returns the closed provider-error classification when retained.
+    /// Returns the closed failure classification when retained.
     pub const fn cause(&self) -> Option<FailedModelCallCause> {
         self.cause
     }
@@ -5192,7 +5120,7 @@ impl<'de> Deserialize<'de> for FailedTerminalModelCall {
         let raw = RawFailedTerminalModelCall::deserialize(deserializer)?;
         if raw.cause.is_some() && raw.disposition != FailedModelCallDisposition::KnownFailed {
             return Err(serde::de::Error::custom(
-                "provider failure cause requires a known-failed disposition",
+                "failure cause requires a known-failed disposition",
             ));
         }
         Ok(Self {
@@ -5283,6 +5211,10 @@ pub enum TurnState {
         ended_attempt_id: CanonicalUuid,
         /// Ambiguous tool attempt awaiting recovery.
         recovery_tool_attempt_id: CanonicalUuid,
+        /// Durable automatic reconciliation attempts already claimed.
+        automatic_reconciliation_attempts: CanonicalU64,
+        /// True only when the automatic attempt budget is exhausted.
+        operator_action_required: bool,
     },
     /// The turn is parked on replacement of one exact lost runner placement.
     ActiveAwaitingRunnerRecovery {
@@ -5396,6 +5328,8 @@ enum RawTurnState {
     ActiveAwaitingToolRecovery {
         ended_attempt_id: CanonicalUuid,
         recovery_tool_attempt_id: CanonicalUuid,
+        automatic_reconciliation_attempts: CanonicalU64,
+        operator_action_required: bool,
     },
     ActiveAwaitingRunnerRecovery {
         runner_id: CanonicalUuid,
@@ -5534,9 +5468,13 @@ impl<'de> Deserialize<'de> for TurnState {
             RawTurnState::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
                 recovery_tool_attempt_id,
+                automatic_reconciliation_attempts,
+                operator_action_required,
             } => Self::ActiveAwaitingToolRecovery {
                 ended_attempt_id,
                 recovery_tool_attempt_id,
+                automatic_reconciliation_attempts,
+                operator_action_required,
             },
             RawTurnState::ActiveAwaitingRunnerRecovery {
                 runner_id,
@@ -5708,7 +5646,7 @@ pub enum ImportedContentKind {
     MessageContentAbsent,
 }
 
-/// A bounded leading excerpt of one imported entry's exact attested text.
+/// A leading excerpt of one imported entry's exact attested text.
 ///
 /// The preview is the entry's exact leading Unicode scalar sequence cut at a
 /// scalar boundary, never a summary, replacement, or re-encoding. It is a
@@ -5717,8 +5655,7 @@ pub enum ImportedContentKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "RawImportedTextPreview")]
 pub struct ImportedTextPreview {
-    /// Exact leading scalars, at most
-    /// [`MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES`] of UTF-8.
+    /// Exact leading scalars within structural wire-text memory.
     preview: String,
     /// Whether exact text remains beyond the emitted scalars.
     truncated: bool,
@@ -5751,12 +5688,20 @@ impl TryFrom<RawImportedTextPreview> for ImportedTextPreview {
 }
 
 impl ImportedTextPreview {
-    /// Constructs the bounded preview of one exact attested text.
+    /// Constructs a structurally bounded preview of one exact attested text.
     ///
     /// The cut lands on a Unicode scalar boundary, so the preview is always a
     /// prefix of the source text rather than a truncated encoding.
     pub fn of_exact_text(text: &str) -> Self {
-        let mut end = MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES.min(text.len());
+        Self::of_exact_text_with_limit(text, None)
+    }
+
+    /// Constructs a preview under the deployment's optional retained-detail policy.
+    pub fn of_exact_text_with_limit(text: &str, limit: Option<usize>) -> Self {
+        let effective_limit = limit
+            .unwrap_or(MAX_CONTENT_FRAGMENT_BYTES)
+            .min(MAX_CONTENT_FRAGMENT_BYTES);
+        let mut end = effective_limit.min(text.len());
         while !text.is_char_boundary(end) {
             end -= 1;
         }
@@ -5777,7 +5722,7 @@ impl ImportedTextPreview {
     }
 
     fn validate(&self) -> Result<(), FrameValidationError> {
-        if self.preview.len() > MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES {
+        if self.preview.len() > MAX_CONTENT_FRAGMENT_BYTES {
             return Err(FrameValidationError::ImportedTextPreviewShape);
         }
         // Every nonempty text yields at least one scalar inside the bound, so
@@ -5926,13 +5871,6 @@ pub enum TranscriptEntry {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TranscriptTextEntry {
-    /// User input text.
-    User {
-        /// Exact accepted input.
-        accepted_input_id: CanonicalUuid,
-        /// Origin turn.
-        turn_id: CanonicalUuid,
-    },
     /// Committed assistant text.
     Assistant {
         /// Owning turn.
@@ -6343,7 +6281,7 @@ pub struct RunnerWorkingDirectory(String);
 
 impl RunnerWorkingDirectory {
     /// Maximum UTF-8 bytes admitted by the runner domain and process wire.
-    // numeric-bound: tunable - mirrors the domain's exact runner-value grammar
+    // numeric-bound: guard - mirrors the domain's exact runner-value wire grammar
     pub const MAX_UTF8_BYTES: usize = DomainRunnerWorkingDirectory::MAX_BYTES;
 
     /// Admits nonempty, NUL-free text within the exact byte bound.
@@ -7640,6 +7578,21 @@ pub enum ServerMessage {
         /// Number of preceding summaries.
         template_count: CanonicalU64,
     },
+    /// Client-relevant deployment policy, with null denoting unbounded.
+    DeploymentLimits {
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        max_message_utf8_bytes: Option<CanonicalU64>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        max_system_prompt_utf8_bytes: Option<CanonicalU64>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        terminal_input_channel_capacity: Option<CanonicalU64>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        min_metadata_page_size: Option<CanonicalU64>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        max_metadata_page_size: Option<CanonicalU64>,
+        #[serde(deserialize_with = "deserialize_required_nullable")]
+        max_review_findings_per_run: Option<CanonicalU64>,
+    },
     /// Begins one bounded metadata-summary page.
     SessionMetadataPageStart {},
     /// One current session metadata summary.
@@ -7936,6 +7889,21 @@ pub enum ServerMessage {
         /// Exact marker payload.
         entry: TranscriptEntry,
     },
+    /// One atomic native user entry with exact ordered multipart content.
+    TranscriptUserEntry {
+        /// Zero-based frontier member index.
+        entry_index: CanonicalU64,
+        /// Entry source session.
+        source_session_id: CanonicalUuid,
+        /// Semantic entry identity.
+        entry_id: CanonicalUuid,
+        /// Exact accepted input.
+        accepted_input_id: CanonicalUuid,
+        /// Origin turn.
+        turn_id: CanonicalUuid,
+        /// Canonical ordered user content.
+        content: UserInputContent,
+    },
     /// Begins one text-bearing frontier member.
     TranscriptTextEntry {
         /// Zero-based frontier member index.
@@ -8201,6 +8169,7 @@ impl ServerMessage {
                 &approval.decider,
                 &approval.rationale,
             )?,
+            Self::TranscriptUserEntry { content, .. } => content.validate()?,
             Self::GoalTransitionApplied {
                 event_ordinal,
                 generation,
@@ -8242,7 +8211,7 @@ impl ServerMessage {
                     add_metadata_utf8_bytes(&mut total_utf8_bytes, title)
                         .map_err(|_| FrameValidationError::MetadataShape)?;
                 }
-                let canonical = canonical_metadata_tags(tags.clone(), MAX_SESSION_METADATA_TAGS)
+                let canonical = canonical_metadata_tags(tags.clone(), None)
                     .map_err(|_| FrameValidationError::MetadataShape)?;
                 if canonical != *tags {
                     return Err(FrameValidationError::MetadataShape);
@@ -8259,9 +8228,7 @@ impl ServerMessage {
                 session_count,
                 next_after_session_id,
             } => {
-                if session_count.value() > 100
-                    || (next_after_session_id.is_some() && session_count.value() == 0)
-                {
+                if next_after_session_id.is_some() && session_count.value() == 0 {
                     return Err(FrameValidationError::MetadataShape);
                 }
             }
@@ -8311,9 +8278,7 @@ impl ServerMessage {
                 conversation_count,
                 next_after,
             } => {
-                if conversation_count.value() > 100
-                    || (next_after.is_some() && conversation_count.value() == 0)
-                {
+                if next_after.is_some() && conversation_count.value() == 0 {
                     return Err(FrameValidationError::ConversationListShape);
                 }
             }
@@ -8365,13 +8330,7 @@ impl ServerMessage {
             } if expected_length_bytes.value() == 0 => {
                 return Err(FrameValidationError::BlobUploadShape);
             }
-            Self::BlobMetadata {
-                byte_length,
-                replica_count,
-                ..
-            } if byte_length.value() == 0
-                || !(1..=MAX_BLOB_REPLICA_COUNT).contains(&replica_count.value()) =>
-            {
+            Self::BlobMetadata { byte_length, .. } if byte_length.value() == 0 => {
                 return Err(FrameValidationError::BlobReadShape);
             }
             Self::BlobChunkRead {
@@ -9051,6 +9010,8 @@ fn validate_rejection_detail(detail: RejectionDetail) -> Result<(), FrameValidat
             last.value() == u64::MAX
         }
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::AttachmentBlobNotFound { .. }
+        | RejectionDetail::AttachmentByteBudgetExceeded { .. }
         | RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
@@ -9156,6 +9117,8 @@ fn validate_conversation_import_detail(
             }
         },
         RejectionDetail::SessionNotFound { .. }
+        | RejectionDetail::AttachmentBlobNotFound { .. }
+        | RejectionDetail::AttachmentByteBudgetExceeded { .. }
         | RejectionDetail::UnsupportedReasoningLevel { .. }
         | RejectionDetail::UnsupportedFastMode { .. }
         | RejectionDetail::UnsupportedServiceTier { .. }
@@ -9800,15 +9763,12 @@ mod tests {
         GoalBlockedProvenance, GoalBlockedReason, GoalCommandRejection, GoalHistoryEvent,
         GoalLifecycleState, ImportedContentKind, ImportedConversationSourceFormat,
         ImportedSessionRelationship, ImportedSourceSpeaker, ImportedSpeaker, ImportedTextPreview,
-        InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES,
-        MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS, MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES,
-        MAX_JSON_CONTAINER_DEPTH, MAX_SESSION_METADATA_ATTRIBUTES,
-        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_REQUIRED_TAGS,
-        MAX_SESSION_METADATA_TAGS, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
-        MAX_SYSTEM_PROMPT_UTF8_BYTES, MetadataActor, MetadataLastWriter, ModelCallCostLabel,
-        ModelCallDisposition, ModelCallDollarCost, ModelCallState, ModelCallTokenUsage,
-        ModelCapabilities, ModelChangeAdjustment, ModelSelection, ModelSettingSource,
-        ModelSettingsOverlay, ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
+        InputContent, InputDelivery, MAX_CONTENT_FRAGMENT_BYTES, MAX_JSON_CONTAINER_DEPTH,
+        MAX_SESSION_METADATA_INDEXED_UTF8_BYTES, MAX_SESSION_METADATA_TOTAL_UTF8_BYTES,
+        MetadataActor, MetadataLastWriter, ModelCallCostLabel, ModelCallDisposition,
+        ModelCallDollarCost, ModelCallState, ModelCallTokenUsage, ModelCapabilities,
+        ModelChangeAdjustment, ModelSelection, ModelSettingSource, ModelSettingsOverlay,
+        ModelSettingsPrecedence, ModelSettingsSnapshot, OpenAiServiceTier,
         OperatorStatusConvergenceSeal, OperatorStatusConvergenceVerdict, OperatorStatusEndMessage,
         OperatorStatusHeldSlotBlocker, OperatorStatusHeldSlotMessage, OperatorStatusHeldSlotOrigin,
         OperatorStatusMergeableState, OperatorStatusMessage,
@@ -11587,6 +11547,53 @@ mod tests {
     }
 
     #[test]
+    fn inv033_transcript_user_entry_round_trips_ordered_multipart_content()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let digest = "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            .parse::<CanonicalBlobDigest>()?;
+        assert_server_message_round_trip(
+            request(31)?,
+            ServerMessage::TranscriptUserEntry {
+                entry_index: CanonicalU64::new(0),
+                source_session_id: uuid(1),
+                entry_id: uuid(2),
+                accepted_input_id: uuid(3),
+                turn_id: uuid(4),
+                content: UserInputContent::from_parts(vec![
+                    UserInputPart::Text {
+                        text: String::from("inspect "),
+                    },
+                    UserInputPart::Attachment {
+                        digest,
+                        kind: UserAttachmentKind::Image,
+                        media_type: String::from("image/png"),
+                        display_filename: Some(String::from("chart.png")),
+                    },
+                    UserInputPart::Text {
+                        text: String::from(" carefully"),
+                    },
+                ]),
+            },
+            r#"{"type":"transcript_user_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000002","accepted_input_id":"00000000-0000-0000-0000-000000000003","turn_id":"00000000-0000-0000-0000-000000000004","content":[{"type":"text","text":"inspect "},{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png","display_filename":"chart.png"},{"type":"text","text":" carefully"}]}"#,
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn inv033_transcript_user_entry_rejects_malformed_multipart_content() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"transcript_user_entry","entry_index":"0","source_session_id":"00000000-0000-0000-0000-000000000001","entry_id":"00000000-0000-0000-0000-000000000002","accepted_input_id":"00000000-0000-0000-0000-000000000003","turn_id":"00000000-0000-0000-0000-000000000004","content":[{"type":"attachment","digest":"sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad","kind":"image","media_type":"image/png"}]}}"#,
+        );
+    }
+
+    #[test]
+    fn attachment_byte_budget_rejection_requires_a_positive_maximum() {
+        assert_server_malformed(
+            r#"{"version":1,"request_id":"1","message":{"type":"error","code":"rejected","message":"attachment budget exceeded","detail":{"type":"rejected","rejection":{"type":"attachment_byte_budget_exceeded","maximum_bytes":"0"}}}}"#,
+        );
+    }
+
+    #[test]
     fn inv033_read_transcript_round_trips_in_the_single_vocabulary()
     -> Result<(), Box<dyn std::error::Error>> {
         let frame = ClientFrame::try_new_for_version(
@@ -12257,6 +12264,71 @@ mod tests {
         Ok(())
     }
 
+    fn assert_attachment_failure_cause_round_trip(
+        cause: FailedModelCallCause,
+        spelling: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let encoded = encode_server_line(&ServerFrame {
+            version: ProtocolVersion::One,
+            request_id: request(92)?,
+            message: ServerMessage::TranscriptTurn {
+                turn_id: uuid(1),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::Failed {
+                    terminal_frontier_id: uuid(2),
+                    terminal_attempt_id: Some(uuid(3)),
+                    terminal_model_call: Some(FailedTerminalModelCall::known_failed_with_cause(
+                        uuid(4),
+                        cause,
+                    )),
+                },
+            },
+        })?;
+        assert!(std::str::from_utf8(&encoded)?.contains(&format!("\"cause\":\"{spelling}\"")));
+        let decoded = decode_server_line(&encoded)?;
+        let ServerMessage::TranscriptTurn {
+            state:
+                TurnState::Failed {
+                    terminal_model_call: Some(call),
+                    ..
+                },
+            ..
+        } = decoded.message
+        else {
+            panic!("attachment failure fixture keeps its terminal call");
+        };
+        assert_eq!(call.cause(), Some(cause));
+        Ok(())
+    }
+
+    #[test]
+    fn attachment_too_large_round_trips_as_a_closed_wire_classification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_attachment_failure_cause_round_trip(
+            FailedModelCallCause::AttachmentTooLarge,
+            "attachment_too_large",
+        )
+    }
+
+    #[test]
+    fn attachment_missing_round_trips_as_a_closed_wire_classification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_attachment_failure_cause_round_trip(
+            FailedModelCallCause::AttachmentMissing,
+            "attachment_missing",
+        )
+    }
+
+    #[test]
+    fn attachment_corrupt_round_trips_as_a_closed_wire_classification()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_attachment_failure_cause_round_trip(
+            FailedModelCallCause::AttachmentCorrupt,
+            "attachment_corrupt",
+        )
+    }
+
     #[test]
     fn failed_terminal_call_rejects_an_unknown_failure_cause() {
         assert_server_malformed(
@@ -12826,22 +12898,27 @@ mod tests {
         );
     }
 
-    /// INV-033: the empty-title, U+0000, and page-size bounds reject a
-    /// listing request before application construction.
+    /// INV-033: structurally invalid title filters reject a listing request
+    /// before application construction.
     #[test]
-    fn inv033_list_conversations_validates_title_and_page_size() {
+    fn inv033_list_conversations_validates_title_filter_shape() {
         assert_client_malformed(
             r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":"","origin":"all","include_archived":false,"page_size":"50","after":null}}"#,
         );
         assert_client_malformed(
             "{\"version\":1,\"request_id\":\"1\",\"request\":{\"type\":\"list_conversations\",\"title_contains\":\"a\\u0000b\",\"origin\":\"all\",\"include_archived\":false,\"page_size\":\"50\",\"after\":null}}",
         );
-        assert_client_malformed(
+    }
+
+    #[test]
+    fn list_conversations_page_size_has_no_wire_policy() -> Result<(), Box<dyn std::error::Error>> {
+        decode_client_line(&line(
             r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"0","after":null}}"#,
-        );
-        assert_client_malformed(
+        ))?;
+        decode_client_line(&line(
             r#"{"version":1,"request_id":"1","request":{"type":"list_conversations","title_contains":null,"origin":"all","include_archived":false,"page_size":"101","after":null}}"#,
-        );
+        ))?;
+        Ok(())
     }
 
     /// INV-033: the three unified page messages keep their exact closed
@@ -12912,16 +12989,20 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: a page end never names a cursor for an empty page or a count
-    /// beyond the page bound.
+    /// INV-033: a page end never names a cursor for an empty page.
     #[test]
-    fn inv033_conversation_page_end_shape_is_bounded() {
+    fn inv033_conversation_page_end_rejects_cursor_for_empty_page() {
         assert_server_malformed(
             r#"{"version":1,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"0","next_after":{"origin":"native_session","conversation_id":"00000000-0000-0000-0000-000000000001"}}}"#,
         );
-        assert_server_malformed(
+    }
+
+    #[test]
+    fn conversation_page_count_has_no_wire_policy() -> Result<(), Box<dyn std::error::Error>> {
+        decode_server_line(&line(
             r#"{"version":1,"request_id":"1","message":{"type":"conversation_page_end","conversation_count":"101","next_after":null}}"#,
-        );
+        ))?;
+        Ok(())
     }
 
     /// INV-033: a native summary title follows the metadata title rules and
@@ -12945,24 +13026,19 @@ mod tests {
         );
     }
 
-    /// INV-033: an in-memory imported summary title beyond the scalar bound
-    /// fails encoding rather than crossing the wire.
+    /// INV-033: imported title length is deployment policy, not wire grammar.
     #[test]
-    fn inv033_conversation_summary_rejects_an_oversized_imported_title()
+    fn inv033_conversation_summary_admits_structurally_valid_long_imported_title()
     -> Result<(), Box<dyn std::error::Error>> {
         let message = ServerMessage::ConversationSummary {
             conversation: ConversationSummary::ImportedConversation {
                 imported_conversation_id: uuid(4),
-                title: Some("x".repeat(MAX_IMPORTED_CONVERSATION_DISPLAY_TITLE_SCALARS + 1)),
+                title: Some("long title x".repeat(31)),
                 entry_count: CanonicalU64::new(1),
                 source_format: ImportedConversationSourceFormat::ClaudeCodeSessionJsonlV2,
             },
         };
-        assert_eq!(
-            ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message)
-                .expect_err("oversized imported title must fail validation"),
-            FrameValidationError::ConversationListShape
-        );
+        ServerFrame::try_new_for_version(ProtocolVersion::One, request(1)?, message)?;
         Ok(())
     }
 
@@ -13960,10 +14036,10 @@ mod tests {
     /// prefix of the source text and never a split encoding.
     #[test]
     fn imported_text_preview_cuts_on_a_scalar_boundary() {
-        // 86 three-byte scalars are 258 bytes, so the 256-byte bound falls
+        // 86 three-byte scalars are 258 bytes, so the configured 256-byte limit falls
         // inside the 86th scalar and the preview keeps only the first 85.
         let text = "\u{4e00}".repeat(86);
-        let preview = ImportedTextPreview::of_exact_text(&text);
+        let preview = ImportedTextPreview::of_exact_text_with_limit(&text, Some(256));
 
         assert_eq!(preview.preview(), "\u{4e00}".repeat(85));
         assert!(preview.truncated());
@@ -13995,7 +14071,7 @@ mod tests {
     fn imported_text_preview_validates_on_direct_deserialization() {
         let oversized = format!(
             "{{\"preview\":\"{}\",\"truncated\":false}}",
-            "a".repeat(MAX_IMPORTED_TEXT_PREVIEW_UTF8_BYTES + 1)
+            "a".repeat(MAX_CONTENT_FRAGMENT_BYTES + 1)
         );
 
         assert!(serde_json::from_str::<ImportedTextPreview>(&oversized).is_err());
@@ -15175,19 +15251,38 @@ mod tests {
         Ok(())
     }
 
-    /// INV-033: the wire prompt admits exactly the 1,048,576-byte bound,
-    /// splitting at a multibyte scalar so the byte measure is what binds.
+    /// INV-033: prompt text enforces structural content rules only.
     #[test]
-    fn inv033_system_prompt_text_binds_at_the_exact_utf8_byte_bound() {
-        let exact = "y".repeat(MAX_SYSTEM_PROMPT_UTF8_BYTES - '√'.len_utf8()) + "√";
-        assert_eq!(exact.len(), MAX_SYSTEM_PROMPT_UTF8_BYTES);
-        let admitted = SystemPromptText::try_new(exact.clone()).expect("exact cap is admitted");
-        assert_eq!(admitted.as_str(), exact);
-
-        let oversized = exact + "y";
-        assert!(SystemPromptText::try_new(oversized).is_err());
+    fn inv033_system_prompt_text_rejects_empty_and_nul_content() {
+        let admitted = SystemPromptText::try_new(String::from("exact √ prompt"))
+            .expect("structurally valid text is admitted");
+        assert_eq!(admitted.as_str(), "exact √ prompt");
         assert!(SystemPromptText::try_new(String::new()).is_err());
         assert!(SystemPromptText::try_new("a\u{0}b".to_owned()).is_err());
+    }
+
+    /// INV-033: deployment limits use one closed required nullable wire shape.
+    #[test]
+    fn inv033_deployment_limits_have_exact_closed_wire_shapes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        assert_client_request_round_trip(
+            request(1)?,
+            ClientRequest::ReadDeploymentLimits {},
+            r#"{"type":"read_deployment_limits"}"#,
+        )?;
+        assert_server_message_round_trip(
+            request(2)?,
+            ServerMessage::DeploymentLimits {
+                max_message_utf8_bytes: Some(CanonicalU64::new(7)),
+                max_system_prompt_utf8_bytes: None,
+                terminal_input_channel_capacity: Some(CanonicalU64::new(3)),
+                min_metadata_page_size: Some(CanonicalU64::new(1)),
+                max_metadata_page_size: None,
+                max_review_findings_per_run: Some(CanonicalU64::new(9)),
+            },
+            r#"{"type":"deployment_limits","max_message_utf8_bytes":"7","max_system_prompt_utf8_bytes":null,"terminal_input_channel_capacity":"3","min_metadata_page_size":"1","max_metadata_page_size":null,"max_review_findings_per_run":"9"}"#,
+        )?;
+        Ok(())
     }
 
     /// INV-033 / INV-047: template frames have exact closed shapes.
@@ -16152,17 +16247,14 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_list_rejects_zero_page_size() {
-        assert_client_malformed(
+    fn metadata_list_page_size_has_no_wire_policy() -> Result<(), Box<dyn std::error::Error>> {
+        decode_client_line(&line(
             r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"0","after_session_id":null}}"#,
-        );
-    }
-
-    #[test]
-    fn inv033_metadata_list_rejects_page_size_over_bound() {
-        assert_client_malformed(
+        ))?;
+        decode_client_line(&line(
             r#"{"version":1,"request_id":"1","request":{"type":"list_session_metadata","required_tags":[],"title_contains":null,"include_archived":false,"page_size":"101","after_session_id":null}}"#,
-        );
+        ))?;
+        Ok(())
     }
 
     #[test]
@@ -16194,24 +16286,9 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_required_tag_deserializer_rejects_member_beyond_bound()
+    fn inv033_metadata_required_tag_deserializer_has_no_deployment_policy()
     -> Result<(), Box<dyn std::error::Error>> {
-        let required_tags = serde_json::to_string(&numbered_metadata_strings(
-            MAX_SESSION_METADATA_REQUIRED_TAGS + 1,
-        ))?;
-        let json = format!(
-            r#"{{"version":1,"request_id":"1","request":{{"type":"list_session_metadata","required_tags":{required_tags},"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}}}"#
-        );
-        assert_client_malformed(&json);
-        Ok(())
-    }
-
-    #[test]
-    fn inv033_metadata_required_tag_deserializer_accepts_exact_bound()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let required_tags = serde_json::to_string(&numbered_metadata_strings(
-            MAX_SESSION_METADATA_REQUIRED_TAGS,
-        ))?;
+        let required_tags = serde_json::to_string(&numbered_metadata_strings(3))?;
         let json = format!(
             r#"{{"version":1,"request_id":"1","request":{{"type":"list_session_metadata","required_tags":{required_tags},"title_contains":null,"include_archived":false,"page_size":"50","after_session_id":null}}}}"#
         );
@@ -16220,23 +16297,11 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_summary_tag_deserializer_rejects_member_beyond_bound()
+    fn inv033_metadata_summary_tag_deserializer_has_no_deployment_policy()
     -> Result<(), Box<dyn std::error::Error>> {
-        let tags =
-            serde_json::to_string(&numbered_metadata_strings(MAX_SESSION_METADATA_TAGS + 1))?;
-        let json = format!(
-            r#"{{"version":1,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"user"}}}}}}}}"#
-        );
-        assert_server_malformed(&json);
-        Ok(())
-    }
-
-    #[test]
-    fn inv033_metadata_summary_tag_deserializer_accepts_exact_bound()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let mut exact_tags = numbered_metadata_strings(MAX_SESSION_METADATA_TAGS);
-        exact_tags.sort();
-        let tags = serde_json::to_string(&exact_tags)?;
+        let mut tags = numbered_metadata_strings(3);
+        tags.sort();
+        let tags = serde_json::to_string(&tags)?;
         let json = format!(
             r#"{{"version":1,"request_id":"1","message":{{"type":"session_metadata_summary","session_id":"00000000-0000-0000-0000-000000000001","defaults_version":"1","model_selection":{{"kind":"direct","selection_id":"00000000-0000-0000-0000-000000000002"}},"dangerous_tool_auto_approval":false,"title":null,"tags":{tags},"archived":false,"last_writer":{{"updated_at_unix_micros":"1","actor":{{"type":"user"}}}}}}}}"#
         );
@@ -16341,20 +16406,24 @@ mod tests {
             .is_err()
         );
         assert!(
-            SessionMetadata::try_new(
+            SessionMetadata::try_new_with_count_limits(
                 None,
-                numbered_metadata_strings(MAX_SESSION_METADATA_TAGS + 1),
+                numbered_metadata_strings(3),
                 Vec::new(),
                 false,
+                Some(2),
+                None,
             )
             .is_err()
         );
         assert!(
-            SessionMetadata::try_new(
+            SessionMetadata::try_new_with_count_limits(
                 None,
                 Vec::new(),
-                numbered_metadata_attributes(MAX_SESSION_METADATA_ATTRIBUTES + 1),
+                numbered_metadata_attributes(3),
                 false,
+                None,
+                Some(2),
             )
             .is_err()
         );
@@ -16420,17 +16489,6 @@ mod tests {
             Err(FrameValidationError::MetadataShape)
         );
 
-        let over_cardinality = ClientRequest::ListSessionMetadata {
-            required_tags: numbered_metadata_strings(MAX_SESSION_METADATA_REQUIRED_TAGS + 1),
-            title_contains: None,
-            include_archived: false,
-            page_size: CanonicalU64::new(50),
-            after_session_id: None,
-        };
-        assert_eq!(
-            ClientFrame::try_new_for_version(ProtocolVersion::One, request(1)?, over_cardinality,),
-            Err(FrameValidationError::MetadataShape)
-        );
         Ok(())
     }
 
@@ -16566,12 +16624,16 @@ mod tests {
     }
 
     #[test]
-    fn inv033_metadata_page_rejects_a_count_above_the_bound()
-    -> Result<(), Box<dyn std::error::Error>> {
-        assert_metadata_message_rejected(ServerMessage::SessionMetadataPageEnd {
-            session_count: CanonicalU64::new(101),
-            next_after_session_id: None,
-        })
+    fn metadata_page_count_has_no_wire_policy() -> Result<(), Box<dyn std::error::Error>> {
+        ServerFrame::try_new_for_version(
+            ProtocolVersion::One,
+            request(1)?,
+            ServerMessage::SessionMetadataPageEnd {
+                session_count: CanonicalU64::new(101),
+                next_after_session_id: None,
+            },
+        )?;
+        Ok(())
     }
 
     #[test]
@@ -16612,6 +16674,29 @@ mod tests {
             tool_reconciliation,
         )?;
         assert_eq!(decode_server_line(&encode_server_line(&frame)?)?, frame);
+        assert_server_message_round_trip(
+            request(3)?,
+            ServerMessage::TranscriptTurn {
+                turn_id: uuid(3),
+                acceptance_position: CanonicalU64::new(1),
+                model_settings: None,
+                state: TurnState::ActiveAwaitingToolRecovery {
+                    ended_attempt_id: uuid(7),
+                    recovery_tool_attempt_id: uuid(9),
+                    automatic_reconciliation_attempts: CanonicalU64::new(2),
+                    operator_action_required: false,
+                },
+            },
+            concat!(
+                "{\"type\":\"transcript_turn\",\"turn_id\":\"00000000-0000-0000-0000-000000000003\",",
+                "\"acceptance_position\":\"1\",\"model_settings\":null,\"state\":{",
+                "\"type\":\"active_awaiting_tool_recovery\",",
+                "\"ended_attempt_id\":\"00000000-0000-0000-0000-000000000007\",",
+                "\"recovery_tool_attempt_id\":\"00000000-0000-0000-0000-000000000009\",",
+                "\"automatic_reconciliation_attempts\":\"2\",",
+                "\"operator_action_required\":false}}"
+            ),
+        )?;
         Ok(())
     }
 

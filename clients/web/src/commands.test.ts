@@ -19,6 +19,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
     })
 
@@ -30,6 +32,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       paneSize: 320,
     })
@@ -37,6 +41,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       paneSize: 440,
     })
@@ -51,6 +57,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       sessionId: '00000000-0000-0000-0000-000000000991',
       openSession: (sessionId) => opened.push(sessionId),
@@ -67,10 +75,41 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds,
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
     })
 
     expect(selectApp(store.getState()).selectedTimeline).toBe(timelineIds[0])
+  })
+
+  it('lets the registered artifact command own expansion state', () => {
+    store.dispatch(actions.artifactSelected('artifact-1'))
+
+    invokeCommand('artifact.preview.expand', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: ['artifact-1'],
+      artifactOriginalIds: [],
+      focusTimeline: () => undefined,
+    })
+
+    expect(selectApp(store.getState()).expandedArtifacts['artifact-1']).toBe(true)
+  })
+
+  it('lets the registered artifact command own selection state', () => {
+    invokeCommand('artifact.select', {
+      dispatch: store.dispatch,
+      getState: store.getState,
+      timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
+      artifactSelectionTarget: 'artifact-2',
+      focusTimeline: () => undefined,
+    })
+
+    expect(selectApp(store.getState()).selectedArtifact).toBe('artifact-2')
   })
 
   it('selects the next immutable imported frontier through the command registry', () => {
@@ -81,6 +120,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       importEntryIds,
       selectedImportEntry,
@@ -100,6 +141,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       importEntryIds: ['import-entry-1', 'import-entry-2'],
       selectedImportEntry: 'import-entry-1',
@@ -116,6 +159,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       canContinueImport: true,
       continueImport: (relationship: 'resume' | 'fork') => relationships.push(relationship),
@@ -134,6 +179,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       canContinueImport: false,
       continueImport: (relationship) => relationships.push(relationship),
@@ -148,6 +195,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       canRetryImport: true,
       retryImport: () => recoveryActions.push('retry'),
@@ -167,6 +216,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: ['41', '42'],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       loadTimelineWindow: (anchor: 'first' | 'latest') => loaded.push(anchor),
     }
@@ -185,6 +236,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: ['41', '42'],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       focusTimeline: () => undefined,
       toggleTimelineExpansion: () => {
         toggles += 1
@@ -200,6 +253,8 @@ describe('command registry', () => {
       dispatch: store.dispatch,
       getState: store.getState,
       timelineIds: [],
+      artifactPreviewIds: [],
+      artifactOriginalIds: [],
       timelineWindowAvailable: true,
       focusTimeline: () => undefined,
       loadTimelineWindow: (anchor: 'first' | 'latest') => loaded.push(anchor),
