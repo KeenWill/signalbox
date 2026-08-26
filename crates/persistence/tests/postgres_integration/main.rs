@@ -12,6 +12,7 @@
 mod support;
 
 mod approval_decisions;
+mod attention;
 mod convergence_sweep;
 mod delegated_result_rereads;
 mod delegation_schema;
@@ -1925,6 +1926,32 @@ async fn postgres_before_approval_event_migration()
     for migration in MIGRATOR
         .iter()
         .take_while(|migration| migration.version < 202608030001)
+    {
+        connection.apply("_sqlx_migrations", migration).await?;
+    }
+    drop(connection);
+    Ok((container, pool, database_url))
+}
+
+/// The attention journal migration, whose backfill the fixture below stages.
+const OPERATOR_ATTENTION_CHANGE_MIGRATION_VERSION: i64 = 202608250800;
+
+/// Stages the database an existing installation carries when the attention
+/// journal ships: every other migration applied, this one not.
+///
+/// The staged database is written through current repository code, which
+/// requires the current schema, so the fixture withholds exactly the migration
+/// under test rather than every migration recorded after it.
+async fn postgres_before_attention_migration()
+-> Result<(ContainerAsync<Postgres>, PgPool, String), Box<dyn Error>> {
+    let (container, pool, database_url) = unmigrated_postgres().await?;
+    let mut connection = pool.acquire().await?;
+    connection
+        .ensure_migrations_table("_sqlx_migrations")
+        .await?;
+    for migration in MIGRATOR
+        .iter()
+        .filter(|migration| migration.version != OPERATOR_ATTENTION_CHANGE_MIGRATION_VERSION)
     {
         connection.apply("_sqlx_migrations", migration).await?;
     }
