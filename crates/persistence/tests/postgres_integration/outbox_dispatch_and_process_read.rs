@@ -330,7 +330,7 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
         queued_snapshot.turns()[0].state(),
         &ProcessTurnState::Queued {
             accepted_input,
-            content: "projected user request".to_owned(),
+            content: user_content("projected user request"),
         }
     );
     assert!(queued_snapshot.entries().is_empty());
@@ -374,7 +374,7 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
             entry: origin_entry,
             accepted_input,
             turn,
-            content: "projected user request".to_owned(),
+            content: user_content("projected user request"),
         }]
     );
 
@@ -383,8 +383,8 @@ async fn s24_inv032_process_transcript_is_one_authoritative_snapshot() -> Result
     Ok(())
 }
 
-/// S24 / INV-012 / INV-053: a settings-aware turn cannot become legacy-null
-/// when its required resolution event is absent.
+/// S24 / INV-012 / INV-053: a settings-aware turn cannot omit its required
+/// resolution event.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s24_inv012_inv053_process_read_rejects_missing_turn_settings_evidence()
@@ -406,32 +406,6 @@ async fn s24_inv012_inv053_process_read_rejects_missing_turn_settings_evidence()
     SubmitInputRepository::new(pool.clone())
         .handle(command.clone(), accepted_input, Some(turn))
         .await?;
-
-    sqlx::raw_sql(
-        "ALTER TABLE durable_command DISABLE TRIGGER USER;
-         ALTER TABLE submit_input_command DISABLE TRIGGER USER;
-         ALTER TABLE submit_input_command DROP CONSTRAINT submit_input_command_registry_fk;",
-    )
-    .execute(&pool)
-    .await?;
-    let registry_downgrade = sqlx::query(
-        "UPDATE durable_command
-            SET storage_version = 1
-          WHERE command_id = $1",
-    )
-    .bind(command.command_id().into_uuid())
-    .execute(&pool)
-    .await?;
-    let typed_downgrade = sqlx::query(
-        "UPDATE submit_input_command
-            SET storage_version = 1
-          WHERE command_id = $1",
-    )
-    .bind(command.command_id().into_uuid())
-    .execute(&pool)
-    .await?;
-    assert_eq!(registry_downgrade.rows_affected(), 1);
-    assert_eq!(typed_downgrade.rows_affected(), 1);
 
     sqlx::query("ALTER TABLE turn_model_settings_resolved_outbox_event DISABLE TRIGGER USER")
         .execute(&pool)
@@ -1523,7 +1497,7 @@ async fn s01_inv012_inv032_scheduling_transitions_dispatch_in_commit_order()
             accepted_input,
             turn,
             acceptance_position: SessionInputPosition::first(),
-            content: "durable process input".to_owned(),
+            content: user_content("durable process input"),
         }
     );
 
@@ -2116,18 +2090,18 @@ async fn s01_inv012_inv032_dispatcher_rejects_crosswired_accepted_content()
         OutboxDispatchOutcome::Delivered { sequence: 2 }
     );
 
-    sqlx::query("ALTER TABLE accepted_input DISABLE TRIGGER accepted_input_is_append_only")
+    sqlx::query("ALTER TABLE accepted_input_content_part DISABLE TRIGGER USER")
         .execute(&pool)
         .await?;
     sqlx::query(
-        "UPDATE accepted_input
-            SET content_text = 'cross-wired accepted content'
+        "UPDATE accepted_input_content_part
+            SET text_value = 'cross-wired accepted content'
           WHERE accepted_input_id = $1",
     )
     .bind(accepted_input.into_uuid())
     .execute(&pool)
     .await?;
-    sqlx::query("ALTER TABLE accepted_input ENABLE TRIGGER accepted_input_is_append_only")
+    sqlx::query("ALTER TABLE accepted_input_content_part ENABLE TRIGGER USER")
         .execute(&pool)
         .await?;
 
@@ -2287,55 +2261,12 @@ async fn inv012_inv053_legacy_command_versions_reject_explicit_model_settings()
         .await?;
     let replacement_seed = 0x3748;
     let replacement = record_settings_replacement_fixture(&pool, replacement_seed).await?;
-    let submit_selection = DirectModelSelection::from_uuid(Uuid::from_u128(0x3751));
-    let submit_creation = prepared_with_low_reasoning(0x3752, 0x3753, submit_selection);
-    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
-        .handle(submit_creation)
-        .await?;
-    let per_call = ModelSettingsOverlay::new(
-        SettingOverlay::ProviderDefault,
-        FastModeOverlay::Inherit,
-        SettingOverlay::Inherit,
-    );
-    let submit = SubmitInput::new(
-        DurableCommandId::from_uuid(Uuid::from_u128(0x3754)),
-        SessionId::from_uuid(Uuid::from_u128(0x3753)),
-        UserContent::try_text(String::from("versioned settings payload"))
-            .expect("fixture content is admitted"),
-        DeliveryRequest::StartWhenNoActiveTurn {
-            configuration: PerInputConfigurationChoices::with_model_settings(
-                SessionConfigurationDefaultsVersion::first(),
-                ModelSelectionOverride::UseSessionDefault,
-                per_call,
-            ),
-        },
-    );
-    let submit_capabilities =
-        ModelCapabilityCatalog::try_from_definitions([ModelCapabilityDefinition::new(
-            submit_selection,
-            ModelCapabilities::new(
-                BTreeSet::from([ReasoningLevel::Low]),
-                FastModeSupport::Unsupported,
-                BTreeSet::new(),
-            ),
-        )])
-        .expect("one fixture capability forms a catalog");
-    SubmitInputRepository::with_model_capabilities(pool.clone(), submit_capabilities)
-        .handle(
-            submit.clone(),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0x3755)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0x3756))),
-        )
-        .await?;
-
     sqlx::raw_sql(
         "ALTER TABLE durable_command DISABLE TRIGGER USER;
          ALTER TABLE create_session_command DISABLE TRIGGER USER;
          ALTER TABLE replace_session_defaults_command DISABLE TRIGGER USER;
-         ALTER TABLE submit_input_command DISABLE TRIGGER USER;
          ALTER TABLE create_session_command DROP CONSTRAINT create_session_command_registry_fk;
-         ALTER TABLE replace_session_defaults_command DROP CONSTRAINT replace_session_defaults_command_registry_fk;
-         ALTER TABLE submit_input_command DROP CONSTRAINT submit_input_command_registry_fk;",
+         ALTER TABLE replace_session_defaults_command DROP CONSTRAINT replace_session_defaults_command_registry_fk;",
     )
     .execute(&pool)
     .await?;
@@ -2360,22 +2291,10 @@ async fn inv012_inv053_legacy_command_versions_reject_explicit_model_settings()
     .bind(replacement.command.into_uuid())
     .execute(&pool)
     .await?;
-    let submit_registry_downgrade =
-        sqlx::query("UPDATE durable_command SET storage_version = 1 WHERE command_id = $1")
-            .bind(submit.command_id().into_uuid())
-            .execute(&pool)
-            .await?;
-    let submit_typed_downgrade =
-        sqlx::query("UPDATE submit_input_command SET storage_version = 1 WHERE command_id = $1")
-            .bind(submit.command_id().into_uuid())
-            .execute(&pool)
-            .await?;
     assert_eq!(native_registry_downgrade.rows_affected(), 1);
     assert_eq!(native_typed_downgrade.rows_affected(), 1);
     assert_eq!(replacement_registry_downgrade.rows_affected(), 1);
     assert_eq!(replacement_typed_downgrade.rows_affected(), 1);
-    assert_eq!(submit_registry_downgrade.rows_affected(), 1);
-    assert_eq!(submit_typed_downgrade.rows_affected(), 1);
 
     assert!(matches!(
         CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
@@ -2393,14 +2312,6 @@ async fn inv012_inv053_legacy_command_versions_reject_explicit_model_settings()
             ReplaceSessionDefaultsCorruption::Inconsistent(
                 "storage version without caller model settings"
             )
-        ))
-    ));
-    assert!(matches!(
-        SubmitInputRepository::new(pool.clone())
-            .load(submit.command_id())
-            .await,
-        Err(SubmitInputRepositoryError::Corruption(
-            SubmitInputCorruption::Inconsistent("storage version without model settings override")
         ))
     ));
     assert!(matches!(
@@ -3308,11 +3219,11 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
     let model_calls =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
     let counted_call = ModelCallId::from_uuid(Uuid::from_u128(0xcd0c));
-    let counted_operation = model_calls
+    let prospective = model_calls
         .preview_activation_operation(preview.prepared(), counted_call)
         .await?
-        .expect("an admitted credential previews the activation operation")
-        .render(Box::new([]))?;
+        .expect("an admitted credential previews the activation operation");
+    let counted_operation = prospective.render(Box::new([]))?;
     let counted_entries = counted_operation
         .request()
         .frontier_entries()
@@ -3342,7 +3253,7 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
     let committed = activation
         .commit_counted_preview(
             preview,
-            counted_call,
+            prospective,
             &model_calls,
             Some(instruction_evidence),
         )
@@ -3496,13 +3407,15 @@ async fn inv061_stale_counted_preview_retains_no_instruction_evidence() -> Resul
         &placement,
     );
 
-    let stale = activation
-        .commit_counted_preview(
-            preview,
+    let prospective = model_calls
+        .preview_activation_operation(
+            preview.prepared(),
             ModelCallId::from_uuid(Uuid::from_u128(0xcd2d)),
-            &model_calls,
-            Some(evidence),
         )
+        .await?
+        .expect("an admitted credential previews the activation operation");
+    let stale = activation
+        .commit_counted_preview(preview, prospective, &model_calls, Some(evidence))
         .await?;
     let discovery_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM instruction_discovery WHERE session_id = $1 AND turn_id = $2",
@@ -3529,8 +3442,9 @@ async fn inv061_stale_counted_preview_retains_no_instruction_evidence() -> Resul
 }
 
 /// S03 / INV-015: deferred compaction evidence accepts successor ranges in
-/// model-visible order even when the retained suffix physically precedes the
-/// prior summary, while reverse correlation rejects an orphan summary.
+/// model-visible order when a predecessor compacts only its logical leading
+/// summary and its retained suffix physically precedes that summary, while
+/// reverse correlation rejects an orphan summary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s03_inv015_context_compaction_constraints_use_projected_successor_order()
@@ -3679,13 +3593,12 @@ async fn s03_inv015_context_compaction_constraints_use_projected_successor_order
              context_summary_through_source_session_id,
              context_summary_through_entry_id)
          VALUES ($1, $2, 'context_summary', 'synthetic successor summary', $3,
-                 $1, $4, $1, $5)",
+                 $1, $4, $1, $4)",
     )
     .bind(session_uuid)
     .bind(successor_summary)
     .bind(successor_call)
     .bind(root_summary)
-    .bind(retained_suffix)
     .execute(&mut *successor_transaction)
     .await?;
     insert_frontier(
@@ -3716,11 +3629,78 @@ async fn s03_inv015_context_compaction_constraints_use_projected_successor_order
     .bind(successor_result)
     .bind(successor_call)
     .bind(root_summary)
-    .bind(retained_suffix)
+    .bind(root_summary)
     .bind(successor_summary)
     .execute(&mut *successor_transaction)
     .await?;
     successor_transaction.commit().await?;
+
+    let suffix_call = Uuid::from_u128(0xcc18);
+    let suffix_summary = Uuid::from_u128(0xcc19);
+    let suffix_result = Uuid::from_u128(0xcc1a);
+    let suffix_compaction = Uuid::from_u128(0xcc1b);
+    let mut suffix_transaction = pool.begin().await?;
+    insert_completed_context_compaction_call(
+        &mut suffix_transaction,
+        suffix_call,
+        session_uuid,
+        selection.into_uuid(),
+        target,
+        successor_result,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             context_summary_value, context_summary_producing_call_id,
+             context_summary_first_source_session_id,
+             context_summary_first_entry_id,
+             context_summary_through_source_session_id,
+             context_summary_through_entry_id)
+         VALUES ($1, $2, 'context_summary', 'synthetic suffix summary', $3,
+                 $1, $4, $1, $5)",
+    )
+    .bind(session_uuid)
+    .bind(suffix_summary)
+    .bind(suffix_call)
+    .bind(successor_summary)
+    .bind(retained_suffix)
+    .execute(&mut *suffix_transaction)
+    .await?;
+    insert_frontier(
+        &mut suffix_transaction,
+        session_uuid,
+        suffix_result,
+        Decimal::from(5),
+        &[
+            (Decimal::ONE, session_uuid, origin_entry),
+            (Decimal::from(2), session_uuid, retained_suffix),
+            (Decimal::from(3), session_uuid, root_summary),
+            (Decimal::from(4), session_uuid, successor_summary),
+            (Decimal::from(5), session_uuid, suffix_summary),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_compaction
+            (context_compaction_id, session_id, predecessor_compaction_id,
+             source_frontier_id, result_frontier_id, producing_call_id,
+             first_source_session_id, first_entry_id,
+             through_source_session_id, through_entry_id, summary_entry_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $2, $7, $2, $8, $9)",
+    )
+    .bind(suffix_compaction)
+    .bind(session_uuid)
+    .bind(successor_compaction)
+    .bind(successor_result)
+    .bind(suffix_result)
+    .bind(suffix_call)
+    .bind(successor_summary)
+    .bind(retained_suffix)
+    .bind(suffix_summary)
+    .execute(&mut *suffix_transaction)
+    .await?;
+    suffix_transaction.commit().await?;
 
     let malformed_summary = Uuid::from_u128(0xcc17);
     let malformed_error = sqlx::query(

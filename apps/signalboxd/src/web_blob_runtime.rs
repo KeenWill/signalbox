@@ -43,12 +43,19 @@ use crate::{
 const WORKER_ARGUMENT: &str = "--web-image-derivative-worker-v1";
 const THUMBNAIL_EDGE_PX: u32 = 256;
 const PREVIEW_EDGE_PX: u32 = 1600;
+// numeric-bound: guard - prevents one declared image dimension from driving an unbounded decoder allocation
 const MAX_IMAGE_AXIS: u32 = 16_384;
+// numeric-bound: guard - prevents a decompression-bomb pixel count from exhausting worker memory
 const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
+// numeric-bound: guard - prevents image decoding from exhausting worker memory
 const MAX_DECODER_ALLOCATION_BYTES: u64 = 320 * 1024 * 1024;
+// numeric-bound: guard - prevents an encoded derivative from exhausting process memory when it is read back
 const MAX_DERIVATIVE_BYTES: u64 = 16 * 1024 * 1024;
+// numeric-bound: guard - prevents an oversized source blob from being copied into the worker's input
 const MAX_IMAGE_INPUT_BYTES: u64 = 64 * 1024 * 1024;
+// numeric-bound: guard - prevents concurrent derivations from exhausting host memory and processes
 const MAX_ACTIVE_IMAGE_DERIVATIONS: usize = 2;
+// numeric-bound: guard - prevents a wedged derivative worker from holding its derivation slot forever
 const WORKER_TIMEOUT_SECONDS: u64 = 120;
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
 
