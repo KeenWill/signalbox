@@ -262,9 +262,33 @@ WITH RECURSIVE selected AS (
            LEFT(goal.need, $4) AS need_summary
       FROM goal_event AS goal JOIN selected USING (session_id)
      ORDER BY goal.session_id, goal.event_ordinal DESC
+), unchargeable_automatic_resume_failure AS (
+    -- The exact classification `GoalRepository::unchargeable_automatic_resume_turns`
+    -- applies before the daemon's resume planner spends the attempt budget: a
+    -- failure the daemon itself owns is not charged to the operator's ceiling.
+    -- Projecting exhaustion from the raw resume count instead would advertise
+    -- `ProvideGoalNeed` while the planner still owes a delayed resume, letting
+    -- an operator command race it.
+    SELECT lifecycle.session_id, lifecycle.turn_id
+      FROM turn_lifecycle AS lifecycle JOIN selected USING (session_id)
+      LEFT JOIN automatic_reconciliation AS recovery
+        ON recovery.turn_id = lifecycle.turn_id
+       AND recovery.session_id = lifecycle.session_id
+      LEFT JOIN model_call AS terminal_call
+        ON terminal_call.model_call_id = lifecycle.terminal_model_call_id
+       AND terminal_call.turn_id = lifecycle.turn_id
+       AND terminal_call.session_id = lifecycle.session_id
+      LEFT JOIN tool_continuation_context_headroom AS headroom
+        ON headroom.terminal_attempt_id = lifecycle.terminal_attempt_id
+       AND headroom.turn_id = lifecycle.turn_id
+       AND headroom.session_id = lifecycle.session_id
+     WHERE recovery.state_kind = 'reconciled'
+        OR headroom.terminal_attempt_id IS NOT NULL
+        OR terminal_call.terminal_provider_failure_cause IN
+           ('rate_limited', 'overloaded', 'provider_internal')
 ), automatic_resume_lineage AS (
     SELECT goal.session_id, goal.generation, goal.event_ordinal AS head_ordinal,
-           0::integer AS spent
+           goal.scheduler_turn_id AS failed_turn_id, 0::integer AS spent
       FROM latest_goal AS goal
      WHERE goal.event_kind = 'blocked'
        AND goal.blocked_reason = 'execution_failure'
@@ -288,10 +312,31 @@ WITH RECURSIVE selected AS (
             WHERE escalation.session_id = goal.session_id
               AND escalation.turn_id = goal.scheduler_turn_id
        )
+       -- A durable execution-failure recovery cause is the second operator-only
+       -- block shape. `PostgresGoalPassDisposition::block_execution_failure`
+       -- reads this record before it plans anything and parks the block as
+       -- `AutomaticResumption::OperatorRequired`, arming no resume at all
+       -- (`docs/spec/goal-mode.md`). Seeding from it suppresses
+       -- `ProvideGoalNeed` forever exactly as a headless escalation would. The
+       -- record is keyed by the same scheduler turn the block names.
+       AND NOT EXISTS (
+           SELECT 1
+             FROM goal_execution_failure_recovery AS recovery
+            WHERE recovery.session_id = goal.session_id
+              AND recovery.turn_id = goal.scheduler_turn_id
+       )
     UNION ALL
+    -- Each step charges the attempt that answered the newer block, which is the
+    -- failed turn that block names, and carries the older block's turn forward
+    -- for the next step to classify.
     SELECT lineage.session_id, lineage.generation, blocked.event_ordinal,
-           lineage.spent + 1
+           blocked.scheduler_turn_id,
+           lineage.spent
+           + CASE WHEN unchargeable.turn_id IS NULL THEN 1 ELSE 0 END
       FROM automatic_resume_lineage AS lineage
+      LEFT JOIN unchargeable_automatic_resume_failure AS unchargeable
+        ON unchargeable.session_id = lineage.session_id
+       AND unchargeable.turn_id = lineage.failed_turn_id
       JOIN goal_event AS resumed
         ON resumed.session_id = lineage.session_id
        AND resumed.generation::text = lineage.generation
@@ -329,7 +374,9 @@ WITH RECURSIVE selected AS (
 ), automatic_resumption AS (
     -- $5 is the deployment's configured automatic-resume attempt budget, the
     -- same number the daemon's resume planner spends; NULL is the configured
-    -- unbounded budget, under which resumption never exhausts.
+    -- unbounded budget, under which resumption never exhausts. `spent` counts
+    -- only the chargeable attempts the planner charges, so exhaustion here and
+    -- exhaustion there name the same lineage.
     SELECT lineage.session_id,
            ($5::bigint IS NULL OR max(lineage.spent) < $5::bigint)
            AND NOT EXISTS (
@@ -390,20 +437,20 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
                        'known_failed', 'refused', 'cancelled', 'ambiguous'
                    )
                )
+               -- `unattended_escalation_applies` decides headlessness per
+               -- dispatch source, and only repository watch can suppress a
+               -- human. A commissioned dispatch takes the unattended path only
+               -- when its authority has been withdrawn, and that path
+               -- terminalizes the turn rather than parking it, so a
+               -- commissioned request still parked in `awaiting_tool_approval`
+               -- is always waiting on the commissioning operator.
                AND (
                    NOT (
                        COALESCE(turn.goal_generation = 1, false)
-                       AND (
-                           EXISTS (
-                               SELECT 1
-                                 FROM repo_watch_dispatch_action AS dispatched
-                                WHERE dispatched.session_id = selected.session_id
-                           )
-                           OR EXISTS (
-                               SELECT 1
-                                 FROM commissioned_dispatch AS dispatched
-                                WHERE dispatched.session_id = selected.session_id
-                           )
+                       AND EXISTS (
+                           SELECT 1
+                             FROM repo_watch_dispatch_action AS dispatched
+                            WHERE dispatched.session_id = selected.session_id
                        )
                    )
                    OR EXISTS (
@@ -416,11 +463,6 @@ SELECT selected.session_id, turn.turn_id, turn.state_kind AS turn_state,
                    OR EXISTS (
                        SELECT 1
                          FROM repo_watch_headless_approval_escalation AS escalation
-                        WHERE escalation.session_id = selected.session_id
-                   )
-                   OR EXISTS (
-                       SELECT 1
-                         FROM commissioned_dispatch_headless_approval_escalation AS escalation
                         WHERE escalation.session_id = selected.session_id
                    )
                )
