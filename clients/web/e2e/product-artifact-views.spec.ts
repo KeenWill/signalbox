@@ -66,12 +66,16 @@ test('opens the typed inspector from Reviews and restores toolbar focus with Esc
 }) => {
   const problems = watchBrowser(page)
   await useDeterministicBootstrap(page)
+  await page.setViewportSize({ width: 1440, height: 900 })
   await page.goto('/reviews')
 
   const openInspector = page.getByRole('button', { name: 'Open artifact inspector' })
   await openInspector.focus()
   await page.keyboard.press('Enter')
   await expect(page.getByRole('textbox', { name: 'Digest' })).toBeFocused()
+  // Escape is deliberately not hijacked while a text field owns focus, so leave the digest field
+  // before asserting that the shell returns focus to the toolbar control that opened the inspector.
+  await page.getByRole('button', { name: 'Close artifact inspector' }).focus()
   await page.keyboard.press('Escape')
   await expect(openInspector).toBeFocused()
   expect(problems).toEqual({ consoleErrors: [], pageErrors: [] })
