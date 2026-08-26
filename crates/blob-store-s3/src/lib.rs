@@ -12,7 +12,10 @@ use std::{
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
     task::{Context, Poll},
     time::Duration,
 };
@@ -61,7 +64,10 @@ const PUBLICATION_LOCK_STRIPES: usize = 64;
 const NAMESPACE_MARKER_KEY: &str = ".signalbox-blob-namespace-v1";
 const MAX_NAMESPACE_MARKER_BYTES: usize = 128;
 const MAX_LIFECYCLE_RESPONSE_BYTES: usize = 65_536;
+const MAX_ERROR_RESPONSE_BYTES: usize = 65_536;
 const S3_XML_NAMESPACE: &str = "http://s3.amazonaws.com/doc/2006-03-01/";
+const BLOB_KEY_PREFIX: &str = "sha256/";
+const OBJECT_ABSENCE_CODE: &str = "NoSuchKey";
 
 /// One path-style S3-compatible immutable-object store.
 pub struct S3BlobStore {
@@ -184,7 +190,7 @@ impl S3BlobStore {
         let mut store = Self::try_new(endpoint, region, bucket, credentials_file)?;
         store.namespace_marker = Some(NamespaceMarker {
             body: Arc::from(marker_body),
-            verified: tokio::sync::OnceCell::new(),
+            verification: NamespaceVerification::default(),
         });
         Ok(store)
     }
@@ -202,7 +208,7 @@ impl S3BlobStore {
             S3NamespaceBindingState::Recorded => self.verify_namespace_marker(marker).await,
         };
         if result.is_ok() {
-            let _ = marker.verified.set(Ok(()));
+            marker.verification.record(true);
         }
         result
     }
@@ -249,18 +255,21 @@ impl S3BlobStore {
         let Some(marker) = &self.namespace_marker else {
             return Ok(());
         };
-        let result = marker
-            .verified
-            .get_or_init(|| async {
-                self.verify_namespace_marker_with(credentials, marker)
-                    .await
-                    .map_err(|_| ())
-            })
-            .await;
-        match result {
-            Ok(()) => Ok(()),
-            Err(()) => Err(BlobStoreError::unavailable("verify S3 namespace marker")),
+        if marker.verification.proved.load(Ordering::Acquire) {
+            return Ok(());
         }
+        let arrived_at = marker.verification.arrive();
+        let _gate = marker.verification.gate.lock().await;
+        match marker.verification.probe(arrived_at) {
+            NamespaceProbe::Proved => return Ok(()),
+            NamespaceProbe::Adopt => {
+                return Err(BlobStoreError::unavailable("verify S3 namespace marker"));
+            }
+            NamespaceProbe::Run => {}
+        }
+        let result = self.verify_namespace_marker_with(credentials, marker).await;
+        marker.verification.record(result.is_ok());
+        result
     }
 
     async fn create_namespace_marker(
@@ -509,22 +518,29 @@ impl S3BlobStore {
             etag_refs,
         );
         let signed = complete.sign(SIGNED_URL_LIFETIME);
-        let body = complete.body();
-        if body.len() > MAX_COMPLETE_BODY_BYTES {
+        let completion_body = complete.body();
+        if completion_body.len() > MAX_COMPLETE_BODY_BYTES {
             return Err(BlobStoreError::unavailable("bound S3 completion body"));
         }
+        let completion_length = completion_body.len() as u64;
+        let (progress, observed_progress) = watch::channel(0_u64);
+        let request = self
+            .client
+            .post(signed)
+            .header(reqwest::header::CONTENT_TYPE, "application/xml")
+            .header(reqwest::header::CONTENT_LENGTH, completion_length)
+            .body(reqwest::Body::wrap(ChunkedProgressBody::new(
+                Bytes::from(completion_body),
+                progress,
+            )));
         let completion = async {
-            let response = self
-                .client
-                .post(signed)
-                .header(reqwest::header::CONTENT_TYPE, "application/xml")
-                .body(body)
-                .send()
-                .await
-                .map_err(|_| CompletionFailure::PossiblyAccepted)?;
-            let response = require_success(response, "complete S3 multipart upload")
-                .await
-                .map_err(CompletionFailure::Definite)?;
+            let response =
+                send_with_upload_idle_timeout(request, observed_progress, completion_length)
+                    .await
+                    .map_err(|()| CompletionFailure::PossiblyAccepted)?;
+            if !response.status().is_success() {
+                return Err(completion_status_failure(response.status()));
+            }
             let body = bounded_response(
                 response,
                 MAX_COMPLETE_RESPONSE_BYTES,
@@ -563,7 +579,7 @@ impl S3BlobStore {
             .await
             .map_err(|_| BlobStoreError::io("get S3 object", SanitizedS3Failure))?;
         if response.status() == StatusCode::NOT_FOUND {
-            return Err(BlobStoreError::not_found("get S3 object"));
+            return Err(classify_absence(response, "get S3 object").await);
         }
         require_success(response, "get S3 object").await
     }
@@ -588,6 +604,12 @@ impl S3BlobStore {
                 break;
             }
             observed_length = observed_length.saturating_add(count as u64);
+            if observed_length > expected.byte_length() {
+                return Err(BlobStoreError::verification(
+                    "verify S3 object",
+                    BlobVerificationFailure::new(expected, None, observed_length),
+                ));
+            }
             hasher.update(&buffer[..count]);
         }
         let observed_digest = BlobDigest::from_bytes(hasher.finalize().into());
@@ -643,6 +665,12 @@ impl S3BlobStore {
             }
             let chunk_start = observed_length;
             observed_length = observed_length.saturating_add(count as u64);
+            if observed_length > expected.byte_length() {
+                return Err(BlobStoreError::verification(
+                    "verify S3 object range",
+                    BlobVerificationFailure::new(expected, None, observed_length),
+                ));
+            }
             hasher.update(&buffer[..count]);
             let retain_start = offset.max(chunk_start);
             let retain_end = end.min(observed_length);
@@ -822,6 +850,44 @@ async fn send_with_upload_idle_timeout(
     }
 }
 
+/// Classifies a non-success completion status that may still have published.
+///
+/// A server or gateway error can be returned after the request reached the
+/// backend, so it does not prove rejection and must reach the read-back.
+fn completion_status_failure(status: StatusCode) -> CompletionFailure {
+    if status.is_server_error() {
+        CompletionFailure::PossiblyAccepted
+    } else {
+        CompletionFailure::Definite(BlobStoreError::unavailable("complete S3 multipart upload"))
+    }
+}
+
+/// Separates a proved missing object from a backend that did not answer.
+///
+/// Reporting absence is a durable claim about the blob, so only a parsed
+/// object-level absence earns `NotFound`. A bucket-level code, an oversized,
+/// truncated, malformed, or non-UTF-8 body, and any unrecognized code all
+/// leave absence unproved and stay ordinary unavailability.
+async fn classify_absence(response: Response, operation: &'static str) -> BlobStoreError {
+    let Ok(body) = bounded_response(response, MAX_ERROR_RESPONSE_BYTES, operation).await else {
+        return BlobStoreError::unavailable(operation);
+    };
+    let Ok(body) = std::str::from_utf8(&body) else {
+        return BlobStoreError::unavailable(operation);
+    };
+    if names_absent_object(body) {
+        BlobStoreError::not_found(operation)
+    } else {
+        BlobStoreError::unavailable(operation)
+    }
+}
+
+/// Reports whether a bounded S3 error document proves object-level absence.
+fn names_absent_object(body: &str) -> bool {
+    instant_xml::from_str::<S3ErrorDocument>(body)
+        .is_ok_and(|document| document.code.as_deref() == Some(OBJECT_ABSENCE_CODE))
+}
+
 fn validate_completion_response(body: &[u8]) -> Result<(), ()> {
     let body = std::str::from_utf8(body).map_err(|_| ())?;
     instant_xml::from_str::<CompleteMultipartUploadResult>(body)
@@ -930,7 +996,57 @@ struct UploadStreamState {
 
 struct NamespaceMarker {
     body: Arc<str>,
-    verified: tokio::sync::OnceCell<Result<(), ()>>,
+    verification: NamespaceVerification,
+}
+
+/// Lazy namespace-marker verification shared across concurrent callers.
+///
+/// Only proved verification is final, so a rotated credential can bind the
+/// namespace without a restart. Callers already waiting while one probe runs
+/// adopt its outcome instead of each running another, which keeps an outage
+/// from serializing one 60-second probe per concurrent traversal.
+#[derive(Default)]
+struct NamespaceVerification {
+    proved: AtomicBool,
+    completed_attempts: AtomicU64,
+    gate: AsyncMutex<()>,
+}
+
+/// What one caller holding the gate must do about verification.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NamespaceProbe {
+    /// Verification already succeeded and no probe is needed.
+    Proved,
+    /// An attempt completed while this caller waited; adopt its failure.
+    Adopt,
+    /// No attempt has completed since this caller arrived; probe now.
+    Run,
+}
+
+impl NamespaceVerification {
+    /// Records this caller's arrival against the completed-attempt counter.
+    fn arrive(&self) -> u64 {
+        self.completed_attempts.load(Ordering::Acquire)
+    }
+
+    /// Decides one gate holder's action given the count it arrived with.
+    fn probe(&self, arrived_at: u64) -> NamespaceProbe {
+        if self.proved.load(Ordering::Acquire) {
+            NamespaceProbe::Proved
+        } else if self.completed_attempts.load(Ordering::Acquire) == arrived_at {
+            NamespaceProbe::Run
+        } else {
+            NamespaceProbe::Adopt
+        }
+    }
+
+    /// Records one completed attempt and whether it proved the namespace.
+    fn record(&self, proved: bool) {
+        if proved {
+            self.proved.store(true, Ordering::Release);
+        }
+        self.completed_attempts.fetch_add(1, Ordering::Release);
+    }
 }
 
 #[derive(Debug, FromXml)]
@@ -955,21 +1071,33 @@ struct LifecycleRule {
 
 impl LifecycleRule {
     fn covers_blobs(&self) -> bool {
-        let prefix_covers = match (&self.filter, self.prefix.as_deref()) {
+        self.status == "Enabled"
+            && self.covers_every_blob_key()
+            && self.abort.as_ref().is_some_and(|abort| abort.days == 1)
+    }
+
+    /// Reports whether this rule selects every deterministic blob object key.
+    ///
+    /// A rule that narrows by tag, size, or a compound `And` never proves blob
+    /// coverage; otherwise the selected prefix must be an ancestor of the blob
+    /// key prefix, and an absent filter and prefix is whole-bucket coverage.
+    fn covers_every_blob_key(&self) -> bool {
+        match (&self.filter, self.prefix.as_deref()) {
             (Some(filter), _) => {
                 filter.tag.is_none()
                     && filter.and.is_none()
                     && filter.object_size_greater_than.is_none()
                     && filter.object_size_less_than.is_none()
-                    && matches!(filter.prefix.as_deref(), None | Some("") | Some("sha256/"))
+                    && covers_blob_keys(filter.prefix.as_deref())
             }
-            (None, Some(prefix)) => matches!(prefix, "" | "sha256/"),
-            (None, None) => false,
-        };
-        self.status == "Enabled"
-            && prefix_covers
-            && self.abort.as_ref().is_some_and(|abort| abort.days == 1)
+            (None, prefix) => covers_blob_keys(prefix),
+        }
     }
+}
+
+/// Reports whether a lifecycle prefix selects every `sha256/` object key.
+fn covers_blob_keys(prefix: Option<&str>) -> bool {
+    prefix.is_none_or(|prefix| BLOB_KEY_PREFIX.starts_with(prefix))
 }
 
 #[derive(Debug, FromXml)]
@@ -1013,6 +1141,13 @@ struct AbortIncompleteMultipartUpload {
 }
 
 #[derive(Debug, FromXml)]
+#[xml(rename = "Error")]
+struct S3ErrorDocument {
+    #[xml(rename = "Code")]
+    code: Option<String>,
+}
+
+#[derive(Debug, FromXml)]
 #[xml(rename = "CompleteMultipartUploadResult", ns(S3_XML_NAMESPACE))]
 struct CompleteMultipartUploadResult {
     #[xml(rename = "Location")]
@@ -1023,6 +1158,61 @@ struct CompleteMultipartUploadResult {
     _key: Option<String>,
     #[xml(rename = "ETag")]
     _etag: Option<String>,
+}
+
+/// One in-memory request body emitted in bounded frames that report progress.
+///
+/// Framing the body keeps the shared no-progress bound applicable to a request
+/// whose bytes are already resident, so a peer that stops consuming the write
+/// cannot hold the operation until the whole-operation deadline.
+struct ChunkedProgressBody {
+    bytes: Bytes,
+    offset: usize,
+    progress: watch::Sender<u64>,
+}
+
+impl ChunkedProgressBody {
+    const fn new(bytes: Bytes, progress: watch::Sender<u64>) -> Self {
+        Self {
+            bytes,
+            offset: 0,
+            progress,
+        }
+    }
+
+    fn remaining(&self) -> u64 {
+        self.bytes.len().saturating_sub(self.offset) as u64
+    }
+}
+
+impl Body for ChunkedProgressBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _context: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if self.offset >= self.bytes.len() {
+            return Poll::Ready(None);
+        }
+        let end = self
+            .offset
+            .saturating_add(STREAM_CHUNK_BYTES)
+            .min(self.bytes.len());
+        let chunk = self.bytes.slice(self.offset..end);
+        self.offset = end;
+        self.progress.send_replace(self.offset as u64);
+        Poll::Ready(Some(Ok(Frame::data(chunk))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.offset >= self.bytes.len()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        SizeHint::with_exact(self.remaining())
+    }
 }
 
 struct ExactUploadBody {
@@ -1229,9 +1419,10 @@ mod tests {
     use url::Url;
 
     use super::{
-        CredentialFileError, LifecycleConfiguration, LifecycleRule, MAX_MULTIPART_PARTS,
-        MAX_S3_OBJECT_BYTES, MIN_MULTIPART_PART_BYTES, S3BlobStore, multipart_part_bytes,
-        read_credentials, validate_completion_response,
+        CompletionFailure, CredentialFileError, LifecycleConfiguration, LifecycleRule,
+        MAX_MULTIPART_PARTS, MAX_S3_OBJECT_BYTES, MIN_MULTIPART_PART_BYTES, NamespaceProbe,
+        NamespaceVerification, S3BlobStore, StatusCode, completion_status_failure,
+        multipart_part_bytes, names_absent_object, read_credentials, validate_completion_response,
     };
 
     const ACCESS_KEY: &str = "fixture-access-key";
@@ -1253,8 +1444,13 @@ mod tests {
         Ok((directory, path))
     }
 
-    fn parsed_lifecycle(xml: &str) -> Result<LifecycleConfiguration, Box<dyn Error>> {
-        Ok(instant_xml::from_str(xml)?)
+    fn first_rule(xml: &str) -> Result<LifecycleRule, Box<dyn Error>> {
+        let lifecycle: LifecycleConfiguration = instant_xml::from_str(xml)?;
+        lifecycle
+            .rules
+            .into_iter()
+            .next()
+            .ok_or_else(|| Box::<dyn Error>::from("fixture lifecycle has no rule"))
     }
 
     #[test]
@@ -1270,69 +1466,188 @@ mod tests {
     }
 
     #[test]
-    fn credential_file_rejects_unknown_members_and_broad_permissions() -> Result<(), Box<dyn Error>>
-    {
-        let unknown_body = format!("{}unknown = true\n", credential_body());
-        let (_unknown_directory, unknown_path) = credential_fixture(&unknown_body)?;
-        let mode_body = credential_body();
-        let (_mode_directory, mode_path) = credential_fixture(&mode_body)?;
-        fs::set_permissions(&mode_path, fs::Permissions::from_mode(0o640))?;
+    fn credential_file_rejects_an_unknown_member() -> Result<(), Box<dyn Error>> {
+        let body = format!("{}unknown = true\n", credential_body());
+        let (_directory, path) = credential_fixture(&body)?;
 
-        assert!(matches!(
-            read_credentials(&unknown_path),
-            Err(CredentialFileError)
-        ));
-        assert!(matches!(
-            read_credentials(&mode_path),
-            Err(CredentialFileError)
-        ));
+        assert!(matches!(read_credentials(&path), Err(CredentialFileError)));
+        Ok(())
+    }
+
+    #[test]
+    fn credential_file_rejects_group_readable_permissions() -> Result<(), Box<dyn Error>> {
+        let (_directory, path) = credential_fixture(&credential_body())?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640))?;
+
+        assert!(matches!(read_credentials(&path), Err(CredentialFileError)));
         Ok(())
     }
 
     #[test]
     fn lifecycle_admits_only_an_enabled_one_day_blob_prefix_rule() -> Result<(), Box<dyn Error>> {
-        let lifecycle = parsed_lifecycle(
+        let rule = first_rule(
             r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><Prefix>sha256/</Prefix></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
         )?;
-        let rule = lifecycle.rules.first().ok_or("fixture rule is absent")?;
 
-        assert!(LifecycleRule::covers_blobs(rule));
+        assert!(LifecycleRule::covers_blobs(&rule));
         Ok(())
     }
 
     #[test]
-    fn lifecycle_rejects_a_late_abort_and_a_narrow_prefix() -> Result<(), Box<dyn Error>> {
-        let late = parsed_lifecycle(
+    fn lifecycle_admits_an_ancestor_prefix_of_the_blob_key_prefix() -> Result<(), Box<dyn Error>> {
+        let rule = first_rule(
+            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>sha256</Prefix><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
+        )?;
+
+        assert!(LifecycleRule::covers_blobs(&rule));
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_admits_a_whole_bucket_rule_without_a_filter_or_prefix()
+    -> Result<(), Box<dyn Error>> {
+        let rule = first_rule(
+            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
+        )?;
+
+        assert!(LifecycleRule::covers_blobs(&rule));
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_admits_an_empty_whole_bucket_filter() -> Result<(), Box<dyn Error>> {
+        let rule = first_rule(
+            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
+        )?;
+
+        assert!(LifecycleRule::covers_blobs(&rule));
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_rejects_an_abort_later_than_one_day() -> Result<(), Box<dyn Error>> {
+        let rule = first_rule(
             r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>sha256/</Prefix><AbortIncompleteMultipartUpload><DaysAfterInitiation>2</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
         )?;
-        let narrow = parsed_lifecycle(
+
+        assert!(!LifecycleRule::covers_blobs(&rule));
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_rejects_a_prefix_narrower_than_the_blob_key_prefix() -> Result<(), Box<dyn Error>>
+    {
+        let rule = first_rule(
             r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>sha256/ab/</Prefix><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
         )?;
-        let tagged = parsed_lifecycle(
+
+        assert!(!LifecycleRule::covers_blobs(&rule));
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_rejects_a_prefix_outside_the_blob_key_prefix() -> Result<(), Box<dyn Error>> {
+        let rule = first_rule(
+            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>staging/</Prefix><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
+        )?;
+
+        assert!(!LifecycleRule::covers_blobs(&rule));
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_rejects_a_tag_filtered_rule() -> Result<(), Box<dyn Error>> {
+        let rule = first_rule(
             r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><Tag><Key>kind</Key><Value>blob</Value></Tag></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
         )?;
-        let size_filtered = parsed_lifecycle(
+
+        assert!(!LifecycleRule::covers_blobs(&rule));
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_rejects_a_size_filtered_rule() -> Result<(), Box<dyn Error>> {
+        let rule = first_rule(
             r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><ObjectSizeGreaterThan>1024</ObjectSizeGreaterThan></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
         )?;
-        let late_rule = late.rules.first().ok_or("late fixture rule is absent")?;
-        let narrow_rule = narrow
-            .rules
-            .first()
-            .ok_or("narrow fixture rule is absent")?;
-        let tagged_rule = tagged
-            .rules
-            .first()
-            .ok_or("tagged fixture rule is absent")?;
-        let size_filtered_rule = size_filtered
-            .rules
-            .first()
-            .ok_or("size-filtered fixture rule is absent")?;
 
-        assert!(!LifecycleRule::covers_blobs(late_rule));
-        assert!(!LifecycleRule::covers_blobs(narrow_rule));
-        assert!(!LifecycleRule::covers_blobs(tagged_rule));
-        assert!(!LifecycleRule::covers_blobs(size_filtered_rule));
+        assert!(!LifecycleRule::covers_blobs(&rule));
         Ok(())
+    }
+
+    #[test]
+    fn an_absent_object_code_proves_absence() {
+        let key = r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchKey</Code><Message>The specified key does not exist</Message><RequestId>fixture</RequestId></Error>"#;
+
+        assert!(names_absent_object(key));
+    }
+
+    #[test]
+    fn an_absent_bucket_code_does_not_prove_object_absence() {
+        let bucket = r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchBucket</Code><Message>The specified bucket does not exist</Message><BucketName>fixture-bucket</BucketName><RequestId>fixture</RequestId></Error>"#;
+
+        assert!(!names_absent_object(bucket));
+    }
+
+    #[test]
+    fn an_unrecognized_code_does_not_prove_object_absence() {
+        let denied = r#"<?xml version="1.0" encoding="UTF-8"?><Error><Code>AccessDenied</Code><Message>Access Denied</Message></Error>"#;
+
+        assert!(!names_absent_object(denied));
+    }
+
+    #[test]
+    fn an_unparsable_body_does_not_prove_object_absence() {
+        assert!(!names_absent_object(""));
+    }
+
+    #[test]
+    fn a_first_caller_runs_its_own_namespace_probe() {
+        let verification = NamespaceVerification::default();
+        let arrived_at = verification.arrive();
+
+        assert_eq!(verification.probe(arrived_at), NamespaceProbe::Run);
+    }
+
+    #[test]
+    fn a_caller_waiting_through_a_failed_probe_adopts_it() {
+        let verification = NamespaceVerification::default();
+        let arrived_at = verification.arrive();
+        verification.record(false);
+
+        assert_eq!(verification.probe(arrived_at), NamespaceProbe::Adopt);
+    }
+
+    #[test]
+    fn a_caller_arriving_after_a_failed_probe_retries() {
+        let verification = NamespaceVerification::default();
+        verification.record(false);
+        let arrived_at = verification.arrive();
+
+        assert_eq!(verification.probe(arrived_at), NamespaceProbe::Run);
+    }
+
+    #[test]
+    fn a_proved_namespace_needs_no_further_probe() {
+        let verification = NamespaceVerification::default();
+        let arrived_at = verification.arrive();
+        verification.record(true);
+
+        assert_eq!(verification.probe(arrived_at), NamespaceProbe::Proved);
+    }
+
+    #[test]
+    fn a_server_completion_status_stays_possibly_accepted() {
+        let failure = completion_status_failure(StatusCode::BAD_GATEWAY);
+
+        assert!(matches!(failure, CompletionFailure::PossiblyAccepted));
+    }
+
+    #[test]
+    fn a_client_completion_status_proves_definite_failure() {
+        let failure = completion_status_failure(StatusCode::NOT_FOUND);
+
+        assert!(matches!(failure, CompletionFailure::Definite(_)));
     }
 
     #[test]
