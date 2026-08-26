@@ -3061,6 +3061,18 @@ async fn multipart_replay_fixture(
             Some(TurnId::from_uuid(Uuid::from_u128(MULTIPART_TURN_ID))),
         )
         .await?;
+    match &first {
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::TurnOrigin(_),
+        )) => {}
+        SubmitInputHandlingOutcome::Recorded(
+            SubmitInputResult::Applied(SubmitInputAppliedResult::PendingSteering(_))
+            | SubmitInputResult::Rejected(_),
+        )
+        | SubmitInputHandlingOutcome::ConflictingReuse { .. } => panic!(
+            "the multipart fixture submission must record a turn-origin acceptance, not {first:?}"
+        ),
+    }
 
     Ok(MultipartReplayFixture {
         container,
@@ -3071,7 +3083,7 @@ async fn multipart_replay_fixture(
     })
 }
 
-/// INV-012: equal multipart replay returns the original durable receipt.
+/// INV-012: equal multipart replay returns the original durable acceptance.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_equal_multipart_submit_replay_returns_the_original_receipt()
@@ -3359,7 +3371,6 @@ struct UnknownAttachmentFixture {
     pool: PgPool,
     repository: SubmitInputRepository,
     command: SubmitInput,
-    first: SubmitInputHandlingOutcome,
     expected_result: SubmitInputResult,
     digest: BlobDigest,
     changed_digest: BlobDigest,
@@ -3387,13 +3398,6 @@ async fn unknown_attachment_fixture() -> Result<UnknownAttachmentFixture, Box<dy
         },
     );
     let repository = SubmitInputRepository::new(pool.clone()).with_attachment_maximum_bytes(1024);
-    let first = repository
-        .handle(
-            command.clone(),
-            AcceptedInputId::from_uuid(Uuid::from_u128(0xb312)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xb313))),
-        )
-        .await?;
     let expected_result =
         SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBlobNotFound { digest });
     Ok(UnknownAttachmentFixture {
@@ -3401,23 +3405,33 @@ async fn unknown_attachment_fixture() -> Result<UnknownAttachmentFixture, Box<dy
         pool,
         repository,
         command,
-        first,
         expected_result,
         digest,
         changed_digest,
     })
 }
 
-/// INV-012 / INV-089: an attachment without a catalogued verified replica is
+/// INV-012 / INV-089: an attachment with no catalogued blob identity is
 /// rejected only after the durable command identity is claimed, and the
-/// unavailable digest is the recorded evidence.
+/// unavailable digest is the recorded evidence. A committed catalogued
+/// identity always carries a verified replica, because the deferred
+/// `blob_requires_replica` constraint trigger rejects any commit without one
+/// and the catalog tables are append-only, so an absent `blob` row is the only
+/// unavailability an admission check can observe.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_inv089_unknown_attachment_is_a_post_claim_rejection() -> Result<(), Box<dyn Error>>
 {
     let fixture = unknown_attachment_fixture().await?;
     assert_eq!(
-        fixture.first,
+        fixture
+            .repository
+            .handle(
+                fixture.command.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb312)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb313))),
+            )
+            .await?,
         SubmitInputHandlingOutcome::Recorded(fixture.expected_result.clone())
     );
     let durable: (i16, String, Vec<u8>) = sqlx::query_as(
@@ -3444,6 +3458,18 @@ async fn inv012_inv089_unknown_attachment_is_a_post_claim_rejection() -> Result<
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_unknown_attachment_rejection_replays_exactly() -> Result<(), Box<dyn Error>> {
     let fixture = unknown_attachment_fixture().await?;
+    let first = fixture
+        .repository
+        .handle(
+            fixture.command.clone(),
+            AcceptedInputId::from_uuid(Uuid::from_u128(0xb312)),
+            Some(TurnId::from_uuid(Uuid::from_u128(0xb313))),
+        )
+        .await?;
+    assert_eq!(
+        first,
+        SubmitInputHandlingOutcome::Recorded(fixture.expected_result.clone())
+    );
     assert_eq!(
         fixture
             .repository
@@ -3453,7 +3479,7 @@ async fn inv012_unknown_attachment_rejection_replays_exactly() -> Result<(), Box
                 Some(TurnId::from_uuid(Uuid::from_u128(0xb315))),
             )
             .await?,
-        SubmitInputHandlingOutcome::Recorded(fixture.expected_result.clone())
+        first
     );
     fixture.finish().await;
     Ok(())
@@ -3467,6 +3493,17 @@ async fn inv012_unknown_attachment_rejection_reconstitutes_exactly() -> Result<(
     assert_eq!(
         fixture
             .repository
+            .handle(
+                fixture.command.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb312)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb313))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(fixture.expected_result.clone())
+    );
+    assert_eq!(
+        fixture
+            .repository
             .load(fixture.command.command_id())
             .await?
             .expect("the rejected command remains complete")
@@ -3477,12 +3514,44 @@ async fn inv012_unknown_attachment_rejection_reconstitutes_exactly() -> Result<(
     Ok(())
 }
 
-/// INV-012: correcting an unknown attachment under the claimed identity is
-/// conflicting reuse.
+/// INV-012: correcting an unknown attachment to a catalogued one under the
+/// claimed identity is conflicting reuse, not a second admission.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv012_changed_unknown_attachment_is_conflicting_reuse() -> Result<(), Box<dyn Error>> {
     let fixture = unknown_attachment_fixture().await?;
+    assert_eq!(
+        fixture
+            .repository
+            .handle(
+                fixture.command.clone(),
+                AcceptedInputId::from_uuid(Uuid::from_u128(0xb312)),
+                Some(TurnId::from_uuid(Uuid::from_u128(0xb313))),
+            )
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(fixture.expected_result.clone())
+    );
+    let mut catalog = fixture.pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ('changed_test', $1)",
+    )
+    .bind(Uuid::from_u128(0xb318))
+    .execute(&mut *catalog)
+    .await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, $2)")
+        .bind(fixture.changed_digest.as_bytes().as_slice())
+        .bind(Decimal::from(16_u64))
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query(
+        "INSERT INTO blob_replica (digest, store_name, object_key)
+         VALUES ($1, 'changed_test', 'changed')",
+    )
+    .bind(fixture.changed_digest.as_bytes().as_slice())
+    .execute(&mut *catalog)
+    .await?;
+    catalog.commit().await?;
     let changed = SubmitInput::new(
         fixture.command.command_id(),
         fixture.command.session(),
@@ -3511,6 +3580,10 @@ struct AttachmentBudgetFixture {
     pool: PgPool,
     repository: SubmitInputRepository,
     first_part: UserContentPart,
+    /// A second reference to `first_part`'s digest carrying different
+    /// attachment metadata, so a repeated digest cannot be mistaken for a
+    /// repeated part value.
+    repeated_first_part: UserContentPart,
     second_part: UserContentPart,
     session: SessionId,
     delivery: DeliveryRequest,
@@ -3528,9 +3601,13 @@ async fn attachment_budget_fixture() -> Result<AttachmentBudgetFixture, Box<dyn 
     let (container, pool, _database_url) = migrated_postgres().await?;
     let first_digest = BlobDigest::digest(b"first attachment");
     let second_digest = BlobDigest::digest(b"second attachment");
+    // Each catalogued length is admissible on its own and only their sum
+    // exceeds the maximum, so admission has to aggregate rather than compare
+    // lengths one at a time. Doubling the first length also exceeds the
+    // maximum, so counting one digest twice cannot pass either.
     let first_length = 16_u64;
-    let second_length = 17_u64;
-    let maximum = first_length;
+    let second_length = 12_u64;
+    let maximum = 20_u64;
     let mut catalog = pool.begin().await?;
     sqlx::query(
         "INSERT INTO blob_store_binding (store_name, namespace_id)
@@ -3568,6 +3645,16 @@ async fn attachment_budget_fixture() -> Result<AttachmentBudgetFixture, Box<dyn 
         pool,
         repository,
         first_part: attachment_part(first_digest),
+        repeated_first_part: UserContentPart::Attachment {
+            digest: first_digest,
+            kind: AttachmentKind::Document,
+            media_type: DeclaredMediaType::try_new(String::from("application/pdf"))
+                .expect("the fixture media type is valid"),
+            display_filename: Some(
+                AttachmentDisplayFilename::try_new(String::from("second-reference.pdf"))
+                    .expect("the fixture display filename is valid"),
+            ),
+        },
         second_part: attachment_part(second_digest),
         session,
         delivery,
@@ -3591,9 +3678,9 @@ fn distinct_attachment_command(
     )
 }
 
-/// INV-089: repeated references to one digest consume its catalogued length
-/// only once, so a doubled reference within the bound reaches session lookup
-/// rather than the byte-budget rejection.
+/// INV-089: the digest is the accounting key, so two metadata-distinct parts
+/// naming one catalogued digest consume its length only once and reach session
+/// lookup rather than the byte-budget rejection.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv089_attachment_admission_counts_a_repeated_digest_once() -> Result<(), Box<dyn Error>> {
@@ -3601,8 +3688,11 @@ async fn inv089_attachment_admission_counts_a_repeated_digest_once() -> Result<(
     let repeated = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb322)),
         fixture.session,
-        UserContent::try_parts(vec![fixture.first_part.clone(), fixture.first_part.clone()])
-            .expect("the repeated fixture content is canonical"),
+        UserContent::try_parts(vec![
+            fixture.first_part.clone(),
+            fixture.repeated_first_part.clone(),
+        ])
+        .expect("the repeated fixture content is canonical"),
         fixture.delivery,
     );
     assert_eq!(
@@ -3624,8 +3714,9 @@ async fn inv089_attachment_admission_counts_a_repeated_digest_once() -> Result<(
     Ok(())
 }
 
-/// INV-089: distinct catalogued digest lengths above the deployment maximum
-/// produce the typed rejection and its durable maximum evidence.
+/// INV-089: distinct catalogued digests, each admissible alone, are rejected
+/// once their summed lengths pass the deployment maximum, and that maximum is
+/// the durable evidence.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn inv089_distinct_attachment_bytes_above_the_maximum_are_rejected()
