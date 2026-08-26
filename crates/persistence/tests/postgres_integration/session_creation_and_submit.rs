@@ -3780,19 +3780,22 @@ async fn inv089_queued_input_checks_the_complete_prospective_attachment_frontier
         attachment_content(fixture.first_digest),
         delivery,
     );
-    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-        SubmitInputAppliedResult::TurnOrigin(_),
-    )) = fixture
-        .repository
-        .handle(
-            first,
-            AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
-        )
-        .await?
-    else {
-        panic!("the first seven-byte attachment must remain within the ten-byte bound");
-    };
+    assert!(
+        matches!(
+            fixture
+                .repository
+                .handle(
+                    first,
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0xb335)),
+                    Some(TurnId::from_uuid(Uuid::from_u128(0xb336))),
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the first seven-byte attachment must remain within the ten-byte bound"
+    );
     let second = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb337)),
         fixture.session,
@@ -4065,19 +4068,22 @@ async fn inv089_pending_steering_rechecks_affected_queued_attachment_frontiers()
             configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
         },
     );
-    let SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
-        SubmitInputAppliedResult::TurnOrigin(_),
-    )) = fixture
-        .repository
-        .handle(
-            queued,
-            AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
-            Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
-        )
-        .await?
-    else {
-        panic!("the queued seven-byte attachment must remain within the ten-byte bound");
-    };
+    assert!(
+        matches!(
+            fixture
+                .repository
+                .handle(
+                    queued,
+                    AcceptedInputId::from_uuid(Uuid::from_u128(0xb34b)),
+                    Some(TurnId::from_uuid(Uuid::from_u128(0xb34c))),
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the queued seven-byte attachment must remain within the ten-byte bound"
+    );
     let steering = SubmitInput::new(
         DurableCommandId::from_uuid(Uuid::from_u128(0xb34d)),
         fixture.session,
@@ -4227,6 +4233,76 @@ async fn inv089_steering_frontier_rejection_rolls_back_provisional_effects()
     assert_eq!(effects.pending_steering, 0);
 
     fixture.finish().await;
+    Ok(())
+}
+
+/// INV-089: a turn executing a tool batch keeps the `running` phase while the
+/// call that produced the batch is already terminal, so prospective
+/// attachment accounting reads the batch's yielded frontier instead of
+/// rejecting the submission it cannot reconstitute.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv089_executing_tool_batch_admits_a_bounded_attachment_queue()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0xb360;
+    let (fixture, _, _, _) = checkpoint_tool_batch_with_approval(
+        &pool,
+        seed,
+        &[("current_time", "{}")],
+        InitialToolApproval::PolicyAuto,
+    )
+    .await?;
+    let digest = BlobDigest::digest(b"tool batch prospective attachment");
+    let mut catalog = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO blob_store_binding (store_name, namespace_id)
+         VALUES ('prospective_tool_batch', $1)",
+    )
+    .bind(Uuid::from_u128(seed + 0x200))
+    .execute(&mut *catalog)
+    .await?;
+    sqlx::query("INSERT INTO blob (digest, byte_length) VALUES ($1, 7)")
+        .bind(digest.as_bytes().as_slice())
+        .execute(&mut *catalog)
+        .await?;
+    sqlx::query(
+        "INSERT INTO blob_replica (digest, store_name, object_key)
+         VALUES ($1, 'prospective_tool_batch', 'queued')",
+    )
+    .bind(digest.as_bytes().as_slice())
+    .execute(&mut *catalog)
+    .await?;
+    catalog.commit().await?;
+    let queued = SubmitInput::new(
+        DurableCommandId::from_uuid(Uuid::from_u128(seed + 0x201)),
+        fixture.session,
+        attachment_content(digest),
+        DeliveryRequest::AfterCurrentTurn {
+            expected_active_turn: fixture.turn,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+
+    assert!(
+        matches!(
+            SubmitInputRepository::new(pool.clone())
+                .with_attachment_maximum_bytes(10)
+                .handle(
+                    queued,
+                    AcceptedInputId::from_uuid(Uuid::from_u128(seed + 0x202)),
+                    Some(TurnId::from_uuid(Uuid::from_u128(seed + 0x203))),
+                )
+                .await?,
+            SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+                SubmitInputAppliedResult::TurnOrigin(_)
+            ))
+        ),
+        "the queued seven-byte attachment must remain within the ten-byte bound"
+    );
+
+    pool.close().await;
+    drop(container);
     Ok(())
 }
 
