@@ -906,6 +906,18 @@ async fn search(
             "search projection is not configured",
         );
     };
+    // The lexical read holds one pooled connection across `SET TRANSACTION`,
+    // the term probe, and the page query, so it is a snapshot reader on the
+    // same footing as the attention snapshot: it draws its permit from the
+    // daemon-wide budget that reserves pool connections for mutations and
+    // outbox work. Admitting it after the query and repository checks keeps a
+    // malformed or unconfigured request from spending a permit.
+    let Some(budget) = state.snapshot_reader_budget else {
+        return search_projection_failed();
+    };
+    let Ok(_permit) = budget.acquire().await else {
+        return search_projection_failed();
+    };
     match repository.search(request).await {
         Ok(page) => Json(search_page_dto(page)).into_response(),
         Err(error) => search_repository_error(error),
@@ -976,6 +988,10 @@ fn search_repository_error(error: SearchRepositoryError) -> Response {
         SearchRepositoryError::Corruption(_) => "fail_closed_corruption",
     };
     tracing::error!(failure_class, cause = %error, "lexical search projection read failed");
+    search_projection_failed()
+}
+
+fn search_projection_failed() -> Response {
     application_error(
         StatusCode::INTERNAL_SERVER_ERROR,
         "search_projection_failed",
