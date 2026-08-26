@@ -694,6 +694,22 @@ async fn oversized_unrecognized_declared_archive_remains_unknown() -> Result<(),
 }
 
 #[tokio::test]
+async fn escape_expanding_entry_names_are_a_typed_output_bound_failure()
+-> Result<(), Box<dyn Error>> {
+    let source = MemorySource::new(
+        fixtures::zip_with_escape_expanding_entry_names()?,
+        "application/zip",
+    )?;
+    let inspection = inspect(&DirectProcessor::new(), &source).await?;
+    assert_eq!(inspection.status(), FileInspectionStatus::Validated);
+
+    let result = read(&DirectProcessor::new(), &source, serde_json::json!({})).await;
+
+    assert_eq!(result, Err(FileMediaFailure::OutputUnitTooLarge));
+    Ok(())
+}
+
+#[tokio::test]
 async fn hostile_view_arguments_are_typed_and_content_silent() -> Result<(), Box<dyn Error>> {
     let source = ArchiveFixture::zip()?.into_source()?;
     let result = read(
