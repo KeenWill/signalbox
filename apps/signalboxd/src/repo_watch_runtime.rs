@@ -26,18 +26,18 @@ use signalbox_application::{
     RepoWatchCheckSuiteObservation, RepoWatchConvergenceAssessment,
     RepoWatchConvergenceAssessmentInput, RepoWatchDifferFailureKind, RepoWatchDispatchService,
     RepoWatchDispatchTransaction, RepoWatchEventIdentityFrontierV1, RepoWatchEventOccurrenceV1,
-    RepoWatchObservation, RepoWatchObservationApplyV1, RepoWatchObservationPatchV1,
-    RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
-    RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateInput,
-    RepoWatchReviewDecision, RepoWatchReviewObservation, RepoWatchRuleEvaluation,
-    RepoWatchRuleEvaluationOutcome, RepoWatchStaleReviewClearanceCandidate,
-    RepoWatchTargetedRefreshCoalescerV1, RepoWatchTargetedRefreshV1, RepoWatchThreadObservation,
-    RepoWatchThreadState, RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input,
-    RepoWatchWebhookIgnoredReasonV1, RepoWatchWebhookMappedNoChangeV1,
-    RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1, RepoWatchWorkflowRunObservation,
-    UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator,
-    apply_repo_watch_observation_patch_v1, derive_repo_watch_events,
-    map_repo_watch_webhook_delivery_v1,
+    RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchObservationApplyV1,
+    RepoWatchObservationPatchV1, RepoWatchPullRequestLifecycle, RepoWatchPullRequestState,
+    RepoWatchPullRequestStateInput, RepoWatchReactionObservation, RepoWatchRepositoryState,
+    RepoWatchRepositoryStateInput, RepoWatchReviewDecision, RepoWatchReviewObservation,
+    RepoWatchRuleEvaluation, RepoWatchRuleEvaluationOutcome,
+    RepoWatchStaleReviewClearanceCandidate, RepoWatchTargetedRefreshCoalescerV1,
+    RepoWatchTargetedRefreshV1, RepoWatchThreadObservation, RepoWatchThreadState,
+    RepoWatchWebhookDeliveryV1, RepoWatchWebhookDeliveryV1Input, RepoWatchWebhookIgnoredReasonV1,
+    RepoWatchWebhookMappedNoChangeV1, RepoWatchWebhookMappingError, RepoWatchWebhookMappingV1,
+    RepoWatchWorkflowRunObservation, UuidV7RepoWatchDispatchIdGenerator,
+    UuidV7RepoWatchEventIdGenerator, apply_repo_watch_observation_patch_v1,
+    derive_repo_watch_events_with_merged_baselines, map_repo_watch_webhook_delivery_v1,
 };
 use signalbox_domain::{
     BranchName, CheckConclusion, CheckRunName, ChecksOutcome, CommitSha, DurableCommandId,
@@ -132,10 +132,6 @@ const WEBHOOK_DRAIN_RETRY_MAX_DOUBLINGS: u32 = 6;
 // serialized repository task cannot also silence the observer meant to
 // expose it.
 const WEBHOOK_DRAIN_MONITOR_INTERVAL: Duration = Duration::from_secs(30);
-// Pending webhook work ordinarily drains in seconds. One minute leaves ample
-// room for an in-flight bounded provider request while ensuring a task wedge
-// becomes an operator-visible error well before the next full poll.
-const WEBHOOK_DRAIN_STALL_THRESHOLD: Duration = Duration::from_secs(60);
 // The minimum drain deadline covers a cursor up to two scaling quanta. Larger
 // cursor documents receive proportional time below, while this floor preserves
 // the original bound for ordinary repositories.
@@ -452,10 +448,17 @@ impl RepositoryWatchRuntime {
         for task in self.tasks {
             if task.webhook_work.is_some() {
                 let repository = task.repository.clone();
-                let store = task.webhook_store.clone();
+                let webhook_store = task.webhook_store.clone();
+                let cursor_store = task.store.clone();
                 let monitor_shutdown = task_shutdown.clone();
                 tasks.spawn(async move {
-                    monitor_webhook_drain(repository, store, monitor_shutdown).await;
+                    monitor_webhook_drain(
+                        repository,
+                        webhook_store,
+                        cursor_store,
+                        monitor_shutdown,
+                    )
+                    .await;
                     RepositoryWatchChildExit::WebhookMonitor
                 });
             }
@@ -956,6 +959,23 @@ impl fmt::Display for WebhookCursorSizingError {
     }
 }
 
+async fn load_webhook_attempt_deadlines(
+    store: &PostgresRepoWatchStore,
+    repository: &RepositorySlug,
+) -> Result<WebhookAttemptDeadlines, WebhookCursorSizingError> {
+    let cursor_payload_bytes = timeout(
+        WEBHOOK_CURSOR_SIZING_TIMEOUT,
+        store.load_cursor_payload_bytes(repository),
+    )
+    .await
+    .map_err(|_| WebhookCursorSizingError::TimedOut)?
+    .map_err(WebhookCursorSizingError::Store)?
+    .unwrap_or(0);
+    Ok(WebhookAttemptDeadlines::for_cursor_payload(
+        cursor_payload_bytes,
+    ))
+}
+
 /// Payload-derived bounds for one serialized webhook attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct WebhookAttemptDeadlines {
@@ -981,6 +1001,10 @@ impl WebhookAttemptDeadlines {
             attempt: drain.saturating_add(WEBHOOK_ATTEMPT_TIMEOUT_MARGIN),
             cursor_payload_bytes,
         }
+    }
+
+    const fn stall_threshold(self) -> Duration {
+        self.drain
     }
 }
 
@@ -1123,7 +1147,8 @@ where
 
 async fn monitor_webhook_drain(
     repository: RepositorySlug,
-    store: PostgresRepoWatchWebhookStore,
+    webhook_store: PostgresRepoWatchWebhookStore,
+    cursor_store: PostgresRepoWatchStore,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut next_inspection = Instant::now() + WEBHOOK_DRAIN_MONITOR_INTERVAL;
@@ -1148,18 +1173,26 @@ async fn monitor_webhook_drain(
             WEBHOOK_DRAIN_MONITOR_INTERVAL,
             Instant::now(),
         );
-        // The inspection acquires a pooled connection and queries, neither of
-        // which this task bounds. Awaiting it outside shutdown would hold this
-        // child while PostgreSQL was unresponsive, and the supervisor joins
-        // every child before aborting the set, so the daemon could not stop.
+        let stall_threshold = match load_webhook_attempt_deadlines(&cursor_store, &repository).await
+        {
+            Ok(deadlines) => deadlines.stall_threshold(),
+            Err(error) => {
+                tracing::error!(
+                    repository = %repository.as_str(),
+                    cause_code = "webhook_drain_monitor_cursor_sizing_failed",
+                    cause = %error,
+                    "repository-watch webhook drain monitor could not size the durable cursor"
+                );
+                continue;
+            }
+        };
+        // The pending-receipt inspection acquires a pooled connection and
+        // queries. Awaiting it outside shutdown would hold this child while
+        // PostgreSQL was unresponsive, and the supervisor joins every child
+        // before aborting the set, so the daemon could not stop.
         if run_until_shutdown(
             &mut shutdown,
-            inspect_webhook_drain(
-                &repository,
-                &store,
-                WEBHOOK_DRAIN_STALL_THRESHOLD,
-                &mut progress,
-            ),
+            inspect_webhook_drain(&repository, &webhook_store, stall_threshold, &mut progress),
         )
         .await
         .is_none()
@@ -2111,6 +2144,7 @@ impl RepositoryWatchTask {
     }
 
     async fn run_webhook_attempt_with_payload_deadline(&mut self) -> WebhookAttemptOutcome {
+        self.webhook_drain_timed_out = false;
         let deadlines = match self.webhook_attempt_deadlines().await {
             Ok(deadlines) => deadlines,
             Err(error) => {
@@ -2165,17 +2199,7 @@ impl RepositoryWatchTask {
     async fn webhook_attempt_deadlines(
         &self,
     ) -> Result<WebhookAttemptDeadlines, WebhookCursorSizingError> {
-        let cursor_payload_bytes = timeout(
-            WEBHOOK_CURSOR_SIZING_TIMEOUT,
-            self.store.load_cursor_payload_bytes(&self.repository),
-        )
-        .await
-        .map_err(|_| WebhookCursorSizingError::TimedOut)?
-        .map_err(WebhookCursorSizingError::Store)?
-        .unwrap_or(0);
-        Ok(WebhookAttemptDeadlines::for_cursor_payload(
-            cursor_payload_bytes,
-        ))
+        load_webhook_attempt_deadlines(&self.store, &self.repository).await
     }
 
     /// Performs the cleanup every cancelled webhook attempt owes its successor.
@@ -2391,6 +2415,7 @@ impl RepositoryWatchTask {
     }
 
     async fn process_webhook_deliveries_with_timeout(&mut self) -> WebhookDrainOutcome {
+        self.webhook_drain_timed_out = false;
         let deadlines = match self.webhook_attempt_deadlines().await {
             Ok(deadlines) => deadlines,
             Err(error) => {
@@ -2571,7 +2596,7 @@ impl RepositoryWatchTask {
                     .seed_webhook_shadow()
                     .await?
                     .then_some(RepoWatchWebhookParityCauseV1::CrossDrainShadowGap);
-                let Some(shadow) = self.webhook_shadow.as_ref() else {
+                let Some(shadow) = self.webhook_shadow.clone() else {
                     return Err(RepositoryWatchAttemptError::Persistence);
                 };
                 let applied =
@@ -2622,7 +2647,7 @@ impl RepositoryWatchTask {
                     RepoWatchObservationApplyV1::Applied(observation) => {
                         let (projections, identity_frontier) = shadow_event_projections(
                             &self.repository,
-                            shadow,
+                            &shadow,
                             &observation,
                             cause,
                         )?;
@@ -2642,6 +2667,9 @@ impl RepositoryWatchTask {
                         self.webhook_shadow = Some(WebhookShadowBaseline {
                             observation,
                             identity_frontier,
+                            merged_pull_request_baselines: shadow
+                                .merged_pull_request_baselines
+                                .clone(),
                         });
                         self.webhook_shadow_superseded = false;
                         Ok(())
@@ -2652,7 +2680,7 @@ impl RepositoryWatchTask {
                     } => {
                         let (mut projections, identity_frontier) = shadow_event_projections(
                             &self.repository,
-                            shadow,
+                            &shadow,
                             &observation,
                             cause,
                         )?;
@@ -2707,6 +2735,9 @@ impl RepositoryWatchTask {
                                     WebhookShadowBaseline {
                                         observation,
                                         identity_frontier,
+                                        merged_pull_request_baselines: shadow
+                                            .merged_pull_request_baselines
+                                            .clone(),
                                     },
                                 )
                                 .await?;
@@ -2729,6 +2760,9 @@ impl RepositoryWatchTask {
                             self.webhook_shadow = Some(WebhookShadowBaseline {
                                 observation,
                                 identity_frontier,
+                                merged_pull_request_baselines: shadow
+                                    .merged_pull_request_baselines
+                                    .clone(),
                             });
                             self.webhook_shadow_superseded = false;
                         }
@@ -2859,6 +2893,8 @@ impl RepositoryWatchTask {
         };
         let (events, identity_frontier) =
             primary_committed_occurrences(&self.repository, &baseline, &observation)?;
+        let compacted =
+            compact_cursor_observation(&observation, &baseline.merged_pull_request_baselines)?;
         // A primary delivery records no event projection. Parity compares
         // projections against poll-produced rows, and this delivery's own commit
         // is the durable row; projecting it too would leave a permanent
@@ -2873,9 +2909,10 @@ impl RepositoryWatchTask {
             .collect::<Result<Vec<_>, _>>()?;
         let request = RepoWatchCommitRequest::from_webhook(
             Some(cursor.generation()),
-            RepoWatchCursorCandidate::with_event_identity_frontier(
-                observation.clone(),
+            RepoWatchCursorCandidate::with_event_identity_frontier_and_merged_baselines(
+                compacted.observation.clone(),
                 identity_frontier.clone(),
+                compacted.merged_pull_request_baselines.clone(),
             ),
             events,
         );
@@ -2885,8 +2922,9 @@ impl RepositoryWatchTask {
                 pending.key(),
                 projections,
                 WebhookShadowBaseline {
-                    observation,
+                    observation: compacted.observation,
                     identity_frontier,
+                    merged_pull_request_baselines: compacted.merged_pull_request_baselines,
                 },
             )
             .await?;
@@ -3097,22 +3135,28 @@ impl RepositoryWatchTask {
             .filter(|refresh| refresh_reaches_a_target(refresh, &applied_targets))
             .cloned()
             .collect::<Vec<_>>();
-        let events = derive_repo_watch_events(
+        let events = derive_repo_watch_events_with_merged_baselines(
             &self.repository,
             Some(cursor.candidate().observation()),
+            cursor.candidate().merged_pull_request_baselines(),
             &observation,
             &mut event_identity_frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
         )
         .map_err(|_| RepositoryWatchAttemptError::Differ)?;
-        let cursor_observation = compact_cursor_observation(&observation)?;
+        let compacted = compact_cursor_observation(
+            &observation,
+            cursor.candidate().merged_pull_request_baselines(),
+        )?;
         Ok(PreparedTargetedRefreshOutcome::Prepared(
             PreparedTargetedRefresh {
                 generation: cursor.generation(),
-                candidate: RepoWatchCursorCandidate::with_event_identity_frontier(
-                    cursor_observation,
-                    event_identity_frontier,
-                ),
+                candidate:
+                    RepoWatchCursorCandidate::with_event_identity_frontier_and_merged_baselines(
+                        compacted.observation,
+                        event_identity_frontier,
+                        compacted.merged_pull_request_baselines,
+                    ),
                 events,
                 queried,
             },
@@ -3550,9 +3594,14 @@ impl RepositoryWatchTask {
             .poller
             .poll_against_cursor(previous, cursor_generation)
             .await?;
-        let events = derive_repo_watch_events(
+        let merged_pull_request_baselines = cursor
+            .as_ref()
+            .map(|cursor| cursor.candidate().merged_pull_request_baselines())
+            .unwrap_or_default();
+        let events = derive_repo_watch_events_with_merged_baselines(
             &self.repository,
             previous,
+            merged_pull_request_baselines,
             &polled.observation,
             &mut event_identity_frontier,
             &mut UuidV7RepoWatchEventIdGenerator,
@@ -3572,23 +3621,26 @@ impl RepositoryWatchTask {
                 RepositoryWatchAttemptError::IdentityFrontier
             }
         })?;
-        let cursor_observation = compact_cursor_observation(&polled.observation)?;
+        let compacted =
+            compact_cursor_observation(&polled.observation, merged_pull_request_baselines)?;
+        let retained_pull_requests = compacted
+            .observation
+            .state()
+            .pull_requests()
+            .iter()
+            .map(|pull_request| pull_request.context().number())
+            .collect::<HashSet<_>>();
         let convergence = polled
             .convergence
             .into_iter()
-            .filter(|assessment| {
-                cursor_observation
-                    .state()
-                    .pull_requests()
-                    .iter()
-                    .any(|pull_request| pull_request.context().number() == assessment.number())
-            })
+            .filter(|assessment| retained_pull_requests.contains(&assessment.number()))
             .collect();
         Ok(PreparedCompletePoll {
             cursor_generation,
-            candidate: RepoWatchCursorCandidate::with_event_identity_frontier(
-                cursor_observation,
+            candidate: RepoWatchCursorCandidate::with_event_identity_frontier_and_merged_baselines(
+                compacted.observation,
                 event_identity_frontier,
+                compacted.merged_pull_request_baselines,
             ),
             events,
             convergence,
@@ -3929,6 +3981,7 @@ struct PreparedTargetedRefresh {
 struct WebhookShadowBaseline {
     observation: RepoWatchObservation,
     identity_frontier: RepoWatchEventIdentityFrontierV1,
+    merged_pull_request_baselines: Vec<RepoWatchMergedPullRequestBaselineV1>,
 }
 
 impl WebhookShadowBaseline {
@@ -3936,6 +3989,10 @@ impl WebhookShadowBaseline {
         Self {
             observation: cursor.candidate().observation().clone(),
             identity_frontier: cursor.candidate().event_identity_frontier().clone(),
+            merged_pull_request_baselines: cursor
+                .candidate()
+                .merged_pull_request_baselines()
+                .to_vec(),
         }
     }
 }
@@ -3957,9 +4014,10 @@ fn primary_committed_occurrences(
     RepositoryWatchAttemptError,
 > {
     let mut identity_frontier = baseline.identity_frontier.clone();
-    let occurrences = derive_repo_watch_events(
+    let occurrences = derive_repo_watch_events_with_merged_baselines(
         repository,
         Some(&baseline.observation),
+        &baseline.merged_pull_request_baselines,
         observation,
         &mut identity_frontier,
         &mut UuidV7RepoWatchEventIdGenerator,
@@ -3985,9 +4043,10 @@ fn shadow_event_projections(
     RepositoryWatchAttemptError,
 > {
     let mut identity_frontier = baseline.identity_frontier.clone();
-    let projections = derive_repo_watch_events(
+    let projections = derive_repo_watch_events_with_merged_baselines(
         repository,
         Some(&baseline.observation),
+        &baseline.merged_pull_request_baselines,
         observation,
         &mut identity_frontier,
         &mut UuidV7RepoWatchEventIdGenerator,
@@ -6997,10 +7056,30 @@ impl PollCache {
 /// webhook refreshes repeatedly transfer and decode terminal history. Closed
 /// but unmerged pull requests remain for one later complete poll, preserving
 /// the existing current-state view for that distinct lifecycle.
+struct CompactedCursorObservation {
+    observation: RepoWatchObservation,
+    merged_pull_request_baselines: Vec<RepoWatchMergedPullRequestBaselineV1>,
+}
+
 fn compact_cursor_observation(
     observation: &RepoWatchObservation,
-) -> Result<RepoWatchObservation, RepositoryWatchAttemptError> {
+    retained_merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
+) -> Result<CompactedCursorObservation, RepositoryWatchAttemptError> {
     let state = observation.state();
+    let mut merged_pull_request_baselines = retained_merged_baselines
+        .iter()
+        .cloned()
+        .map(|baseline| (baseline.number(), baseline))
+        .collect::<BTreeMap<_, _>>();
+    for pull_request in state.pull_requests() {
+        if let Some(baseline) =
+            RepoWatchMergedPullRequestBaselineV1::from_merged_state(pull_request)
+        {
+            merged_pull_request_baselines.insert(baseline.number(), baseline);
+        } else {
+            merged_pull_request_baselines.remove(&pull_request.context().number());
+        }
+    }
     let compacted = RepoWatchRepositoryState::try_new(RepoWatchRepositoryStateInput {
         pull_requests: state
             .pull_requests()
@@ -7014,10 +7093,10 @@ fn compact_cursor_observation(
         branch_heads: state.branch_heads().to_vec(),
     })
     .map_err(|_| RepositoryWatchAttemptError::Normalization)?;
-    Ok(RepoWatchObservation::new(
-        observation.signal_reviewers().to_vec(),
-        compacted,
-    ))
+    Ok(CompactedCursorObservation {
+        observation: RepoWatchObservation::new(observation.signal_reviewers().to_vec(), compacted),
+        merged_pull_request_baselines: merged_pull_request_baselines.into_values().collect(),
+    })
 }
 
 fn pull_request_base_revision<'a>(
@@ -7740,6 +7819,7 @@ mod tests {
         time::Duration,
     };
 
+    use signalbox_application::derive_repo_watch_events;
     use tempfile::TempDir;
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
@@ -7773,9 +7853,9 @@ mod tests {
         WebhookAttemptPhase, WebhookDrain, WebhookDrainOutcome, WebhookDrainProgress,
         WebhookDrainRetry, WebhookPayloadPurgeSchedule, WebhookPollInterrupt,
         WebhookShadowBaseline, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
-        commit_check_run_search_is_complete, compact_cursor_observation, derive_repo_watch_events,
-        dispatch_context_json, initial_poll_deadline, inspect_webhook_drain, next_cadence_deadline,
-        next_repository_wake, normalize_checks_outcome, normalize_pull_request_context, object_id,
+        commit_check_run_search_is_complete, compact_cursor_observation, dispatch_context_json,
+        initial_poll_deadline, inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
+        normalize_checks_outcome, normalize_pull_request_context, object_id,
         observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
         record_dispatch_start_nudge_outcome, repository_reconciliation_quantum_exhausted,
         rule_activation_error, run_until_shutdown, supervise_repository_tasks,
@@ -11127,6 +11207,9 @@ mod tests {
             WEBHOOK_DRAIN_TIMEOUT_PER_PAYLOAD_QUANTUM.saturating_mul(3)
         );
         assert_eq!(maximum.drain, WEBHOOK_DRAIN_MAX_ATTEMPT_TIMEOUT);
+        assert_eq!(ordinary.stall_threshold(), ordinary.drain);
+        assert_eq!(larger.stall_threshold(), larger.drain);
+        assert_eq!(maximum.stall_threshold(), maximum.drain);
         assert!(ordinary.attempt > ordinary.drain);
         assert!(larger.attempt > larger.drain);
         assert!(maximum.attempt > maximum.drain);
@@ -11142,6 +11225,25 @@ mod tests {
 
         assert!(WEBHOOK_CURSOR_SIZING_TIMEOUT < floor.drain);
         assert!(WEBHOOK_CURSOR_SIZING_TIMEOUT < floor.attempt);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires ephemeral PostgreSQL"]
+    async fn cursor_sizing_failure_clears_an_earlier_drain_timeout_marker()
+    -> Result<(), Box<dyn Error>> {
+        let (_container, pool) = migrated_postgres().await?;
+        let mut fixture = webhook_task(&pool).await?;
+        fixture.task.webhook_drain_timed_out = true;
+        pool.close().await;
+
+        let outcome = fixture.task.process_webhook_deliveries_with_timeout().await;
+
+        assert_eq!(
+            outcome,
+            WebhookDrainOutcome::ProjectionFailed(RepositoryWatchAttemptError::Persistence)
+        );
+        assert!(!fixture.task.webhook_drain_timed_out);
+        Ok(())
     }
 
     #[tokio::test]
@@ -12418,19 +12520,27 @@ mod tests {
         let observation =
             observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Merged).await;
 
-        let compacted = compact_cursor_observation(&observation)
+        let compacted = compact_cursor_observation(&observation, &[])
             .expect("fixture observation compacts canonically");
 
-        assert!(compacted.state().pull_requests().is_empty());
+        assert!(compacted.observation.state().pull_requests().is_empty());
+        assert_eq!(compacted.merged_pull_request_baselines.len(), 1);
         assert_eq!(
-            compacted.state().workflow_runs(),
+            compacted.merged_pull_request_baselines[0].number(),
+            observation.state().pull_requests()[0].context().number()
+        );
+        assert_eq!(
+            compacted.observation.state().workflow_runs(),
             observation.state().workflow_runs()
         );
         assert_eq!(
-            compacted.state().branch_heads(),
+            compacted.observation.state().branch_heads(),
             observation.state().branch_heads()
         );
-        assert_eq!(compacted.signal_reviewers(), observation.signal_reviewers());
+        assert_eq!(
+            compacted.observation.signal_reviewers(),
+            observation.signal_reviewers()
+        );
     }
 
     #[tokio::test]
@@ -12438,13 +12548,14 @@ mod tests {
         let observation =
             observation_with_pull_lifecycle(RepoWatchPullRequestLifecycle::Closed).await;
 
-        let compacted = compact_cursor_observation(&observation)
+        let compacted = compact_cursor_observation(&observation, &[])
             .expect("fixture observation compacts canonically");
 
         assert_eq!(
-            compacted.state().pull_requests(),
+            compacted.observation.state().pull_requests(),
             observation.state().pull_requests()
         );
+        assert!(compacted.merged_pull_request_baselines.is_empty());
     }
 
     #[tokio::test]
@@ -13065,6 +13176,7 @@ mod tests {
                 WebhookShadowBaseline {
                     observation,
                     identity_frontier: RepoWatchEventIdentityFrontierV1::default(),
+                    merged_pull_request_baselines: Vec::new(),
                 },
             )
             .await
@@ -13123,6 +13235,7 @@ mod tests {
                 WebhookShadowBaseline {
                     observation,
                     identity_frontier: RepoWatchEventIdentityFrontierV1::default(),
+                    merged_pull_request_baselines: Vec::new(),
                 },
             )
             .await

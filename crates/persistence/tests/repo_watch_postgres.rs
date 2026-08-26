@@ -78,6 +78,7 @@ const REACTOR: &str = "fixture-reactor";
 const PULL_REQUEST: u64 = 41;
 const CONTENT_IDENTITY_MIGRATION: i64 = 202608150001;
 const FRONTIER_OWNERSHIP_MIGRATION: i64 = 202608250501;
+const MERGED_BASELINE_MIGRATION: i64 = 202608251001;
 const CARRIED_STREAM_IDENTITY: [u8; 32] = [0x99; 32];
 const CARRIED_SEQUENCE: u64 = 7;
 const CHECK_SUITE_ID: u64 = 51;
@@ -672,7 +673,7 @@ async fn content_identity_migration_carries_existing_cursor_and_event_to_version
     // Applying the content-identity migration applies every later migration
     // with it, so the version this observes is the current storage version and
     // not the two that migration introduced.
-    assert_eq!(cursor_version, 3);
+    assert_eq!(cursor_version, 4);
     assert_eq!(frontier, serde_json::json!([]));
     assert_eq!(event_identity.content_identity_version, 1);
     assert_eq!(event_identity.content_identity.len(), 32);
@@ -758,7 +759,7 @@ async fn frontier_ownership_migration_keeps_every_occurrence_sequence() -> Resul
         .entries()
         .collect::<Vec<_>>();
 
-    assert_eq!(cursor_version, 3);
+    assert_eq!(cursor_version, 4);
     assert_eq!(
         frontier,
         serde_json::json!([{
@@ -773,6 +774,93 @@ async fn frontier_ownership_migration_keeps_every_occurrence_sequence() -> Resul
             CARRIED_STREAM_IDENTITY,
             NonZeroU64::new(CARRIED_SEQUENCE).expect("fixture sequence is positive"),
         )]
+    );
+    Ok(())
+}
+
+async fn seed_version_three_cursor_with_merged_pull_request(
+    pool: &PgPool,
+) -> Result<(), Box<dyn Error>> {
+    sqlx::query(
+        "INSERT INTO repo_watch_cursor (
+            repository, generation, storage_version, cursor_payload
+         ) VALUES ($1, 1, 3, $2)",
+    )
+    .bind(REPOSITORY)
+    .bind(sqlx::types::Json(serde_json::json!({
+        "storage_version": 3,
+        "signal_reviewers": [],
+        "event_identity_frontier": [],
+        "state": {
+            "pull_requests": [{
+                "number": PULL_REQUEST,
+                "head_sha": INITIAL_HEAD,
+                "head_repository": HEAD_REPOSITORY,
+                "base_branch": BASE_BRANCH,
+                "head_branch": HEAD_BRANCH,
+                "title": TITLE,
+                "body": BODY,
+                "labels": [],
+                "draft": false,
+                "author": AUTHOR,
+                "lifecycle": "merged",
+                "mergeable_state": "mergeable",
+                "completed_check_suites": [],
+                "completed_check_runs": [],
+                "reviews": [],
+                "threads": [],
+                "reactions": []
+            }],
+            "workflow_runs": [],
+            "branch_heads": []
+        }
+    })))
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn merged_baseline_migration_preserves_full_prior_state_until_runtime_compaction()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = postgres_before_migration(MERGED_BASELINE_MIGRATION).await?;
+    seed_version_three_cursor_with_merged_pull_request(&pool).await?;
+
+    apply_migrations_from(&pool, MERGED_BASELINE_MIGRATION).await?;
+
+    let stored: (i16, serde_json::Value, serde_json::Value) = sqlx::query_as(
+        "SELECT storage_version,
+                cursor_payload -> 'merged_pull_request_baselines',
+                cursor_payload -> 'state' -> 'pull_requests'
+           FROM repo_watch_cursor
+          WHERE repository = $1",
+    )
+    .bind(REPOSITORY)
+    .fetch_one(&pool)
+    .await?;
+    let loaded = PostgresRepoWatchStore::new(pool)
+        .load_cursor(&repository()?)
+        .await?
+        .expect("migrated cursor remains readable");
+
+    assert_eq!(stored.0, 4);
+    assert_eq!(stored.1, serde_json::json!([]));
+    assert_eq!(stored.2.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        loaded
+            .candidate()
+            .observation()
+            .state()
+            .pull_requests()
+            .len(),
+        1
+    );
+    assert!(
+        loaded
+            .candidate()
+            .merged_pull_request_baselines()
+            .is_empty()
     );
     Ok(())
 }
@@ -1791,7 +1879,7 @@ async fn malformed_cursor_document_fails_closed_on_read() -> Result<(), Box<dyn 
         .execute(&mut *corruption_connection)
         .await?;
     sqlx::query(
-        "UPDATE repo_watch_cursor SET cursor_payload = '{\"storage_version\":3}'::jsonb WHERE repository = $1",
+        "UPDATE repo_watch_cursor SET cursor_payload = '{\"storage_version\":4}'::jsonb WHERE repository = $1",
     )
     .bind(repository.as_str())
     .execute(&mut *corruption_connection)

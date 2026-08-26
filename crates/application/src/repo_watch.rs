@@ -763,6 +763,215 @@ pub struct RepoWatchReactionObservation {
     content: ReactionContent,
 }
 
+/// One completed check-suite key retained after its pull request merges.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RepoWatchMergedCheckSuiteBaselineV1 {
+    id: GitHubObjectId,
+    completion_generation: RepoWatchCheckCompletionGeneration,
+}
+
+impl RepoWatchMergedCheckSuiteBaselineV1 {
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+    ) -> Self {
+        Self {
+            id,
+            completion_generation,
+        }
+    }
+
+    pub const fn id(&self) -> GitHubObjectId {
+        self.id
+    }
+
+    pub const fn completion_generation(&self) -> &RepoWatchCheckCompletionGeneration {
+        &self.completion_generation
+    }
+}
+
+/// One completed check-run comparison key retained after merge.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RepoWatchMergedCheckRunBaselineV1 {
+    id: GitHubObjectId,
+    completion_generation: RepoWatchCheckCompletionGeneration,
+    conclusion: CheckConclusion,
+}
+
+impl RepoWatchMergedCheckRunBaselineV1 {
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+        conclusion: CheckConclusion,
+    ) -> Self {
+        Self {
+            id,
+            completion_generation,
+            conclusion,
+        }
+    }
+
+    pub const fn id(&self) -> GitHubObjectId {
+        self.id
+    }
+
+    pub const fn completion_generation(&self) -> &RepoWatchCheckCompletionGeneration {
+        &self.completion_generation
+    }
+
+    pub const fn conclusion(&self) -> CheckConclusion {
+        self.conclusion
+    }
+}
+
+/// Field-labeled construction input for one compact merged-PR baseline.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchMergedPullRequestBaselineInputV1 {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub labels: Vec<LabelName>,
+    pub mergeable_state: MergeableState,
+    pub completed_check_suites: Vec<RepoWatchMergedCheckSuiteBaselineV1>,
+    pub completed_check_runs: Vec<RepoWatchMergedCheckRunBaselineV1>,
+    pub review_ids: Vec<GitHubObjectId>,
+    pub threads: Vec<RepoWatchThreadObservation>,
+    pub reactions: Vec<RepoWatchReactionObservation>,
+}
+
+/// Minimal consecutive-comparison state for a merged pull request.
+///
+/// Full provider details leave the ordinary observation after merge, while
+/// this baseline retains only members the differ needs to recognize a later
+/// post-merge occurrence without replaying terminal history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepoWatchMergedPullRequestBaselineV1 {
+    number: PullRequestNumber,
+    head_sha: CommitSha,
+    labels: Box<[LabelName]>,
+    mergeable_state: MergeableState,
+    completed_check_suites: Box<[RepoWatchMergedCheckSuiteBaselineV1]>,
+    completed_check_runs: Box<[RepoWatchMergedCheckRunBaselineV1]>,
+    review_ids: Box<[GitHubObjectId]>,
+    threads: Box<[RepoWatchThreadObservation]>,
+    reactions: Box<[RepoWatchReactionObservation]>,
+}
+
+impl RepoWatchMergedPullRequestBaselineV1 {
+    pub fn new(mut input: RepoWatchMergedPullRequestBaselineInputV1) -> Self {
+        input.labels.sort();
+        input.labels.dedup();
+        input.completed_check_suites.sort();
+        input.completed_check_suites.dedup();
+        input.completed_check_runs.sort();
+        input.completed_check_runs.dedup();
+        input.review_ids.sort();
+        input.review_ids.dedup();
+        input
+            .threads
+            .sort_by(|left, right| left.thread().cmp(right.thread()));
+        input.threads.dedup();
+        input.reactions.sort_by(|left, right| {
+            (
+                reaction_subject_sort_key(left.subject()),
+                left.reactor(),
+                left.content(),
+            )
+                .cmp(&(
+                    reaction_subject_sort_key(right.subject()),
+                    right.reactor(),
+                    right.content(),
+                ))
+        });
+        input.reactions.dedup();
+        Self {
+            number: input.number,
+            head_sha: input.head_sha,
+            labels: input.labels.into_boxed_slice(),
+            mergeable_state: input.mergeable_state,
+            completed_check_suites: input.completed_check_suites.into_boxed_slice(),
+            completed_check_runs: input.completed_check_runs.into_boxed_slice(),
+            review_ids: input.review_ids.into_boxed_slice(),
+            threads: input.threads.into_boxed_slice(),
+            reactions: input.reactions.into_boxed_slice(),
+        }
+    }
+
+    pub fn from_merged_state(state: &RepoWatchPullRequestState) -> Option<Self> {
+        (state.lifecycle() == RepoWatchPullRequestLifecycle::Merged).then(|| {
+            Self::new(RepoWatchMergedPullRequestBaselineInputV1 {
+                number: state.context().number(),
+                head_sha: state.context().head_sha().clone(),
+                labels: state.context().labels().to_vec(),
+                mergeable_state: state.mergeable_state(),
+                completed_check_suites: state
+                    .completed_check_suites()
+                    .iter()
+                    .map(|suite| {
+                        RepoWatchMergedCheckSuiteBaselineV1::new(
+                            suite.id(),
+                            suite.completion_generation().clone(),
+                        )
+                    })
+                    .collect(),
+                completed_check_runs: state
+                    .completed_check_runs()
+                    .iter()
+                    .map(|run| {
+                        RepoWatchMergedCheckRunBaselineV1::new(
+                            run.id(),
+                            run.completion_generation().clone(),
+                            run.conclusion(),
+                        )
+                    })
+                    .collect(),
+                review_ids: state
+                    .reviews()
+                    .iter()
+                    .map(RepoWatchReviewObservation::id)
+                    .collect(),
+                threads: state.threads().to_vec(),
+                reactions: state.reactions().to_vec(),
+            })
+        })
+    }
+
+    pub const fn number(&self) -> PullRequestNumber {
+        self.number
+    }
+
+    pub const fn head_sha(&self) -> &CommitSha {
+        &self.head_sha
+    }
+
+    pub fn labels(&self) -> &[LabelName] {
+        &self.labels
+    }
+
+    pub const fn mergeable_state(&self) -> MergeableState {
+        self.mergeable_state
+    }
+
+    pub fn completed_check_suites(&self) -> &[RepoWatchMergedCheckSuiteBaselineV1] {
+        &self.completed_check_suites
+    }
+
+    pub fn completed_check_runs(&self) -> &[RepoWatchMergedCheckRunBaselineV1] {
+        &self.completed_check_runs
+    }
+
+    pub fn review_ids(&self) -> &[GitHubObjectId] {
+        &self.review_ids
+    }
+
+    pub fn threads(&self) -> &[RepoWatchThreadObservation] {
+        &self.threads
+    }
+
+    pub fn reactions(&self) -> &[RepoWatchReactionObservation] {
+        &self.reactions
+    }
+}
+
 impl RepoWatchReactionObservation {
     pub const fn new(
         subject: ReactionSubject,
@@ -1307,7 +1516,30 @@ pub fn derive_repo_watch_events(
     identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
 ) -> Result<Vec<RepoWatchEventOccurrenceV1>, RepoWatchDifferError> {
+    derive_repo_watch_events_with_merged_baselines(
+        repository,
+        previous,
+        &[],
+        current,
+        identity_frontier,
+        ids,
+    )
+}
+
+/// Compares observations while preserving recurring events for compacted merged PRs.
+pub fn derive_repo_watch_events_with_merged_baselines(
+    repository: &RepositorySlug,
+    previous: Option<&RepoWatchObservation>,
+    merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
+    current: &RepoWatchObservation,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
+    ids: &mut impl RepoWatchEventIdGenerator,
+) -> Result<Vec<RepoWatchEventOccurrenceV1>, RepoWatchDifferError> {
     let mut events = Vec::new();
+    let merged_baselines_by_number = merged_baselines
+        .iter()
+        .map(|baseline| (baseline.number(), baseline))
+        .collect::<BTreeMap<_, _>>();
     let reaction_filter_unchanged =
         previous.is_none_or(|prior| prior.signal_reviewers() == current.signal_reviewers());
     for current_pull_request in current.state().pull_requests() {
@@ -1317,19 +1549,44 @@ pub fn derive_repo_watch_events(
                 current_pull_request.context().number(),
             )
         });
-        derive_pull_request_events(
-            repository,
-            previous_pull_request,
-            current_pull_request,
-            RepositoryComparison {
-                previous: previous.map(RepoWatchObservation::state),
-                current: current.state(),
-                reaction_filter_unchanged,
-            },
-            identity_frontier,
-            ids,
-            &mut events,
-        )?;
+        let repository_comparison = RepositoryComparison {
+            previous: previous.map(RepoWatchObservation::state),
+            current: current.state(),
+            reaction_filter_unchanged,
+        };
+        if let Some(previous_pull_request) = previous_pull_request {
+            derive_pull_request_events(
+                repository,
+                Some(previous_pull_request),
+                current_pull_request,
+                repository_comparison,
+                identity_frontier,
+                ids,
+                &mut events,
+            )?;
+        } else if let Some(compacted) =
+            merged_baselines_by_number.get(&current_pull_request.context().number())
+        {
+            derive_compacted_merged_pull_request_events(
+                repository,
+                compacted,
+                current_pull_request,
+                repository_comparison,
+                identity_frontier,
+                ids,
+                &mut events,
+            )?;
+        } else {
+            derive_pull_request_events(
+                repository,
+                None,
+                current_pull_request,
+                repository_comparison,
+                identity_frontier,
+                ids,
+                &mut events,
+            )?;
+        }
     }
     if let Some(previous) = previous {
         derive_workflow_events(
@@ -1342,6 +1599,187 @@ pub fn derive_repo_watch_events(
         )?;
     }
     Ok(events)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn derive_compacted_merged_pull_request_events(
+    repository: &RepositorySlug,
+    previous: &RepoWatchMergedPullRequestBaselineV1,
+    current: &RepoWatchPullRequestState,
+    repository_comparison: RepositoryComparison<'_>,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
+    ids: &mut impl RepoWatchEventIdGenerator,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
+) -> Result<(), RepoWatchDifferError> {
+    let context = current.context();
+    let opened_now = current.lifecycle() == RepoWatchPullRequestLifecycle::Open;
+    if opened_now {
+        push_pull_request_event(
+            repository,
+            context,
+            RepoWatchEventKindV1::PullRequestOpened,
+            RepoWatchEventStreamKeyV1::PullRequestKind {
+                number: context.number(),
+                kind: RepoWatchEventKindNameV1::PullRequestOpened,
+            },
+            identity_frontier,
+            ids,
+            events,
+        )?;
+        push_pull_request_event(
+            repository,
+            context,
+            RepoWatchEventKindV1::MergeableStateChanged {
+                current: current.mergeable_state(),
+            },
+            RepoWatchEventStreamKeyV1::PullRequestKind {
+                number: context.number(),
+                kind: RepoWatchEventKindNameV1::MergeableStateChanged,
+            },
+            identity_frontier,
+            ids,
+            events,
+        )?;
+    }
+    if previous.head_sha() != context.head_sha() {
+        push_pull_request_event(
+            repository,
+            context,
+            RepoWatchEventKindV1::HeadChanged {
+                previous: previous.head_sha().clone(),
+                current: context.head_sha().clone(),
+            },
+            RepoWatchEventStreamKeyV1::PullRequestKind {
+                number: context.number(),
+                kind: RepoWatchEventKindNameV1::HeadChanged,
+            },
+            identity_frontier,
+            ids,
+            events,
+        )?;
+    }
+    if !opened_now && previous.mergeable_state() != current.mergeable_state() {
+        push_pull_request_event(
+            repository,
+            context,
+            RepoWatchEventKindV1::MergeableStateChanged {
+                current: current.mergeable_state(),
+            },
+            RepoWatchEventStreamKeyV1::PullRequestKind {
+                number: context.number(),
+                kind: RepoWatchEventKindNameV1::MergeableStateChanged,
+            },
+            identity_frontier,
+            ids,
+            events,
+        )?;
+    }
+    for suite in current.completed_check_suites() {
+        if !previous.completed_check_suites().iter().any(|prior| {
+            prior.id() == suite.id()
+                && prior.completion_generation() == suite.completion_generation()
+        }) {
+            push_pull_request_event(
+                repository,
+                context,
+                RepoWatchEventKindV1::ChecksCompleted {
+                    outcome: suite.outcome(),
+                },
+                RepoWatchEventStreamKeyV1::CheckSuite {
+                    number: context.number(),
+                    suite: suite.id(),
+                    completion_generation: suite.completion_generation(),
+                },
+                identity_frontier,
+                ids,
+                events,
+            )?;
+        }
+    }
+    for run in current.completed_check_runs() {
+        if !previous.completed_check_runs().iter().any(|prior| {
+            prior.id() == run.id()
+                && prior.completion_generation() == run.completion_generation()
+                && prior.conclusion() == run.conclusion()
+        }) {
+            push_pull_request_event(
+                repository,
+                context,
+                RepoWatchEventKindV1::CheckRunCompleted {
+                    name: run.name().clone(),
+                    conclusion: run.conclusion(),
+                },
+                RepoWatchEventStreamKeyV1::CheckRun {
+                    number: context.number(),
+                    run: run.id(),
+                    completion_generation: run.completion_generation(),
+                },
+                identity_frontier,
+                ids,
+                events,
+            )?;
+        }
+    }
+    for review in current.reviews() {
+        if !previous.review_ids().contains(&review.id())
+            && let Some(state) = review.state()
+        {
+            push_pull_request_event(
+                repository,
+                context,
+                RepoWatchEventKindV1::ReviewSubmitted {
+                    reviewer: review.reviewer().clone(),
+                    state,
+                    commit: review.commit().clone(),
+                },
+                RepoWatchEventStreamKeyV1::Review {
+                    number: context.number(),
+                    review: review.id(),
+                },
+                identity_frontier,
+                ids,
+                events,
+            )?;
+        }
+    }
+    derive_compacted_thread_events(
+        repository,
+        previous,
+        current,
+        identity_frontier,
+        ids,
+        events,
+    )?;
+    derive_compacted_label_events(
+        repository,
+        previous,
+        current,
+        identity_frontier,
+        ids,
+        events,
+    )?;
+    if let Some(previous_repository) = repository_comparison.previous {
+        derive_base_advanced_event(
+            repository,
+            previous_repository,
+            repository_comparison.current,
+            current,
+            identity_frontier,
+            ids,
+            events,
+        )?;
+    }
+    if repository_comparison.reaction_filter_unchanged {
+        derive_compacted_reaction_events(
+            repository,
+            previous,
+            current,
+            identity_frontier,
+            ids,
+            events,
+        )?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -1592,6 +2030,165 @@ fn derive_check_events(
                     run: run.id(),
                     completion_generation: run.completion_generation(),
                 },
+                identity_frontier,
+                ids,
+                events,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn derive_compacted_thread_events(
+    repository: &RepositorySlug,
+    previous: &RepoWatchMergedPullRequestBaselineV1,
+    current: &RepoWatchPullRequestState,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
+    ids: &mut impl RepoWatchEventIdGenerator,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
+) -> Result<(), RepoWatchDifferError> {
+    for thread in current.threads() {
+        let previous_state = previous
+            .threads()
+            .iter()
+            .find(|prior| prior.thread() == thread.thread())
+            .map(RepoWatchThreadObservation::state);
+        if previous_state.is_none() {
+            push_pull_request_event(
+                repository,
+                current.context(),
+                RepoWatchEventKindV1::ThreadOpened {
+                    thread: thread.thread().clone(),
+                },
+                RepoWatchEventStreamKeyV1::Thread {
+                    number: current.context().number(),
+                    kind: RepoWatchEventKindNameV1::ThreadOpened,
+                    thread: thread.thread(),
+                },
+                identity_frontier,
+                ids,
+                events,
+            )?;
+        }
+        match (previous_state, thread.state()) {
+            (None | Some(RepoWatchThreadState::Open), RepoWatchThreadState::Resolved) => {
+                push_pull_request_event(
+                    repository,
+                    current.context(),
+                    RepoWatchEventKindV1::ThreadResolved {
+                        thread: thread.thread().clone(),
+                    },
+                    RepoWatchEventStreamKeyV1::Thread {
+                        number: current.context().number(),
+                        kind: RepoWatchEventKindNameV1::ThreadResolved,
+                        thread: thread.thread(),
+                    },
+                    identity_frontier,
+                    ids,
+                    events,
+                )?;
+            }
+            (Some(RepoWatchThreadState::Resolved), RepoWatchThreadState::Open) => {
+                push_pull_request_event(
+                    repository,
+                    current.context(),
+                    RepoWatchEventKindV1::ThreadOpened {
+                        thread: thread.thread().clone(),
+                    },
+                    RepoWatchEventStreamKeyV1::Thread {
+                        number: current.context().number(),
+                        kind: RepoWatchEventKindNameV1::ThreadOpened,
+                        thread: thread.thread(),
+                    },
+                    identity_frontier,
+                    ids,
+                    events,
+                )?;
+            }
+            (None | Some(RepoWatchThreadState::Open), RepoWatchThreadState::Open)
+            | (Some(RepoWatchThreadState::Resolved), RepoWatchThreadState::Resolved) => {}
+        }
+    }
+    Ok(())
+}
+
+fn derive_compacted_label_events(
+    repository: &RepositorySlug,
+    previous: &RepoWatchMergedPullRequestBaselineV1,
+    current: &RepoWatchPullRequestState,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
+    ids: &mut impl RepoWatchEventIdGenerator,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
+) -> Result<(), RepoWatchDifferError> {
+    for label in current.context().labels() {
+        if !previous.labels().contains(label) {
+            push_pull_request_event(
+                repository,
+                current.context(),
+                RepoWatchEventKindV1::Labeled {
+                    label: label.clone(),
+                },
+                RepoWatchEventStreamKeyV1::Label {
+                    number: current.context().number(),
+                    kind: RepoWatchEventKindNameV1::Labeled,
+                    label,
+                },
+                identity_frontier,
+                ids,
+                events,
+            )?;
+        }
+    }
+    for label in previous.labels() {
+        if !current.context().labels().contains(label) {
+            push_pull_request_event(
+                repository,
+                current.context(),
+                RepoWatchEventKindV1::Unlabeled {
+                    label: label.clone(),
+                },
+                RepoWatchEventStreamKeyV1::Label {
+                    number: current.context().number(),
+                    kind: RepoWatchEventKindNameV1::Unlabeled,
+                    label,
+                },
+                identity_frontier,
+                ids,
+                events,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn derive_compacted_reaction_events(
+    repository: &RepositorySlug,
+    previous: &RepoWatchMergedPullRequestBaselineV1,
+    current: &RepoWatchPullRequestState,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
+    ids: &mut impl RepoWatchEventIdGenerator,
+    events: &mut Vec<RepoWatchEventOccurrenceV1>,
+) -> Result<(), RepoWatchDifferError> {
+    for reaction in current.reactions() {
+        if !previous.reactions().contains(reaction) {
+            push_reaction_event(
+                repository,
+                current,
+                reaction,
+                ReactionChange::Added,
+                identity_frontier,
+                ids,
+                events,
+            )?;
+        }
+    }
+    for reaction in previous.reactions() {
+        if !current.reactions().contains(reaction) {
+            push_reaction_event(
+                repository,
+                current,
+                reaction,
+                ReactionChange::Removed,
                 identity_frontier,
                 ids,
                 events,
@@ -4392,6 +4989,125 @@ mod tests {
                 reactor: previous_reaction.reactor().clone(),
                 content: previous_reaction.content().clone(),
                 change: ReactionChange::Removed,
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn compact_merged_baseline_preserves_post_merge_recurring_events() -> Result<(), Box<dyn Error>>
+    {
+        let merged = pull_request(PullRequestFacts {
+            lifecycle: RepoWatchPullRequestLifecycle::Merged,
+            ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+        })?;
+        let baseline = RepoWatchMergedPullRequestBaselineV1::from_merged_state(&merged)
+            .expect("merged fixture produces a compact baseline");
+        let current_suite = RepoWatchCheckSuiteObservation::new(
+            object_id(CHECK_SUITE_ID),
+            completion_generation(CHECK_COMPLETION_GENERATION)?,
+            ChecksOutcome::Failure,
+        );
+        let current_run = RepoWatchCheckRunObservation::new(
+            object_id(CHECK_RUN_ID),
+            completion_generation(CHECK_COMPLETION_GENERATION)?,
+            CheckRunName::try_new(String::from(CHECK_NAME))?,
+            CheckConclusion::TimedOut,
+        );
+        let current_review = RepoWatchReviewObservation::new(
+            object_id(REVIEW_ID),
+            reviewer(REVIEWER)?,
+            Some(ReviewState::ChangesRequested),
+            CommitSha::try_new(String::from(REVIEW_COMMIT))?,
+        );
+        let current_thread = RepoWatchThreadObservation::new(
+            ReviewThreadId::try_new(String::from(THREAD_ID))?,
+            RepoWatchThreadState::Resolved,
+        );
+        let current_reaction = reaction()?;
+        let current_label = label(LABEL_READY)?;
+        let current = observation(
+            vec![pull_request(PullRequestFacts {
+                lifecycle: RepoWatchPullRequestLifecycle::Merged,
+                labels: vec![current_label.clone()],
+                completed_check_suites: vec![current_suite.clone()],
+                completed_check_runs: vec![current_run.clone()],
+                reviews: vec![current_review.clone()],
+                threads: vec![current_thread.clone()],
+                reactions: vec![current_reaction.clone()],
+                ..PullRequestFacts::matching(PULL_REQUEST_NUMBER)
+            })?],
+            Vec::new(),
+            Vec::new(),
+            vec![reviewer(REVIEWER)?],
+        )?;
+        let previous = observation(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![reviewer(REVIEWER)?],
+        )?;
+        let mut identity_frontier = RepoWatchEventIdentityFrontierV1::default();
+
+        let events = derive_repo_watch_events_with_merged_baselines(
+            &repository()?,
+            Some(&previous),
+            &[baseline],
+            &current,
+            &mut identity_frontier,
+            &mut FixedEventIds::new(),
+        )?
+        .into_iter()
+        .map(RepoWatchEventOccurrenceV1::into_event)
+        .collect::<Vec<_>>();
+
+        assert_eq!(events.len(), 7);
+        assert_eq!(
+            events[0].kind(),
+            &RepoWatchEventKindV1::ChecksCompleted {
+                outcome: current_suite.outcome(),
+            }
+        );
+        assert_eq!(
+            events[1].kind(),
+            &RepoWatchEventKindV1::CheckRunCompleted {
+                name: current_run.name().clone(),
+                conclusion: current_run.conclusion(),
+            }
+        );
+        assert_eq!(
+            events[2].kind(),
+            &RepoWatchEventKindV1::ReviewSubmitted {
+                reviewer: current_review.reviewer().clone(),
+                state: ReviewState::ChangesRequested,
+                commit: current_review.commit().clone(),
+            }
+        );
+        assert_eq!(
+            events[3].kind(),
+            &RepoWatchEventKindV1::ThreadOpened {
+                thread: current_thread.thread().clone(),
+            }
+        );
+        assert_eq!(
+            events[4].kind(),
+            &RepoWatchEventKindV1::ThreadResolved {
+                thread: current_thread.thread().clone(),
+            }
+        );
+        assert_eq!(
+            events[5].kind(),
+            &RepoWatchEventKindV1::Labeled {
+                label: current_label,
+            }
+        );
+        assert_eq!(
+            events[6].kind(),
+            &RepoWatchEventKindV1::ReactionChanged {
+                subject: current_reaction.subject(),
+                reactor: current_reaction.reactor().clone(),
+                content: current_reaction.content().clone(),
+                change: ReactionChange::Added,
             }
         );
         Ok(())

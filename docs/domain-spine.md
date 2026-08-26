@@ -8218,6 +8218,45 @@ impl RepoWatchReactionObservation {
     // accessors: subject(), reactor(), content()
 }
 
+pub struct RepoWatchMergedCheckSuiteBaselineV1 { /* private */ }
+impl RepoWatchMergedCheckSuiteBaselineV1 {
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+    ) -> Self;
+    // accessors: id(), completion_generation()
+}
+
+pub struct RepoWatchMergedCheckRunBaselineV1 { /* private */ }
+impl RepoWatchMergedCheckRunBaselineV1 {
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+        conclusion: CheckConclusion,
+    ) -> Self;
+    // accessors: id(), completion_generation(), conclusion()
+}
+
+pub struct RepoWatchMergedPullRequestBaselineInputV1 {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub labels: Vec<LabelName>,
+    pub mergeable_state: MergeableState,
+    pub completed_check_suites: Vec<RepoWatchMergedCheckSuiteBaselineV1>,
+    pub completed_check_runs: Vec<RepoWatchMergedCheckRunBaselineV1>,
+    pub review_ids: Vec<GitHubObjectId>,
+    pub threads: Vec<RepoWatchThreadObservation>,
+    pub reactions: Vec<RepoWatchReactionObservation>,
+}
+
+pub struct RepoWatchMergedPullRequestBaselineV1 { /* private */ }
+impl RepoWatchMergedPullRequestBaselineV1 {
+    pub fn new(input: RepoWatchMergedPullRequestBaselineInputV1) -> Self;
+    pub fn from_merged_state(state: &RepoWatchPullRequestState) -> Option<Self>;
+    // accessors: number(), head_sha(), labels(), mergeable_state(),
+    // completed_check_suites(), completed_check_runs(), review_ids(), threads(), reactions()
+}
+
 pub struct RepoWatchPullRequestStateInput {
     pub context: PullRequestEventContext,
     pub lifecycle: RepoWatchPullRequestLifecycle,
@@ -8308,6 +8347,15 @@ pub fn repo_watch_events_have_equal_identified_content(
 pub fn derive_repo_watch_events(
     repository: &RepositorySlug,
     previous: Option<&RepoWatchObservation>,
+    current: &RepoWatchObservation,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
+    ids: &mut impl RepoWatchEventIdGenerator,
+) -> Result<Vec<RepoWatchEventOccurrenceV1>, RepoWatchDifferError>;
+
+pub fn derive_repo_watch_events_with_merged_baselines(
+    repository: &RepositorySlug,
+    previous: Option<&RepoWatchObservation>,
+    merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
     current: &RepoWatchObservation,
     identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
@@ -12216,7 +12264,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
 | application: convergence_reconciliation            | 6 (+1 free fn)                   |
-| application: repo_watch                            | 45 (+2 free fn) (incl. 4 traits) |
+| application: repo_watch                            | 49 (+3 free fn) (incl. 4 traits) |
 | application: repo_watch_webhook                    | 18 (+2 free fn)                  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
@@ -12230,4 +12278,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 9 (incl. 3 traits)               |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **368 (+14 free fn)**            |
+| **signalbox-application total**                    | **372 (+15 free fn)**            |

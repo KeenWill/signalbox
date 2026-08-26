@@ -264,33 +264,37 @@ runtime lifecycle defect.
 repository state needed for future comparisons, exact signal-reviewer set, and
 the last positive occurrence sequence for each recurring source-independent
 event stream. A complete or targeted observation derives events against the full
-provider state first, then omits merged pull-request details from the cursor
-candidate while retaining the merge event's advanced occurrence frontier. Closed
+provider state first, then removes each merged pull request from the ordinary
+cursor observation. A separate compact baseline keeps only its number, head,
+labels, mergeability, completed-check comparison keys, review identities, thread
+states, and reactions. That is enough for the differ to recognize later
+post-merge occurrences without retaining terminal titles, bodies, branch and
+repository names, check names, reviewer names, or review commits. Closed
 unmerged pull requests remain until a later complete poll no longer fetches
 them. Thus a merge burst cannot make every later webhook refresh re-transfer
-terminal titles, bodies, checks, reviews, threads, and reactions. The frontier
-is canonical by its 32-byte stream identities, rejects duplicates and zero
-sequences, and admits at most 1,000,000 streams. That ceiling is where one
-repository's identity state, rather than its event history, becomes the dominant
-cost of watching it: each entry costs a 32-byte stream identity, an 8-byte
-sequence, and an 8-byte owning pull-request number, so the limit bounds one
-frontier's raw entry fields near 48 MB before map and encoding overhead.
-Exceeding it fails the comparison, because the alternative is reusing an
-occurrence number and minting a content identity that collides with an
-already-durable one. Sequence exhaustion fails the comparison rather than
-wrapping. Provider-keyed immutable facts use sequence one without occupying
-frontier space. A fact counts as immutable only when the differ suppresses
-re-emission on members its stream key already names, so completed check runs are
-not among them: their conclusion can change under an unchanged run identity and
-completion generation, and they advance a frontier sequence like any recurring
-stream. The cursor does not retain resource keys, ETags, accepted transport
-responses, raw provider payloads, or credentials. A per-repository atomic commit
-accepts an expected generation, one complete cursor candidate, and its ordered
-event-occurrence batch. It serializes competing commits, appends the cursor and
-every event together, rolls back the whole batch on failure, reports a stale
-generation as conflict, and recognizes only an exact candidate-and-occurrence
-replay. An unchanged candidate with no events does not advance the cursor; an
-unchanged candidate carrying events is rejected.
+full terminal detail, while post-merge label, check, review, thread, and
+reaction changes still produce events. The frontier is canonical by its 32-byte
+stream identities, rejects duplicates and zero sequences, and admits at most
+1,000,000 streams. That ceiling is where one repository's identity state, rather
+than its event history, becomes the dominant cost of watching it: each entry
+costs a 32-byte stream identity, an 8-byte sequence, and an 8-byte owning
+pull-request number, so the limit bounds one frontier's raw entry fields near 48
+MB before map and encoding overhead. Exceeding it fails the comparison, because
+the alternative is reusing an occurrence number and minting a content identity
+that collides with an already-durable one. Sequence exhaustion fails the
+comparison rather than wrapping. Provider-keyed immutable facts use sequence one
+without occupying frontier space. A fact counts as immutable only when the
+differ suppresses re-emission on members its stream key already names, so
+completed check runs are not among them: their conclusion can change under an
+unchanged run identity and completion generation, and they advance a frontier
+sequence like any recurring stream. The cursor does not retain resource keys,
+ETags, accepted transport responses, raw provider payloads, or credentials. A
+per-repository atomic commit accepts an expected generation, one complete cursor
+candidate, and its ordered event-occurrence batch. It serializes competing
+commits, appends the cursor and every event together, rolls back the whole batch
+on failure, reports a stale generation as conflict, and recognizes only an exact
+candidate-and-occurrence replay. An unchanged candidate with no events does not
+advance the cursor; an unchanged candidate carrying events is rejected.
 
 A commit coalesces an occurrence whose content identity is already durable for
 that repository under the same content, writing the cursor without a second row
@@ -407,6 +411,14 @@ reset could collide with existed. A carried entry names no owning pull request,
 since version two stored none and the one-way hash cannot recover one; the
 stream's next occurrence overwrites the member with the pull request that
 produced it, so only a stream that never recurs again keeps null.
+
+Storage version four adds the required compact merged-pull-request baseline
+collection. Migration `202608251001` seeds that collection empty while retaining
+every version-three pull-request observation. The first successful cursor commit
+on the new runtime derives compact baselines from those full merged observations
+and removes the full entries atomically, so migration neither loses the prior
+comparison state nor requires manual cursor surgery. A version-four reader
+requires the collection rather than treating its absence as empty.
 
 No lifecycle releases a stream today, and none may be added without deciding
 which subject provably produces no further occurrence. A merged pull request is
@@ -1360,10 +1372,13 @@ below and so cannot be covered by them; it carries its own ten-second bound,
 whose expiry fails the attempt as a persistence failure rather than leaving one
 unbounded step ahead of every attempt. The outer deadline is the greater of 60
 seconds and 30 seconds per started MiB of stored cursor payload, capped at 15
-minutes. It spans the drain's provider and database work. Expiry cancels that
-attempt, leaves unfinished deliveries pending, invalidates partial provider
-freshness, emits the closed `webhook_projection_drain_timed_out` cause, and,
-unless only post-terminal dispatch work expired, enters the same bounded
+minutes. The stall monitor sizes the cursor under the same bound on each
+inspection and uses that payload-derived drain deadline as its unchanged-head
+threshold, so a healthy large-cursor attempt is not reported stalled before its
+own deadline. The deadline spans the drain's provider and database work. Expiry
+cancels that attempt, leaves unfinished deliveries pending, invalidates partial
+provider freshness, emits the closed `webhook_projection_drain_timed_out` cause,
+and, unless only post-terminal dispatch work expired, enters the same bounded
 projection backoff as another retryable drain failure. Post-terminal dispatch
 expiry instead arms its fixed dispatch follow-up. The serialized task is
 therefore returned to its scheduler after bounded child cleanup even when an
