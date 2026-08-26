@@ -769,11 +769,11 @@ async fn s01_s20_s21_inv014_inv015_inv032_inv035_model_call_transactions_complet
     Ok(())
 }
 
-/// INV-062: a durable Prepared model call is a reconciliation-sweep hint, so
+/// INV-091: a durable Prepared model call is a reconciliation-sweep hint, so
 /// temporary attachment unavailability can retry without process restart.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv062_prepared_model_call_remains_scheduler_eligible() -> Result<(), Box<dyn Error>> {
+async fn inv091_prepared_model_call_remains_scheduler_eligible() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let session = SessionId::from_uuid(Uuid::from_u128(0x8e0_6201));
     let direct_selection =
