@@ -913,13 +913,51 @@ async fn verify_stream(
 
 /// Names the exact object generation a response was served from.
 ///
-/// An absent, empty, or oversized entity tag leaves the generation unnamed, so
-/// no later request can prove it read the same bytes this call verified.
+/// An absent, repeated, oversized, or non-singleton entity tag leaves the
+/// generation unnamed, so no later request can prove it read the same bytes
+/// this call verified. Repetition is read across the whole field list rather
+/// than from the first value alone: a response carrying two `ETag` fields makes
+/// two generation claims, and taking either one would pin a generation the
+/// served body may not belong to.
 fn object_generation(headers: &HeaderMap) -> Option<HeaderValue> {
-    headers
-        .get(reqwest::header::ETAG)
-        .filter(|generation| !generation.is_empty() && generation.len() <= MAX_ETAG_BYTES)
-        .cloned()
+    let mut served = headers.get_all(reqwest::header::ETAG).iter();
+    let generation = served.next()?;
+    if served.next().is_some() {
+        return None;
+    }
+    (generation.len() <= MAX_ETAG_BYTES && names_one_strong_generation(generation))
+        .then(|| generation.clone())
+}
+
+/// Reports whether a served entity tag names exactly one strong generation.
+///
+/// The delivering request replays this value as `If-Match`, where `*` matches
+/// whatever representation is current and a comma-separated list matches any
+/// member, so either spelling would let the store serve a generation this call
+/// never hashed. `If-Match` also compares strongly, so a weak `W/` tag can
+/// never match and is not a usable generation token either. What remains is one
+/// double-quoted tag with no embedded quote, comma, or space.
+///
+/// A zero-character opaque tag is refused, and that is stricter than the
+/// entity-tag grammar, which permits `""`. The refusal is deliberate: this
+/// adapter accepts a token only as proof that a later read reached the same
+/// generation, and `""` is the one spelling that provably carries no
+/// generation-distinguishing content, so a store emitting it can satisfy the
+/// precondition with any later generation. Every other constant tag is
+/// indistinguishable from a real one and cannot be caught here; this one can.
+/// No S3-compatible store is known to serve it.
+fn names_one_strong_generation(generation: &HeaderValue) -> bool {
+    let Some(interior) = generation
+        .as_bytes()
+        .strip_prefix(b"\"")
+        .and_then(|rest| rest.strip_suffix(b"\""))
+    else {
+        return false;
+    };
+    !interior.is_empty()
+        && interior
+            .iter()
+            .all(|byte| matches!(byte, 0x21 | 0x23..=0x7e | 0x80..=0xff))
 }
 
 async fn require_success(
@@ -1180,12 +1218,17 @@ impl LifecycleRule {
 
     /// Reports whether this rule selects every deterministic blob object key.
     ///
+    /// A rule that carries both the legacy `Prefix` and a `Filter` names two
+    /// selections at once, so nothing it states is a proof: the response is not
+    /// a valid lifecycle configuration, and honoring either field alone can
+    /// admit a rule whose real selection is narrower than the blob key prefix.
     /// A rule that narrows by tag, size, or a compound `And` never proves blob
     /// coverage; otherwise the selected prefix must be an ancestor of the blob
     /// key prefix, and an absent filter and prefix is whole-bucket coverage.
     fn covers_every_blob_key(&self) -> bool {
         match (&self.filter, self.prefix.as_deref()) {
-            (Some(filter), _) => {
+            (Some(_), Some(_)) => false,
+            (Some(filter), None) => {
                 filter.tag.is_none()
                     && filter.and.is_none()
                     && filter.object_size_greater_than.is_none()
@@ -1555,6 +1598,15 @@ mod tests {
         headers
     }
 
+    fn repeated_generation_headers(first: &str, second: &str) -> HeaderMap {
+        let mut headers = generation_headers(first);
+        headers.append(
+            reqwest::header::ETAG,
+            HeaderValue::from_str(second).expect("the fixture entity tag is a header value"),
+        );
+        headers
+    }
+
     fn credential_body() -> String {
         format!(
             "version = 1\naccess_key_id = \"{ACCESS_KEY}\"\nsecret_access_key = \"{SECRET_KEY}\"\n"
@@ -1694,6 +1746,28 @@ mod tests {
     fn lifecycle_rejects_a_size_filtered_rule() -> Result<(), Box<dyn Error>> {
         let rule = first_rule(
             r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><ObjectSizeGreaterThan>1024</ObjectSizeGreaterThan></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
+        )?;
+
+        assert!(!LifecycleRule::covers_blobs(&rule));
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_rejects_a_rule_carrying_both_a_legacy_prefix_and_a_filter()
+    -> Result<(), Box<dyn Error>> {
+        let rule = first_rule(
+            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>staging/</Prefix><Filter><Prefix>sha256/</Prefix></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
+        )?;
+
+        assert!(!LifecycleRule::covers_blobs(&rule));
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_rejects_a_whole_bucket_filter_beside_a_narrow_legacy_prefix()
+    -> Result<(), Box<dyn Error>> {
+        let rule = first_rule(
+            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Prefix>staging/</Prefix><Filter></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
         )?;
 
         assert!(!LifecycleRule::covers_blobs(&rule));
@@ -1893,10 +1967,55 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_or_oversized_entity_tag_leaves_the_generation_unnamed() {
-        assert_eq!(object_generation(&generation_headers("")), None);
+    fn a_repeated_entity_tag_field_leaves_the_generation_unnamed() {
         assert_eq!(
-            object_generation(&generation_headers(&"e".repeat(MAX_ETAG_BYTES + 1))),
+            object_generation(&repeated_generation_headers("\"second\"", "\"first\"")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_zero_length_entity_tag_header_leaves_the_generation_unnamed() {
+        assert_eq!(object_generation(&generation_headers("")), None);
+    }
+
+    #[test]
+    fn a_quoted_empty_entity_tag_leaves_the_generation_unnamed() {
+        assert_eq!(object_generation(&generation_headers("\"\"")), None);
+    }
+
+    #[test]
+    fn an_oversized_entity_tag_leaves_the_generation_unnamed() {
+        let oversized = format!("\"{}\"", "e".repeat(MAX_ETAG_BYTES));
+
+        assert_eq!(object_generation(&generation_headers(&oversized)), None);
+    }
+
+    #[test]
+    fn a_wildcard_entity_tag_leaves_the_generation_unnamed() {
+        assert_eq!(object_generation(&generation_headers("*")), None);
+    }
+
+    #[test]
+    fn an_entity_tag_list_leaves_the_generation_unnamed() {
+        assert_eq!(
+            object_generation(&generation_headers("\"first\", \"second\"")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_weak_entity_tag_leaves_the_generation_unnamed() {
+        assert_eq!(
+            object_generation(&generation_headers("W/\"fixture-generation\"")),
+            None
+        );
+    }
+
+    #[test]
+    fn an_unquoted_entity_tag_leaves_the_generation_unnamed() {
+        assert_eq!(
+            object_generation(&generation_headers("fixture-generation")),
             None
         );
     }

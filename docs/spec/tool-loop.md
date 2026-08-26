@@ -1184,26 +1184,30 @@ The read declaration's requested decoded length and one logical-read unit are
 charged once by tool-request identity to durable per-turn counters before
 authorization; replay never charges twice. Before authorization, a digest absent
 from the rendered frontier closes the `Prepared` attempt as
-`KnownFailed(InvalidArguments)` with exact fixed detail `blob_not_visible`; a
-reservation that would exceed 2,097,152 bytes closes it the same way with exact
-fixed detail `blob_turn_byte_budget_exceeded`, and a reservation that would
-exceed 64 logical reads closes it with exact fixed detail
-`blob_turn_read_count_exceeded`. Any closure resolves the logical request,
-crosses no executor or store boundary, leaves previously charged bytes charged,
-and permits the next model round. A successful reservation is not refunded by a
-later denial or failure. Store I/O occurs only after durable authorization. An
-individual missing, corrupt, or unavailable replica falls through to the next
-recorded candidate. Only after no candidate verifies does the read become
-trustworthy content-silent `ExecutionFailed` evidence with the respective exact
-fixed detail `blob_missing`, `blob_corrupt`, or `blob_unavailable`. Any
-unavailable candidate takes precedence; otherwise any readable candidate that
-fails verification selects `blob_corrupt`, and `blob_missing` applies only when
-every candidate is absent. It resolves the logical request and permits the next
-model round rather than entering the effect-free crash-loss path or failing the
-turn; a later request may retry `blob_unavailable` within the remaining per-turn
-budget. The compact result must also fit the ordinary 1 MiB text-result bound;
-admission accounts for JSON and base64 overhead rather than producing a result
-that the ordinary result boundary would reject.
+`KnownFailed(PreauthorizationRejected)` with exact fixed detail
+`blob_not_visible`; a reservation that would exceed 2,097,152 bytes closes it
+the same way with exact fixed detail `blob_turn_byte_budget_exceeded`, and a
+reservation that would exceed 64 logical reads closes it with exact fixed detail
+`blob_turn_read_count_exceeded`. That kind is what separates a durable
+request-scoped resource or visibility refusal from a malformed argument the
+model can correct by rewriting the call, so the closed set carries it as its own
+member rather than folding it into `InvalidArguments`. Any closure resolves the
+logical request, crosses no executor or store boundary, leaves previously
+charged bytes charged, and permits the next model round. A successful
+reservation is not refunded by a later denial or failure. Store I/O occurs only
+after durable authorization. An individual missing, corrupt, or unavailable
+replica falls through to the next recorded candidate. Only after no candidate
+verifies does the read become trustworthy content-silent `ExecutionFailed`
+evidence with the respective exact fixed detail `blob_missing`, `blob_corrupt`,
+or `blob_unavailable`. Any unavailable candidate takes precedence; otherwise any
+readable candidate that fails verification selects `blob_corrupt`, and
+`blob_missing` applies only when every candidate is absent. It resolves the
+logical request and permits the next model round rather than entering the
+effect-free crash-loss path or failing the turn; a later request may retry
+`blob_unavailable` within the remaining per-turn budget. The compact result must
+also fit the ordinary 1 MiB text-result bound; admission accounts for JSON and
+base64 overhead rather than producing a result that the ordinary result boundary
+would reject.
 
 For both web tools, an explicit shipped `Human` posture supersedes the
 declaration's `Confirm` default and the session blanket, so a request parks for

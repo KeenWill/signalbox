@@ -12,6 +12,7 @@ use tokio::io::AsyncReadExt;
 use crate::blob_storage_runtime::BlobStoreRegistry;
 
 /// Hard safety ceiling bounding store latency and retained read capacity.
+// numeric-bound: guard - prevents a stalled blob store read from blocking its caller forever
 pub(crate) const BLOB_READ_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Bounded catalog facts returned without contacting a store.
