@@ -367,7 +367,7 @@ fn valid_utf8_scalar_crossing_the_byte_boundary_is_trimmed() {
 }
 
 #[test]
-fn escaped_read_content_is_truncated_to_result_text_admission() {
+fn maximum_escaped_read_content_remains_inside_result_text_admission() {
     const FILE_PATH: &str = "control.txt";
 
     let content = "\0".repeat(MAX_WORKSPACE_READ_BYTES);
@@ -392,8 +392,8 @@ fn escaped_read_content_is_truncated_to_result_text_admission() {
         .expect("read byte count is unsigned") as usize;
 
     assert_eq!(retained.len(), bytes_read);
-    assert!(bytes_read < content_bytes);
-    assert_eq!(decoded["truncated"], serde_json::Value::Bool(true));
+    assert_eq!(bytes_read, content_bytes);
+    assert_eq!(decoded["truncated"], serde_json::Value::Bool(false));
 }
 
 #[test]

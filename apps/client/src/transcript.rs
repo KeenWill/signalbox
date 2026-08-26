@@ -137,6 +137,11 @@ pub(crate) struct SnapshotEntry {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum SnapshotEntryKind {
+    User {
+        accepted_input_id: CanonicalUuid,
+        turn_id: CanonicalUuid,
+        content: signalbox_process_protocol::UserInputContent,
+    },
     Text(TranscriptTextEntry),
     Marker(TranscriptEntry),
 }
@@ -310,6 +315,24 @@ pub(crate) async fn read_snapshot(
                     .checked_add(1)
                     .ok_or(ClientError::Protocol("snapshot entry count overflowed"))?;
             }
+            ServerMessage::TranscriptUserEntry {
+                entry_index,
+                source_session_id,
+                entry_id,
+                ..
+            } if model_calls_ended => {
+                entries_started = true;
+                require_entry_index(entry_index.value(), entry_count)?;
+                if !entry_ids.insert(entry_key(source_session_id, entry_id))? {
+                    return Err(ClientError::Protocol(
+                        "snapshot repeated a source-qualified entry identity",
+                    ));
+                }
+                append_frame(&mut spool, &frame)?;
+                entry_count = entry_count
+                    .checked_add(1)
+                    .ok_or(ClientError::Protocol("snapshot entry count overflowed"))?;
+            }
             ServerMessage::TranscriptTextEntry {
                 entry_index,
                 source_session_id,
@@ -441,6 +464,23 @@ fn snapshot_record(message: ServerMessage) -> Result<SnapshotRecord, ClientError
             source_session_id,
             entry_id,
             kind: SnapshotEntryKind::Marker(entry),
+        })),
+        ServerMessage::TranscriptUserEntry {
+            entry_index,
+            source_session_id,
+            entry_id,
+            accepted_input_id,
+            turn_id,
+            content,
+        } => Ok(SnapshotRecord::Entry(SnapshotEntry {
+            entry_index: entry_index.value(),
+            source_session_id,
+            entry_id,
+            kind: SnapshotEntryKind::User {
+                accepted_input_id,
+                turn_id,
+                content,
+            },
         })),
         ServerMessage::TranscriptTextEntry {
             entry_index,
