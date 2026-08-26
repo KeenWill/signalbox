@@ -320,6 +320,7 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(page.getByRole('heading', { name: sessionWorkspaceFixture.id })).toBeVisible()
   await expect(page.getByText('Active · opened near latest')).toBeVisible()
   await expect(page.getByText(sessionWorkspaceFixture.itemCount, { exact: true })).toBeVisible()
+  await expect(page.getByRole('region', { name: 'composer attachments unavailable' })).toBeVisible()
   const timeline = page.getByRole('listbox', { name: 'Session timeline' })
   await expect(page.getByRole('option', { name: /41 input accepted/ })).toHaveAttribute(
     'aria-selected',
@@ -351,6 +352,15 @@ test('opens and inspects a bounded production session without a mouse', async ({
   await expect(inspector.getByText('43', { exact: true })).toBeVisible()
   await expect(inspector.getByText('turn completed', { exact: true })).toBeVisible()
   await expect(inspector.getByText('78', { exact: true })).toBeVisible()
+
+  const accepted = page.getByRole('option', { name: /41 input accepted/ })
+  await accepted.click()
+  await expect(page.locator('#session-timeline-detail-41')).toBeVisible()
+  await expect(
+    page.getByRole('region', { name: 'transcript attachments unavailable' }),
+  ).toBeVisible()
+  await accepted.click()
+  await expect(page.locator('#session-timeline-detail-41')).toBeHidden()
 
   await page.getByRole('button', { name: /First/ }).click()
   await expect(timeline).toBeFocused()

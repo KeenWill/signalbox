@@ -2,25 +2,44 @@ import {
   Ban,
   Braces,
   Download,
+  ExternalLink,
+  File,
+  FileAudio,
   FileCode2,
   FileQuestion,
   FileText,
+  FileVideo,
+  GitBranch,
   Image as ImageIcon,
   Maximize2,
   Minimize2,
   ShieldAlert,
 } from 'lucide-react'
-import { type ComponentType, type ReactNode, useEffect, useRef, useState } from 'react'
+import {
+  type ComponentType,
+  type KeyboardEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from 'react'
 import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
 import { actions, useAppDispatch, useAppSelector } from '../../state'
-import { artifactScenario, selectBoundedOriginalView } from './artifactScenario'
+import {
+  artifactScenario,
+  selectBoundedOriginalView,
+  selectProvenViewDerivation,
+} from './artifactScenario'
 import {
   ARTIFACT_PREVIEW_CHARACTERS,
   type ArtifactItem,
   boundArtifactText,
   type CodeArtifact,
+  type DerivativeArtifact,
+  type DocumentArtifact,
   type GenericBlobArtifact,
+  type MediaPlaceholderArtifact,
   type RemoteImageArtifact,
   type RenderableArtifact,
   type SignalboxImageArtifact,
@@ -52,7 +71,7 @@ export const imageViewLabel = (kind: WebBlobViewKind): string =>
     download: 'Download',
   })[kind]
 
-const viewByKind = (
+export const selectBlobView = (
   descriptor: WebBlobDescriptor,
   kind: WebBlobViewKind,
 ): WebBlobAvailableView | undefined => descriptor.available_views.find((view) => view.kind === kind)
@@ -83,6 +102,13 @@ const invokeArtifactAction = (
   invokeCommand(commandId, commandContext)
 }
 
+const scrollArtifactPreviewByPage = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+  if (event.key !== 'PageDown' && event.key !== 'PageUp') return
+  event.preventDefault()
+  const direction = event.key === 'PageDown' ? 1 : -1
+  event.currentTarget.scrollBy({ top: direction * event.currentTarget.clientHeight })
+}
+
 function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
   const expanded = useAppSelector((state) => Boolean(state.app.expandedArtifacts[artifact.id]))
   const bounded = boundArtifactText(
@@ -98,6 +124,7 @@ function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
         className="artifact-scroll"
         aria-label={`Bounded preview of ${artifact.displayName}`}
         onFocusCapture={() => selectArtifact(commandContext, artifact.id)}
+        onKeyDown={scrollArtifactPreviewByPage}
         readOnly
         value={bounded.content}
       />
@@ -136,6 +163,7 @@ function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
         className="artifact-scroll"
         aria-label={`Bounded preview of ${artifact.displayName}`}
         onFocusCapture={() => selectArtifact(commandContext, artifact.id)}
+        onKeyDown={scrollArtifactPreviewByPage}
         readOnly
         value={bounded.content}
       />
@@ -191,16 +219,21 @@ function SignalboxImageBody({ artifact, commandContext }: RendererProps<Signalbo
   const originalState = useAppSelector((state) => state.app.originalArtifacts[artifact.id])
   const { descriptor } = artifact.source
   const automatic = selectImageView(descriptor, failedAutomaticUrls)
-  const advertisedOriginal = viewByKind(descriptor, 'browser_native')
+  const advertisedOriginal = selectBlobView(descriptor, 'browser_native')
   const original = selectBoundedOriginalView(descriptor)
-  const download = viewByKind(descriptor, 'download')
+  const download = selectBlobView(descriptor, 'download')
   const originalRequested = originalState === 'loading' || originalState === 'loaded'
   const originalQuery = useVerifiedOriginalImage(original, originalRequested)
   const [verifiedOriginalUrl, setVerifiedOriginalUrl] = useState<string | null>(null)
   const verifiedBlob = originalQuery.data
-  const rendered =
+  const candidate =
     originalRequested && original && verifiedOriginalUrl !== null ? original : automatic
-  const derivation = rendered?.derivations[0]
+  const derivation = candidate ? selectProvenViewDerivation(descriptor, candidate) : undefined
+  const rendered =
+    candidate &&
+    ((candidate.kind !== 'preview' && candidate.kind !== 'thumbnail') || derivation !== undefined)
+      ? candidate
+      : undefined
 
   // The object URL is allocated and revoked by one effect owning its lifecycle: allocation during
   // render would strand the extra URL produced by development double-rendering unrevoked.
@@ -350,7 +383,7 @@ function RemoteImageBody({ artifact }: RendererProps<RemoteImageArtifact>) {
 }
 
 function GenericBlobBody({ artifact }: RendererProps<GenericBlobArtifact>) {
-  const download = viewByKind(artifact.descriptor, 'download')
+  const download = selectBlobView(artifact.descriptor, 'download')
 
   return (
     <div className="artifact-image-layout">
@@ -385,6 +418,108 @@ function ImageBody({
     <SignalboxImageBody artifact={artifact} commandContext={commandContext} />
   ) : (
     <RemoteImageBody artifact={artifact} commandContext={commandContext} />
+  )
+}
+
+function DocumentBody({ artifact }: RendererProps<DocumentArtifact>) {
+  const { descriptor } = artifact.source
+  const browserNative = selectBlobView(descriptor, 'browser_native')
+  const download = selectBlobView(descriptor, 'download')
+
+  return (
+    <div className="artifact-placeholder-layout">
+      <div className="artifact-document-placeholder">
+        <File aria-hidden="true" />
+        <strong>{artifact.documentKind === 'pdf' ? 'PDF document' : 'Document'}</strong>
+        <p>Document bytes stay unloaded until an explicit open or download action.</p>
+      </div>
+      <ArtifactMetadata
+        renderer="document placeholder"
+        mediaType={descriptor.declared_media_type}
+        provenance="Original blob"
+      >
+        {browserNative && (
+          <a href={browserNative.content_url} target="_blank" rel="noreferrer">
+            <ExternalLink aria-hidden="true" /> Open document
+          </a>
+        )}
+        {download && (
+          <a href={download.content_url} download={artifact.displayName}>
+            <Download aria-hidden="true" /> Download
+          </a>
+        )}
+      </ArtifactMetadata>
+    </div>
+  )
+}
+
+function DerivativeBody({ artifact }: RendererProps<DerivativeArtifact>) {
+  const [failedContentUrl, setFailedContentUrl] = useState<string | null>(null)
+  const rendered = selectBlobView(artifact.source.descriptor, artifact.viewKind)
+  const derivation = rendered
+    ? selectProvenViewDerivation(artifact.source.descriptor, rendered)
+    : undefined
+  const loadFailed = rendered?.content_url === failedContentUrl
+
+  if (!rendered || !derivation || loadFailed) {
+    return (
+      <div className="artifact-state blocked" role="status">
+        <ShieldAlert aria-hidden="true" />
+        <div>
+          <strong>Derivative unavailable</strong>
+          <p>The descriptor does not authorize the requested derived view and no fallback ran.</p>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="artifact-image-layout">
+      <div className="artifact-visual">
+        <img
+          src={rendered.content_url}
+          alt={`Derived ${artifact.viewKind} of ${artifact.displayName}`}
+          loading="lazy"
+          onError={() => setFailedContentUrl(rendered.content_url)}
+        />
+      </div>
+      <ArtifactMetadata
+        renderer={`${artifact.viewKind} derivative`}
+        mediaType={rendered.media_type}
+        provenance={`${derivation.transformation_name} v${derivation.transformation_version}`}
+      >
+        <span className="artifact-provenance-count">
+          {derivation.input_digests.length} input · {derivation.output_digests.length} output
+        </span>
+      </ArtifactMetadata>
+    </div>
+  )
+}
+
+function MediaPlaceholderBody({ artifact }: RendererProps<MediaPlaceholderArtifact>) {
+  const { descriptor } = artifact.source
+  const download = selectBlobView(descriptor, 'download')
+  const MediaIcon = artifact.mediaKind === 'audio' ? FileAudio : FileVideo
+
+  return (
+    <div className="artifact-placeholder-layout">
+      <div className="artifact-document-placeholder media-placeholder">
+        <MediaIcon aria-hidden="true" />
+        <strong>{artifact.mediaKind === 'audio' ? 'Audio' : 'Video'} playback unavailable</strong>
+        <p>The current contract supplies bytes but no admitted inline media presentation.</p>
+      </div>
+      <ArtifactMetadata
+        renderer={`${artifact.mediaKind} placeholder`}
+        mediaType={descriptor.declared_media_type}
+        provenance="Original blob"
+      >
+        {download && (
+          <a href={download.content_url} download={artifact.displayName}>
+            <Download aria-hidden="true" /> Download
+          </a>
+        )}
+      </ArtifactMetadata>
+    </div>
   )
 }
 
@@ -437,6 +572,9 @@ const rendererRegistry: {
   code: CodeBody,
   image: ImageBody,
   blob: GenericBlobBody,
+  document: DocumentBody,
+  derivative: DerivativeBody,
+  media_placeholder: MediaPlaceholderBody,
 }
 
 export const registeredArtifactKinds = Object.freeze(Object.keys(rendererRegistry).sort())
@@ -468,6 +606,14 @@ const artifactIcon = (artifact: ArtifactItem) => {
   if (artifact.kind === 'code') return <FileCode2 aria-hidden="true" />
   if (artifact.kind === 'image') return <ImageIcon aria-hidden="true" />
   if (artifact.kind === 'blob') return <FileQuestion aria-hidden="true" />
+  if (artifact.kind === 'document') return <File aria-hidden="true" />
+  if (artifact.kind === 'derivative') return <GitBranch aria-hidden="true" />
+  if (artifact.kind === 'media_placeholder')
+    return artifact.mediaKind === 'audio' ? (
+      <FileAudio aria-hidden="true" />
+    ) : (
+      <FileVideo aria-hidden="true" />
+    )
   if (artifact.kind === 'blocked') return <ShieldAlert aria-hidden="true" />
   return <FileQuestion aria-hidden="true" />
 }
