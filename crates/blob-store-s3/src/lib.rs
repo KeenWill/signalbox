@@ -913,16 +913,20 @@ async fn verify_stream(
 
 /// Names the exact object generation a response was served from.
 ///
-/// An absent, oversized, or non-singleton entity tag leaves the generation
-/// unnamed, so no later request can prove it read the same bytes this call
-/// verified.
+/// An absent, repeated, oversized, or non-singleton entity tag leaves the
+/// generation unnamed, so no later request can prove it read the same bytes
+/// this call verified. Repetition is read across the whole field list rather
+/// than from the first value alone: a response carrying two `ETag` fields makes
+/// two generation claims, and taking either one would pin a generation the
+/// served body may not belong to.
 fn object_generation(headers: &HeaderMap) -> Option<HeaderValue> {
-    headers
-        .get(reqwest::header::ETAG)
-        .filter(|generation| {
-            generation.len() <= MAX_ETAG_BYTES && names_one_strong_generation(generation)
-        })
-        .cloned()
+    let mut served = headers.get_all(reqwest::header::ETAG).iter();
+    let generation = served.next()?;
+    if served.next().is_some() {
+        return None;
+    }
+    (generation.len() <= MAX_ETAG_BYTES && names_one_strong_generation(generation))
+        .then(|| generation.clone())
 }
 
 /// Reports whether a served entity tag names exactly one strong generation.
@@ -931,10 +935,17 @@ fn object_generation(headers: &HeaderMap) -> Option<HeaderValue> {
 /// whatever representation is current and a comma-separated list matches any
 /// member, so either spelling would let the store serve a generation this call
 /// never hashed. `If-Match` also compares strongly, so a weak `W/` tag can
-/// never match and is not a usable generation token either. Only one
-/// double-quoted tag of at least one entity-tag character — no embedded quote,
-/// no comma, no space — names the exact generation the verifying response was
-/// served from.
+/// never match and is not a usable generation token either. What remains is one
+/// double-quoted tag with no embedded quote, comma, or space.
+///
+/// A zero-character opaque tag is refused, and that is stricter than the
+/// entity-tag grammar, which permits `""`. The refusal is deliberate: this
+/// adapter accepts a token only as proof that a later read reached the same
+/// generation, and `""` is the one spelling that provably carries no
+/// generation-distinguishing content, so a store emitting it can satisfy the
+/// precondition with any later generation. Every other constant tag is
+/// indistinguishable from a real one and cannot be caught here; this one can.
+/// No S3-compatible store is known to serve it.
 fn names_one_strong_generation(generation: &HeaderValue) -> bool {
     let Some(interior) = generation
         .as_bytes()
@@ -1587,6 +1598,15 @@ mod tests {
         headers
     }
 
+    fn repeated_generation_headers(first: &str, second: &str) -> HeaderMap {
+        let mut headers = generation_headers(first);
+        headers.append(
+            reqwest::header::ETAG,
+            HeaderValue::from_str(second).expect("the fixture entity tag is a header value"),
+        );
+        headers
+    }
+
     fn credential_body() -> String {
         format!(
             "version = 1\naccess_key_id = \"{ACCESS_KEY}\"\nsecret_access_key = \"{SECRET_KEY}\"\n"
@@ -1947,8 +1967,21 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_entity_tag_leaves_the_generation_unnamed() {
+    fn a_repeated_entity_tag_field_leaves_the_generation_unnamed() {
+        assert_eq!(
+            object_generation(&repeated_generation_headers("\"second\"", "\"first\"")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_zero_length_entity_tag_header_leaves_the_generation_unnamed() {
         assert_eq!(object_generation(&generation_headers("")), None);
+    }
+
+    #[test]
+    fn a_quoted_empty_entity_tag_leaves_the_generation_unnamed() {
+        assert_eq!(object_generation(&generation_headers("\"\"")), None);
     }
 
     #[test]
