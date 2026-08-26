@@ -40,6 +40,8 @@ pub struct PrepareContextCompactionRequest {
     pub selection: DirectModelSelection,
     /// Exact resolved provider target.
     pub target: ResolvedProviderTarget,
+    /// Whether this call's provider input total includes both cache axes.
+    pub input_includes_cache_tokens: bool,
     /// Non-secret credential reference pinned for the call.
     pub credential_reference: String,
     /// Fresh physical call candidate.
@@ -72,6 +74,50 @@ pub struct PreparedContextCompaction {
     summarized_positions: Box<[u64]>,
     summary_entry: SemanticTranscriptEntryId,
     result_frontier: ContextFrontierId,
+}
+
+/// Read-only model-visible inventory used to choose an automatic boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AutomaticContextCompactionPreview {
+    source_frontier: ContextFrontierId,
+    members: Box<[AutomaticContextCompactionPreviewMember]>,
+}
+
+impl AutomaticContextCompactionPreview {
+    /// Returns the complete frontier whose projected members were observed.
+    pub const fn source_frontier(&self) -> ContextFrontierId {
+        self.source_frontier
+    }
+
+    /// Returns projected members in model-visible order.
+    pub fn members(&self) -> &[AutomaticContextCompactionPreviewMember] {
+        &self.members
+    }
+}
+
+/// One projected entry and whether it closes every preceding tool exchange.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AutomaticContextCompactionPreviewMember {
+    position: u64,
+    reference: SemanticTranscriptEntryRef,
+    safe_boundary: bool,
+}
+
+impl AutomaticContextCompactionPreviewMember {
+    /// Returns the entry's one-based physical frontier position.
+    pub const fn position(self) -> u64 {
+        self.position
+    }
+
+    /// Returns the exact semantic entry reference.
+    pub const fn reference(self) -> SemanticTranscriptEntryRef {
+        self.reference
+    }
+
+    /// Reports whether a summary through this entry closes all tool exchanges.
+    pub const fn is_safe_boundary(self) -> bool {
+        self.safe_boundary
+    }
 }
 
 impl PreparedContextCompaction {
@@ -279,6 +325,34 @@ impl ContextCompactionRepository {
             None,
         )
         .await
+    }
+
+    /// Reads the current projected frontier without claiming a compaction.
+    ///
+    /// Automatic callers render this immutable inventory before choosing the
+    /// exact boundary they later commit. The prepare transaction reselects the
+    /// frontier and validates that boundary before any provider interaction.
+    pub async fn preview_automatic_range(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<AutomaticContextCompactionPreview>, ContextCompactionRepositoryError> {
+        let mut transaction = self.pool.begin().await?;
+        let source = load_compaction_source(&mut transaction, session).await?;
+        let preview = match source {
+            Some(source) if source.member_count > 0 => {
+                let visible =
+                    load_projected_frontier_members(&mut transaction, session, source.frontier)
+                        .await?;
+                let members = preview_members(&visible)?;
+                Some(AutomaticContextCompactionPreview {
+                    source_frontier: source.frontier,
+                    members: members.into_boxed_slice(),
+                })
+            }
+            Some(_) | None => None,
+        };
+        transaction.rollback().await?;
+        Ok(preview)
     }
 
     /// Commits InFlight before any provider interaction begins.
@@ -771,10 +845,58 @@ impl PreparedContextCompaction {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompactionSource {
+    frontier: ContextFrontierId,
+    member_count: u64,
+}
+
+async fn load_compaction_source(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+) -> Result<Option<CompactionSource>, ContextCompactionRepositoryError> {
+    let row = sqlx::query(
+        "WITH candidate (frontier_id) AS (
+            SELECT turn_lifecycle_effective_terminal_frontier(session_id, turn_id)
+              FROM turn_lifecycle
+             WHERE session_id = $1
+               AND (state_kind = 'terminal' OR delegation_runtime_terminal)
+            UNION ALL
+            SELECT seed_context_frontier_id
+              FROM imported_session_seed
+             WHERE session_id = $1
+            UNION ALL
+            SELECT result_frontier_id
+              FROM context_compaction
+             WHERE session_id = $1
+         )
+         SELECT frontier.context_frontier_id, frontier.member_count
+           FROM candidate
+           JOIN context_frontier AS frontier
+             ON frontier.owning_session_id = $1
+            AND frontier.context_frontier_id = candidate.frontier_id
+          ORDER BY frontier.member_count DESC
+          LIMIT 1",
+    )
+    .bind(session_id_to_uuid(session))
+    .fetch_optional(&mut **transaction)
+    .await?;
+    row.map(|row| {
+        Ok(CompactionSource {
+            frontier: ContextFrontierId::from_uuid(row.try_get("context_frontier_id")?),
+            member_count: decode_u64(row.try_get("member_count")?, "source member count")?,
+        })
+    })
+    .transpose()
+}
+
 async fn prepare_in_transaction(
     transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     request: &PrepareContextCompactionRequest,
 ) -> Result<(bool, PrepareContextCompactionOutcome), ContextCompactionRepositoryError> {
+    if request.automatic_for_turn.is_some() && request.requested_through_position.is_none() {
+        return Ok((false, PrepareContextCompactionOutcome::InvalidBoundary));
+    }
     match lookup_command_on_connection(
         transaction,
         request.command,
@@ -947,38 +1069,12 @@ async fn prepare_in_transaction(
     if busy {
         return Ok((false, PrepareContextCompactionOutcome::Busy));
     }
-    let source = sqlx::query(
-        "WITH candidate (frontier_id) AS (
-            SELECT turn_lifecycle_effective_terminal_frontier(session_id, turn_id)
-              FROM turn_lifecycle
-             WHERE session_id = $1
-               AND (state_kind = 'terminal' OR delegation_runtime_terminal)
-            UNION ALL
-            SELECT seed_context_frontier_id
-              FROM imported_session_seed
-             WHERE session_id = $1
-            UNION ALL
-            SELECT result_frontier_id
-              FROM context_compaction
-             WHERE session_id = $1
-         )
-         SELECT frontier.context_frontier_id, frontier.member_count
-           FROM candidate
-           JOIN context_frontier AS frontier
-             ON frontier.owning_session_id = $1
-            AND frontier.context_frontier_id = candidate.frontier_id
-          ORDER BY frontier.member_count DESC
-          LIMIT 1",
-    )
-    .bind(session_id_to_uuid(request.session))
-    .fetch_optional(&mut **transaction)
-    .await?;
+    let source = load_compaction_source(transaction, request.session).await?;
     let Some(source) = source else {
         return Ok((false, PrepareContextCompactionOutcome::NoBoundary));
     };
-    let source_frontier = ContextFrontierId::from_uuid(source.try_get("context_frontier_id")?);
-    let member_count = decode_u64(source.try_get("member_count")?, "source member count")?;
-    if member_count == 0 {
+    let source_frontier = source.frontier;
+    if source.member_count == 0 {
         return Ok((false, PrepareContextCompactionOutcome::NoBoundary));
     }
     let predecessor = sqlx::query(
@@ -1049,8 +1145,8 @@ async fn prepare_in_transaction(
         "INSERT INTO context_compaction_model_call
             (model_call_id, session_id, direct_model_selection_id,
              resolved_provider_model_identity_id, source_frontier_id,
-             credential_reference, state_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, 'prepared')",
+             credential_reference, usage_input_includes_cache_tokens, state_kind)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'prepared')",
     )
     .bind(request.call.into_uuid())
     .bind(session_id_to_uuid(request.session))
@@ -1058,6 +1154,7 @@ async fn prepare_in_transaction(
     .bind(request.target.identity().into_uuid())
     .bind(source_frontier.into_uuid())
     .bind(&request.credential_reference)
+    .bind(request.input_includes_cache_tokens)
     .execute(&mut **transaction)
     .await;
     if let Err(error) = insert_call {
@@ -1321,6 +1418,30 @@ fn range_closes_tool_exchanges(members: &[ProjectedFrontierMember]) -> bool {
     open_requests == 0
 }
 
+fn preview_members(
+    members: &[ProjectedFrontierMember],
+) -> Result<Vec<AutomaticContextCompactionPreviewMember>, ContextCompactionRepositoryError> {
+    let mut open_requests = 0_usize;
+    let mut preview = Vec::with_capacity(members.len());
+    for member in members {
+        match member.payload_kind.as_str() {
+            "assistant_tool_use" => open_requests = open_requests.saturating_add(1),
+            "tool_execution_result" | "tool_denied" | "tool_closed_by_turn_end" => {
+                open_requests = open_requests.checked_sub(1).ok_or(
+                    ContextCompactionCorruption::Inconsistent("context compaction tool exchange"),
+                )?;
+            }
+            _ => {}
+        }
+        preview.push(AutomaticContextCompactionPreviewMember {
+            position: member.position,
+            reference: member.reference,
+            safe_boundary: open_requests == 0,
+        });
+    }
+    Ok(preview)
+}
+
 fn latest_safe_boundary(members: &[ProjectedFrontierMember]) -> Option<usize> {
     let mut latest = None;
     let mut open_requests = 0usize;
@@ -1481,7 +1602,10 @@ impl From<ContextCompactionCorruption> for ContextCompactionRepositoryError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProjectedFrontierMember, Uuid, latest_safe_boundary, project_frontier_members};
+    use super::{
+        ProjectedFrontierMember, Uuid, latest_safe_boundary, preview_members,
+        project_frontier_members,
+    };
     use signalbox_domain::{SemanticTranscriptEntryId, SemanticTranscriptEntryRef, SessionId};
 
     fn entry(value: u128) -> SemanticTranscriptEntryRef {
@@ -1559,5 +1683,43 @@ mod tests {
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].reference, successor_summary);
         assert_eq!(visible[0].position, 5);
+    }
+
+    #[test]
+    fn automatic_preview_marks_only_closed_tool_exchange_boundaries_safe() {
+        let visible = vec![
+            ProjectedFrontierMember {
+                position: 1,
+                reference: entry(0x7031),
+                payload_kind: "assistant_tool_use".to_owned(),
+                summary_range: None,
+            },
+            ProjectedFrontierMember {
+                position: 2,
+                reference: entry(0x7032),
+                payload_kind: "assistant_tool_use".to_owned(),
+                summary_range: None,
+            },
+            ProjectedFrontierMember {
+                position: 3,
+                reference: entry(0x7033),
+                payload_kind: "tool_execution_result".to_owned(),
+                summary_range: None,
+            },
+            ProjectedFrontierMember {
+                position: 4,
+                reference: entry(0x7034),
+                payload_kind: "tool_execution_result".to_owned(),
+                summary_range: None,
+            },
+            ordinary(5, entry(0x7035)),
+        ];
+        let preview = preview_members(&visible).expect("the tool exchange is balanced");
+
+        assert!(!preview[0].is_safe_boundary());
+        assert!(!preview[1].is_safe_boundary());
+        assert!(!preview[2].is_safe_boundary());
+        assert!(preview[3].is_safe_boundary());
+        assert!(preview[4].is_safe_boundary());
     }
 }

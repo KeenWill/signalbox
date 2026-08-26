@@ -174,6 +174,38 @@ impl<Runner: ProcessRunner> CargoDiagnosticsTool<Runner> {
         })
     }
 
+    /// Compiles diagnostics with one pinned read-only Cargo registry cache.
+    pub fn try_new_with_cargo_registry(
+        runner: Runner,
+        workspace_root: impl AsRef<Path>,
+        cargo_registry: impl AsRef<Path>,
+    ) -> Result<Self, CargoDiagnosticsToolConstructionError> {
+        let command_runner = SandboxedCommandRunner::try_new_with_cargo_registry(
+            runner,
+            workspace_root,
+            cargo_registry,
+        )?;
+        let detail = ToolExecutionErrorDetail::try_new(String::from(INVALID_ARGUMENTS_DETAIL))
+            .map_err(|_| CargoDiagnosticsToolConstructionError::ErrorDetail)?;
+        let definition = compile_contract_definition::<CargoDiagnosticsContract>(
+            ToolPermissionDefault::Auto,
+            ToolEffectClass::ExternalEffect,
+        )
+        .map_err(|error| match error {
+            ToolContractCompileError::Name => CargoDiagnosticsToolConstructionError::Name,
+            ToolContractCompileError::Schema => CargoDiagnosticsToolConstructionError::Schema,
+        })?;
+        let compiled = CompiledTool::new(definition, CargoDiagnosticsValidator { detail });
+        let catalog = CompiledToolCatalog::try_new([compiled])
+            .map_err(|_| CargoDiagnosticsToolConstructionError::Duplicate)?;
+        Ok(Self {
+            catalog,
+            executor: CargoDiagnosticsExecutor {
+                runner: CargoDiagnosticsRunner { command_runner },
+            },
+        })
+    }
+
     /// Returns separate catalog and executor composition roles.
     pub fn into_parts(self) -> (CompiledToolCatalog, CargoDiagnosticsExecutor<Runner>) {
         (self.catalog, self.executor)
@@ -300,6 +332,21 @@ impl<Runner: ProcessRunner> CargoDiagnosticsRunner<Runner> {
     ) -> Result<Self, ExecToolConstructionError> {
         Ok(Self {
             command_runner: SandboxedCommandRunner::try_new(runner, workspace_root)?,
+        })
+    }
+
+    /// Admits a workspace plus one pinned read-only Cargo registry cache.
+    pub fn try_new_with_cargo_registry(
+        runner: Runner,
+        workspace_root: impl AsRef<Path>,
+        cargo_registry: impl AsRef<Path>,
+    ) -> Result<Self, ExecToolConstructionError> {
+        Ok(Self {
+            command_runner: SandboxedCommandRunner::try_new_with_cargo_registry(
+                runner,
+                workspace_root,
+                cargo_registry,
+            )?,
         })
     }
 

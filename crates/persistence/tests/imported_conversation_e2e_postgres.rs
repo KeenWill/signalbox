@@ -35,7 +35,7 @@ use signalbox_domain::{
 use signalbox_persistence::{
     conversation_import::ImportedConversationRepository,
     create_session_from_imported_frontier::ImportedSessionRepository,
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     model_execution::PostgresModelCallRepository,
     process_read::{
@@ -73,7 +73,7 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -511,6 +511,7 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
             },
         )]),
         InProcessAttemptDispatchGate::default(),
+        None,
     );
     assert_eq!(
         model_service.execute(session).await?,
@@ -525,7 +526,7 @@ async fn s28_inv002_inv015_inv038_inv039_import_seed_and_native_turn_complete_en
         panic!("the scripted provider observation must complete the call");
     };
 
-    let (_, _, _, _, _, provider, _, _, retained) = model_service.into_parts();
+    let (_, _, _, _, _, provider, _, _, retained, _) = model_service.into_parts();
     assert!(retained.is_none());
     let messages = provider
         .last_prepared_messages()

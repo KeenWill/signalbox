@@ -394,7 +394,7 @@ impl ReqwestWebFetchTransport {
         if exchange_timeout.is_zero() {
             return Err(ReqwestWebFetchConstructionError);
         }
-        build_web_fetch_client(exchange_timeout, None)?;
+        build_web_fetch_client(Some(exchange_timeout), None)?;
         Ok(Self { exchange_timeout })
     }
 }
@@ -404,7 +404,7 @@ impl WebFetchTransport for ReqwestWebFetchTransport {
         &mut self,
         request: WebFetchRequest,
     ) -> Result<WebFetchResponse, WebFetchTransportFailure> {
-        let client = public_destination_client(request.url(), self.exchange_timeout)
+        let client = public_destination_client(request.url(), Some(self.exchange_timeout))
             .await
             .map_err(|_| WebFetchTransportFailure::RequestFailed)?;
         fetch_with_client(client, request).await
@@ -810,7 +810,8 @@ mod tests {
             url: Url::parse("http://localhost/private").expect("fixture URL is valid"),
         };
 
-        let resolution = public_destination_client(request.url(), Duration::from_secs(2)).await;
+        let resolution =
+            public_destination_client(request.url(), Some(Duration::from_secs(2))).await;
 
         assert!(matches!(
             resolution,
@@ -838,7 +839,7 @@ mod tests {
             host: String::from(host),
             addresses: vec![address],
         };
-        let client = build_web_fetch_client(Duration::from_secs(2), Some(&destination))
+        let client = build_web_fetch_client(Some(Duration::from_secs(2)), Some(&destination))
             .expect("fixed test client builds");
 
         let response = fetch_with_client(client, request).await;
@@ -909,7 +910,7 @@ mod tests {
             host: String::from(host),
             addresses: vec![address],
         };
-        let client = build_web_fetch_client(Duration::from_secs(2), Some(&destination))
+        let client = build_web_fetch_client(Some(Duration::from_secs(2)), Some(&destination))
             .expect("fixed test client builds");
 
         let response = fetch_with_client(client, request)

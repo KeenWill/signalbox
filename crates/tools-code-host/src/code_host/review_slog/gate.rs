@@ -250,50 +250,59 @@ mod tests {
     const STARVED_AT: &str = "2026-07-27T11:00:00Z";
 
     fn current_reviewer() -> ReviewerVerdictEvidence {
-        ReviewerVerdictEvidence::try_new(ReviewerVerdictFields {
-            status: ReviewerVerdictStatus::CurrentHead,
-            reviewed_revision: Some(String::from(HEAD_REVISION)),
-            reviewed_at: Some(String::from(REVIEWED_AT)),
-            starvation_after_verdict: false,
-            latest_starvation_at: None,
-            latest_review_request_at: None,
-            review_request_in_flight: false,
-            source_truncated: false,
-            comments_previous_cursor: None,
-            reviews_previous_cursor: None,
-        })
+        ReviewerVerdictEvidence::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ReviewerVerdictFields {
+                status: ReviewerVerdictStatus::CurrentHead,
+                reviewed_revision: Some(String::from(HEAD_REVISION)),
+                reviewed_at: Some(String::from(REVIEWED_AT)),
+                starvation_after_verdict: false,
+                latest_starvation_at: None,
+                latest_review_request_at: None,
+                review_request_in_flight: false,
+                source_truncated: false,
+                comments_previous_cursor: None,
+                reviews_previous_cursor: None,
+            },
+        )
         .expect("fixture reviewer evidence is admitted")
     }
 
     fn starved_reviewer() -> ReviewerVerdictEvidence {
-        ReviewerVerdictEvidence::try_new(ReviewerVerdictFields {
-            status: ReviewerVerdictStatus::CurrentHead,
-            reviewed_revision: Some(String::from(HEAD_REVISION)),
-            reviewed_at: Some(String::from(REVIEWED_AT)),
-            starvation_after_verdict: true,
-            latest_starvation_at: Some(String::from(STARVED_AT)),
-            latest_review_request_at: None,
-            review_request_in_flight: false,
-            source_truncated: false,
-            comments_previous_cursor: None,
-            reviews_previous_cursor: None,
-        })
+        ReviewerVerdictEvidence::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ReviewerVerdictFields {
+                status: ReviewerVerdictStatus::CurrentHead,
+                reviewed_revision: Some(String::from(HEAD_REVISION)),
+                reviewed_at: Some(String::from(REVIEWED_AT)),
+                starvation_after_verdict: true,
+                latest_starvation_at: Some(String::from(STARVED_AT)),
+                latest_review_request_at: None,
+                review_request_in_flight: false,
+                source_truncated: false,
+                comments_previous_cursor: None,
+                reviews_previous_cursor: None,
+            },
+        )
         .expect("fixture reviewer evidence is admitted")
     }
 
     fn in_flight_reviewer() -> ReviewerVerdictEvidence {
-        ReviewerVerdictEvidence::try_new(ReviewerVerdictFields {
-            status: ReviewerVerdictStatus::CurrentHead,
-            reviewed_revision: Some(String::from(HEAD_REVISION)),
-            reviewed_at: Some(String::from(REVIEWED_AT)),
-            starvation_after_verdict: false,
-            latest_starvation_at: None,
-            latest_review_request_at: Some(String::from(STARVED_AT)),
-            review_request_in_flight: true,
-            source_truncated: false,
-            comments_previous_cursor: None,
-            reviews_previous_cursor: None,
-        })
+        ReviewerVerdictEvidence::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ReviewerVerdictFields {
+                status: ReviewerVerdictStatus::CurrentHead,
+                reviewed_revision: Some(String::from(HEAD_REVISION)),
+                reviewed_at: Some(String::from(REVIEWED_AT)),
+                starvation_after_verdict: false,
+                latest_starvation_at: None,
+                latest_review_request_at: Some(String::from(STARVED_AT)),
+                review_request_in_flight: true,
+                source_truncated: false,
+                comments_previous_cursor: None,
+                reviews_previous_cursor: None,
+            },
+        )
         .expect("fixture reviewer evidence is admitted")
     }
 
@@ -301,21 +310,24 @@ mod tests {
         reviewer: ReviewerVerdictEvidence,
         mergeable_state: &str,
     ) -> ConvergenceStateResult {
-        ConvergenceStateResult::try_new(ConvergenceStateFields {
-            head_revision: String::from(HEAD_REVISION),
-            mergeable_state: String::from(mergeable_state),
-            ci_rollup_state: Some(String::from("success")),
-            checks: Vec::new(),
-            checks_truncated: false,
-            checks_next_cursor: None,
-            unresolved_threads: Vec::new(),
-            open_escalations: Vec::new(),
-            buried_escalations: Vec::new(),
-            undispositioned_threads: Vec::new(),
-            threads_truncated: false,
-            threads_next_cursor: None,
-            reviewer,
-        })
+        ConvergenceStateResult::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ConvergenceStateFields {
+                head_revision: String::from(HEAD_REVISION),
+                mergeable_state: String::from(mergeable_state),
+                ci_rollup_state: Some(String::from("success")),
+                checks: Vec::new(),
+                checks_truncated: false,
+                checks_next_cursor: None,
+                unresolved_threads: Vec::new(),
+                open_escalations: Vec::new(),
+                buried_escalations: Vec::new(),
+                undispositioned_threads: Vec::new(),
+                threads_truncated: false,
+                threads_next_cursor: None,
+                reviewer,
+            },
+        )
         .expect("fixture convergence evidence is admitted")
     }
 
@@ -325,50 +337,63 @@ mod tests {
 
     fn convergence_with_unresolved_thread() -> ConvergenceStateResult {
         let thread = ReviewThreadIdentity::try_new(
+            crate::code_host::test_numeric_bounds(),
             String::from("PRRT_late"),
             String::from("src/lib.rs"),
             String::from("Late finding"),
         )
         .expect("fixture thread identity is admitted");
-        ConvergenceStateResult::try_new(ConvergenceStateFields {
-            head_revision: String::from(HEAD_REVISION),
-            mergeable_state: String::from("mergeable"),
-            ci_rollup_state: Some(String::from("success")),
-            checks: Vec::new(),
-            checks_truncated: false,
-            checks_next_cursor: None,
-            unresolved_threads: vec![thread],
-            open_escalations: Vec::new(),
-            buried_escalations: Vec::new(),
-            undispositioned_threads: Vec::new(),
-            threads_truncated: false,
-            threads_next_cursor: None,
-            reviewer: current_reviewer(),
-        })
+        ConvergenceStateResult::try_new(
+            crate::code_host::test_numeric_bounds(),
+            ConvergenceStateFields {
+                head_revision: String::from(HEAD_REVISION),
+                mergeable_state: String::from("mergeable"),
+                ci_rollup_state: Some(String::from("success")),
+                checks: Vec::new(),
+                checks_truncated: false,
+                checks_next_cursor: None,
+                unresolved_threads: vec![thread],
+                open_escalations: Vec::new(),
+                buried_escalations: Vec::new(),
+                undispositioned_threads: Vec::new(),
+                threads_truncated: false,
+                threads_next_cursor: None,
+                reviewer: current_reviewer(),
+            },
+        )
         .expect("fixture convergence evidence is admitted")
     }
 
     fn stack() -> StackStateResult {
-        StackStateResult::try_new(StackStateFields {
-            number: 17,
-            base_ref: String::from("main"),
-            base_revision: String::from(BASE_REVISION),
-            head_ref: String::from("feature"),
-            head_revision: String::from(HEAD_REVISION),
-            default_ref: String::from("main"),
-            default_revision: String::from(BASE_REVISION),
-            base_commits_not_in_head: 0,
-            main_commits_not_in_base: 0,
-            children: Vec::new(),
-            children_truncated: false,
-            children_next_cursor: None,
-        })
+        StackStateResult::try_new(
+            crate::code_host::test_numeric_bounds(),
+            StackStateFields {
+                number: 17,
+                base_ref: String::from("main"),
+                base_revision: String::from(BASE_REVISION),
+                head_ref: String::from("feature"),
+                head_revision: String::from(HEAD_REVISION),
+                default_ref: String::from("main"),
+                default_revision: String::from(BASE_REVISION),
+                base_commits_not_in_head: 0,
+                main_commits_not_in_base: 0,
+                children: Vec::new(),
+                children_truncated: false,
+                children_next_cursor: None,
+            },
+        )
         .expect("fixture stack evidence is admitted")
     }
 
     fn inventory() -> ThreadInventoryResult {
-        ThreadInventoryResult::try_new(String::from(HEAD_REVISION), Vec::new(), false, None)
-            .expect("fixture inventory is admitted")
+        ThreadInventoryResult::try_new(
+            crate::code_host::test_numeric_bounds(),
+            String::from(HEAD_REVISION),
+            Vec::new(),
+            false,
+            None,
+        )
+        .expect("fixture inventory is admitted")
     }
 
     /// Complete green evidence with a current actual verdict opens the
@@ -421,6 +446,7 @@ mod tests {
         let convergence = convergence(current_reviewer());
         let stack = stack();
         let inventory = ThreadInventoryResult::try_new(
+            crate::code_host::test_numeric_bounds(),
             String::from("2222222222222222222222222222222222222222"),
             Vec::new(),
             false,

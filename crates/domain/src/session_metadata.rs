@@ -33,12 +33,6 @@ impl SessionMetadataContent {
     /// Maximum UTF-8 bytes in one indexed metadata tag or attribute key.
     pub const MAX_INDEXED_UTF8_BYTES: usize = 1_024;
 
-    /// Maximum distinct tags in one complete metadata snapshot.
-    pub const MAX_TAGS: usize = 256;
-
-    /// Maximum distinct attributes in one complete metadata snapshot.
-    pub const MAX_ATTRIBUTES: usize = 256;
-
     /// Constructs the canonical empty, non-archived metadata value.
     pub fn empty() -> Self {
         Self {
@@ -59,10 +53,22 @@ impl SessionMetadataContent {
         attributes: Vec<(String, String)>,
         archived: bool,
     ) -> Result<Self, SessionMetadataContentError> {
-        if tags.len() > Self::MAX_TAGS {
+        Self::try_new_with_count_limits(title, tags, attributes, archived, None, None)
+    }
+
+    /// Validates one replacement against deployment-owned count policies.
+    pub fn try_new_with_count_limits(
+        title: Option<String>,
+        tags: Vec<String>,
+        attributes: Vec<(String, String)>,
+        archived: bool,
+        max_tags: Option<usize>,
+        max_attributes: Option<usize>,
+    ) -> Result<Self, SessionMetadataContentError> {
+        if max_tags.is_some_and(|limit| tags.len() > limit) {
             return Err(SessionMetadataContentError::TooManyTags);
         }
-        if attributes.len() > Self::MAX_ATTRIBUTES {
+        if max_attributes.is_some_and(|limit| attributes.len() > limit) {
             return Err(SessionMetadataContentError::TooManyAttributes);
         }
 
@@ -787,11 +793,13 @@ mod tests {
 
     #[test]
     fn metadata_rejects_tag_cardinality_over_bound() {
-        let error = SessionMetadataContent::try_new(
+        let error = SessionMetadataContent::try_new_with_count_limits(
             None,
-            vec![String::from("tag"); SessionMetadataContent::MAX_TAGS + 1],
+            vec![String::from("tag"), String::from("other")],
             Vec::new(),
             false,
+            Some(1),
+            None,
         )
         .expect_err("one tag above the cardinality bound is rejected");
 
@@ -800,11 +808,16 @@ mod tests {
 
     #[test]
     fn metadata_rejects_attribute_cardinality_over_bound() {
-        let error = SessionMetadataContent::try_new(
+        let error = SessionMetadataContent::try_new_with_count_limits(
             None,
             Vec::new(),
-            vec![(String::from("key"), String::new()); SessionMetadataContent::MAX_ATTRIBUTES + 1],
+            vec![
+                (String::from("first"), String::new()),
+                (String::from("second"), String::new()),
+            ],
             false,
+            None,
+            Some(1),
         )
         .expect_err("one attribute above the cardinality bound is rejected");
 

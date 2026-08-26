@@ -10,6 +10,7 @@ use std::{num::NonZeroU64, path::Path};
 use signalbox_blob_store::{BlobObjectKey, BlobStore, BlobStoreFailureKind};
 use signalbox_blob_store_filesystem::FilesystemBlobStore;
 use tempfile::TempDir;
+use tokio::io::AsyncReadExt as _;
 
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -267,6 +268,39 @@ async fn inv059_filesystem_range_reverifies_the_generation_it_reads() {
         .expect_err("the range must be retained only from a verified generation");
 
     assert_eq!(error.kind(), BlobStoreFailureKind::VerificationFailed);
+}
+
+#[tokio::test]
+async fn inv059_filesystem_verified_stream_pins_the_verified_bytes() {
+    let (root, store) = fixture();
+    let expected = signalbox_blob_store::conformance::expected_fixture();
+    let key = BlobObjectKey::for_digest(expected.digest());
+    store
+        .put(
+            expected,
+            Box::new(std::io::Cursor::new(
+                signalbox_blob_store::conformance::fixture_content().to_vec(),
+            )),
+        )
+        .await
+        .expect("the valid stream fixture is published");
+    let opened = store
+        .open_verified(expected, &key)
+        .await
+        .expect("the verified bytes are pinned before delivery");
+    std::fs::write(
+        root.path().join(key.as_str()),
+        signalbox_blob_store::conformance::corrupt_fixture_content(),
+    )
+    .expect("the published inode is mutated after verification");
+    let mut reader = opened.into_reader();
+    let mut bytes = Vec::new();
+    reader
+        .read_to_end(&mut bytes)
+        .await
+        .expect("the pinned verified stream remains readable");
+
+    assert_eq!(bytes, signalbox_blob_store::conformance::fixture_content());
 }
 
 #[tokio::test]
