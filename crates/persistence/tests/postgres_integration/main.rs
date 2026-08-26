@@ -16,6 +16,7 @@ mod convergence_sweep;
 mod delegated_result_rereads;
 mod delegation_schema;
 mod delegation_transactions;
+mod frontier_validation;
 mod hub_fence;
 mod model_call_execution_and_recovery;
 mod model_call_usage_and_interrupts;
@@ -46,19 +47,19 @@ use rust_decimal::Decimal;
 use serde_json::Value;
 use signalbox_application::{
     ApprovalJudgeCompletionIdentities, AttachmentPreparationFailure, AuthorizeModelCallOutcome,
-    AuthorizeModelCallTransaction, ClassifyOperatorFailure, CommitModelCallObservationTransaction,
-    CompiledTool, CompiledToolCatalog, CorrelatedDurableChildWait, CreateSessionError,
-    CreateSessionOutcome, CreateSessionRequest, CreateSessionService, EligibilityNudge,
-    EligibilityNudgeOutcome, EligibilitySweep, InProcessAttemptDispatchGate, LoadSessionService,
-    ModelCallAuthorizationReread, ModelCallCredentialReference, ModelCallExecutionError,
-    ModelCallExecutionIdGenerator, ModelCallExecutionOutcome, ModelCallExecutionService,
-    ModelCallObservationCommitOutcome, ModelCallReconciliationFailureKind,
-    ModelCallReconciliationOutcome, ModelConversationMessage, OperatorFailureClass,
-    PromptMemberStatement, ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest,
-    ReplaceSessionDefaultsService, RetainedModelCallObservationStatus,
-    RetainedPreparedFailureStatus, ScriptedModelCallProvider, ScriptedModelCallStep,
-    SessionIdGenerator, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
-    StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
+    AuthorizeModelCallTransaction, AutomaticReconciliationFailureKind,
+    AutomaticReconciliationOperation, AutomaticReconciliationOutcome, ClassifyOperatorFailure,
+    CommitModelCallObservationTransaction, CompiledTool, CompiledToolCatalog,
+    CorrelatedDurableChildWait, CreateSessionError, CreateSessionOutcome, CreateSessionRequest,
+    CreateSessionService, EligibilityNudge, EligibilityNudgeOutcome, EligibilitySweep,
+    InProcessAttemptDispatchGate, LoadSessionService, ModelCallAuthorizationReread,
+    ModelCallCredentialReference, ModelCallExecutionError, ModelCallExecutionIdGenerator,
+    ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallObservationCommitOutcome,
+    ModelConversationMessage, OperatorFailureClass, PromptMemberStatement,
+    ReplaceSessionDefaultsOutcome, ReplaceSessionDefaultsRequest, ReplaceSessionDefaultsService,
+    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus, ScriptedModelCallProvider,
+    ScriptedModelCallStep, SessionIdGenerator, StartEligibleTurnIdGenerator,
+    StartEligibleTurnOutcome, StartEligibleTurnService, StartupScanIdGenerator, StartupScanService,
     StartupScanSessionOutcome, SubmitInputIdGenerator, SubmitInputOutcome, SubmitInputRequest,
     SubmitInputService, ToolAttemptAuthorizationOutcome, ToolAttemptAuthorizationStatus,
     ToolCatalog, ToolDefinition, ToolInputSchema, ToolPreauthorization,
@@ -69,19 +70,20 @@ use signalbox_domain::{
     AcceptedInputTurnFailureIdentities, ActivatedAcceptedInputTurn, ActiveTurnPhase,
     AmbiguousModelCallTurnIdentities, AssistantResponsePart, AssistantText,
     AttachmentDisplayFilename, AttachmentKind, AuthorizedModelCall, BlobDigest,
-    CancelledModelCallTurnIdentities, CompletedModelCallIdentities, ContextFrontierId,
-    CorrelatedModelCallTerminalObservation, CreateSession, CurrentToolAttemptState,
-    CurrentTurnAttemptState, DecideToolRequest, DecideToolRequestResult, DeclaredMediaType,
-    DelegateApprovalRecommendation, DelegationAwaitRequest, DelegationContent,
-    DelegationMessageDirection, DelegationMessageId, DelegationMessageRequest, DelegationWaitMode,
-    DeliveryRequest, DescendantTerminationScope, DirectModelSelection, DurableCommandId,
-    FailedModelCallTurnIdentities, FastModeOverlay, FastModeSupport, FrozenModelSelection, Goal,
-    GoalCommandRejection, GoalCommandResult, GoalModelProvenance, GoalReport, GoalStatement,
-    GoalUserAction, GoalUserCommand, GoalUserProvenance, InitialToolApproval, ModelAlias,
-    ModelCallId, ModelCallTerminalIdentities, ModelCallTerminalObservation,
-    ModelCallTerminalOutcome, ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition,
-    ModelSelectionOverride, ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence,
-    ModelTargetCatalog, ModelTargetDefinition, NormalizedToolArguments, OverrideDeniedToolRequest,
+    CancelledModelCallTurnIdentities, CompletedModelCallIdentities, ContextCompactionId,
+    ContextCompactionTokenUsage, ContextFrontierId, CorrelatedModelCallTerminalObservation,
+    CreateSession, CurrentToolAttemptState, CurrentTurnAttemptState, DecideToolRequest,
+    DecideToolRequestResult, DeclaredMediaType, DelegateApprovalRecommendation,
+    DelegationAwaitRequest, DelegationContent, DelegationMessageDirection, DelegationMessageId,
+    DelegationMessageRequest, DelegationWaitMode, DeliveryRequest, DescendantTerminationScope,
+    DirectModelSelection, DurableCommandId, FailedModelCallTurnIdentities, FastMode,
+    FastModeOverlay, FastModeSupport, FrozenModelSelection, Goal, GoalCommandRejection,
+    GoalCommandResult, GoalModelProvenance, GoalReport, GoalStatement, GoalUserAction,
+    GoalUserCommand, GoalUserProvenance, InitialToolApproval, ModelAlias, ModelCallId,
+    ModelCallTerminalIdentities, ModelCallTerminalObservation, ModelCallTerminalOutcome,
+    ModelCapabilities, ModelCapabilityCatalog, ModelCapabilityDefinition, ModelSelectionOverride,
+    ModelSelectionRequest, ModelSettingsOverlay, ModelSettingsPrecedence, ModelTargetCatalog,
+    ModelTargetDefinition, NormalizedToolArguments, OverrideDeniedToolRequest,
     OverrideDeniedToolRequestRejectedResult, OverrideDeniedToolRequestResult,
     PerInputConfigurationChoices, PhysicalCancellationModelCallTurnIdentities,
     PreparedCreateSession, PreparedModelCallRequest, ProviderModelCallFailureCause,
@@ -109,7 +111,15 @@ use signalbox_persistence::{
         AuthorizeApprovalJudgeOutcome, AuthorizedApprovalJudge, CompleteApprovalJudgeOutcome,
         FailedApprovalJudgeDisposition, PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
     },
+    automatic_reconciliation::{
+        AutomaticReconciliationRepositoryError, PostgresAutomaticReconciliationRepository,
+        RECONCILIATION_ACQUIRE_WAIT, RECONCILIATION_LOCK_WAIT, reconciliation_deadline,
+    },
     blob::{BlobCatalogRepository, BlobReplicaRecord, BlobStoreBindingRecord},
+    context_compaction::{
+        ContextCompactionRepository, PrepareContextCompactionOutcome,
+        PrepareContextCompactionRequest,
+    },
     create_session::{
         CreateSessionCorruption, CreateSessionHandlingOutcome, CreateSessionRepository,
         CreateSessionRepositoryError,
@@ -117,19 +127,15 @@ use signalbox_persistence::{
     create_session_from_imported_frontier::{
         ImportedSessionRepository, ImportedSessionRepositoryError,
     },
-    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels,
     goal::{GoalCommandHandlingOutcome, GoalRepository, GoalTransitionOutcome},
     goal_turn::GoalTurnCandidates,
     local_test_connection_options, migrate,
-    model_call_reconciliation::{
-        ModelCallReconciliationRepositoryError, PostgresModelCallReconciliationRepository,
-        RECONCILIATION_ACQUIRE_WAIT, RECONCILIATION_LOCK_WAIT,
-    },
     model_execution::{
         CredentialPoolRuntimeAction, CredentialPoolRuntimeMember, CredentialPoolRuntimePolicy,
         ModelCallCorruption, ModelCallIdentityCollision, ModelCallRepositoryError,
-        PostgresModelCallRepository, PrepareInitialModelCallOutcome,
+        PostgresModelCallRepository, PrepareInitialModelCallOutcome, ToolContinuationUsageLimit,
     },
     outbox::{
         DispatchedDelegationOutcome, DispatchedDelegationPolicy, DispatchedDelegationProvenance,
@@ -1503,6 +1509,7 @@ async fn complete_text_turn(
             },
         )]),
         InProcessAttemptDispatchGate::default(),
+        None,
     );
     assert_eq!(
         service.execute(session).await?,
@@ -1515,7 +1522,7 @@ async fn complete_text_turn(
     if !matches!(*outcome, ModelCallTerminalOutcome::Completed(_)) {
         return Err("scripted model completion did not complete the turn".into());
     }
-    let (_, _, _, _, _, provider, _, _, _) = service.into_parts();
+    let (_, _, _, _, _, provider, _, _, _, _) = service.into_parts();
     Ok(provider
         .last_prepared_messages()
         .expect("scripted provider observed prepared messages")
@@ -1865,7 +1872,7 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, Stri
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_cmd(disposable_postgres_server_args())
-        .with_mount(disposable_postgres_state_tmpfs())
+        .with_mount(disposable_postgres_state_tmpfs_from_example()?)
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -3582,6 +3589,36 @@ async fn checkpoint_confirmed_tool_round_with_attachment(
     Ok((fixture, repository, observation, *request))
 }
 
+async fn checkpoint_confirmed_tool_round_with_usage(
+    pool: &PgPool,
+    seed: u128,
+    tool_name: &str,
+    arguments: &str,
+    usage: ProviderReportedTokenUsage,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        CorrelatedModelCallTerminalObservation,
+        signalbox_domain::ToolRequestId,
+    ),
+    Box<dyn Error>,
+> {
+    let (fixture, repository, observation, requests) =
+        checkpoint_tool_batch_with_approval_and_usage(
+            pool,
+            seed,
+            &[(tool_name, arguments)],
+            InitialToolApproval::Confirm,
+            usage,
+        )
+        .await?;
+    let [request] = requests.as_slice() else {
+        panic!("the single-proposal fixture returns one request")
+    };
+    Ok((fixture, repository, observation, *request))
+}
+
 async fn checkpoint_confirmed_tool_batch(
     pool: &PgPool,
     seed: u128,
@@ -3646,11 +3683,108 @@ async fn checkpoint_tool_batch_with_approval(
     .await
 }
 
+async fn checkpoint_suppressed_tool_round(
+    pool: &PgPool,
+    seed: u128,
+    tool_name: &str,
+) -> Result<(RestartModelCallFixture, signalbox_domain::ToolRequestId), Box<dyn Error>> {
+    let (fixture, model_repository, authorized) =
+        authorize_checkpointed_model_call(pool, seed).await?;
+    let request = signalbox_domain::ToolRequestId::from_uuid(Uuid::from_u128(seed + 0x40));
+    let response =
+        ToolUsingAssistantResponse::try_from_parts(vec![AssistantResponsePart::ToolCall(
+            ToolCallProposal::suppressed(
+                ToolName::try_new(String::from(tool_name)).expect("valid fixture tool name"),
+            ),
+        )])
+        .expect("the suppressed proposal forms one inert tool response");
+    let observation = authorized
+        .observation_correlation()
+        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+    let outcome = model_repository
+        .apply_terminal_observation(
+            fixture.session,
+            observation,
+            ModelCallTerminalIdentities::ToolRound(ToolRoundModelCallIdentities::new(
+                vec![ToolResponsePartIdentity::tool_call(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 0x80)),
+                    request,
+                    InitialToolApproval::RuntimeSafetyDeny,
+                )],
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 0xc0)),
+                Some(TurnAttemptId::from_uuid(Uuid::from_u128(seed + 0xc1))),
+            )),
+            |_| panic!("the fixture has no pending steering to reclassify"),
+        )
+        .await?;
+    let ModelCallTerminalOutcome::ToolRound(round) = outcome else {
+        panic!("the suppressed fixture reaches an automatically denied tool round")
+    };
+    assert!(matches!(
+        round.next_phase(),
+        ActiveTurnPhase::Running { .. }
+    ));
+    Ok((fixture, request))
+}
+
 async fn checkpoint_tool_batch_with_approval_and_attachment(
     pool: &PgPool,
     seed: u128,
     proposals: &[(&str, &str)],
     initial_approval: InitialToolApproval,
+    attachment: Option<BlobDigest>,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        CorrelatedModelCallTerminalObservation,
+        Vec<signalbox_domain::ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
+    checkpoint_tool_batch_with_approval_and_usage_and_attachment(
+        pool,
+        seed,
+        proposals,
+        initial_approval,
+        ProviderReportedTokenUsage::unreported(),
+        attachment,
+    )
+    .await
+}
+
+async fn checkpoint_tool_batch_with_approval_and_usage(
+    pool: &PgPool,
+    seed: u128,
+    proposals: &[(&str, &str)],
+    initial_approval: InitialToolApproval,
+    usage: ProviderReportedTokenUsage,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        PostgresModelCallRepository,
+        CorrelatedModelCallTerminalObservation,
+        Vec<signalbox_domain::ToolRequestId>,
+    ),
+    Box<dyn Error>,
+> {
+    checkpoint_tool_batch_with_approval_and_usage_and_attachment(
+        pool,
+        seed,
+        proposals,
+        initial_approval,
+        usage,
+        None,
+    )
+    .await
+}
+
+async fn checkpoint_tool_batch_with_approval_and_usage_and_attachment(
+    pool: &PgPool,
+    seed: u128,
+    proposals: &[(&str, &str)],
+    initial_approval: InitialToolApproval,
+    usage: ProviderReportedTokenUsage,
     attachment: Option<BlobDigest>,
 ) -> Result<
     (
@@ -3687,7 +3821,10 @@ async fn checkpoint_tool_batch_with_approval_and_attachment(
     .expect("the proposals form a tool-using response");
     let observation = authorized
         .observation_correlation()
-        .bind_terminal_observation(ModelCallTerminalObservation::CompletedWithTools { response });
+        .bind_terminal_observation_with_usage(
+            ModelCallTerminalObservation::CompletedWithTools { response },
+            usage,
+        );
     let identities = requests
         .iter()
         .enumerate()

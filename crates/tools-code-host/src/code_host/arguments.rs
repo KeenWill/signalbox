@@ -6,15 +6,15 @@ use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::de::DeserializeOwned;
 use signalbox_domain::NormalizedToolArguments;
 
-// numeric-bound: tunable - the repository spelling this tool advertises accepting
+// numeric-bound: guard - the tool grammar advertises accepting repository spellings only to this length
 pub(super) const MAX_REPOSITORY_BYTES: usize = 256;
-// numeric-bound: tunable - the file path length this tool advertises accepting
+// numeric-bound: guard - the tool grammar advertises accepting file paths only to this length
 pub(super) const MAX_FILE_PATH_BYTES: usize = 4 * 1024;
-// numeric-bound: tunable - the comment body this tool advertises accepting
+// numeric-bound: guard - the tool grammar advertises accepting comment bodies only to this length
 pub(super) const MAX_COMMENT_BODY_BYTES: usize = 64 * 1024;
-// numeric-bound: tunable - the opaque identifier this tool advertises accepting
+// numeric-bound: guard - the tool grammar advertises accepting opaque identifiers only to this length
 pub(super) const MAX_OPAQUE_ID_BYTES: usize = 512;
-// numeric-bound: tunable - the pagination cursor this tool advertises accepting
+// numeric-bound: guard - the tool grammar advertises accepting pagination cursors only to this length
 pub(super) const MAX_CURSOR_BYTES: usize = 512;
 
 /// A code-host argument value did not satisfy its checked representation.

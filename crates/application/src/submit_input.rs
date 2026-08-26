@@ -11,7 +11,7 @@ use std::{error::Error, fmt, future::Future};
 use signalbox_domain::{
     AcceptedInputId, CancelledModelCallTurnIdentities, ContextFrontierId, DeliveryRequest,
     DurableCommandId, SemanticTranscriptEntryId, SessionId, SubmitInput as DomainSubmitInput,
-    SubmitInputAppliedResult, SubmitInputResult, TurnId, UserContent,
+    SubmitInputAppliedResult, SubmitInputResult, TurnId, UserContent, UserContentPart,
 };
 
 use crate::{
@@ -24,12 +24,29 @@ use crate::{
 pub enum SubmitInputRequestError {
     /// The user-global command identity is a reserved sentinel.
     InvalidCommandId(InvalidDurableCommandId),
+    /// The accepted-input text exceeds the deployment's admission bound.
+    ///
+    /// The domain already refuses content above `UserContent::MAX_TEXT_BYTES`;
+    /// this rejection is the deployment's own lowering of that ceiling.
+    OversizedContent {
+        /// The rejected text's exact aggregate UTF-8 length in bytes.
+        utf8_byte_length: usize,
+        /// The deployment's configured inclusive admission maximum.
+        max_utf8_bytes: usize,
+    },
 }
 
 impl fmt::Display for SubmitInputRequestError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidCommandId(error) => error.fmt(formatter),
+            Self::OversizedContent {
+                utf8_byte_length,
+                max_utf8_bytes,
+            } => write!(
+                formatter,
+                "accepted-input content is {utf8_byte_length} UTF-8 bytes; the configured maximum is {max_utf8_bytes}",
+            ),
         }
     }
 }
@@ -52,12 +69,23 @@ pub struct SubmitInputRequest {
 }
 
 impl SubmitInputRequest {
-    /// Validates admission policy before canonical command construction.
+    /// Validates structural admission before canonical command construction.
     pub fn try_new(
         command_id: DurableCommandId,
         session: SessionId,
         content: UserContent,
         delivery: DeliveryRequest,
+    ) -> Result<Self, SubmitInputRequestError> {
+        Self::try_new_with_content_limit(command_id, session, content, delivery, None)
+    }
+
+    /// Validates structural admission and the deployment's optional content policy.
+    pub fn try_new_with_content_limit(
+        command_id: DurableCommandId,
+        session: SessionId,
+        content: UserContent,
+        delivery: DeliveryRequest,
+        max_content_utf8_bytes: Option<usize>,
     ) -> Result<Self, SubmitInputRequestError> {
         if command_id.as_uuid().is_nil() {
             return Err(SubmitInputRequestError::InvalidCommandId(
@@ -69,6 +97,16 @@ impl SubmitInputRequest {
                 InvalidDurableCommandId::Max,
             ));
         }
+        if let Some(max_utf8_bytes) = max_content_utf8_bytes {
+            let utf8_byte_length = accepted_text_utf8_bytes(&content);
+            if utf8_byte_length > max_utf8_bytes {
+                return Err(SubmitInputRequestError::OversizedContent {
+                    utf8_byte_length,
+                    max_utf8_bytes,
+                });
+            }
+        }
+
         Ok(Self {
             command_id,
             session,
@@ -96,6 +134,23 @@ impl SubmitInputRequest {
     pub const fn delivery(&self) -> DeliveryRequest {
         self.delivery
     }
+}
+
+/// Sums the exact UTF-8 length of every text part in one accepted input.
+///
+/// The domain bounds this same aggregate at `UserContent::MAX_TEXT_BYTES`, so a
+/// deployment's configured admission limit is measured over the same quantity
+/// rather than over one part. Attachment parts carry no accepted-input text and
+/// contribute nothing here; their bytes are bounded by blob storage instead.
+fn accepted_text_utf8_bytes(content: &UserContent) -> usize {
+    content
+        .parts()
+        .iter()
+        .map(|part| match part {
+            UserContentPart::Text { value } => value.as_str().len(),
+            UserContentPart::Attachment { .. } => 0,
+        })
+        .sum()
 }
 
 /// Application effect supplying fresh candidate identities for input handling.
@@ -693,9 +748,14 @@ mod tests {
         let mut exact = "a".repeat(UserContent::MAX_TEXT_BYTES - 2);
         exact.push('\u{e9}');
 
-        let request =
-            SubmitInputRequest::try_new(command_id(1), session_id(2), content(&exact), delivery(1))
-                .expect("text ending exactly at the UTF-8 byte bound is admitted");
+        let request = SubmitInputRequest::try_new_with_content_limit(
+            command_id(1),
+            session_id(2),
+            content(&exact),
+            delivery(1),
+            Some(UserContent::MAX_TEXT_BYTES),
+        )
+        .expect("text ending exactly at the UTF-8 byte bound is admitted");
 
         assert_eq!(
             request
@@ -705,6 +765,51 @@ mod tests {
                 .as_str()
                 .len(),
             UserContent::MAX_TEXT_BYTES
+        );
+    }
+
+    /// The accepted-input contract rejects text over the deployment's own
+    /// configured admission bound at the application boundary, below the
+    /// domain ceiling and without retaining the rejected text in the error.
+    #[test]
+    fn oversized_accepted_input_content_is_rejected_before_command_construction() {
+        const CONFIGURED_MAX_UTF8_BYTES: usize = 1_024;
+        let oversized = "a".repeat(CONFIGURED_MAX_UTF8_BYTES + 1);
+
+        assert_eq!(
+            SubmitInputRequest::try_new_with_content_limit(
+                command_id(1),
+                session_id(2),
+                content(&oversized),
+                delivery(1),
+                Some(CONFIGURED_MAX_UTF8_BYTES),
+            ),
+            Err(SubmitInputRequestError::OversizedContent {
+                utf8_byte_length: CONFIGURED_MAX_UTF8_BYTES + 1,
+                max_utf8_bytes: CONFIGURED_MAX_UTF8_BYTES,
+            })
+        );
+    }
+
+    /// An unconfigured deployment leaves the aggregate text bound to the
+    /// domain, which already refuses anything above its own ceiling.
+    #[test]
+    fn unconfigured_accepted_input_content_admits_domain_bounded_text() {
+        let request = SubmitInputRequest::try_new(
+            command_id(1),
+            session_id(2),
+            content("hello"),
+            delivery(1),
+        )
+        .expect("domain-bounded text is admitted without a configured limit");
+
+        assert_eq!(
+            request
+                .content()
+                .single_text()
+                .expect("the fixture has exactly one text part")
+                .as_str(),
+            "hello"
         );
     }
 

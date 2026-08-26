@@ -9,9 +9,45 @@ export type WebApiError = {
 
 export type WebApiErrorKind = "transport" | "application";
 
+export type WebBlobAvailableView = {
+  readonly byte_length: string;
+  readonly content_url: string;
+  readonly derivations: ReadonlyArray<WebBlobDerivation>;
+  readonly kind: WebBlobViewKind;
+  readonly media_type: string;
+};
+
+export type WebBlobDerivation = {
+  readonly derivation_id: string;
+  readonly input_digests: ReadonlyArray<string>;
+  readonly output_digests: ReadonlyArray<string>;
+  readonly parameters_json: string;
+  readonly producer: WebBlobDerivationProducer;
+  readonly transformation_name: string;
+  readonly transformation_version: number;
+};
+
+export type WebBlobDerivationProducer = {
+  readonly cache_key: string;
+  readonly class: "deterministic";
+  readonly implementation_digest: string;
+} | {
+  readonly class: "executed";
+  readonly execution_id: string;
+  readonly implementation_digest: string;
+} | {
+  readonly class: "model_derived";
+  readonly model_call_id: string;
+};
+
+export type WebBlobViewKind = "download" | "browser_native" | "thumbnail" | "preview";
+
 export type WebContractCapabilities = {
+  readonly blob_derivations: boolean;
   readonly bounded_json: boolean;
   readonly bounded_session_timeline: boolean;
+  readonly image_derivatives: boolean;
+  readonly immutable_blob_content: boolean;
   readonly import_discovery: boolean;
   readonly imported_continuations: boolean;
   readonly ndjson_streaming: boolean;
@@ -152,6 +188,14 @@ export type WebApiErrorResponse = {
   readonly error: WebApiError;
 };
 
+export type WebBlobDescriptor = {
+  readonly available_views: ReadonlyArray<WebBlobAvailableView>;
+  readonly byte_length: string;
+  readonly declared_media_type: string;
+  readonly digest: string;
+  readonly display_filename: ReadonlyArray<string>;
+};
+
 export type WebSessionTimelineDescriptor = {
   readonly first_address: WebTimelineAddress;
   readonly latest_address: WebTimelineAddress;
@@ -231,6 +275,7 @@ export type WebImportContinuationResponse = {
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;
 export function decodeWebContractExample(value: unknown): WebContractExample;
 export function decodeWebApiErrorResponse(value: unknown): WebApiErrorResponse;
+export function decodeWebBlobDescriptor(value: unknown): WebBlobDescriptor;
 export function decodeWebSessionTimelineDescriptor(value: unknown): WebSessionTimelineDescriptor;
 export function decodeWebSessionTimelineWindow(value: unknown): WebSessionTimelineWindow;
 export function decodeWebImportListRequest(value: unknown): WebImportListRequest;
