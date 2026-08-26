@@ -617,17 +617,16 @@ impl PostgresRepoWatchWebhookStore {
                     delivery.receipt_sequence,
                     delivery.received_at,
                     octet_length(payload.body)::bigint AS body_bytes
-               FROM repo_watch_webhook_delivery AS delivery
+               FROM repo_watch_webhook_pending AS pending
+               JOIN repo_watch_webhook_delivery AS delivery
+                 ON delivery.hook_id = pending.hook_id
+                AND delivery.delivery_id = pending.delivery_id
                JOIN repo_watch_webhook_payload AS payload
                  ON payload.hook_id = delivery.hook_id
                 AND payload.delivery_id = delivery.delivery_id
-               LEFT JOIN repo_watch_webhook_disposition AS disposition
-                 ON disposition.hook_id = delivery.hook_id
-                AND disposition.delivery_id = delivery.delivery_id
-              WHERE delivery.repository = $1
-                AND disposition.delivery_id IS NULL
-                AND ($3::bigint IS NULL OR delivery.receipt_sequence > $3)
-              ORDER BY delivery.receipt_sequence
+              WHERE pending.repository = $1
+                AND ($3::bigint IS NULL OR pending.receipt_sequence > $3)
+              ORDER BY pending.receipt_sequence
               LIMIT $2",
         )
         .bind(repository.as_str())
@@ -677,14 +676,14 @@ impl PostgresRepoWatchWebhookStore {
         Ok(deliveries)
     }
 
-    /// The oldest undispositioned delivery's identity and receipt, without its
-    /// payload.
+    /// The oldest pending delivery's identity and receipt, without its payload.
     ///
     /// The drain monitor runs on a fixed cadence for every webhook repository
     /// and reports only identity and pending age, so it must not transfer the
-    /// admitted bodies a pending page carries. This query therefore never joins
-    /// `repo_watch_webhook_payload`, and it answers for a delivery whose body
-    /// has already been purged.
+    /// admitted bodies a pending page carries or re-scan append-only disposition
+    /// history. This query therefore reads the transactional pending inventory,
+    /// never joins `repo_watch_webhook_payload`, and answers for a delivery whose
+    /// body has already been purged.
     pub async fn load_oldest_pending_receipt(
         &self,
         repository: &RepositorySlug,
@@ -695,13 +694,12 @@ impl PostgresRepoWatchWebhookStore {
                     delivery.receipt_sequence,
                     delivery.received_at,
                     transaction_timestamp() AS observed_at
-               FROM repo_watch_webhook_delivery AS delivery
-               LEFT JOIN repo_watch_webhook_disposition AS disposition
-                 ON disposition.hook_id = delivery.hook_id
-                AND disposition.delivery_id = delivery.delivery_id
-              WHERE delivery.repository = $1
-                AND disposition.delivery_id IS NULL
-              ORDER BY delivery.receipt_sequence
+               FROM repo_watch_webhook_pending AS pending
+               JOIN repo_watch_webhook_delivery AS delivery
+                 ON delivery.hook_id = pending.hook_id
+                AND delivery.delivery_id = pending.delivery_id
+              WHERE pending.repository = $1
+              ORDER BY pending.receipt_sequence
               LIMIT 1",
         )
         .bind(repository.as_str())

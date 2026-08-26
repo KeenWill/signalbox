@@ -252,8 +252,6 @@ formatting.
 **Operational traps.** Do not adopt the review-slog toolkit as a merge gate
 until its
 [blocking condition](docs/open-questions.md#review-slog-toolkit-adoption) is
-cleared. Do not rely on automatic context compaction until its
-[blocking condition](docs/open-questions.md#automatic-context-compaction) is
 cleared.
 
 Run `git worktree list` before working with another checkout of this clone.

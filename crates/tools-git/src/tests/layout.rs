@@ -1,6 +1,7 @@
 //! Repository-layout scan properties.
 
 use std::{
+    cell::Cell,
     ffi::{OsStr, OsString},
     fs,
     os::{
@@ -21,9 +22,10 @@ use crate::descriptor::unsupported_object_alternates_are_absent_with_test_hook;
 use crate::failure::LocalGitFailure;
 use crate::index_lock::IndexLock;
 use crate::layout::{
-    reject_administrative_symlinks, validate_repository_layout,
-    validate_shallow_file_at_with_test_hook,
+    reject_administrative_symlinks, reject_administrative_symlinks_with_test_observer,
+    validate_repository_layout, validate_shallow_file_at_with_test_hook,
 };
+
 use crate::limits::{MAX_BRANCH_BYTES, MAX_OBJECT_BYTES, MAX_REFERENCE_BYTES};
 use crate::pinning::{
     PinnedObjectDatabase, PinnedRepository, live_object_database_bytes_with_test_hook,
@@ -36,6 +38,20 @@ use crate::tests::support::{
     plant_loose_blob_with_claimed_id, plant_packed_blob, real_git_packed_replacement_reference,
     workspace_root_identity,
 };
+
+// numeric-bound: test fixture - exceeds the dogfood supervisor's former descriptor ceiling
+const WIDE_ADMINISTRATIVE_SIBLING_COUNT: usize = 1_100;
+
+fn wide_administrative_layout() -> Fixture {
+    let fixture = Fixture::new();
+    let worktrees = fixture.root().join(".git/worktrees");
+    fs::create_dir(&worktrees).expect("wide administration root constructs");
+    for sibling in 0..WIDE_ADMINISTRATIVE_SIBLING_COUNT {
+        fs::create_dir(worktrees.join(format!("worktree-{sibling}")))
+            .expect("wide administrative sibling constructs");
+    }
+    fixture
+}
 
 #[track_caller]
 fn assert_repository_construction_failure(failure: LocalGitToolsConstructionError) {
@@ -229,6 +245,28 @@ fn administrative_scan_stays_on_the_pinned_directory_after_path_replacement() {
     fs::rename(retired_git, git_path).expect("fixture administrative directory restores");
 
     assert_repository_construction_failure(replacement_failure);
+}
+
+#[test]
+fn administrative_scan_descriptor_retention_follows_depth_not_sibling_width() {
+    let fixture = wide_administrative_layout();
+    let git_directory = openat(
+        CWD,
+        fixture.root().join(".git"),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .expect("wide administrative directory opens");
+    let retained_depth = Cell::new(0_usize);
+
+    reject_administrative_symlinks_with_test_observer(
+        &git_directory,
+        ObjectFormat::Sha1,
+        |depth| retained_depth.set(retained_depth.get().max(depth)),
+    )
+    .expect("wide administrative directory validates");
+
+    assert!(retained_depth.get() < WIDE_ADMINISTRATIVE_SIBLING_COUNT);
 }
 
 #[test]
