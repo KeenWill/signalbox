@@ -53,9 +53,10 @@ const REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1: &[u8] =
 /// A stream is created by the first occurrence of a recurring event on a
 /// distinct subject: a pull request's own transitions, each of its labels, each
 /// review thread, each base branch it advances onto, and each distinct
-/// reaction. Every entry costs a 32-byte stream identity and an 8-byte
-/// sequence, so this ceiling bounds one repository's frontier at roughly 40 MB
-/// of resident state and a durable frontier of the same order. That is the
+/// reaction. Every entry costs a 32-byte stream identity, an 8-byte sequence,
+/// and an 8-byte owning pull-request number, so this ceiling bounds one
+/// repository's frontier at roughly 48 MB of resident entry fields before map
+/// overhead, and a durable frontier of the same order. That is the
 /// point at which a single watched repository's identity state, rather than its
 /// event history, becomes the dominant cost of watching it, and it is far above
 /// what any real repository reaches: GitHub's largest public repositories have
@@ -94,6 +95,7 @@ impl RepoWatchEventContentIdentityV1 {
 pub struct RepoWatchEventIdentityFrontierEntryV1 {
     stream_identity: [u8; 32],
     sequence: NonZeroU64,
+    pull_request_number: Option<PullRequestNumber>,
 }
 
 impl RepoWatchEventIdentityFrontierEntryV1 {
@@ -106,6 +108,23 @@ impl RepoWatchEventIdentityFrontierEntryV1 {
         Self {
             stream_identity,
             sequence,
+            pull_request_number: None,
+        }
+    }
+
+    /// Pairs one stream with its last sequence and the pull request owning it.
+    ///
+    /// A repository-global stream, such as a branch workflow run, belongs to no
+    /// pull request and carries none.
+    pub const fn for_pull_request(
+        stream_identity: [u8; 32],
+        sequence: NonZeroU64,
+        pull_request_number: PullRequestNumber,
+    ) -> Self {
+        Self {
+            stream_identity,
+            sequence,
+            pull_request_number: Some(pull_request_number),
         }
     }
 
@@ -121,12 +140,24 @@ impl RepoWatchEventIdentityFrontierEntryV1 {
     pub const fn sequence(&self) -> NonZeroU64 {
         self.sequence
     }
+
+    /// The pull request owning this recurring stream, when one does.
+    pub const fn pull_request_number(&self) -> Option<PullRequestNumber> {
+        self.pull_request_number
+    }
+}
+
+/// One stream's counter and the subject whose retirement releases it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RepoWatchEventIdentityFrontierSequenceV1 {
+    sequence: NonZeroU64,
+    pull_request_number: Option<PullRequestNumber>,
 }
 
 /// Canonical per-repository occurrence counters carried by the durable cursor.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RepoWatchEventIdentityFrontierV1 {
-    sequences: BTreeMap<[u8; 32], NonZeroU64>,
+    sequences: BTreeMap<[u8; 32], RepoWatchEventIdentityFrontierSequenceV1>,
 }
 
 impl RepoWatchEventIdentityFrontierV1 {
@@ -144,7 +175,13 @@ impl RepoWatchEventIdentityFrontierV1 {
         let mut sequences = BTreeMap::new();
         for entry in entries {
             if sequences
-                .insert(entry.stream_identity, entry.sequence)
+                .insert(
+                    entry.stream_identity,
+                    RepoWatchEventIdentityFrontierSequenceV1 {
+                        sequence: entry.sequence,
+                        pull_request_number: entry.pull_request_number,
+                    },
+                )
                 .is_some()
             {
                 return Err(RepoWatchEventIdentityFrontierError::DuplicateStream);
@@ -160,17 +197,26 @@ impl RepoWatchEventIdentityFrontierV1 {
     pub fn entries(
         &self,
     ) -> impl ExactSizeIterator<Item = RepoWatchEventIdentityFrontierEntryV1> + '_ {
-        self.sequences.iter().map(|(stream, sequence)| {
-            RepoWatchEventIdentityFrontierEntryV1::new(*stream, *sequence)
-        })
+        self.sequences
+            .iter()
+            .map(|(stream, entry)| match entry.pull_request_number {
+                Some(number) => RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                    *stream,
+                    entry.sequence,
+                    number,
+                ),
+                None => RepoWatchEventIdentityFrontierEntryV1::new(*stream, entry.sequence),
+            })
     }
 
     fn advance(
         &mut self,
         stream_identity: [u8; 32],
+        pull_request_number: Option<PullRequestNumber>,
     ) -> Result<NonZeroU64, RepoWatchEventIdentityFrontierError> {
         let next = match self.sequences.get(&stream_identity) {
-            Some(sequence) => sequence
+            Some(entry) => entry
+                .sequence
                 .get()
                 .checked_add(1)
                 .and_then(NonZeroU64::new)
@@ -182,7 +228,13 @@ impl RepoWatchEventIdentityFrontierV1 {
                 NonZeroU64::MIN
             }
         };
-        self.sequences.insert(stream_identity, next);
+        self.sequences.insert(
+            stream_identity,
+            RepoWatchEventIdentityFrontierSequenceV1 {
+                sequence: next,
+                pull_request_number,
+            },
+        );
         Ok(next)
     }
 }
@@ -1121,6 +1173,24 @@ enum RepoWatchEventStreamKeyV1<'value> {
 }
 
 impl RepoWatchEventStreamKeyV1<'_> {
+    /// The pull request owning this stream, or none for a repository-global one.
+    ///
+    /// A workflow run belongs to a branch rather than to any pull request, so
+    /// its stream has no subject whose terminal state could retire it.
+    const fn pull_request_number(&self) -> Option<PullRequestNumber> {
+        match self {
+            Self::PullRequestKind { number, .. }
+            | Self::Label { number, .. }
+            | Self::CheckSuite { number, .. }
+            | Self::CheckRun { number, .. }
+            | Self::Review { number, .. }
+            | Self::Thread { number, .. }
+            | Self::BaseAdvance { number, .. }
+            | Self::Reaction { number, .. } => Some(*number),
+            Self::Workflow { .. } => None,
+        }
+    }
+
     /// Whether this stream can state more than one fact.
     ///
     /// A stream is non-recurring only when the differ suppresses re-emission on
@@ -1856,9 +1926,10 @@ fn push_identified_event(
     events: &mut Vec<RepoWatchEventOccurrenceV1>,
 ) -> Result<(), RepoWatchDifferError> {
     let is_recurring = stream_key.is_recurring();
+    let pull_request_number = stream_key.pull_request_number();
     let stream_identity = repo_watch_event_stream_identity_v1(stream_key);
     let sequence = if is_recurring {
-        identity_frontier.advance(stream_identity)?
+        identity_frontier.advance(stream_identity, pull_request_number)?
     } else {
         NonZeroU64::MIN
     };
@@ -4973,7 +5044,7 @@ mod tests {
             frontier.entries().len(),
             MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS
         );
-        assert_eq!(frontier.advance(stream_identity_for(0))?.get(), 2);
+        assert_eq!(frontier.advance(stream_identity_for(0), None)?.get(), 2);
         Ok(())
     }
 
@@ -4994,9 +5065,32 @@ mod tests {
         )?;
 
         assert_eq!(
-            frontier.advance(stream_identity_for(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS)),
+            frontier.advance(
+                stream_identity_for(MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS),
+                None
+            ),
             Err(RepoWatchEventIdentityFrontierError::StreamLimit)
         );
+        Ok(())
+    }
+
+    /// Ownership is the durable member a later retirement mechanism reads, so
+    /// it has to survive the round trip the cursor performs on every commit.
+    #[test]
+    fn identity_frontier_entries_carry_their_owning_pull_request() -> Result<(), Box<dyn Error>> {
+        let owning = pull_request_number(PULL_REQUEST_NUMBER);
+        let frontier = RepoWatchEventIdentityFrontierV1::try_from_entries(vec![
+            RepoWatchEventIdentityFrontierEntryV1::for_pull_request(
+                stream_identity_for(0),
+                NonZeroU64::MIN,
+                owning,
+            ),
+            RepoWatchEventIdentityFrontierEntryV1::new(stream_identity_for(1), NonZeroU64::MIN),
+        ])?;
+
+        let entries = frontier.entries().collect::<Vec<_>>();
+        assert_eq!(entries[0].pull_request_number(), Some(owning));
+        assert_eq!(entries[1].pull_request_number(), None);
         Ok(())
     }
 }
