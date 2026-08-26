@@ -43,6 +43,7 @@ use signalbox_model_runtime_codex_cli::verify_pinned_codex_cli_version;
 use signalbox_model_runtime_openai::{OpenAiConfig, OpenAiConstructionError, OpenAiRuntime};
 use signalbox_persistence::{
     automatic_reconciliation::RETRY_LADDER_ARITY,
+    blob::BlobCatalogRepository,
     convergence_sweep::PostgresConvergenceSweepStore,
     conversation_import::backfill_imported_conversation_display_titles,
     hub_fence::FENCED_POOL_MAX_CONNECTIONS,
@@ -61,7 +62,7 @@ use signalboxd::runner_protocol_runtime::{
 };
 use signalboxd::{
     ActivatedTurnPass, AttachmentPreparingModelCallProvider, BaseDaemonCredentialInputs,
-    BlobStoreRegistry, CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds,
+    BlobStoreRegistry, BlobTools, CODE_HOST_CREDENTIAL_REFERENCE, CodeHostNumericBounds,
     ConfiguredApprovalPostureError, ConvergenceSweepNumericBounds, ConvergenceSweepRuntime,
     DaemonToolCatalog, DaemonToolComposition, DaemonTools, DaemonToolsConstructionError,
     ExpiredPassRecoveryPolicy, FatalExecutionSupervisor, FencedHubDatabase, FencedHubDatabaseError,
@@ -1790,20 +1791,7 @@ async fn run_hub(
             .roots()
             .to_vec(),
     );
-    let (tool_catalog, tool_executor) = tools.into_parts();
-
-    let tool_catalog =
-        match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
-            Ok(catalog) => catalog,
-            Err(error) => {
-                let failure = erase_startup_cause(
-                    RuntimePhase::Configuration,
-                    SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
-                );
-                let _ = database.close().await;
-                return Err(failure);
-            }
-        };
+    let (mut tool_catalog, mut tool_executor) = tools.into_parts();
 
     let migration_pool = pool.clone();
     let scan_pool = pool.clone();
@@ -1956,7 +1944,56 @@ async fn run_hub(
         }
     };
     let mut blob_store_registry = blob_store_registry.map(Arc::new);
-
+    // The family is model-facing only where blob storage exists: an absent
+    // registry means no configuration and an empty catalog, so advertising
+    // `blob_metadata` and `blob_read` would declare tools no request can use.
+    let mut blob_executor = None;
+    if blob_store_registry.is_some() {
+        let blob_tools = match BlobTools::try_new(
+            BlobCatalogRepository::new(pool.clone()),
+            blob_store_registry.clone(),
+        ) {
+            Ok(tools) => tools,
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("blob_read_tool_construction_failed"),
+                );
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        };
+        let (blob_catalog, executor) = blob_tools.into_parts();
+        tool_catalog = match tool_catalog.with_compiled_catalog(blob_catalog) {
+            Ok(catalog) => catalog,
+            Err(_) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static("blob_read_tool_catalog_conflict"),
+                );
+                drop(executor);
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        };
+        blob_executor = Some(executor);
+    }
+    tool_catalog =
+        match tool_catalog.with_approval_postures(model_configuration.tool_approval_postures()) {
+            Ok(catalog) => catalog,
+            Err(error) => {
+                let failure = erase_startup_cause(
+                    RuntimePhase::Configuration,
+                    SanitizedStartupCause::Static(configured_approval_posture_cause(&error)),
+                );
+                drop(blob_executor);
+                drop(blob_store_registry);
+                let _ = database.close().await;
+                return Err(failure);
+            }
+        };
     let runner_service = match PostgresRunnerRegistrationService::registration_only(pool.clone()) {
         Ok(service) => service,
         Err(_) => {
@@ -1964,6 +2001,7 @@ async fn run_hub(
                 RuntimePhase::Configuration,
                 SanitizedStartupCause::Static("runner_catalog_construction_failed"),
             );
+            drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
@@ -1982,6 +2020,7 @@ async fn run_hub(
                 RuntimePhase::StartupScan,
                 SanitizedStartupCause::Static("runner_connection_reconciliation_failed"),
             );
+            drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
@@ -1991,6 +2030,7 @@ async fn run_hub(
             if let Some(registry) = blob_store_registry.as_ref() {
                 registry.disarm_staging_sweep();
             }
+            drop(blob_executor);
             drop(blob_store_registry);
             let _ = database.close().await;
             return Ok(ShutdownOutcome::GuardLost);
@@ -2003,6 +2043,7 @@ async fn run_hub(
                 RuntimePhase::SocketBinding,
                 SanitizedStartupCause::Socket(&error),
             );
+            drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
@@ -2017,6 +2058,7 @@ async fn run_hub(
                 SanitizedStartupCause::Socket(&error),
             );
             let _ = runner_listener.cleanup();
+            drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
@@ -2052,6 +2094,7 @@ async fn run_hub(
                     );
                     let _ = listener.cleanup();
                     let _ = runner_listener.cleanup();
+                    drop(blob_executor);
                     disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
                         .await;
                     drop(blob_store_registry);
@@ -2073,6 +2116,7 @@ async fn run_hub(
                     );
                     let _ = listener.cleanup();
                     let _ = runner_listener.cleanup();
+                    drop(blob_executor);
                     disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry)
                         .await;
                     drop(blob_store_registry);
@@ -2100,6 +2144,7 @@ async fn run_hub(
             );
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
+            drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
@@ -2134,6 +2179,7 @@ async fn run_hub(
             );
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
+            drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
@@ -2145,6 +2191,7 @@ async fn run_hub(
             if let Some(registry) = blob_store_registry.as_ref() {
                 registry.disarm_staging_sweep();
             }
+            drop(blob_executor);
             drop(blob_store_registry);
             let _ = database.close().await;
             return Ok(ShutdownOutcome::GuardLost);
@@ -2176,6 +2223,7 @@ async fn run_hub(
                 );
                 let _ = listener.cleanup();
                 let _ = runner_listener.cleanup();
+                drop(blob_executor);
                 disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
                 drop(blob_store_registry);
                 let _ = database.close().await;
@@ -2203,6 +2251,7 @@ async fn run_hub(
                 );
                 let _ = listener.cleanup();
                 let _ = runner_listener.cleanup();
+                drop(blob_executor);
                 disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
                 drop(blob_store_registry);
                 let _ = database.close().await;
@@ -2223,6 +2272,7 @@ async fn run_hub(
             );
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
+            drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
@@ -2234,6 +2284,7 @@ async fn run_hub(
             if let Some(registry) = blob_store_registry.as_ref() {
                 registry.disarm_staging_sweep();
             }
+            drop(blob_executor);
             drop(blob_store_registry);
             let _ = database.close().await;
             return Ok(ShutdownOutcome::GuardLost);
@@ -2261,6 +2312,7 @@ async fn run_hub(
             };
             let _ = listener.cleanup();
             let _ = runner_listener.cleanup();
+            drop(blob_executor);
             disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
             drop(blob_store_registry);
             let _ = database.close().await;
@@ -2272,6 +2324,7 @@ async fn run_hub(
             if let Some(registry) = blob_store_registry.as_ref() {
                 registry.disarm_staging_sweep();
             }
+            drop(blob_executor);
             drop(blob_store_registry);
             let _ = database.close().await;
             return Ok(ShutdownOutcome::GuardLost);
@@ -2290,6 +2343,7 @@ async fn run_hub(
                 );
                 let _ = listener.cleanup();
                 let _ = runner_listener.cleanup();
+                drop(blob_executor);
                 disarm_staging_sweep_unless_guarded(&mut database, &mut blob_store_registry).await;
                 drop(blob_store_registry);
                 let _ = database.close().await;
@@ -2301,12 +2355,14 @@ async fn run_hub(
                 if let Some(registry) = blob_store_registry.as_ref() {
                     registry.disarm_staging_sweep();
                 }
+                drop(blob_executor);
                 drop(blob_store_registry);
                 let _ = database.close().await;
                 return Ok(ShutdownOutcome::GuardLost);
             }
         }
     }
+    tool_executor = tool_executor.with_blob_executor(blob_executor);
     let runner_runtime = RunnerProtocolRuntime::new(runner_listener, runner_service);
     let process_runtime = ProcessRuntime::new_with_templates(
         listener,
