@@ -713,13 +713,7 @@ test('does not start Attention reads for incompatible bootstrap values', async (
 })
 
 test('retries a transient Attention bootstrap failure in place', async ({ page }) => {
-  let attempts = 0
-  await page.route('**/api/bootstrap', (route) => {
-    attempts += 1
-    return attempts === 1
-      ? route.fulfill({ status: 503, body: 'temporarily unavailable' })
-      : route.fulfill({ json: bootstrapFixture })
-  })
+  const admission = await useBootstrapRecoveringAfterOneOutage(page)
   await useDeterministicAttention(page)
   await page.goto('/attention')
 
@@ -727,9 +721,9 @@ test('retries a transient Attention bootstrap failure in place', async ({ page }
   await expect(page.getByText('Transport unavailable')).toBeVisible()
   await page.getByRole('button', { name: 'Retry contract check' }).click()
 
-  await expect(page.getByText('signalbox.web-http · 1')).toBeVisible()
+  await expect(page.getByText('signalbox.web-http · 2')).toBeVisible()
   await expect(page.getByRole('heading', { name: '0 sessions' })).toBeVisible()
-  expect(attempts).toBe(2)
+  expect(admission.attempts).toBe(2)
 })
 
 test('gives iconless Attention contract errors the full empty-state width', async ({ page }) => {

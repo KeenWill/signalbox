@@ -464,31 +464,40 @@ describe('SameOriginProductTransport', () => {
     )
   })
 
-  it('rejects malformed session identities and judge counts', async () => {
+  it('rejects a malformed session identity', async () => {
     const malformedIdentity = { ...attentionFixture.summaries[0], session_id: 'not-a-uuid' }
-    const malformedCount = {
-      ...attentionFixture.summaries[0],
-      judge: { ...attentionFixture.summaries[0].judge, failed: '-1' },
-    }
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(
-        new Response(
-          JSON.stringify({
-            ...attentionFixture,
-            continuation_after_session_id: null,
-            summaries: [malformedIdentity],
-          }),
-        ),
-      )
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify({ ...attentionFixture, summaries: [malformedCount] })),
-      )
-    vi.stubGlobal('fetch', fetchMock)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              ...attentionFixture,
+              continuation_after_session_id: null,
+              summaries: [malformedIdentity],
+            }),
+          ),
+      ),
+    )
 
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
       'attention_snapshot.summaries[0].session_id must be matching',
     )
+  })
+
+  it('rejects a malformed judge count', async () => {
+    const malformedCount = {
+      ...attentionFixture.summaries[0],
+      judge: { ...attentionFixture.summaries[0].judge, failed: '-1' },
+    }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(JSON.stringify({ ...attentionFixture, summaries: [malformedCount] })),
+      ),
+    )
+
     await expect(new SameOriginProductTransport().readAttention()).rejects.toThrow(
       'attention_snapshot.summaries[0].judge.failed must be matching',
     )
@@ -718,6 +727,14 @@ describe('product surface availability', () => {
     })
   })
 
+  it('marks the mounted Attention reads as server-backed', () => {
+    expect(productSurfaceStates.attention).toEqual({
+      kind: 'server-backed',
+      owningTrack: '#992 attention projections',
+      facts: ['keyset attention snapshot pages', 'streamed attention projection updates'],
+    })
+  })
+
   it('marks the mounted Imports reads as server-backed', () => {
     expect(productSurfaceStates.imports).toEqual({
       kind: 'server-backed',
@@ -727,9 +744,10 @@ describe('product surface availability', () => {
   })
 
   it('reports cache ownership only for implemented surfaces', () => {
+    expect(productSurfaceCacheLabel('attention')).toBe('Bounded query')
     expect(productSurfaceCacheLabel('sessions')).toBe('Bounded query')
     expect(productSurfaceCacheLabel('imports')).toBe('Bounded query')
     expect(productSurfaceCacheLabel('settings')).toBe('Local settings')
-    expect(productSurfaceCacheLabel('attention')).toBeNull()
+    expect(productSurfaceCacheLabel('search')).toBeNull()
   })
 })

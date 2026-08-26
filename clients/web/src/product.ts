@@ -264,9 +264,9 @@ export type ProductSurfaceState =
 
 export const productSurfaceStates: Record<ProductRouteId, ProductSurfaceState> = {
   attention: {
-    kind: 'committed-unimplemented',
+    kind: 'server-backed',
     owningTrack: '#992 attention projections',
-    facts: ['prioritized attention reads'],
+    facts: ['keyset attention snapshot pages', 'streamed attention projection updates'],
   },
   sessions: {
     kind: 'server-backed',
