@@ -114,6 +114,7 @@ test("generated bootstrap decoder rejects another contract version", () => {
         capabilities: {
           bounded_json: true,
           bounded_lexical_search: true,
+          bounded_usage_cost: true,
           same_origin_json_mutations: true,
           ndjson_streaming: true,
           immutable_blob_content: true,
@@ -131,6 +132,8 @@ test("generated bootstrap decoder rejects another contract version", () => {
           max_search_snippet_bytes: 512,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
+          max_usage_aggregate_groups: 256,
+          max_usage_call_page_items: 100,
         },
       }),
     /incompatible web contract/,
@@ -1174,6 +1177,7 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
         capabilities: {
           bounded_json: true,
           bounded_lexical_search: true,
+          bounded_usage_cost: true,
           same_origin_json_mutations: true,
           ndjson_streaming: true,
           immutable_blob_content: true,
@@ -1191,6 +1195,8 @@ test("generated bootstrap decoder rejects incompatible limits", () => {
           max_search_snippet_bytes: 512,
           max_timeline_window_items: 256,
           max_timeline_window_bytes: 65536,
+          max_usage_aggregate_groups: 256,
+          max_usage_call_page_items: 100,
         },
       }),
     /incompatible web contract/,
@@ -1589,7 +1595,7 @@ test("generated usage decoder bounds rate versions by UTF-8 bytes", () => {
 
   assert.throws(
     () => decodeWebUsageSummary({ groups: [empty], truncated: false }),
-    /at least 1 characters|1 through 128 UTF-8 bytes/,
+    /at least 1 Unicode scalar values|one recognized variant|1 through 128 UTF-8 bytes/,
   );
   assert.throws(
     () => decodeWebUsageSummary({ groups: [oversized], truncated: false }),
@@ -1665,8 +1671,17 @@ test("generated usage decoder validates ordering and cursor correlation", () => 
   );
 });
 
-test("generated usage decoder accepts an omitted optional continuation", () => {
+test("generated usage decoder rejects an omitted continuation member", () => {
   const page = { calls: [usageCall()] };
+
+  assert.throws(
+    () => decodeWebUsageCallPage(page, "newest"),
+    /continuation/,
+  );
+});
+
+test("generated usage decoder accepts an exhausted null continuation", () => {
+  const page = { calls: [usageCall()], continuation: null };
 
   assert.equal(decodeWebUsageCallPage(page, "newest"), page);
 });
@@ -1796,7 +1811,7 @@ test("generated usage decoder bounds profile identities by UTF-8 bytes", () => {
 
   assert.throws(
     () => decodeWebUsageSummary({ groups: [empty], truncated: false }),
-    /at least 1 characters|1 through 256 UTF-8 bytes/,
+    /at least 1 Unicode scalar values|1 through 256 UTF-8 bytes/,
   );
   assert.throws(
     () => decodeWebUsageSummary({ groups: [oversized], truncated: false }),
@@ -1822,12 +1837,21 @@ test("generated usage decoder correlates call kind with turn presence", () => {
 
   assert.throws(
     () => decodeWebUsageCallPage({ calls: [compaction], continuation: null }, "newest"),
-    /turn_id must be string|null exactly for context compaction calls/,
+    /null exactly for context compaction calls/,
   );
   assert.throws(
     () => decodeWebUsageCallPage({ calls: [ordinary], continuation: null }, "newest"),
-    /turn_id must be string|null exactly for context compaction calls/,
+    /null exactly for context compaction calls/,
   );
+});
+
+test("generated usage decoder accepts a compaction call with a null turn", () => {
+  const compaction = usageCall();
+  compaction.call_kind = "context_compaction";
+  compaction.turn_id = null;
+  const page = { calls: [compaction], continuation: null };
+
+  assert.equal(decodeWebUsageCallPage(page, "newest"), page);
 });
 
 test("generated usage decoder rejects omitted turns for turn-scoped calls", () => {

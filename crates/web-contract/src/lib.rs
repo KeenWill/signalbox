@@ -1314,6 +1314,8 @@ pub struct WebUsageCall {
     pub call_kind: WebUsageCallKind,
     pub call_id: WebUuid,
     pub session_id: WebSessionId,
+    /// Owning turn, present-but-null exactly for context compaction.
+    #[serde(deserialize_with = "deserialize_present_option")]
     #[schemars(required)]
     pub turn_id: Option<WebUuid>,
     pub model_id: WebUuid,
@@ -1339,6 +1341,10 @@ pub struct WebUsageCallCursor {
 pub struct WebUsageCallPage {
     #[schemars(length(max = 100))]
     pub calls: Vec<WebUsageCall>,
+    /// Present-but-null when the page exhausts the matching evidence, so an
+    /// omitted member is an incompatibility rather than a silent exhaustion.
+    #[serde(deserialize_with = "deserialize_present_option")]
+    #[schemars(required)]
     pub continuation: Option<WebUsageCallCursor>,
 }
 
@@ -1582,6 +1588,11 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
     make_property_nullable(&mut search_page_schema, "continuation")?;
     let search_page_schema = canonical_schema(search_page_schema);
 
+    let mut usage_call_page_schema = schemars::schema_for!(WebUsageCallPage).to_value();
+    make_property_nullable(&mut usage_call_page_schema, "continuation")?;
+    make_definition_property_nullable(&mut usage_call_page_schema, "WebUsageCall", "turn_id")?;
+    let usage_call_page_schema = canonical_schema(usage_call_page_schema);
+
     Ok(vec![
         ContractSchema {
             name: "WebContractBootstrap",
@@ -1677,7 +1688,7 @@ fn contract_schemas() -> Result<Vec<ContractSchema>, GenerateWebContractError> {
         ContractSchema {
             name: "WebUsageCallPage",
             decoder: "decodeWebUsageCallPage",
-            schema: canonical_schema(schemars::schema_for!(WebUsageCallPage).to_value()),
+            schema: usage_call_page_schema,
         },
     ])
 }
@@ -1696,6 +1707,24 @@ fn make_property_nullable(
 ) -> Result<(), GenerateWebContractError> {
     let property = schema
         .pointer_mut(&format!("/properties/{property_name}"))
+        .ok_or(GenerateWebContractError::UnsupportedSchema)?;
+    let concrete = property.take();
+    *property = json!({ "anyOf": [concrete, { "type": "null" }] });
+    Ok(())
+}
+
+// `#[schemars(required)]` marks an `Option` member required by emitting the
+// inner type alone, so a required-present nullable member restores its null
+// branch here. Definitions carry the members of referenced types.
+fn make_definition_property_nullable(
+    schema: &mut Value,
+    definition_name: &str,
+    property_name: &str,
+) -> Result<(), GenerateWebContractError> {
+    let property = schema
+        .pointer_mut(&format!(
+            "/$defs/{definition_name}/properties/{property_name}"
+        ))
         .ok_or(GenerateWebContractError::UnsupportedSchema)?;
     let concrete = property.take();
     *property = json!({ "anyOf": [concrete, { "type": "null" }] });

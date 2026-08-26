@@ -1477,8 +1477,17 @@ fn usage_aggregate_cost_dto(
             ProcessModelCallInputTokenSemantics::CacheInclusive
         }
     };
+    // `Unsafe` conflates two distinct states: a constituent call whose cache
+    // breakdown contradicts its input total, and a group that never reported
+    // the cache axes normalization would need. Only the first contradicts the
+    // evidence. When the group's coverage lacks an axis, normalization is
+    // merely incomplete, and the independently reported axes stay priceable
+    // exactly as they do on the individual-call path.
     if group.key().input_semantics == UsageInputTokenSemantics::CacheInclusive
         && group.cache_normalization() == UsageCacheNormalization::Unsafe
+        && tokens.input.is_some()
+        && tokens.cache_creation_input.is_some()
+        && tokens.cache_read_input.is_some()
     {
         return unavailable(WebUsageCostUnavailableReason::InvalidCacheBreakdown);
     }
@@ -2922,9 +2931,11 @@ mod tests {
     use signalbox_application::{
         AttentionAction, AttentionActivity, AttentionActivityKind, AttentionBlockedReason,
         AttentionCursor, AttentionGoalBlock, AttentionJudgeFacts, AttentionSnapshot,
-        AttentionState, AttentionSummary, UsageInputTokenSemantics, UsageTokenAxes,
-        max_attention_change_items, max_attention_goal_summary_characters,
-        max_attention_snapshot_items,
+        AttentionState, AttentionSummary, UsageAggregateGroup, UsageAggregateKey,
+        UsageAggregateTokenAxes, UsageCacheNormalization, UsageCallKind,
+        UsageCredentialProfileLabel, UsageInputTokenSemantics, UsageProvenance, UsageTokenAxes,
+        UsageTokenCoverage, UsageTokenPresence, max_attention_change_items,
+        max_attention_goal_summary_characters, max_attention_snapshot_items,
     };
     use signalbox_domain::{ProviderModelIdentity, ResolvedProviderTarget, SessionId, TurnId};
     use signalbox_web_contract::{
@@ -2941,7 +2952,8 @@ mod tests {
         WebHttpConfigurationError, WebHttpRuntime, WebHttpRuntimeError, attention_snapshot_dto,
         blob_descriptor_head, content_disposition, deterministic_test_router, if_none_match,
         ndjson_response, parse_byte_range, production_router, reader_body_until,
-        single_range_header, try_acquire_web_blob_read_permit, usage_cost_dto,
+        single_range_header, try_acquire_web_blob_read_permit, usage_aggregate_cost_dto,
+        usage_cost_dto,
     };
     use crate::HubModelConfiguration;
 
@@ -4082,6 +4094,85 @@ mod tests {
             },
             true,
         );
+
+        assert_eq!(
+            cost,
+            WebUsageCost::Unavailable {
+                reason: WebUsageCostUnavailableReason::InvalidCacheBreakdown,
+            }
+        );
+    }
+
+    fn cache_inclusive_aggregate_group(
+        tokens: UsageAggregateTokenAxes,
+        coverage: UsageTokenCoverage,
+    ) -> UsageAggregateGroup {
+        UsageAggregateGroup::new(
+            UsageAggregateKey {
+                call_kind: UsageCallKind::ModelCall,
+                model: rated_example_target(),
+                credential_profile: UsageCredentialProfileLabel::new(String::from(
+                    "exact:anthropic-primary",
+                ))
+                .expect("the label is discriminated and bounded"),
+                credential_reference: Some(String::from("anthropic-primary")),
+                provenance: UsageProvenance::Reported,
+                input_semantics: UsageInputTokenSemantics::CacheInclusive,
+                coverage,
+            },
+            2,
+            tokens,
+            UsageCacheNormalization::Unsafe,
+        )
+        .expect("the group agrees with its declared coverage and normalization")
+    }
+
+    #[test]
+    fn aggregate_usage_cost_prices_independent_axes_when_cache_axes_are_absent() {
+        let configuration = example_model_configuration();
+        let group = cache_inclusive_aggregate_group(
+            UsageAggregateTokenAxes {
+                input: Some(10),
+                output: Some(2),
+                cache_creation_input: None,
+                cache_read_input: None,
+            },
+            UsageTokenCoverage {
+                input: UsageTokenPresence::Present,
+                output: UsageTokenPresence::Present,
+                cache_creation_input: UsageTokenPresence::Absent,
+                cache_read_input: UsageTokenPresence::Absent,
+            },
+        );
+
+        let cost = usage_aggregate_cost_dto(&configuration, &group);
+
+        assert!(
+            matches!(cost, WebUsageCost::Derived { .. }),
+            "incomplete normalization must keep the independently reported \
+             output axis priceable, as the individual-call path does: {cost:?}"
+        );
+    }
+
+    #[test]
+    fn aggregate_usage_cost_rejects_a_constituent_cache_breakdown_contradiction() {
+        let configuration = example_model_configuration();
+        let group = cache_inclusive_aggregate_group(
+            UsageAggregateTokenAxes {
+                input: Some(10),
+                output: Some(2),
+                cache_creation_input: Some(3),
+                cache_read_input: Some(1),
+            },
+            UsageTokenCoverage {
+                input: UsageTokenPresence::Present,
+                output: UsageTokenPresence::Present,
+                cache_creation_input: UsageTokenPresence::Present,
+                cache_read_input: UsageTokenPresence::Present,
+            },
+        );
+
+        let cost = usage_aggregate_cost_dto(&configuration, &group);
 
         assert_eq!(
             cost,

@@ -371,7 +371,10 @@ export function SearchUsageWorkbench({
   const usageCalls = useInfiniteQuery({
     queryKey: ['search-usage', 'calls', filters],
     enabled: route.view === 'usage',
-    initialPageParam: undefined as WebUsageCallPage['continuation'],
+    // The page's continuation member is required-present nullable, so the
+    // absent first-page cursor widens the page-param type rather than casting
+    // to it.
+    initialPageParam: undefined as WebUsageCallPage['continuation'] | undefined,
     queryFn: ({ pageParam, signal }) =>
       source.usageCalls(
         { filters, order: 'newest', maxItems: USAGE_PAGE_ITEMS, after: pageParam },

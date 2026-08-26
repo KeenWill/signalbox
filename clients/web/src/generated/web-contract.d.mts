@@ -307,15 +307,10 @@ export type WebUsageCall = {
   readonly recorded_at_micros: WebUsageTimestampMicros;
   readonly session_id: WebSessionId;
   readonly tokens: WebUsageTokenAxes;
-  readonly turn_id: string;
+  readonly turn_id: string | null;
 };
 
 export type WebUsageCallCount = string;
-
-export type WebUsageCallCursor = {
-  readonly call_id: WebUuid;
-  readonly recorded_at_micros: WebUsageTimestampMicros;
-};
 
 export type WebUsageCallKind = "model_call" | "approval_judge" | "context_compaction";
 
@@ -491,7 +486,10 @@ export type WebUsageSummary = {
 
 export type WebUsageCallPage = {
   readonly calls: ReadonlyArray<WebUsageCall>;
-  readonly continuation?: WebUsageCallCursor | null;
+  readonly continuation: {
+  readonly call_id: WebUuid;
+  readonly recorded_at_micros: WebUsageTimestampMicros;
+} | null;
 };
 
 export function decodeWebContractBootstrap(value: unknown): WebContractBootstrap;

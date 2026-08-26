@@ -2537,9 +2537,16 @@ const schemas = {
             "$ref": "#/$defs/WebUsageTokenAxes"
           },
           "turn_id": {
-            "description": "Checked canonical UUID used for browser-visible non-session identities.",
-            "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
-            "type": "string"
+            "anyOf": [
+              {
+                "description": "Owning turn, present-but-null exactly for context compaction.",
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -2554,23 +2561,6 @@ const schemas = {
           "tokens",
           "recorded_at_micros",
           "cost"
-        ],
-        "type": "object"
-      },
-      "WebUsageCallCursor": {
-        "additionalProperties": false,
-        "description": "Stable terminal-time/UUID keyset boundary for usage detail traversal.",
-        "properties": {
-          "call_id": {
-            "$ref": "#/$defs/WebUuid"
-          },
-          "recorded_at_micros": {
-            "$ref": "#/$defs/WebUsageTimestampMicros"
-          }
-        },
-        "required": [
-          "recorded_at_micros",
-          "call_id"
         ],
         "type": "object"
       },
@@ -2728,7 +2718,21 @@ const schemas = {
       "continuation": {
         "anyOf": [
           {
-            "$ref": "#/$defs/WebUsageCallCursor"
+            "additionalProperties": false,
+            "description": "Present-but-null when the page exhausts the matching evidence, so an\nomitted member is an incompatibility rather than a silent exhaustion.",
+            "properties": {
+              "call_id": {
+                "$ref": "#/$defs/WebUuid"
+              },
+              "recorded_at_micros": {
+                "$ref": "#/$defs/WebUsageTimestampMicros"
+              }
+            },
+            "required": [
+              "recorded_at_micros",
+              "call_id"
+            ],
+            "type": "object"
           },
           {
             "type": "null"
@@ -2737,7 +2741,8 @@ const schemas = {
       }
     },
     "required": [
-      "calls"
+      "calls",
+      "continuation"
     ],
     "title": "WebUsageCallPage",
     "type": "object"
