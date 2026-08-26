@@ -8,6 +8,10 @@ use signalbox_persistence::attention::AttentionRepository;
 
 const FLEET_SIZE: u128 = 258;
 const FLEET_SEED: u128 = 0xa770_0000;
+/// These reads turn on fleet size and journal length, never on how many
+/// automatic resumptions a deployment still owes, so they state the unbounded
+/// automatic-resume budget instead of a number their story never uses.
+const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
 
 async fn create_mixed_scale_fleet(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     for offset in 0..FLEET_SIZE {
@@ -41,7 +45,7 @@ fn resync_cursor(changes: AttentionChanges) -> AttentionCursor {
 async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_mixed_scale_fleet(&pool).await?;
-    let repository = AttentionRepository::new(pool.clone());
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
     let first = repository.snapshot(None).await?;
     let second = repository.snapshot(first.continuation_after).await?;
     let third = repository.snapshot(second.continuation_after).await?;
@@ -153,7 +157,7 @@ async fn bounded_pages_cover_large_fleet() -> Result<(), Box<dyn Error>> {
 async fn oversized_change_burst_requires_resync() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     create_attention_session(&pool, 0).await?;
-    let repository = AttentionRepository::new(pool.clone());
+    let repository = AttentionRepository::new(pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
     let first = repository.snapshot(None).await?;
     let changed_session = first.summaries[0].session;
     sqlx::query(
@@ -223,6 +227,59 @@ async fn attention_and_outbox_publishers_share_commit_order() -> Result<(), Box<
     Ok(())
 }
 
+/// A goal command naming a session that was never created still owes its
+/// operator a durable `session_not_found` receipt, which is why `goal_command`
+/// carries no session reference. The attention journal's session reference is
+/// immediate, so publishing that rejection would fail the receipt write.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn unknown_session_goal_rejection_is_recorded_and_publishes_no_attention()
+-> Result<(), Box<dyn Error>> {
+    const UNKNOWN_SESSION_SEED: u128 = 0xa772_0000;
+
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let unknown_session = SessionId::from_uuid(Uuid::from_u128(UNKNOWN_SESSION_SEED));
+    let outcome = GoalRepository::new(pool.clone())
+        .handle_user_command(
+            GoalUserCommand::new(
+                DurableCommandId::from_uuid(Uuid::from_u128(UNKNOWN_SESSION_SEED + 1)),
+                unknown_session,
+                GoalUserAction::Resume(None),
+            ),
+            None,
+            |_| None,
+        )
+        .await?;
+    let published: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM operator_attention_change WHERE session_id = $1")
+            .bind(unknown_session.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+    let recorded: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM goal_command
+          WHERE session_id = $1
+            AND result_kind = 'rejected'
+            AND rejection_kind = 'session_not_found'",
+    )
+    .bind(unknown_session.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(matches!(
+        outcome,
+        GoalCommandHandlingOutcome::Recorded(GoalCommandResult::Rejected(
+            GoalCommandRejection::SessionNotFound
+        ))
+    ));
+    assert_eq!(recorded, 1);
+    assert_eq!(published, 0);
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn delegated_session_backfill_uses_creation_placement_time() -> Result<(), Box<dyn Error>> {
@@ -235,7 +292,7 @@ async fn delegated_session_backfill_uses_creation_placement_time() -> Result<(),
     setup.commit().await?;
     let migration = MIGRATOR
         .iter()
-        .find(|migration| migration.version == 202608250800)
+        .find(|migration| migration.version == OPERATOR_ATTENTION_CHANGE_MIGRATION_VERSION)
         .expect("the attention migration is registered");
     let mut connection = pool.acquire().await?;
     connection.apply("_sqlx_migrations", migration).await?;

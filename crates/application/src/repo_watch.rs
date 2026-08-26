@@ -66,7 +66,7 @@ const REPO_WATCH_EVENT_IDENTIFIED_CONTENT_DOMAIN_V1: &[u8] =
 /// an occurrence number, which mints a content identity that collides with an
 /// already-durable one, so the differ stops rather than emit an identity that
 /// does not identify its occurrence.
-// numeric-bound: ceiling - caps one repository's resident and durable occurrence frontier
+// numeric-bound: guard - prevents hostile identity fan-out from exhausting resident memory
 const MAX_REPO_WATCH_EVENT_IDENTITY_STREAMS: usize = 1_000_000;
 
 /// A source-independent SHA-256 identity for one normalized event occurrence.
@@ -270,7 +270,7 @@ pub enum RepoWatchPullRequestLifecycle {
     Merged,
 }
 
-// numeric-bound: tunable - admits the provider check-generation text this accepts
+// numeric-bound: guard - preserves the advertised provider check-generation wire grammar
 const MAX_CHECK_COMPLETION_GENERATION_BYTES: usize = 64;
 
 /// Opaque provider generation for one completed check execution.

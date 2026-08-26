@@ -1,18 +1,48 @@
-import { Download, FileQuestion, Image as ImageIcon, Maximize2 } from 'lucide-react'
-import { useState } from 'react'
+import {
+  Ban,
+  Braces,
+  Download,
+  FileCode2,
+  FileQuestion,
+  FileText,
+  Image as ImageIcon,
+  Maximize2,
+  Minimize2,
+  ShieldAlert,
+} from 'lucide-react'
+import { type ComponentType, type ReactNode, useEffect, useRef, useState } from 'react'
+import { type CommandContext, invokeCommand } from '../../commands'
 import type { WebBlobDescriptor } from '../../generated/web-contract.mjs'
-import { artifactScenario } from './artifactScenario'
+import { actions, useAppDispatch, useAppSelector } from '../../state'
+import { artifactScenario, selectBoundedOriginalView } from './artifactScenario'
+import {
+  ARTIFACT_PREVIEW_CHARACTERS,
+  type ArtifactItem,
+  boundArtifactText,
+  type CodeArtifact,
+  type GenericBlobArtifact,
+  type RemoteImageArtifact,
+  type RenderableArtifact,
+  type SignalboxImageArtifact,
+  type TextArtifact,
+} from './artifactTypes'
+import { useVerifiedOriginalImage } from './originalImageService'
+import { admitRemoteMediaUrl } from './remoteMediaPreference'
 import './artifacts.css'
 
 type WebBlobAvailableView = WebBlobDescriptor['available_views'][number]
 type WebBlobViewKind = WebBlobAvailableView['kind']
+type SupportedArtifactKind = RenderableArtifact['kind']
 
 const IMAGE_VIEW_PRIORITY: ReadonlyArray<WebBlobViewKind> = ['preview', 'thumbnail']
 
-export const selectImageView = (descriptor: WebBlobDescriptor): WebBlobAvailableView | undefined =>
+export const selectImageView = (
+  descriptor: WebBlobDescriptor,
+  failedContentUrls: ReadonlySet<string> = new Set(),
+): WebBlobAvailableView | undefined =>
   IMAGE_VIEW_PRIORITY.map((kind) =>
     descriptor.available_views.find((view) => view.kind === kind),
-  ).find((view) => view !== undefined)
+  ).find((view) => view !== undefined && !failedContentUrls.has(view.content_url))
 
 export const imageViewLabel = (kind: WebBlobViewKind): string =>
   ({
@@ -27,92 +57,473 @@ const viewByKind = (
   kind: WebBlobViewKind,
 ): WebBlobAvailableView | undefined => descriptor.available_views.find((view) => view.kind === kind)
 
-const displayName = (descriptor: WebBlobDescriptor): string =>
-  descriptor.display_filename[0] ?? descriptor.digest
+interface RendererProps<T extends RenderableArtifact> {
+  artifact: T
+  commandContext: CommandContext
+}
 
-function ArtifactRenderer({ descriptor }: { descriptor: WebBlobDescriptor }) {
-  const [originalRequested, setOriginalRequested] = useState(false)
-  const automatic = selectImageView(descriptor)
-  const original = viewByKind(descriptor, 'browser_native')
-  const download = viewByKind(descriptor, 'download')
-  const rendered = originalRequested && original ? original : automatic
-  const derivation = rendered?.derivations[0]
+type ArtifactCommandId =
+  | 'artifact.preview.expand'
+  | 'artifact.preview.collapse'
+  | 'artifact.original.load'
+
+const selectArtifact = (commandContext: CommandContext, artifactId: string) => {
+  invokeCommand('artifact.select', {
+    ...commandContext,
+    artifactSelectionTarget: artifactId,
+  })
+}
+
+const invokeArtifactAction = (
+  commandContext: CommandContext,
+  commandId: ArtifactCommandId,
+  artifactId: string,
+) => {
+  selectArtifact(commandContext, artifactId)
+  invokeCommand(commandId, commandContext)
+}
+
+function TextBody({ artifact, commandContext }: RendererProps<TextArtifact>) {
+  const expanded = useAppSelector((state) => Boolean(state.app.expandedArtifacts[artifact.id]))
+  const bounded = boundArtifactText(
+    artifact.content,
+    artifact.characterCount,
+    expanded ? 'expanded' : 'preview',
+  )
+  const canExpand = !expanded && bounded.omittedCharacters > 0
 
   return (
-    <article className="artifact-row" aria-label={`Artifact ${displayName(descriptor)}`}>
+    <div className="artifact-rendered artifact-text">
+      <textarea
+        className="artifact-scroll"
+        aria-label={`Bounded preview of ${artifact.displayName}`}
+        onFocusCapture={() => selectArtifact(commandContext, artifact.id)}
+        readOnly
+        value={bounded.content}
+      />
+      <BoundedFooter
+        omittedCharacters={bounded.omittedCharacters}
+        canExpand={canExpand}
+        expanded={expanded}
+        onToggle={() =>
+          invokeArtifactAction(
+            commandContext,
+            expanded ? 'artifact.preview.collapse' : 'artifact.preview.expand',
+            artifact.id,
+          )
+        }
+      />
+    </div>
+  )
+}
+
+function CodeBody({ artifact, commandContext }: RendererProps<CodeArtifact>) {
+  const expanded = useAppSelector((state) => Boolean(state.app.expandedArtifacts[artifact.id]))
+  const bounded = boundArtifactText(
+    artifact.content,
+    artifact.characterCount,
+    expanded ? 'expanded' : 'preview',
+  )
+  const canExpand = !expanded && bounded.omittedCharacters > 0
+
+  return (
+    <div className="artifact-rendered artifact-code">
+      <div className="artifact-code-heading">
+        <Braces aria-hidden="true" />
+        <span>{artifact.language}</span>
+      </div>
+      <textarea
+        className="artifact-scroll"
+        aria-label={`Bounded preview of ${artifact.displayName}`}
+        onFocusCapture={() => selectArtifact(commandContext, artifact.id)}
+        readOnly
+        value={bounded.content}
+      />
+      <BoundedFooter
+        omittedCharacters={bounded.omittedCharacters}
+        canExpand={canExpand}
+        expanded={expanded}
+        onToggle={() =>
+          invokeArtifactAction(
+            commandContext,
+            expanded ? 'artifact.preview.collapse' : 'artifact.preview.expand',
+            artifact.id,
+          )
+        }
+      />
+    </div>
+  )
+}
+
+function BoundedFooter({
+  omittedCharacters,
+  canExpand,
+  expanded,
+  onToggle,
+}: {
+  omittedCharacters: number
+  canExpand: boolean
+  expanded: boolean
+  onToggle: () => void
+}) {
+  return (
+    <footer className="artifact-bounded-footer">
+      <span>
+        {omittedCharacters > 0
+          ? `${omittedCharacters.toLocaleString()} characters remain outside this bounded view`
+          : 'Complete bounded content shown'}
+      </span>
+      {(canExpand || expanded) && (
+        <button type="button" onClick={onToggle}>
+          {expanded ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
+          {expanded ? 'Collapse preview' : 'Expand bounded preview'}
+        </button>
+      )}
+    </footer>
+  )
+}
+
+function SignalboxImageBody({ artifact, commandContext }: RendererProps<SignalboxImageArtifact>) {
+  const dispatch = useAppDispatch()
+  const [failedAutomaticUrls, setFailedAutomaticUrls] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  )
+  const originalState = useAppSelector((state) => state.app.originalArtifacts[artifact.id])
+  const { descriptor } = artifact.source
+  const automatic = selectImageView(descriptor, failedAutomaticUrls)
+  const advertisedOriginal = viewByKind(descriptor, 'browser_native')
+  const original = selectBoundedOriginalView(descriptor)
+  const download = viewByKind(descriptor, 'download')
+  const originalRequested = originalState === 'loading' || originalState === 'loaded'
+  const originalQuery = useVerifiedOriginalImage(original, originalRequested)
+  const [verifiedOriginalUrl, setVerifiedOriginalUrl] = useState<string | null>(null)
+  const verifiedBlob = originalQuery.data
+  const rendered =
+    originalRequested && original && verifiedOriginalUrl !== null ? original : automatic
+  const derivation = rendered?.derivations[0]
+
+  // The object URL is allocated and revoked by one effect owning its lifecycle: allocation during
+  // render would strand the extra URL produced by development double-rendering unrevoked.
+  useEffect(() => {
+    if (verifiedBlob === undefined) return
+    const url = URL.createObjectURL(verifiedBlob)
+    setVerifiedOriginalUrl(url)
+    return () => {
+      setVerifiedOriginalUrl(null)
+      URL.revokeObjectURL(url)
+    }
+  }, [verifiedBlob])
+
+  // Project the service's request state into the explicit control state: a new failure settles the
+  // request as failed, and a retry that finds a failure this projection already settled asks the
+  // service to fetch again. Errors settled before this mount (the ref's initial value) stay
+  // retryable rather than immediately re-settling.
+  const settledErrorCount = useRef(originalQuery.errorUpdateCount)
+  const { errorUpdateCount, isError, isFetching, refetch } = originalQuery
+  const verified = originalQuery.data !== undefined
+  useEffect(() => {
+    if (!originalRequested || isFetching || verified) return
+    if (errorUpdateCount > settledErrorCount.current) {
+      settledErrorCount.current = errorUpdateCount
+      dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'failed' }))
+      return
+    }
+    if (isError) void refetch()
+  }, [
+    artifact.id,
+    dispatch,
+    errorUpdateCount,
+    isError,
+    isFetching,
+    originalRequested,
+    refetch,
+    verified,
+  ])
+
+  return (
+    <div className="artifact-image-layout">
       <div className="artifact-visual">
         {rendered ? (
           <img
-            src={rendered.content_url}
-            alt={`${imageViewLabel(rendered.kind)} of ${displayName(descriptor)}`}
+            src={
+              rendered.kind === 'browser_native' && verifiedOriginalUrl !== null
+                ? verifiedOriginalUrl
+                : rendered.content_url
+            }
+            alt={`${imageViewLabel(rendered.kind)} of ${artifact.displayName}`}
             loading="lazy"
+            onLoad={() => {
+              if (rendered.kind === 'browser_native' && originalState === 'loading') {
+                dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'loaded' }))
+              }
+            }}
+            onError={() => {
+              if (rendered.kind === 'browser_native') {
+                dispatch(actions.artifactOriginalSettled({ id: artifact.id, result: 'failed' }))
+              } else {
+                setFailedAutomaticUrls((current) => {
+                  const next = new Set(current)
+                  next.add(rendered.content_url)
+                  return next
+                })
+              }
+            }}
           />
         ) : (
           <FileQuestion aria-label="No compatible inline renderer" />
         )}
       </div>
-      <div className="artifact-detail">
-        <header>
-          {rendered ? <ImageIcon aria-hidden="true" /> : <FileQuestion aria-hidden="true" />}
-          <div>
-            <strong>{displayName(descriptor)}</strong>
-            <small>{descriptor.byte_length} bytes · immutable original</small>
-          </div>
-        </header>
-        <dl>
-          <div>
-            <dt>Renderer</dt>
-            <dd>{rendered?.kind ?? 'metadata fallback'}</dd>
-          </div>
-          <div>
-            <dt>Declared type</dt>
-            <dd>{descriptor.declared_media_type}</dd>
-          </div>
-          <div>
-            <dt>Provenance</dt>
-            <dd>{derivation?.transformation_name ?? 'original bytes'}</dd>
-          </div>
-        </dl>
-        <div className="artifact-actions">
-          {original && (
-            <button
-              type="button"
-              aria-pressed={originalRequested}
-              onClick={() => setOriginalRequested(true)}
-            >
-              <Maximize2 aria-hidden="true" />
-              {originalRequested ? 'Original loaded' : 'Load original'}
-            </button>
+      <ArtifactMetadata
+        renderer={rendered?.kind ?? 'metadata fallback'}
+        mediaType={descriptor.declared_media_type}
+        byteLength={descriptor.byte_length}
+        provenance={derivation?.transformation_name ?? 'original bytes'}
+      >
+        {original && (
+          <button
+            type="button"
+            aria-pressed={originalState === 'loaded'}
+            aria-disabled={originalState === 'loading' || originalState === 'loaded'}
+            onClick={() => {
+              if (originalState !== 'loading' && originalState !== 'loaded') {
+                invokeArtifactAction(commandContext, 'artifact.original.load', artifact.id)
+              }
+            }}
+          >
+            <Maximize2 aria-hidden="true" />
+            {originalState === 'loading'
+              ? 'Loading original'
+              : originalState === 'loaded'
+                ? 'Original loaded'
+                : originalState === 'failed'
+                  ? 'Retry original'
+                  : 'Load original'}
+          </button>
+        )}
+        {advertisedOriginal && !original && (
+          <p>Original exceeds inline admission bounds. Download remains available.</p>
+        )}
+        {originalState === 'failed' && (
+          <p role="status">
+            {automatic
+              ? `Original image failed to load. The ${automatic.kind} remains available.`
+              : 'Original image failed to load. No automatic image view remains available.'}
+          </p>
+        )}
+        {originalState !== 'failed' &&
+          !originalRequested &&
+          failedAutomaticUrls.size > 0 &&
+          !automatic && (
+            <p role="status">
+              No admitted inline image view could be loaded. Metadata and download remain available.
+            </p>
           )}
-          {download && (
-            <a href={download.content_url} download={displayName(descriptor)}>
-              <Download aria-hidden="true" /> Download
-            </a>
-          )}
+        {download && (
+          <a href={download.content_url} download={artifact.displayName}>
+            <Download aria-hidden="true" /> Download
+          </a>
+        )}
+      </ArtifactMetadata>
+    </div>
+  )
+}
+
+function RemoteImageBody({ artifact }: RendererProps<RemoteImageArtifact>) {
+  const admittedUrl = admitRemoteMediaUrl(artifact.source.url)
+
+  return (
+    <div className="artifact-image-layout">
+      <div className="artifact-visual remote-media">
+        <Ban aria-label="Remote media not loaded" />
+      </div>
+      <ArtifactMetadata
+        renderer={admittedUrl === null ? 'remote media blocked' : 'remote media unavailable'}
+        mediaType="Not inspected"
+        provenance="External URL"
+      >
+        {admittedUrl !== null && (
+          <p>Remote rendering requires a bounded owning media service. No bytes were fetched.</p>
+        )}
+      </ArtifactMetadata>
+    </div>
+  )
+}
+
+function GenericBlobBody({ artifact }: RendererProps<GenericBlobArtifact>) {
+  const download = viewByKind(artifact.descriptor, 'download')
+
+  return (
+    <div className="artifact-image-layout">
+      <div className="artifact-visual">
+        <FileQuestion aria-label="No compatible inline renderer" />
+      </div>
+      <ArtifactMetadata
+        renderer="metadata fallback"
+        mediaType={artifact.descriptor.declared_media_type}
+        byteLength={artifact.descriptor.byte_length}
+        provenance="original bytes"
+      >
+        {download && (
+          <a href={download.content_url} download={artifact.displayName}>
+            <Download aria-hidden="true" /> Download
+          </a>
+        )}
+      </ArtifactMetadata>
+    </div>
+  )
+}
+
+const isSignalboxImage = (
+  artifact: SignalboxImageArtifact | RemoteImageArtifact,
+): artifact is SignalboxImageArtifact => artifact.source.kind === 'signalbox_blob'
+
+function ImageBody({
+  artifact,
+  commandContext,
+}: RendererProps<SignalboxImageArtifact | RemoteImageArtifact>) {
+  return isSignalboxImage(artifact) ? (
+    <SignalboxImageBody artifact={artifact} commandContext={commandContext} />
+  ) : (
+    <RemoteImageBody artifact={artifact} commandContext={commandContext} />
+  )
+}
+
+function ArtifactMetadata({
+  renderer,
+  mediaType,
+  byteLength,
+  provenance,
+  children,
+}: {
+  renderer: string
+  mediaType: string
+  byteLength?: string
+  provenance: string
+  children: ReactNode
+}) {
+  return (
+    <div className="artifact-detail">
+      <dl>
+        <div>
+          <dt>Renderer</dt>
+          <dd>{renderer}</dd>
+        </div>
+        <div>
+          <dt>Declared type</dt>
+          <dd>{mediaType}</dd>
+        </div>
+        {byteLength !== undefined && (
+          <div>
+            <dt>Byte length</dt>
+            <dd>{BigInt(byteLength).toLocaleString()} bytes</dd>
+          </div>
+        )}
+        <div>
+          <dt>Provenance</dt>
+          <dd>{provenance}</dd>
+        </div>
+      </dl>
+      <div className="artifact-actions">{children}</div>
+    </div>
+  )
+}
+
+const rendererRegistry: {
+  [Kind in SupportedArtifactKind]: ComponentType<
+    RendererProps<Extract<RenderableArtifact, { kind: Kind }>>
+  >
+} = {
+  text: TextBody,
+  code: CodeBody,
+  image: ImageBody,
+  blob: GenericBlobBody,
+}
+
+export const registeredArtifactKinds = Object.freeze(Object.keys(rendererRegistry).sort())
+
+function RendererBoundary({
+  artifact,
+  commandContext,
+}: {
+  artifact: ArtifactItem
+  commandContext: CommandContext
+}) {
+  if (artifact.kind === 'blocked') {
+    return (
+      <div className="artifact-state blocked" role="status">
+        <ShieldAlert aria-hidden="true" />
+        <div>
+          <strong>Artifact blocked</strong>
+          <p>{artifact.reason}</p>
         </div>
       </div>
+    )
+  }
+  const Renderer = rendererRegistry[artifact.kind] as ComponentType<RendererProps<typeof artifact>>
+  return <Renderer artifact={artifact} commandContext={commandContext} />
+}
+
+const artifactIcon = (artifact: ArtifactItem) => {
+  if (artifact.kind === 'text') return <FileText aria-hidden="true" />
+  if (artifact.kind === 'code') return <FileCode2 aria-hidden="true" />
+  if (artifact.kind === 'image') return <ImageIcon aria-hidden="true" />
+  if (artifact.kind === 'blob') return <FileQuestion aria-hidden="true" />
+  if (artifact.kind === 'blocked') return <ShieldAlert aria-hidden="true" />
+  return <FileQuestion aria-hidden="true" />
+}
+
+export function ArtifactRenderer({
+  artifact,
+  commandContext,
+}: {
+  artifact: ArtifactItem
+  commandContext: CommandContext
+}) {
+  const selected = useAppSelector((state) => state.app.selectedArtifact === artifact.id)
+  return (
+    <article
+      className="artifact-row"
+      aria-label={`Artifact ${artifact.displayName}`}
+      data-selected={selected || undefined}
+    >
+      <button
+        type="button"
+        className="artifact-heading"
+        aria-pressed={selected}
+        onClick={() => selectArtifact(commandContext, artifact.id)}
+      >
+        {artifactIcon(artifact)}
+        <div>
+          <strong>{artifact.displayName}</strong>
+          <small>{artifact.kind === 'blocked' ? artifact.attemptedKind : artifact.kind}</small>
+        </div>
+      </button>
+      <RendererBoundary artifact={artifact} commandContext={commandContext} />
     </article>
   )
 }
 
-export function ArtifactWorkbench() {
+export function ArtifactWorkbench({ commandContext }: { commandContext: CommandContext }) {
   return (
     <section
       className="artifact-panel"
-      aria-label="Blob evidence"
+      aria-labelledby="artifact-heading"
       data-command-focus-target
       tabIndex={-1}
     >
-      <header className="section-header">
+      <header className="section-header artifact-panel-heading">
         <div>
-          <span className="eyebrow">Capability projection</span>
-          <h1 id="artifact-heading">Blob evidence</h1>
+          <span className="eyebrow">Typed capability projection</span>
+          <h1 id="artifact-heading">Artifact renderers</h1>
         </div>
-        <span className="window-count">2 descriptors · 0 original bytes prefetched</span>
       </header>
+      <p className="artifact-bound-summary">
+        {artifactScenario.length} typed records · {ARTIFACT_PREVIEW_CHARACTERS.toLocaleString()}
+        -character previews · 0 original bytes prefetched
+      </p>
       <div className="artifact-list">
-        {artifactScenario.map((descriptor) => (
-          <ArtifactRenderer key={descriptor.digest} descriptor={descriptor} />
+        {artifactScenario.map((artifact) => (
+          <ArtifactRenderer key={artifact.id} artifact={artifact} commandContext={commandContext} />
         ))}
       </div>
     </section>

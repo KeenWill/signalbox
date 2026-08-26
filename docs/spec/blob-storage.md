@@ -31,6 +31,10 @@ Bounded direct metadata and range reads, replica fallback classification,
 non-waiting process admission, and the terminal read commands are verified
 against this implementing change (`agent/blob-storage-read-wire`).
 
+The canonical multipart domain algebra and ordered process-protocol vocabulary
+are verified against this implementing change
+(`agent/blob-storage-multipart-algebra`).
+
 Same-origin browser delivery, immutable derivation provenance, and lazy isolated
 image derivatives are verified against this PR (`agent/web-blob-delivery`).
 

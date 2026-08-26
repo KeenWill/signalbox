@@ -5,13 +5,13 @@ use std::{future::Future, time::SystemTime};
 use signalbox_domain::{SessionId, TurnId};
 
 /// Maximum session summaries returned by one coherent fleet snapshot.
-// numeric-bound: ceiling - caps one fleet response's rows and projected bytes
+// numeric-bound: guard - prevents a growing fleet from projecting an unbounded snapshot response
 const ATTENTION_SNAPSHOT_ITEM_CEILING: u16 = 32;
 /// Maximum Unicode scalar values retained from blocked-goal need text.
-// numeric-bound: ceiling - prevents one fleet summary from carrying unbounded goal text
+// numeric-bound: guard - prevents one operator-authored goal need from carrying unbounded text into every summary
 const ATTENTION_GOAL_SUMMARY_CHARACTER_CEILING: u16 = 128;
 /// Maximum journal records consumed by one incremental follow read.
-// numeric-bound: ceiling - bounds one follower database read and replacement batch
+// numeric-bound: guard - prevents a change-journal backlog from driving an unbounded follow read and replacement batch
 const ATTENTION_CHANGE_ITEM_CEILING: u16 = 32;
 
 /// Returns the hard safety ceiling for one coherent fleet snapshot.

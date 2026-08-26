@@ -7,6 +7,7 @@ final class ProcessProtocolTests: XCTestCase {
   private let sessionID = "11111111-1111-4111-8111-111111111111"
   private let turnID = "22222222-2222-4222-8222-222222222222"
   private let toolRequestID = "33333333-3333-4333-8333-333333333333"
+  private let blobDigest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
   func testClientFrameUsesVersionOneAndCanonicalStringScalars() throws {
     let frame = SignalboxProcessClientFrame(
@@ -127,7 +128,123 @@ final class ProcessProtocolTests: XCTestCase {
 
     XCTAssertEqual(
       String(decoding: encoded, as: UTF8.self),
-      #"{"request":{"command_id":"\#(turnID)","content":"Stop and continue","descendant_scope":"parent_and_descendants","expected_active_turn_id":"\#(turnID)","expected_defaults_version":"3","model_settings":{"fast_mode":{"kind":"inherit"},"reasoning_level":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session_id":"\#(sessionID)","type":"stop_turn"},"request_id":"9","version":1}"#
+      #"{"request":{"command_id":"\#(turnID)","content":[{"text":"Stop and continue","type":"text"}],"descendant_scope":"parent_and_descendants","expected_active_turn_id":"\#(turnID)","expected_defaults_version":"3","model_settings":{"fast_mode":{"kind":"inherit"},"reasoning_level":{"kind":"inherit"},"service_tier":{"kind":"inherit"}},"session_id":"\#(sessionID)","type":"stop_turn"},"request_id":"9","version":1}"#
+    )
+  }
+
+  /// INV-012 / INV-060: multipart decoding preserves ordered attachment
+  /// metadata and structural replay equality.
+  func testUserInputContentPreservesOrderedAttachmentMetadata() throws {
+    let content = try SignalboxUserInputContent(validating: [
+      .text("before"),
+      .attachment(
+        digest: try SignalboxCanonicalBlobDigest(validating: blobDigest),
+        kind: .document,
+        mediaType: "application/pdf",
+        displayFilename: "brief.pdf"
+      ),
+      .text("after"),
+    ])
+
+    let encoded = try SignalboxJSONCoding.encoder().encode(content)
+    let decoded = try SignalboxJSONCoding.decoder().decode(
+      SignalboxUserInputContent.self,
+      from: encoded
+    )
+
+    XCTAssertEqual(decoded, content)
+  }
+
+  func testTranscriptUserEntryDecodesTypedMultipartContent() throws {
+    let entryID = "44444444-4444-4444-8444-444444444444"
+    let message = try SignalboxJSONCoding.decoder().decode(
+      SignalboxProcessServerMessage.self,
+      from: Data(
+        """
+        {
+          "type":"transcript_user_entry",
+          "entry_index":"0",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"\(entryID)",
+          "accepted_input_id":"\(toolRequestID)",
+          "turn_id":"\(turnID)",
+          "content":[
+            {"type":"text","text":"before"},
+            {
+              "type":"attachment",
+              "digest":"\(blobDigest)",
+              "kind":"document",
+              "media_type":"application/pdf",
+              "display_filename":"brief.pdf"
+            },
+            {"type":"text","text":"after"}
+          ]
+        }
+        """.utf8
+      )
+    )
+
+    guard case .transcriptUserEntry(let entry) = message else {
+      return XCTFail("Expected a typed transcript user entry.")
+    }
+    XCTAssertEqual(entry.entryIndex, SignalboxCanonicalUInt64(rawValue: 0))
+    XCTAssertEqual(entry.sourceSessionID.rawValue, sessionID)
+    XCTAssertEqual(entry.entryID.rawValue, entryID)
+    XCTAssertEqual(entry.acceptedInputID.rawValue, toolRequestID)
+    XCTAssertEqual(entry.turnID.rawValue, turnID)
+    XCTAssertEqual(
+      entry.content,
+      try SignalboxUserInputContent(validating: [
+        .text("before"),
+        .attachment(
+          digest: SignalboxCanonicalBlobDigest(validating: blobDigest),
+          kind: .document,
+          mediaType: "application/pdf",
+          displayFilename: "brief.pdf"
+        ),
+        .text("after"),
+      ])
+    )
+  }
+
+  func testUserInputContentRejectsAdjacentTextParts() {
+    XCTAssertThrowsError(
+      try SignalboxUserInputContent(validating: [.text("first"), .text("second")])
+    )
+  }
+
+  /// INV-012: native multipart decoding stops at the retained-parts bound
+  /// without decoding an unbounded remainder.
+  func testUserInputContentDecodingStopsAtThePartLimit() throws {
+    let retained = Array(
+      repeating: #"{"type":"text","text":"x"}"#,
+      count: SignalboxProcessProtocol.maximumUserInputParts
+    )
+    let encoded = Data(("[" + (retained + ["false"]).joined(separator: ",") + "]").utf8)
+
+    XCTAssertThrowsError(
+      try SignalboxJSONCoding.decoder().decode(SignalboxUserInputContent.self, from: encoded)
+    ) { error in
+      guard case DecodingError.dataCorrupted(let context) = error else {
+        return XCTFail("Expected the multipart count error, got \(error).")
+      }
+      XCTAssertEqual(context.debugDescription, "User input part count is invalid.")
+    }
+  }
+
+  func testUserInputContentDisplayTextEscapesFilenameLineBreaks() throws {
+    let content = try SignalboxUserInputContent(validating: [
+      .attachment(
+        digest: try SignalboxCanonicalBlobDigest(validating: blobDigest),
+        kind: .document,
+        mediaType: "application/pdf",
+        displayFilename: "brief.pdf\n[trusted-looking transcript line]"
+      )
+    ])
+
+    XCTAssertEqual(
+      content.displayText,
+      "[attachment document \"brief.pdf\\n[trusted-looking transcript line]\" \(blobDigest)]"
     )
   }
 
@@ -1274,6 +1391,32 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(ProcessProtocolFixture.userDenialReason(in: frame.message), reason)
   }
 
+  func testLegacyUserTextEntryFailsClosed() throws {
+    let encoded = Data(
+      """
+      {
+        "version":1,
+        "request_id":"9",
+        "message":{
+          "type":"transcript_text_entry",
+          "entry_index":"0",
+          "source_session_id":"\(sessionID)",
+          "entry_id":"33333333-3333-4333-8333-333333333333",
+          "entry":{
+            "type":"user",
+            "accepted_input_id":"44444444-4444-4444-8444-444444444444",
+            "turn_id":"\(turnID)"
+          }
+        }
+      }
+      """.utf8
+    )
+
+    let frame = try SignalboxProcessServerFrame.decode(from: encoded)
+
+    XCTAssertNotNil(ProcessProtocolFixture.textEntryDecodingDiagnostic(in: frame.message))
+  }
+
   func testContextCompactionFramesDecodeTheirCurrentShapes() throws {
     let contextCompactionID = "33333333-3333-4333-8333-333333333333"
     let modelCallID = "44444444-4444-4444-8444-444444444444"
@@ -1664,7 +1807,7 @@ final class ProcessProtocolTests: XCTestCase {
     )
 
     XCTAssertEqual(
-      try ProcessProtocolFixture.failedProviderCause(in: frame.message),
+      try ProcessProtocolFixture.failedModelCallCause(in: frame.message),
       .unknown(ProcessProtocolFixture.futureProviderFailureCause)
     )
   }
@@ -1765,7 +1908,7 @@ final class ProcessProtocolTests: XCTestCase {
     XCTAssertEqual(version.rawValue, spelling)
   }
 
-  func testFailedTerminalProviderCauseDecodesAsAClosedClassification() throws {
+  func testFailedTerminalModelCallCauseDecodesAsAClosedClassification() throws {
     let frame = try SignalboxProcessServerFrame.decode(
       from: ProcessProtocolFixture.failedTurnFrame(
         turnID: turnID, cause: "quota_exhausted"
@@ -1773,8 +1916,47 @@ final class ProcessProtocolTests: XCTestCase {
     )
 
     XCTAssertEqual(
-      try ProcessProtocolFixture.failedProviderCause(in: frame.message),
+      try ProcessProtocolFixture.failedModelCallCause(in: frame.message),
       .quotaExhausted
+    )
+  }
+
+  func testAttachmentTooLargeCauseDecodesAsAClosedClassification() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.failedTurnFrame(
+        turnID: turnID, cause: "attachment_too_large"
+      )
+    )
+
+    XCTAssertEqual(
+      try ProcessProtocolFixture.failedModelCallCause(in: frame.message),
+      .attachmentTooLarge
+    )
+  }
+
+  func testAttachmentMissingCauseDecodesAsAClosedClassification() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.failedTurnFrame(
+        turnID: turnID, cause: "attachment_missing"
+      )
+    )
+
+    XCTAssertEqual(
+      try ProcessProtocolFixture.failedModelCallCause(in: frame.message),
+      .attachmentMissing
+    )
+  }
+
+  func testAttachmentCorruptCauseDecodesAsAClosedClassification() throws {
+    let frame = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.failedTurnFrame(
+        turnID: turnID, cause: "attachment_corrupt"
+      )
+    )
+
+    XCTAssertEqual(
+      try ProcessProtocolFixture.failedModelCallCause(in: frame.message),
+      .attachmentCorrupt
     )
   }
 
@@ -2131,6 +2313,48 @@ final class ProcessProtocolTests: XCTestCase {
       ProcessProtocolFixture.decodingDiagnostic(in: frame.message),
       ProcessProtocolFixture.unknownRejectionDetailDiagnostic
     )
+  }
+
+  func testAttachmentRejectionsDecodeTypedDetails() throws {
+    let missing = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.attachmentBlobNotFoundFrame(digest: blobDigest)
+    )
+    let oversized = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.attachmentByteBudgetExceededFrame(maximumBytes: "4096")
+    )
+
+    XCTAssertEqual(
+      try ProcessProtocolFixture.rejectionDetail(in: missing.message),
+      .attachmentBlobNotFound(
+        digest: try SignalboxCanonicalBlobDigest(validating: blobDigest)
+      )
+    )
+    XCTAssertEqual(
+      try ProcessProtocolFixture.rejectionDetail(in: oversized.message),
+      .attachmentByteBudgetExceeded(
+        maximumBytes: SignalboxCanonicalUInt64(rawValue: 4096)
+      )
+    )
+  }
+
+  func testAttachmentRejectionsRejectMalformedKnownDetails() throws {
+    let invalidDigest = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.attachmentBlobNotFoundFrame(digest: "sha256:AA")
+    )
+    let zeroMaximum = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.attachmentByteBudgetExceededFrame(maximumBytes: "0")
+    )
+    let noncanonicalMaximum = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.attachmentByteBudgetExceededFrame(maximumBytes: "04096")
+    )
+    let expanded = try SignalboxProcessServerFrame.decode(
+      from: ProcessProtocolFixture.expandedAttachmentBlobNotFoundFrame(digest: blobDigest)
+    )
+
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: invalidDigest.message))
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: zeroMaximum.message))
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: noncanonicalMaximum.message))
+    XCTAssertNotNil(ProcessProtocolFixture.decodingDiagnostic(in: expanded.message))
   }
 
   func testTurnControlRejectionsDecodeTypedDetails() throws {
@@ -2639,6 +2863,43 @@ private enum ProcessProtocolFixture {
         }
       }
       """.utf8
+    )
+  }
+
+  static func attachmentBlobNotFoundFrame(digest: String) -> Data {
+    rejectedFrame(
+      detail:
+        """
+        {
+          "type":"attachment_blob_not_found",
+          "digest":"\(digest)"
+        }
+        """
+    )
+  }
+
+  static func attachmentByteBudgetExceededFrame(maximumBytes: String) -> Data {
+    rejectedFrame(
+      detail:
+        """
+        {
+          "type":"attachment_byte_budget_exceeded",
+          "maximum_bytes":"\(maximumBytes)"
+        }
+        """
+    )
+  }
+
+  static func expandedAttachmentBlobNotFoundFrame(digest: String) -> Data {
+    rejectedFrame(
+      detail:
+        """
+        {
+          "type":"attachment_blob_not_found",
+          "digest":"\(digest)",
+          "future_field":true
+        }
+        """
     )
   }
 
@@ -3157,7 +3418,7 @@ private enum ProcessProtocolFixture {
     return count.rawValue
   }
 
-  static func failedProviderCause(
+  static func failedModelCallCause(
     in message: SignalboxProcessServerMessage
   ) throws -> SignalboxFailedModelCallCause {
     guard
@@ -3322,6 +3583,17 @@ private enum ProcessProtocolFixture {
     in message: SignalboxProcessServerMessage
   ) -> SignalboxDecodingDiagnostic? {
     guard case .unknown(_, _, let diagnostic) = message else {
+      return nil
+    }
+    return diagnostic
+  }
+
+  static func textEntryDecodingDiagnostic(
+    in message: SignalboxProcessServerMessage
+  ) -> SignalboxDecodingDiagnostic? {
+    guard case .transcriptTextEntry(let textEntry) = message,
+      case .unknown("user", _, let diagnostic) = textEntry.entry
+    else {
       return nil
     }
     return diagnostic

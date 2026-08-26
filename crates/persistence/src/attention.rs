@@ -74,12 +74,24 @@ impl From<AttentionCorruption> for AttentionRepositoryError {
 #[derive(Clone, Debug)]
 pub struct AttentionRepository {
     pool: PgPool,
+    automatic_resume_attempt_budget: Option<u32>,
 }
 
 impl AttentionRepository {
+    /// Binds the projection to the deployment's automatic-resume attempt
+    /// budget.
+    ///
+    /// The budget must be the one the daemon's resume planner applies
+    /// (`automatic_resume_attempt_budget`); reading a different number makes
+    /// the projection report a session as needing its operator while the
+    /// daemon still owes it resumes, or the reverse. `None` is the configured
+    /// unbounded budget, under which automatic resumption never exhausts.
     #[must_use]
-    pub const fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub const fn new(pool: PgPool, automatic_resume_attempt_budget: Option<u32>) -> Self {
+        Self {
+            pool,
+            automatic_resume_attempt_budget,
+        }
     }
 
     pub async fn snapshot(
@@ -88,7 +100,13 @@ impl AttentionRepository {
     ) -> Result<AttentionSnapshot, AttentionRepositoryError> {
         let mut transaction = self.read_transaction().await?;
         let cursor = current_cursor(&mut transaction).await?;
-        let mut summaries = load_summaries(&mut transaction, None, after).await?;
+        let mut summaries = load_summaries(
+            &mut transaction,
+            None,
+            after,
+            self.automatic_resume_attempt_budget,
+        )
+        .await?;
         let has_more = summaries.len() > usize::from(max_attention_snapshot_items());
         summaries.truncate(usize::from(max_attention_snapshot_items()));
         let continuation_after = has_more
@@ -141,7 +159,13 @@ impl AttentionRepository {
             .collect::<Result<BTreeSet<_>, _>>()?
             .into_iter()
             .collect::<Vec<_>>();
-        let summaries = load_summaries(&mut transaction, Some(&identities), None).await?;
+        let summaries = load_summaries(
+            &mut transaction,
+            Some(&identities),
+            None,
+            self.automatic_resume_attempt_budget,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(AttentionChanges::Updated {
             cursor: next,
@@ -303,8 +327,11 @@ WITH RECURSIVE selected AS (
            (get_byte(identity.bytes, 8) & 63) | 128
        )
 ), automatic_resumption AS (
+    -- $5 is the deployment's configured automatic-resume attempt budget, the
+    -- same number the daemon's resume planner spends; NULL is the configured
+    -- unbounded budget, under which resumption never exhausts.
     SELECT lineage.session_id,
-           max(lineage.spent) < 5
+           ($5::bigint IS NULL OR max(lineage.spent) < $5::bigint)
            AND NOT EXISTS (
                SELECT 1
                  FROM goal_command AS command
@@ -431,6 +458,7 @@ async fn load_summaries(
     transaction: &mut Transaction<'_, Postgres>,
     identities: Option<&[Uuid]>,
     after: Option<SessionId>,
+    automatic_resume_attempt_budget: Option<u32>,
 ) -> Result<Vec<AttentionSummary>, AttentionRepositoryError> {
     if identities.is_some_and(<[Uuid]>::is_empty) {
         return Ok(Vec::new());
@@ -444,6 +472,7 @@ async fn load_summaries(
         .bind(identities.map(<[Uuid]>::to_vec))
         .bind(after.map(SessionId::into_uuid))
         .bind(i32::from(max_attention_goal_summary_characters()))
+        .bind(automatic_resume_attempt_budget.map(i64::from))
         .fetch_all(&mut **transaction)
         .await?
         .iter()

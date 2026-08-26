@@ -87,19 +87,21 @@ pub use list_conversations::{
 };
 pub use load_session::{LoadSessionService, SessionReader};
 pub use model_execution::{
-    AttemptDispatchGate, AuthorizeModelCallOutcome, AuthorizeModelCallTransaction,
-    AvailabilitySuccessorOutcome, CommitModelCallObservationTransaction,
-    CredentialPoolExhaustedOutcome, FailPreparedModelCallTransaction, InProcessAttemptDispatchGate,
-    InProcessAttemptDispatchPermit, ModelCallAuthorizationReread, ModelCallCapabilityPreparation,
+    AttachmentPreparationFailure, AttemptDispatchGate, AuthorizeModelCallOutcome,
+    AuthorizeModelCallTransaction, AvailabilitySuccessorOutcome,
+    CommitModelCallObservationTransaction, CredentialPoolExhaustedOutcome,
+    FailPreparedModelCallTransaction, InProcessAttemptDispatchGate, InProcessAttemptDispatchPermit,
+    ModelAttachmentStub, ModelCallAuthorizationReread, ModelCallCapabilityPreparation,
     ModelCallCredentialReference, ModelCallExecutionError, ModelCallExecutionIdGenerator,
     ModelCallExecutionOutcome, ModelCallExecutionService, ModelCallInputTokenCount,
     ModelCallInputTokenCounter, ModelCallObservationCommitOutcome, ModelCallProvider,
     ModelCallTerminalIdentityCandidates, ModelConversationMessage, ModelFrontierRenderingError,
-    ModelToolResultContent, PrepareModelCallOutcome, PrepareModelCallTransaction,
-    PreparedModelCallFailureCause, PreparedModelOperation, RetainedModelCallExecutionState,
-    RetainedModelCallObservationStatus, RetainedPreparedFailureStatus, ScriptedModelCallCapability,
-    ScriptedModelCallError, ScriptedModelCallProvider, ScriptedModelCallStep,
-    UuidV7ModelCallExecutionIdGenerator,
+    ModelToolResultContent, ModelUserContent, ModelUserContentPart, PrepareModelCallOutcome,
+    PrepareModelCallTransaction, PreparedModelCallFailureCause, PreparedModelOperation,
+    RetainedModelCallExecutionState, RetainedModelCallObservationStatus,
+    RetainedPreparedFailureStatus, ScriptedModelCallCapability, ScriptedModelCallError,
+    ScriptedModelCallProvider, ScriptedModelCallStep, UuidV7ModelCallExecutionIdGenerator,
+    render_model_user_content,
 };
 pub use operator_failure::{ClassifyOperatorFailure, OperatorFailureClass};
 pub use replace_session_defaults::{
@@ -163,7 +165,7 @@ pub use scheduler::{
     InProcessEligibilityWorkSource, InvalidReconciliationSweepInterval,
     InvalidSchedulerPassOccupancyBound, ReconciliationSweepInterval, SchedulerLoop,
     SchedulerLoopExit, SchedulerOccupancyObserver, SchedulerOldestInFlightPass,
-    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_pass_admission_cap,
+    SchedulerPassExpiryHandler, SchedulerPassOccupancyBound, scheduler_ordinary_pass_limit,
 };
 pub use session_delegation::DelegationMessageDeliveryProjection;
 pub use session_metadata::{
@@ -216,11 +218,11 @@ pub use tool_loop_ports::{
     ToolContinuationIdentities, ToolCrashClosureIdentities, ToolExecutionTransaction,
 };
 pub use turn_liveness::{
-    ClaimedModelCallReconciliation, ExhaustedModelCallReconciliation,
-    ModelCallReconciliationAttempt, ModelCallReconciliationBatch,
-    ModelCallReconciliationFailureKind, ModelCallReconciliationOutcome, StaleActiveTurnBound,
-    StaleTurnCandidate, StaleTurnOutcome, TurnLivenessBoundError, TurnLivenessEvidence,
-    TurnLivenessLedger, TurnLivenessScanInterval,
+    AutomaticReconciliationAttempt, AutomaticReconciliationBatch,
+    AutomaticReconciliationFailureKind, AutomaticReconciliationOperation,
+    AutomaticReconciliationOutcome, ClaimedAutomaticReconciliation,
+    ExhaustedAutomaticReconciliation, StaleActiveTurnBound, StaleTurnCandidate, StaleTurnOutcome,
+    TurnLivenessBoundError, TurnLivenessEvidence, TurnLivenessLedger, TurnLivenessScanInterval,
 };
 pub use update_session_placement::{
     UpdateSessionPlacementOutcome, UpdateSessionPlacementRequest, UpdateSessionPlacementService,
