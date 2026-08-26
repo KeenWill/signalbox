@@ -34,10 +34,27 @@ export const emptyArtifactInspectorState: ArtifactInspectorState = {
 
 const descriptorQueryPrefix = ['production', 'blob-descriptor'] as const
 
+// Resolution identities are allocated from a module-scoped counter rather than counted within the
+// inspector: the inspector's state unmounts with its route (an operator detour through Scenario
+// studio), while the original-load projection is mounted above the router and outlives it. A
+// component-local count restarts at 1 after such a remount and recreates a previous resolution's
+// artifact ID, so the renderer would inherit that ID's settled `loaded` state and fetch original
+// bytes without the new resolution's explicit Load original. A module-scoped counter never reissues
+// an identity for the lifetime of the store that records those loads.
+let lastResolutionSequence = 0
+
+export const nextResolutionSequence = (): number => {
+  lastResolutionSequence += 1
+  return lastResolutionSequence
+}
+
 // Project an operator-resolved descriptor into the typed artifact the shared renderer registry
 // consumes. The identity carries the resolution sequence so a re-resolve mounts a fresh renderer
 // with fresh original-load state instead of inheriting the previous resolution's settled state.
-const inspectedArtifact = (descriptor: WebBlobDescriptor, sequence: number): ArtifactItem => {
+export const inspectedArtifact = (
+  descriptor: WebBlobDescriptor,
+  sequence: number,
+): ArtifactItem => {
   const identity = {
     id: `product-artifact:${String(sequence)}:${descriptor.digest}`,
     displayName: descriptor.display_filename[0] ?? descriptor.digest,
@@ -117,7 +134,7 @@ export function ArtifactInspector({
         digest,
         mediaType,
         displayFilename: displayFilename || undefined,
-        sequence: (request?.sequence ?? 0) + 1,
+        sequence: nextResolutionSequence(),
       },
     })
   }
