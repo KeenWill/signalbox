@@ -167,6 +167,15 @@ const WEBHOOK_TARGETED_COMPLETION_SHUTDOWN_TIMEOUT: Duration = Duration::from_se
 // under the stall threshold, so a bounded failure is reported within the
 // cadence rather than displacing the report it exists to produce.
 const WEBHOOK_DRAIN_MONITOR_QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+// Sizing the stored cursor is what derives the payload-scaled deadlines below,
+// so those deadlines cannot span it. Left unbounded it would be the one step of
+// a webhook attempt no deadline covers, and startup joins every repository's
+// attempt without a bound of its own. Bounded like the monitor's read above:
+// the pool is shared with repositories whose own work can hold its connections,
+// and expiry is reported as the persistence failure the attempt already
+// handles.
+// numeric-bound: guard - prevents an unbounded sizing read ahead of every payload-scaled attempt
+const WEBHOOK_CURSOR_SIZING_TIMEOUT: Duration = Duration::from_secs(10);
 // One webhook drain visits one 25-delivery page before returning to the
 // scheduler. A full 100-delivery storage page repeatedly exceeded the outer
 // deadline under admitted dogfood bursts even though receipts were progressing,
@@ -919,6 +928,30 @@ impl WebhookAttemptPhase {
             Self::BeforeDrain => "before_drain",
             Self::Drain => "drain",
             Self::AfterDrain => "after_drain",
+        }
+    }
+}
+
+/// Why one attempt could not derive its payload-scaled deadlines.
+///
+/// Both causes leave the attempt with no bound to run under, so both report the
+/// same persistence failure; they are distinguished only so the operator can
+/// tell a rejected read from one that never answered.
+#[derive(Debug)]
+enum WebhookCursorSizingError {
+    Store(RepoWatchStoreError),
+    TimedOut,
+}
+
+impl fmt::Display for WebhookCursorSizingError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Store(error) => error.fmt(formatter),
+            Self::TimedOut => write!(
+                formatter,
+                "durable cursor sizing exceeded its {}-second bound",
+                WEBHOOK_CURSOR_SIZING_TIMEOUT.as_secs()
+            ),
         }
     }
 }
@@ -2122,14 +2155,24 @@ impl RepositoryWatchTask {
         }
     }
 
+    /// Sizes the durable cursor under its own fixed bound.
+    ///
+    /// The deadlines this returns are derived from the read, so they cannot
+    /// bound it. Without this the sizing read would precede every attempt's
+    /// `timeout`, leaving a stalled database able to hold the serialized
+    /// repository task — and, through startup's unbounded join, the daemon —
+    /// with no deadline to report.
     async fn webhook_attempt_deadlines(
         &self,
-    ) -> Result<WebhookAttemptDeadlines, RepoWatchStoreError> {
-        let cursor_payload_bytes = self
-            .store
-            .load_cursor_payload_bytes(&self.repository)
-            .await?
-            .unwrap_or(0);
+    ) -> Result<WebhookAttemptDeadlines, WebhookCursorSizingError> {
+        let cursor_payload_bytes = timeout(
+            WEBHOOK_CURSOR_SIZING_TIMEOUT,
+            self.store.load_cursor_payload_bytes(&self.repository),
+        )
+        .await
+        .map_err(|_| WebhookCursorSizingError::TimedOut)?
+        .map_err(WebhookCursorSizingError::Store)?
+        .unwrap_or(0);
         Ok(WebhookAttemptDeadlines::for_cursor_payload(
             cursor_payload_bytes,
         ))
@@ -7722,17 +7765,17 @@ mod tests {
         RepositoryWatchChildExit, RepositoryWatchRuntimeConstructionError,
         RepositoryWatchRuntimeError, RepositoryWatchTask, RepositoryWatchWake, ResourceKey,
         ReviewState, TargetedPollOutcome, TargetedPullRequest, TargetedRefreshSettlement, Url,
-        UuidV7RepoWatchEventIdGenerator, WEBHOOK_DRAIN_ATTEMPT_TIMEOUT,
-        WEBHOOK_DRAIN_MAX_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_RETRY_DELAY,
-        WEBHOOK_DRAIN_RETRY_MAX_DELAY, WEBHOOK_DRAIN_TIMEOUT_PAYLOAD_QUANTUM_BYTES,
-        WEBHOOK_DRAIN_TIMEOUT_PER_PAYLOAD_QUANTUM, WEBHOOK_PENDING_PAGE_SIZE,
-        WebhookAttemptDeadlines, WebhookAttemptOutcome, WebhookAttemptPhase, WebhookDrain,
-        WebhookDrainOutcome, WebhookDrainProgress, WebhookDrainRetry, WebhookPayloadPurgeSchedule,
-        WebhookPollInterrupt, WebhookShadowBaseline, WorkflowName, WorkflowResponse,
-        await_poll_or_interrupt, commit_check_run_search_is_complete, compact_cursor_observation,
-        derive_repo_watch_events, dispatch_context_json, initial_poll_deadline,
-        inspect_webhook_drain, next_cadence_deadline, next_repository_wake,
-        normalize_checks_outcome, normalize_pull_request_context, object_id,
+        UuidV7RepoWatchEventIdGenerator, WEBHOOK_CURSOR_SIZING_TIMEOUT,
+        WEBHOOK_DRAIN_ATTEMPT_TIMEOUT, WEBHOOK_DRAIN_MAX_ATTEMPT_TIMEOUT,
+        WEBHOOK_DRAIN_RETRY_DELAY, WEBHOOK_DRAIN_RETRY_MAX_DELAY,
+        WEBHOOK_DRAIN_TIMEOUT_PAYLOAD_QUANTUM_BYTES, WEBHOOK_DRAIN_TIMEOUT_PER_PAYLOAD_QUANTUM,
+        WEBHOOK_PENDING_PAGE_SIZE, WebhookAttemptDeadlines, WebhookAttemptOutcome,
+        WebhookAttemptPhase, WebhookDrain, WebhookDrainOutcome, WebhookDrainProgress,
+        WebhookDrainRetry, WebhookPayloadPurgeSchedule, WebhookPollInterrupt,
+        WebhookShadowBaseline, WorkflowName, WorkflowResponse, await_poll_or_interrupt,
+        commit_check_run_search_is_complete, compact_cursor_observation, derive_repo_watch_events,
+        dispatch_context_json, initial_poll_deadline, inspect_webhook_drain, next_cadence_deadline,
+        next_repository_wake, normalize_checks_outcome, normalize_pull_request_context, object_id,
         observe_webhook_work_before_drain, owed_dispatch_context_json_parts,
         record_dispatch_start_nudge_outcome, repository_reconciliation_quantum_exhausted,
         rule_activation_error, run_until_shutdown, supervise_repository_tasks,
@@ -11087,6 +11130,18 @@ mod tests {
         assert!(ordinary.attempt > ordinary.drain);
         assert!(larger.attempt > larger.drain);
         assert!(maximum.attempt > maximum.drain);
+    }
+
+    /// The read that derives the deadlines cannot be covered by them, so its
+    /// own bound has to expire sooner than the shortest attempt it could have
+    /// produced. Otherwise a stalled sizing read would hold the serialized
+    /// repository task longer than the attempt it was sizing ever could.
+    #[test]
+    fn cursor_sizing_is_bounded_below_the_shortest_deadline_it_derives() {
+        let floor = WebhookAttemptDeadlines::for_cursor_payload(0);
+
+        assert!(WEBHOOK_CURSOR_SIZING_TIMEOUT < floor.drain);
+        assert!(WEBHOOK_CURSOR_SIZING_TIMEOUT < floor.attempt);
     }
 
     #[tokio::test]
