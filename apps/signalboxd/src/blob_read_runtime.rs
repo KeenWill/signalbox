@@ -1,6 +1,6 @@
 //! Bounded catalog-backed blob reads with no database transaction across store I/O.
 
-use std::num::NonZeroU64;
+use std::{io::Cursor, num::NonZeroU64};
 
 use signalbox_blob_store::{BlobStoreFailureKind, MAX_BLOB_RANGE_BYTES};
 use signalbox_domain::BlobDigest;
@@ -116,6 +116,65 @@ pub(crate) async fn read_blob_chunk(
                 BlobStoreFailureKind::PublicationAmbiguous | BlobStoreFailureKind::Unavailable => {
                     saw_unavailable = true;
                 }
+            },
+        }
+    }
+    if saw_unavailable {
+        Err(BlobReadError::Unavailable)
+    } else if saw_corrupt {
+        Err(BlobReadError::Corrupt)
+    } else if saw_missing {
+        Err(BlobReadError::Missing)
+    } else {
+        Err(BlobReadError::Integrity)
+    }
+}
+
+/// Opens one bounded HTTP range after the store verifies the complete object.
+pub(crate) async fn open_recorded_blob_range(
+    registry: &BlobStoreRegistry,
+    entry: &BlobCatalogEntry,
+    offset: u64,
+    length: NonZeroU64,
+) -> Result<signalbox_blob_store::BlobReader, BlobReadError> {
+    let expected = entry.expected();
+    if length.get() > MAX_BLOB_RANGE_BYTES
+        || offset
+            .checked_add(length.get())
+            .is_none_or(|end| end > expected.byte_length())
+    {
+        return Err(BlobReadError::RangeOutOfBounds {
+            blob_length: expected.byte_length(),
+        });
+    }
+    let bytes = read_blob_chunk(registry, entry, offset, length).await?;
+    Ok(Box::new(Cursor::new(bytes)))
+}
+
+/// Opens one generation-pinned stream after a single complete-object verification pass.
+pub(crate) async fn open_recorded_blob_verified(
+    registry: &BlobStoreRegistry,
+    entry: &BlobCatalogEntry,
+) -> Result<signalbox_blob_store::BlobReader, BlobReadError> {
+    let mut saw_missing = false;
+    let mut saw_corrupt = false;
+    let mut saw_unavailable = false;
+    for replica in entry.replicas() {
+        let Some(store) = registry.recorded_store(replica.store()) else {
+            return Err(BlobReadError::Integrity);
+        };
+        match store
+            .open_verified(entry.expected(), replica.object_key())
+            .await
+        {
+            Ok(opened) if opened.byte_length() == entry.expected().byte_length() => {
+                return Ok(opened.into_reader());
+            }
+            Ok(_) => saw_corrupt = true,
+            Err(error) => match error.kind() {
+                BlobStoreFailureKind::NotFound => saw_missing = true,
+                BlobStoreFailureKind::VerificationFailed => saw_corrupt = true,
+                BlobStoreFailureKind::Unavailable => saw_unavailable = true,
             },
         }
     }

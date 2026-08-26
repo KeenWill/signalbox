@@ -2332,6 +2332,7 @@ dependencies = [
  "defmt",
  "jiff-core",
  "jiff-static",
+ "jiff-tzdb",
  "log",
  "portable-atomic",
  "portable-atomic-util",
@@ -2358,6 +2359,12 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "jiff-tzdb"
+version = "0.1.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "142bd39932ad231f10513df9ab62661fead8719872150b7ad02a2df79f4e141e"
 
 [[package]]
 name = "jni"
@@ -4405,6 +4412,7 @@ dependencies = [
  "signalbox-test-bin",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -4751,6 +4759,8 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "image",
+ "mime",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

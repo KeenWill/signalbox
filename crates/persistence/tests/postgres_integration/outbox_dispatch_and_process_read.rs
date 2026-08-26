@@ -3219,11 +3219,11 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
     let model_calls =
         PostgresModelCallRepository::new(pool.clone(), targets, model_credential_reference());
     let counted_call = ModelCallId::from_uuid(Uuid::from_u128(0xcd0c));
-    let counted_operation = model_calls
+    let prospective = model_calls
         .preview_activation_operation(preview.prepared(), counted_call)
         .await?
-        .expect("an admitted credential previews the activation operation")
-        .render(Box::new([]))?;
+        .expect("an admitted credential previews the activation operation");
+    let counted_operation = prospective.render(Box::new([]))?;
     let counted_entries = counted_operation
         .request()
         .frontier_entries()
@@ -3253,7 +3253,7 @@ async fn s01_s03_s08_inv009_inv014_counted_activation_checkpoints_exact_call_bef
     let committed = activation
         .commit_counted_preview(
             preview,
-            counted_call,
+            prospective,
             &model_calls,
             Some(instruction_evidence),
         )
@@ -3407,13 +3407,15 @@ async fn inv061_stale_counted_preview_retains_no_instruction_evidence() -> Resul
         &placement,
     );
 
-    let stale = activation
-        .commit_counted_preview(
-            preview,
+    let prospective = model_calls
+        .preview_activation_operation(
+            preview.prepared(),
             ModelCallId::from_uuid(Uuid::from_u128(0xcd2d)),
-            &model_calls,
-            Some(evidence),
         )
+        .await?
+        .expect("an admitted credential previews the activation operation");
+    let stale = activation
+        .commit_counted_preview(preview, prospective, &model_calls, Some(evidence))
         .await?;
     let discovery_rows: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM instruction_discovery WHERE session_id = $1 AND turn_id = $2",
@@ -3440,8 +3442,9 @@ async fn inv061_stale_counted_preview_retains_no_instruction_evidence() -> Resul
 }
 
 /// S03 / INV-015: deferred compaction evidence accepts successor ranges in
-/// model-visible order even when the retained suffix physically precedes the
-/// prior summary, while reverse correlation rejects an orphan summary.
+/// model-visible order when a predecessor compacts only its logical leading
+/// summary and its retained suffix physically precedes that summary, while
+/// reverse correlation rejects an orphan summary.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s03_inv015_context_compaction_constraints_use_projected_successor_order()
@@ -3590,13 +3593,12 @@ async fn s03_inv015_context_compaction_constraints_use_projected_successor_order
              context_summary_through_source_session_id,
              context_summary_through_entry_id)
          VALUES ($1, $2, 'context_summary', 'synthetic successor summary', $3,
-                 $1, $4, $1, $5)",
+                 $1, $4, $1, $4)",
     )
     .bind(session_uuid)
     .bind(successor_summary)
     .bind(successor_call)
     .bind(root_summary)
-    .bind(retained_suffix)
     .execute(&mut *successor_transaction)
     .await?;
     insert_frontier(
@@ -3627,11 +3629,78 @@ async fn s03_inv015_context_compaction_constraints_use_projected_successor_order
     .bind(successor_result)
     .bind(successor_call)
     .bind(root_summary)
-    .bind(retained_suffix)
+    .bind(root_summary)
     .bind(successor_summary)
     .execute(&mut *successor_transaction)
     .await?;
     successor_transaction.commit().await?;
+
+    let suffix_call = Uuid::from_u128(0xcc18);
+    let suffix_summary = Uuid::from_u128(0xcc19);
+    let suffix_result = Uuid::from_u128(0xcc1a);
+    let suffix_compaction = Uuid::from_u128(0xcc1b);
+    let mut suffix_transaction = pool.begin().await?;
+    insert_completed_context_compaction_call(
+        &mut suffix_transaction,
+        suffix_call,
+        session_uuid,
+        selection.into_uuid(),
+        target,
+        successor_result,
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO semantic_transcript_entry
+            (source_session_id, semantic_entry_id, payload_kind,
+             context_summary_value, context_summary_producing_call_id,
+             context_summary_first_source_session_id,
+             context_summary_first_entry_id,
+             context_summary_through_source_session_id,
+             context_summary_through_entry_id)
+         VALUES ($1, $2, 'context_summary', 'synthetic suffix summary', $3,
+                 $1, $4, $1, $5)",
+    )
+    .bind(session_uuid)
+    .bind(suffix_summary)
+    .bind(suffix_call)
+    .bind(successor_summary)
+    .bind(retained_suffix)
+    .execute(&mut *suffix_transaction)
+    .await?;
+    insert_frontier(
+        &mut suffix_transaction,
+        session_uuid,
+        suffix_result,
+        Decimal::from(5),
+        &[
+            (Decimal::ONE, session_uuid, origin_entry),
+            (Decimal::from(2), session_uuid, retained_suffix),
+            (Decimal::from(3), session_uuid, root_summary),
+            (Decimal::from(4), session_uuid, successor_summary),
+            (Decimal::from(5), session_uuid, suffix_summary),
+        ],
+    )
+    .await?;
+    sqlx::query(
+        "INSERT INTO context_compaction
+            (context_compaction_id, session_id, predecessor_compaction_id,
+             source_frontier_id, result_frontier_id, producing_call_id,
+             first_source_session_id, first_entry_id,
+             through_source_session_id, through_entry_id, summary_entry_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $2, $7, $2, $8, $9)",
+    )
+    .bind(suffix_compaction)
+    .bind(session_uuid)
+    .bind(successor_compaction)
+    .bind(successor_result)
+    .bind(suffix_result)
+    .bind(suffix_call)
+    .bind(successor_summary)
+    .bind(retained_suffix)
+    .bind(suffix_summary)
+    .execute(&mut *suffix_transaction)
+    .await?;
+    suffix_transaction.commit().await?;
 
     let malformed_summary = Uuid::from_u128(0xcc17);
     let malformed_error = sqlx::query(
