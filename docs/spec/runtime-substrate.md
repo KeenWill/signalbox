@@ -14,41 +14,46 @@ credential delivery and authenticated live smoke are verified against this PR
 (`agent/claude-cli-credential-delivery`). The Codex CLI adapter stack comprises
 PR #264 (`agent/codex-cli-wrap`) and PR #268 (`agent/codex-cli-pin-smoke`); its
 escalation closeout is PR #317 (`agent/escalation-closeout`). The Codex CLI
-compatibility-smoke automation was verified through PR #333
-(`agent/ci-tells-truth`); its feature classification, ambient-skill catalog
-probe, and pinned version were verified against the `0.146.0` executable through
-PR #321 (`renovate/openai-codex-0.x`). Its twice-daily schedule and
-workflow-self-change trigger were verified through PR #471
-(`agent/codex-smoke-schedule`). The `signalboxd` names this page states for the
+typed rate-limit and overload evidence, provider-directed retry delay, and
+pre-stream non-acceptance proof are verified against this PR
+(`agent/multi-account-pools`). The Codex CLI compatibility-smoke automation was
+verified through PR #333 (`agent/ci-tells-truth`); its feature classification,
+ambient-skill catalog probe, and pinned version were verified against the
+`0.146.0` executable through PR #321 (`renovate/openai-codex-0.x`). Its
+twice-daily schedule and workflow-self-change trigger were verified through PR
+`#471` (`agent/codex-smoke-schedule`). The Codex CLI adapter's prompt
+tool-authority preamble is verified against this PR
+(`agent/phantom-prohibition`). The `signalboxd` names this page states for the
 composition root, its telemetry, and the production `FileCredentialAccess` were
 verified through PR #258 (`agent/signalboxd-rename`); the Anthropic and OpenAI
 adapter-scoped file catalogs are verified against this PR
 (`agent/credential-pools-parser`). The Anthropic adapter's server-side
 `fallback`-block recognition was verified through PR #280
 (`agent/provider-identity-normalization`). The HTTP fallback-body redaction
-ordering was verified through PR #330 (`agent/audit-verified-fixes`). The five
+ordering was verified through PR #330 (`agent/audit-verified-fixes`). The
 persistence-repository families in the operator-failure inventory were verified
-through PR #288 (`agent/audit-fix-docs-coherence`). The streamed-delivery bridge
-and ephemeral text-delta projection were verified through PR #300
-(`agent/token-level-streaming`); the Claude 5-family thinking-signature stream
-shape was verified through PR #305 (`agent/sonnet-streamed-tool-use`). The Codex
-CLI redaction contract was verified through PR #316
-(`agent/redaction-hardening`; shape coverage, absorbing suppression, enumerated
-single-split parity, and geometric work bound). Exact Codex CLI usage-axis
-projection is verified against PR #389 (`agent/cost-accounting`). Model-settings
-mappings and advisory exceptions are verified against PR #437
-(`agent/model-settings-adapters`). The Claude Code CLI adapter's daemon
-composition is verified against this PR (`agent/wire-claude-cli-adapter`), and
-the OpenAI adapter's against this PR (`agent/wire-openai-adapter`). The
-Anthropic compatibility smoke was verified through PR #465
-(`agent/anthropic-api-smoke`), and the OpenAI compatibility smoke through PR
-#466 (`agent/openai-api-smoke`). The cross-adapter `ToolCallsAtLoss` fact
-carried in boundary-loss evidence is verified against this PR
-(`agent/typed-loss-cause`), against every streamed and buffered loss path in the
-four adapters. This page covers the provider-neutral operation, observation, and
-evidence vocabulary; SSE framing; structured-output and tool decode;
-`ScriptedModel`; the four provider adapters; and their credential boundaries.
-Layer-2 authorization and evidence classification
+through PR #288 (`agent/audit-fix-docs-coherence`) when there were five of them,
+and the sixth, turn liveness, against this PR (`agent/turn-liveness-watchdog`).
+The streamed-delivery bridge and ephemeral text-delta projection were verified
+through PR #300 (`agent/token-level-streaming`); the Claude 5-family
+thinking-signature stream shape was verified through PR #305
+(`agent/sonnet-streamed-tool-use`). The Codex CLI redaction contract was
+verified through PR #316 (`agent/redaction-hardening`; shape coverage, absorbing
+suppression, enumerated single-split parity, and geometric work bound). Exact
+Codex CLI usage-axis projection is verified against PR #389
+(`agent/cost-accounting`). Model-settings mappings and advisory exceptions are
+verified against PR #437 (`agent/model-settings-adapters`). The Claude Code CLI
+adapter's daemon composition is verified against this PR
+(`agent/wire-claude-cli-adapter`), and the OpenAI adapter's against this PR
+(`agent/wire-openai-adapter`). The Anthropic compatibility smoke was verified
+through PR #465 (`agent/anthropic-api-smoke`), and the OpenAI compatibility
+smoke through PR `#466` (`agent/openai-api-smoke`). The cross-adapter
+`ToolCallsAtLoss` fact carried in boundary-loss evidence is verified against
+this PR (`agent/typed-loss-cause`), against every streamed and buffered loss
+path in the four adapters. This page covers the provider-neutral operation,
+observation, and evidence vocabulary; SSE framing; structured-output and tool
+decode; `ScriptedModel`; the four provider adapters; and their credential
+boundaries. Layer-2 authorization and evidence classification
 ([model-call-execution](model-call-execution.md)), credential channels,
 delivery, and rotation discipline
 ([configuration-and-credentials](configuration-and-credentials.md)), and the
@@ -232,7 +237,11 @@ strings appear only as retained detail inside already-classified variants:
   representation from format-aware redaction; audit evidence must be bounded and
   secret-free before it leaves the adapter. Quota exhaustion is distinct from
   rate limiting. Why: a billing condition must never be treated as retry-later
-  backoff.
+  backoff. HTTP adapters decode both `Retry-After` delay-seconds and HTTP-date
+  forms; Codex decodes its bounded seconds/minutes retry phrase. The resulting
+  duration is typed exchange evidence, never retained prose. Rate-limit and
+  overload successors use it as a minimum beneath a five-minute cap; quota
+  successors remain immediate.
 - `CancellationConfirmed`: a definitive provider cancellation response. No
   in-repository adapter constructs one; the variant keeps the vocabulary total
   so observing one never forces a misclassification.
@@ -281,20 +290,18 @@ states the negative, while the same rejection with blocks still behind it
 withholds. A tool call an earlier record already established outranks the
 withholding in every adapter.
 
-**Committed unimplemented functionality — provider non-acceptance evidence.** No
-present `TerminalEvidence` variant or `ProviderErrorEvidence` field proves that
-a provider rejected a request before accepting it, and no current adapter can
-authorize an availability successor. This proof is what separates the
-`successor` and `terminal` endings of
+**Implemented behavior — provider non-acceptance evidence.**
+`ProviderErrorEvidence::non_acceptance_proven` is an adapter-owned typed fact,
+never inferred from `ProviderErrorKind` or provider prose. This proof separates
+the `successor` and `terminal` endings of
 [the credential-availability machine](credential-availability.md#the-credential-availability-machine);
-this page owns the evidence algebra that carries it. The implementing child must
-add a sealed typed proof alongside `ProviderError` for the exact
-quota-exhausted, rate-limited, and overloaded provider responses whose protocol
-semantics establish non-acceptance. Each adapter owns its exhaustive native
-mapping; the provider bridge preserves the proof without deriving it from
-`ProviderErrorKind`, status retryability, or native prose. Classification alone
-remains insufficient, and absence of the proof keeps the known failure terminal.
-This constraint adds no proof to the implemented evidence vocabulary above.
+this page owns the evidence algebra that carries it. Adapters set the proof
+alongside `ProviderError` for the exact quota-exhausted, rate-limited, and
+overloaded provider responses whose protocol semantics establish non-acceptance.
+Each adapter owns its exhaustive native mapping; the provider bridge preserves
+the proof without deriving it from `ProviderErrorKind`, status retryability, or
+native prose. Classification alone remains insufficient, and absence of the
+proof keeps the known failure terminal.
 
 The admitting condition is fixed here rather than left to that child, because
 the two readings differ in whether another provider call happens. A proof is
@@ -302,7 +309,9 @@ admitted only when the adapter decoded its own documented error envelope and the
 decoded native token names one of the three causes in that adapter's exhaustive
 mapping — `rate_limit_error` or `overloaded_error` for Anthropic, and
 `rate_limit_exceeded`, `rate_limit_error`, or `insufficient_quota` for OpenAI.
-Every status-derived fallback carries no proof: a response whose body is absent,
+Codex additionally admits a classified availability cause only when its JSONL
+lifecycle reaches the exact, noncontradictory `turn.failed` closure. Every
+status-derived fallback carries no proof: a response whose body is absent,
 undecodable, or names a token the mapping does not cover keeps its
 status-classified kind and stays an ordinary terminal known failure. A native
 token that contradicts its status carries none either, and the existing
@@ -318,15 +327,20 @@ content, reported usage, or a finish token is already observed. Non-acceptance
 is precisely what such an exchange disproves, so attaching the proof there would
 authorize a second paid call for work the provider already did. An availability
 failure that arrives mid-stream therefore terminalizes the turn as any other
-known failure does, with no successor. Neither CLI adapter can supply the proof
-at all: each classifies from the rendered failure message by substring, which is
-exactly the native prose this contract already refuses as a derivation, and
-neither surfaces a structured native code its mapping could name. Admitting one
-under a CLI would need that CLI to expose a stable machine-readable
-discriminator first. The asymmetry is deliberate. An under-decoded rejection
-loses a substitution the deployment had configured, which costs one turn; a
-status-only or prose-derived inference that the provider did not act would
-authorize a second paid call on evidence the provider never gave.
+known failure does, with no successor. The two CLI adapters differ here. The
+Claude Code CLI cannot supply the proof at all: it classifies from the rendered
+failure message by substring, which is exactly the native prose this contract
+already refuses as a derivation, and it surfaces no structured native code its
+mapping could name. Admitting one under it would need that CLI to expose a
+stable machine-readable discriminator first. The Codex CLI classifies from that
+same rendered prose, but its JSONL lifecycle carries the machine-readable
+closure this contract demands, so it does supply the proof — under the exact,
+noncontradictory `turn.failed` closure stated above and never from the prose
+alone. A trailer that contradicts the recorded stream error fails closed and
+carries nothing. The asymmetry is deliberate. An under-decoded rejection loses a
+substitution the deployment had configured, which costs one turn; a status-only
+or prose-derived inference that the provider did not act would authorize a
+second paid call on evidence the provider never gave.
 
 A success-status response whose body is not valid completion material is
 boundary loss, never completion. An unrecognized finish token is boundary loss
@@ -757,6 +771,25 @@ creates, so construction rejects hosts where process-group control is
 unavailable; a descendant that deliberately leaves that group is outside the
 adapter's boundary. Host isolation owns containment beyond the created group —
 specifically the runner sandbox in build-out — and is not an adapter claim.
+
+The rendered prompt opens with a preamble whose tool-authority statement is
+singular and positionally first: the serialized `tools` array is named the
+single authority on which tools exist, `tool_choice` and `structured_output` are
+carved out as the only statements that narrow or add to what may be proposed,
+the harness's own disabled facilities are distinguished from the declared tools,
+and the preamble states no categorical tool prohibition. Why: an earlier
+preamble opened with "Do not use shell, file, web, MCP, or collaboration tools"
+— aimed at the wrapped CLI's native facilities — and the prohibited categories
+are exactly the categories a caller's tool catalog populates, so the prompt
+carried two competing authority statements and a model could obey the wrong one,
+refusing work its declared tools authorized. The native facilities need no
+prompt-level prohibition because the invocation disables them mechanically, and
+prompt text is never a capability boundary. The residual the adapter cannot
+remove: the pinned CLI injects its own agent-identity instructions around the
+stdin prompt at runtime, so the preamble's authority statement is the first tool
+statement the adapter controls rather than the first text the model sees. The
+translation unit test pins the rendered prompt — no categorical prohibition,
+exactly one authority statement, positioned before the serialized request.
 
 **Committed unimplemented functionality — Codex file delivery.** The present
 adapter supports only its ambient credential home and keeps `OPENAI_API_KEY` and
@@ -1317,12 +1350,16 @@ claiming general secret detection.
 
 `crates/application/src/operator_failure.rs` defines the one closed
 operator-facing failure classification shared by application services, the
-persistence adapters, and signalboxd telemetry: five scheduling, model-call, and
-tool-loop error families (startup scan, turn activation, eligibility sweep,
-model-call repository, and tool-loop repository) map into `OperatorFailureClass`
-through the `ClassifyOperatorFailure` trait, exposing a user-content-free
-classification to shared telemetry while the underlying error keeps its
-diagnostic detail internally. The four classes:
+persistence adapters, and signalboxd telemetry: six scheduling, model-call,
+tool-loop, and liveness error families (startup scan, turn activation,
+eligibility sweep, model-call repository, tool-loop repository, and turn
+liveness) map into `OperatorFailureClass` through the `ClassifyOperatorFailure`
+trait, exposing a user-content-free classification to shared telemetry while the
+underlying error keeps its diagnostic detail internally. The turn-liveness
+family separates a failed inventory read, which is a pass that decided nothing,
+from a failed terminalization, which is a decision that could not be carried
+out, and forwards the shared failed-turn transition's own classification
+unchanged when that transition is what refused. The four classes:
 
 - **`Infrastructure { commit_ambiguous }`** — the operation could not complete;
   the flag marks failures whose transaction fate is unknown (commit-ambiguity
@@ -1337,9 +1374,14 @@ diagnostic detail internally. The four classes:
   of a defect, kept distinct from corruption.
 
 The class states only how bad a failure is. The orthogonal sanitized cause code
-stating *what happened* — carried by the model-call bridge, reusing this page's
-`ProviderErrorKind` vocabulary verbatim for definitive provider errors — is
-owned by [model-call-execution](model-call-execution.md#operator-diagnostics).
+stating *what happened* is owned by whichever page owns the behavior that raises
+it: for provider and model-call failures — carried by the model-call bridge,
+reusing this page's `ProviderErrorKind` vocabulary verbatim for definitive
+provider errors — the owning page is
+[model-call-execution](model-call-execution.md#operator-diagnostics), and the
+turn-liveness causes are owned by
+[turn-lifecycle-and-scheduling](turn-lifecycle-and-scheduling.md). No page owns
+a cause code for behavior it does not describe.
 
 Concurrent staleness is not a class: a guarded write that matches zero rows is
 consumed inside adapters by reload-and-rederive

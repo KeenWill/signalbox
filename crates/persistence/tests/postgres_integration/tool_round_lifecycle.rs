@@ -68,17 +68,17 @@ async fn prepare_confirmed_tool_attempt(
             fixture.session,
             fixture.turn,
             attempt,
-            ToolEffectClass::EffectFree,
+            ToolEffectClass::ExternalEffect,
         )
         .await?;
     Ok((fixture, attempt))
 }
 
-/// INV-063: blob-read visibility and decoded-byte charges commit before
+/// INV-069: blob-read visibility and decoded-byte charges commit before
 /// dispatch authority.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv063_blob_read_preauthorization_is_visible_bounded_and_durable()
+async fn inv069_blob_read_preauthorization_is_visible_bounded_and_durable()
 -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let visible_seed = 0xd000;
@@ -125,11 +125,11 @@ async fn inv063_blob_read_preauthorization_is_visible_bounded_and_durable()
     Ok(())
 }
 
-/// INV-063: an unattached blob-read digest is rejected before dispatch and
+/// INV-069: an unattached blob-read digest is rejected before dispatch and
 /// leaves the durable attempt Prepared.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv063_unattached_blob_read_is_rejected_before_dispatch() -> Result<(), Box<dyn Error>> {
+async fn inv069_unattached_blob_read_is_rejected_before_dispatch() -> Result<(), Box<dyn Error>> {
     let (container, pool, _database_url) = migrated_postgres().await?;
     let repository = PostgresToolLoopRepository::new(pool.clone());
 
@@ -155,7 +155,10 @@ async fn inv063_unattached_blob_read_is_rejected_before_dispatch() -> Result<(),
         .await?;
     assert_eq!(
         hidden,
-        ToolAttemptAuthorizationOutcome::PreauthorizationRejected
+        ToolAttemptAuthorizationOutcome::PreauthorizationRejected {
+            detail: ToolExecutionErrorDetail::try_new(String::from("blob_not_visible"))
+                .expect("the fixed rejection detail is valid"),
+        }
     );
     let hidden_state: String =
         sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
@@ -167,6 +170,33 @@ async fn inv063_unattached_blob_read_is_rejected_before_dispatch() -> Result<(),
     pool.close().await;
     drop(container);
     Ok(())
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct StoredReclassifiedSteeringFacts {
+    disposition_kind: String,
+    origin_turn_id: Option<Uuid>,
+}
+
+#[derive(Debug, PartialEq)]
+enum TurnOriginPresence {
+    Absent,
+    Present,
+}
+
+impl From<Option<Uuid>> for TurnOriginPresence {
+    fn from(origin_turn_id: Option<Uuid>) -> Self {
+        match origin_turn_id {
+            Some(_) => Self::Present,
+            None => Self::Absent,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+struct ReclassifiedSteeringFacts {
+    disposition_kind: String,
+    origin: TurnOriginPresence,
 }
 
 /// S02 / S08 / INV-016 / INV-036: a NextSafePoint input accepted while a tool
@@ -1597,7 +1627,6 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
             outbox_event_count: 1,
         }
     );
-
     let snapshot = ProcessReadRepository::new(pool.clone())
         .read_transcript(fixture.session)
         .await?
@@ -1613,6 +1642,143 @@ async fn inv006_inv025_inv029_inv037_interrupt_preserves_tool_recovery_ambiguity
         "the tool reconciliation event must not block dispatch"
     );
 
+    assert_eq!(
+        activated_turn(
+            StartEligibleTurnRepository::new(pool.clone())
+                .handle(
+                    fixture.session,
+                    AcceptedInputTurnActivationIdentities::new(
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 34)),
+                        SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+                        ContextFrontierId::from_uuid(Uuid::from_u128(seed + 32)),
+                        TurnAttemptId::from_uuid(Uuid::from_u128(seed + 33)),
+                    ),
+                )
+                .await?,
+        ),
+        successor
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// INV-006 / INV-025 / INV-029 / INV-037: eligibility replays pending
+/// steering reclassified behind an interrupted ambiguous tool attempt without
+/// requiring that reconciliation predecessor to own a model call.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn inv006_inv025_inv029_inv037_replays_reclassified_tool_reconciliation_predecessor()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x74e0;
+    let (fixture, _, _, request) =
+        checkpoint_confirmed_tool_round(&pool, seed, "external-tool", "{}").await?;
+    let repository = PostgresToolLoopRepository::new(pool.clone());
+    let issuing_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
+    repository
+        .decide(
+            decide_tool_request(
+                DurableCommandId::from_uuid(Uuid::from_u128(seed + 24)),
+                request,
+                ToolApprovalDecision::Approve,
+            ),
+            || issuing_attempt,
+        )
+        .await?;
+    let tool_attempt = ToolAttemptId::from_uuid(Uuid::from_u128(seed + 25));
+    repository
+        .prepare_next_attempt(
+            fixture.session,
+            fixture.turn,
+            tool_attempt,
+            ToolEffectClass::ExternalEffect,
+        )
+        .await?;
+    repository
+        .authorize_attempt(fixture.session, fixture.turn, tool_attempt)
+        .await?;
+
+    let pending_steering = AcceptedInputId::from_uuid(Uuid::from_u128(seed + 35));
+    let steering_command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 36));
+    let steering_session = fixture.session;
+    let steering_input = SubmitInput::new(
+        steering_command,
+        steering_session,
+        UserContent::try_text(String::from("steer while the tool attempt is ambiguous"))
+            .expect("test steering content is admitted"),
+        DeliveryRequest::NextSafePoint {
+            expected_active_turn: fixture.turn,
+        },
+    );
+    assert!(matches!(
+        SubmitInputRepository::new(pool.clone())
+            .handle(steering_input, pending_steering, None)
+            .await?,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(
+            SubmitInputAppliedResult::PendingSteering(_)
+        ))
+    ));
+
+    let mut recovery_ids = FixedStartupScanIds::new([], []);
+    assert_ambiguous_tool_recovery(
+        PostgresStartupScanRepository::new(pool.clone())
+            .recover(
+                fixture.session,
+                signalbox_domain::AcceptedInputTurnFailureIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 26)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 27)),
+                ),
+                &mut recovery_ids,
+            )
+            .await?,
+    );
+
+    let successor = TurnId::from_uuid(Uuid::from_u128(seed + 30));
+    let interrupt_command = DurableCommandId::from_uuid(Uuid::from_u128(seed + 28));
+    let interrupt_session = fixture.session;
+    let interrupt_input = SubmitInput::new(
+        interrupt_command,
+        interrupt_session,
+        UserContent::try_text(String::from("stop ambiguous tool"))
+            .expect("test interrupt content is admitted"),
+        DeliveryRequest::Interrupt {
+            expected_active_turn: fixture.turn,
+            descendant_scope: DescendantTerminationScope::ParentAlone,
+            configuration: input_choices(1, ModelSelectionOverride::UseSessionDefault),
+        },
+    );
+    let interrupt = SubmitInputRepository::new(pool.clone())
+        .handle(
+            interrupt_input,
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 29)),
+            Some(successor),
+        )
+        .await?;
+    assert!(matches!(
+        interrupt,
+        SubmitInputHandlingOutcome::Recorded(SubmitInputResult::Applied(_))
+    ));
+
+    let stored_steering: StoredReclassifiedSteeringFacts = sqlx::query_as(
+        "SELECT disposition_kind, origin_turn_id
+           FROM accepted_input
+          WHERE accepted_input_id = $1",
+    )
+    .bind(pending_steering.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        ReclassifiedSteeringFacts {
+            disposition_kind: stored_steering.disposition_kind,
+            origin: stored_steering.origin_turn_id.into(),
+        },
+        ReclassifiedSteeringFacts {
+            disposition_kind: String::from("reclassified_as_turn_origin"),
+            origin: TurnOriginPresence::Present,
+        },
+    );
     assert_eq!(
         activated_turn(
             StartEligibleTurnRepository::new(pool.clone())
@@ -2583,19 +2749,21 @@ async fn inv006_inv012_stopped_tool_round_closes_requests_and_decision_replay()
     Ok(())
 }
 
-/// S02 / S07 / S11 / INV-006 / INV-037: the terminal shape committed when a
-/// stop request races a tool-using response reloads through the scheduling
-/// projection, so the interrupt successor activates instead of leaving the
-/// session permanently unloadable.
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires ephemeral PostgreSQL"]
-async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_successor()
--> Result<(), Box<dyn Error>> {
-    let (container, pool, _database_url) = migrated_postgres().await?;
-    let seed = 0x7d00;
+async fn commit_stopped_tool_round(
+    pool: &PgPool,
+    seed: u128,
+) -> Result<
+    (
+        RestartModelCallFixture,
+        SemanticTranscriptEntryId,
+        ContextFrontierId,
+        TurnId,
+    ),
+    Box<dyn Error>,
+> {
     let successor = TurnId::from_uuid(Uuid::from_u128(seed + 21));
     let (fixture, model_repository, _prepared, authorized) =
-        authorize_checkpointed_model_call_with_prepared(&pool, seed).await?;
+        authorize_checkpointed_model_call_with_prepared(pool, seed).await?;
     SubmitInputRepository::new(pool.clone())
         .handle(
             input_with_delivery(
@@ -2622,7 +2790,9 @@ async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_succ
             ),
         )])
         .expect("the fixture contains one tool proposal");
-    let outcome = model_repository
+    let cancellation_entry = SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 29));
+    let terminal_frontier = ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30));
+    model_repository
         .apply_terminal_observation(
             fixture.session,
             authorized
@@ -2638,17 +2808,29 @@ async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_succ
                         SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 25)),
                         InitialToolApproval::Confirm,
                     )],
-                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 29)),
-                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30)),
+                    cancellation_entry,
+                    terminal_frontier,
                 ),
             ),
             |_| panic!("the fixture has no pending steering to reclassify"),
         )
         .await?;
-    assert!(matches!(
-        outcome,
-        ModelCallTerminalOutcome::CancelledWithToolResponse(_)
-    ));
+
+    Ok((fixture, cancellation_entry, terminal_frontier, successor))
+}
+
+/// S02 / S07 / S11 / INV-006 / INV-037: the terminal shape committed when a
+/// stop request races a tool-using response reloads through the scheduling
+/// projection, so the interrupt successor activates instead of leaving the
+/// session permanently unloadable.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_successor()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7d00;
+    let (fixture, _cancellation_entry, _terminal_frontier, successor) =
+        commit_stopped_tool_round(&pool, seed).await?;
 
     let activation = StartEligibleTurnRepository::new(pool.clone())
         .handle(
@@ -2666,6 +2848,91 @@ async fn s02_s07_s11_inv006_inv037_stopped_tool_round_reloads_and_activates_succ
         successor,
         "the committed stopped tool round must reload as a terminal predecessor"
     );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S02 / S07 / S11 / INV-032 / INV-037: a stopped tool response's cancellation
+/// remains dispatchable when its correlated producing call completed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s02_s07_s11_inv032_inv037_stopped_tool_round_cancellation_dispatches()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7d80;
+    let (fixture, cancellation_entry, terminal_frontier, _successor) =
+        commit_stopped_tool_round(&pool, seed).await?;
+    let terminal_call_disposition: String = sqlx::query_scalar(
+        "SELECT terminal_disposition_kind
+           FROM model_call
+          WHERE model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(terminal_call_disposition, "completed");
+    let mut dispatched = Vec::new();
+    drain_outbox(&pool, |event| dispatched.push(event.kind().clone())).await?;
+    assert!(
+        dispatched.contains(&DispatchedOutboxEventKind::TurnCancelled {
+            turn: fixture.turn,
+            cancellation_entry,
+            terminal_frontier,
+        }),
+        "the cancelled turn with its completed producing call must dispatch"
+    );
+
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
+
+/// S02 / S07 / S11 / INV-032: a cancellation naming a completed terminal call
+/// is dispatchable only with the correlated closed-by-turn-end tool round.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn s02_s07_s11_inv032_completed_cancellation_requires_closed_tool_round()
+-> Result<(), Box<dyn Error>> {
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7e00;
+    let (fixture, _cancellation_entry, _terminal_frontier, _successor) =
+        commit_stopped_tool_round(&pool, seed).await?;
+    let sequence = sqlx::query_scalar(
+        "SELECT event_sequence
+           FROM turn_cancelled_outbox_event
+          WHERE turn_id = $1",
+    )
+    .bind(fixture.turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_round DISABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    sqlx::query(
+        "UPDATE tool_round
+            SET boundary_kind = 'continuing'
+          WHERE producing_model_call_id = $1",
+    )
+    .bind(fixture.call.into_uuid())
+    .execute(&pool)
+    .await?;
+    sqlx::query("ALTER TABLE tool_round ENABLE TRIGGER USER")
+        .execute(&pool)
+        .await?;
+    rewind_outbox_delivery_before(&pool, sequence).await?;
+
+    assert!(matches!(
+        OutboxDispatcher::new(pool.clone())
+            .dispatch_next(|_| {
+                panic!("a completed cancellation without its closed tool round must not dispatch")
+            })
+            .await,
+        Err(OutboxDispatchError::Corruption(
+            OutboxCorruption::InvalidTerminalEventCorrelation
+        ))
+    ));
 
     pool.close().await;
     drop(container);

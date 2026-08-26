@@ -16,8 +16,14 @@ pub const MAX_DECLARED_MEDIA_TYPE_BYTES: usize = 255;
 pub const MAX_ATTACHMENT_DISPLAY_FILENAME_BYTES: usize = 255;
 
 /// A nonempty decoded Unicode scalar sequence containing no U+0000.
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Eq, Hash, PartialEq)]
 pub struct NonEmptyUnicodeText(String);
+
+impl fmt::Debug for NonEmptyUnicodeText {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("NonEmptyUnicodeText(<redacted>)")
+    }
+}
 
 impl NonEmptyUnicodeText {
     /// Checks one decoded string without trimming or normalization.
@@ -59,10 +65,19 @@ pub enum NonEmptyUnicodeTextFailure {
 }
 
 /// Failed text construction retaining the rejected string unchanged.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct NonEmptyUnicodeTextError {
     value: String,
     failure: NonEmptyUnicodeTextFailure,
+}
+
+impl fmt::Debug for NonEmptyUnicodeTextError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NonEmptyUnicodeTextError")
+            .field("failure", &self.failure)
+            .finish()
+    }
 }
 
 impl NonEmptyUnicodeTextError {
@@ -125,6 +140,9 @@ impl AttachmentBlobFact {
 pub struct DeclaredMediaType(String);
 
 impl DeclaredMediaType {
+    /// Inclusive encoded-byte bound for one declaration.
+    pub const MAX_BYTES: usize = MAX_DECLARED_MEDIA_TYPE_BYTES;
+
     /// Checks one media-type declaration without normalization.
     pub fn try_new(value: String) -> Result<Self, DeclaredMediaTypeError> {
         let failure = if value.is_empty() {
@@ -184,6 +202,9 @@ impl DeclaredMediaTypeError {
 pub struct AttachmentDisplayFilename(String);
 
 impl AttachmentDisplayFilename {
+    /// Inclusive encoded-byte bound for one display filename.
+    pub const MAX_BYTES: usize = MAX_ATTACHMENT_DISPLAY_FILENAME_BYTES;
+
     /// Checks one display filename without path or Unicode normalization.
     pub fn try_new(value: String) -> Result<Self, AttachmentDisplayFilenameError> {
         let failure = if value.is_empty() {
@@ -234,10 +255,19 @@ pub enum AttachmentDisplayFilenameFailure {
 }
 
 /// Failed display-filename construction retaining the rejected value.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct AttachmentDisplayFilenameError {
     value: String,
     failure: AttachmentDisplayFilenameFailure,
+}
+
+impl fmt::Debug for AttachmentDisplayFilenameError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AttachmentDisplayFilenameError")
+            .field("failure", &self.failure)
+            .finish()
+    }
 }
 
 impl AttachmentDisplayFilenameError {
@@ -289,6 +319,8 @@ pub struct UserContent {
 }
 
 impl UserContent {
+    /// Maximum number of ordered parts in one accepted input.
+    pub const MAX_PARTS: usize = MAX_USER_CONTENT_PARTS;
     /// Inclusive aggregate UTF-8 byte bound across all text parts.
     pub const MAX_TEXT_BYTES: usize = MAX_USER_CONTENT_TEXT_BYTES;
 
@@ -308,33 +340,9 @@ impl UserContent {
 
     /// Checks one complete ordered parts sequence.
     pub fn try_parts(parts: Vec<UserContentPart>) -> Result<Self, UserContentError> {
-        if parts.is_empty() {
-            return Err(UserContentError::Empty);
+        if let Some(failure) = user_content_failure(&parts) {
+            return Err(UserContentError { parts, failure });
         }
-        if parts.len() > MAX_USER_CONTENT_PARTS {
-            return Err(UserContentError::TooManyParts);
-        }
-
-        let mut aggregate_text_bytes = 0_usize;
-        let mut previous_was_text = false;
-        for part in &parts {
-            match part {
-                UserContentPart::Text { value } => {
-                    if previous_was_text {
-                        return Err(UserContentError::AdjacentTextParts);
-                    }
-                    aggregate_text_bytes = aggregate_text_bytes
-                        .checked_add(value.as_str().len())
-                        .ok_or(UserContentError::TextTooLarge)?;
-                    if aggregate_text_bytes > Self::MAX_TEXT_BYTES {
-                        return Err(UserContentError::TextTooLarge);
-                    }
-                    previous_was_text = true;
-                }
-                UserContentPart::Attachment { .. } => previous_was_text = false,
-            }
-        }
-
         Ok(Self { parts })
     }
 
@@ -357,9 +365,65 @@ impl UserContent {
     }
 }
 
+fn user_content_failure(parts: &[UserContentPart]) -> Option<UserContentFailure> {
+    if parts.is_empty() {
+        return Some(UserContentFailure::Empty);
+    }
+    if parts.len() > MAX_USER_CONTENT_PARTS {
+        return Some(UserContentFailure::TooManyParts);
+    }
+
+    let mut aggregate_text_bytes = 0_usize;
+    let mut previous_was_text = false;
+    for part in parts {
+        match part {
+            UserContentPart::Text { value } => {
+                if previous_was_text {
+                    return Some(UserContentFailure::AdjacentTextParts);
+                }
+                let Some(next_text_bytes) = aggregate_text_bytes.checked_add(value.as_str().len())
+                else {
+                    return Some(UserContentFailure::TextTooLarge);
+                };
+                aggregate_text_bytes = next_text_bytes;
+                if aggregate_text_bytes > UserContent::MAX_TEXT_BYTES {
+                    return Some(UserContentFailure::TextTooLarge);
+                }
+                previous_was_text = true;
+            }
+            UserContentPart::Attachment { .. } => previous_was_text = false,
+        }
+    }
+    None
+}
+
+/// Failed content construction retaining the rejected parts unchanged.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserContentError {
+    parts: Vec<UserContentPart>,
+    failure: UserContentFailure,
+}
+
+impl UserContentError {
+    /// Returns the closed structural rejection reason.
+    pub const fn failure(&self) -> UserContentFailure {
+        self.failure
+    }
+
+    /// Borrows the rejected ordered parts unchanged.
+    pub fn parts(&self) -> &[UserContentPart] {
+        &self.parts
+    }
+
+    /// Returns the rejected parts and failure.
+    pub fn into_parts(self) -> (Vec<UserContentPart>, UserContentFailure) {
+        (self.parts, self.failure)
+    }
+}
+
 /// Closed structural rejection for one complete content sequence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UserContentError {
+pub enum UserContentFailure {
     /// No parts were supplied.
     Empty,
     /// The part-count bound was exceeded.
@@ -375,7 +439,7 @@ mod tests {
     use super::{
         AttachmentDisplayFilename, AttachmentDisplayFilenameFailure, AttachmentKind,
         DeclaredMediaType, DeclaredMediaTypeFailure, MAX_USER_CONTENT_TEXT_BYTES,
-        NonEmptyUnicodeText, NonEmptyUnicodeTextFailure, UserContent, UserContentError,
+        NonEmptyUnicodeText, NonEmptyUnicodeTextFailure, UserContent, UserContentFailure,
         UserContentPart,
     };
     use crate::BlobDigest;
@@ -415,6 +479,26 @@ mod tests {
             null_error.into_parts(),
             (with_null, NonEmptyUnicodeTextFailure::ContainsNull)
         );
+    }
+
+    #[test]
+    fn user_text_debug_is_redacted() {
+        let private_text = "private user text";
+        let text = NonEmptyUnicodeText::try_new(String::from(private_text))
+            .expect("the fixture text is valid");
+
+        assert!(!format!("{text:?}").contains(private_text));
+    }
+
+    #[test]
+    fn rejected_user_text_debug_is_redacted() {
+        let rejected = "private rejected text\0";
+        let error = NonEmptyUnicodeText::try_new(String::from(rejected))
+            .expect_err("the fixture text contains U+0000");
+        let debug = format!("{error:?}");
+
+        assert!(!debug.contains(rejected));
+        assert!(debug.contains("ContainsNull"));
     }
 
     /// INV-005 / INV-012: content preserves exact scalar spellings.
@@ -461,20 +545,28 @@ mod tests {
     }
 
     #[test]
-    fn empty_part_sequence_is_rejected() {
-        assert_eq!(
-            UserContent::try_parts(Vec::new()),
-            Err(UserContentError::Empty)
-        );
+    fn empty_part_sequence_is_rejected_without_losing_the_parts() {
+        let error =
+            UserContent::try_parts(Vec::new()).expect_err("an empty part sequence is rejected");
+
+        assert_eq!(error.failure(), UserContentFailure::Empty);
+        assert_eq!(error.into_parts(), (Vec::new(), UserContentFailure::Empty));
     }
 
     #[test]
-    fn adjacent_text_parts_are_rejected() {
-        let adjacent = UserContent::try_parts(vec![
+    fn adjacent_text_parts_are_rejected_without_losing_the_parts() {
+        let parts = vec![
             UserContentPart::try_text(String::from("first")).expect("text is valid"),
             UserContentPart::try_text(String::from("second")).expect("text is valid"),
-        ]);
-        assert_eq!(adjacent, Err(UserContentError::AdjacentTextParts));
+        ];
+        let error =
+            UserContent::try_parts(parts.clone()).expect_err("adjacent text parts are rejected");
+
+        assert_eq!(error.failure(), UserContentFailure::AdjacentTextParts);
+        assert_eq!(
+            error.into_parts(),
+            (parts, UserContentFailure::AdjacentTextParts)
+        );
     }
 
     #[test]
@@ -513,6 +605,17 @@ mod tests {
             .expect("a basename is valid");
 
         assert!(!format!("{filename:?}").contains(basename));
+    }
+
+    #[test]
+    fn rejected_attachment_display_filename_debug_is_redacted() {
+        let rejected = "../private-chart.png";
+        let error = AttachmentDisplayFilename::try_new(String::from(rejected))
+            .expect_err("a path spelling is rejected");
+        let debug = format!("{error:?}");
+
+        assert!(!debug.contains(rejected));
+        assert!(debug.contains("ContainsPathSeparator"));
     }
 
     #[test]

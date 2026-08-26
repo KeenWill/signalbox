@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use signalbox_application::{
     ClassifyOperatorFailure, CompiledTool, CompiledToolCatalog, CorrelatedToolExecutorEvidence,
     OperatorFailureClass, ToolArgumentValidator, ToolExecutionInvocation, ToolExecutor,
-    ToolExecutorEvidence, ToolPreauthorization,
+    ToolExecutorEvidence, ToolPreauthorization, relinquish_scheduler_capacity,
 };
 use signalbox_domain::{
     BlobDigest, NormalizedToolArguments, ToolEffectClass, ToolExecutionErrorDetail,
@@ -19,7 +19,9 @@ use signalbox_tool_schema_derive::ToolSchema;
 use tokio::sync::Semaphore;
 
 use crate::{
-    blob_read_runtime::{BlobReadError, read_blob_chunk, read_blob_metadata},
+    blob_read_runtime::{
+        BLOB_READ_TIMEOUT, BlobReadError, read_blob_chunk, read_blob_entry, read_blob_metadata,
+    },
     blob_storage_runtime::BlobStoreRegistry,
 };
 
@@ -114,7 +116,7 @@ impl BlobTools {
         .map_err(|_| BlobToolConstructionError)?;
         let read = compile_contract_definition::<ReadContract>(
             ToolPermissionDefault::Auto,
-            ToolEffectClass::EffectFree,
+            ToolEffectClass::ExternalEffect,
         )
         .map_err(|_| BlobToolConstructionError)?;
         let catalog = CompiledToolCatalog::try_new([
@@ -175,7 +177,12 @@ impl fmt::Debug for BlobToolExecutor {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Sanitized catalog or store failure from a blob-read executor.
-pub struct BlobToolExecutorError;
+pub enum BlobToolExecutorError {
+    /// Infrastructure or an impossible executor invocation failed.
+    Infrastructure,
+    /// Durable catalog or adapter facts violated an internal integrity boundary.
+    Integrity,
+}
 impl fmt::Display for BlobToolExecutorError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("blob-read tool failed")
@@ -184,8 +191,18 @@ impl fmt::Display for BlobToolExecutorError {
 impl Error for BlobToolExecutorError {}
 impl ClassifyOperatorFailure for BlobToolExecutorError {
     fn operator_failure_class(&self) -> OperatorFailureClass {
-        OperatorFailureClass::Infrastructure {
-            commit_ambiguous: false,
+        match self {
+            Self::Infrastructure => OperatorFailureClass::Infrastructure {
+                commit_ambiguous: false,
+            },
+            Self::Integrity => OperatorFailureClass::FailClosedCorruption,
+        }
+    }
+
+    fn operator_failure_cause_code(&self) -> &'static str {
+        match self {
+            Self::Infrastructure => "blob_tool_infrastructure",
+            Self::Integrity => "blob_tool_integrity",
         }
     }
 }
@@ -200,10 +217,10 @@ impl ToolExecutor for BlobToolExecutor {
         let read = match invocation.request().name().as_str() {
             BLOB_METADATA_NAME => false,
             BLOB_READ_NAME => true,
-            _ => return Err(BlobToolExecutorError),
+            _ => return Err(BlobToolExecutorError::Infrastructure),
         };
-        let decoded =
-            decode(invocation.request().arguments(), read).map_err(|_| BlobToolExecutorError)?;
+        let decoded = decode(invocation.request().arguments(), read)
+            .map_err(|_| BlobToolExecutorError::Infrastructure)?;
         let evidence = match decoded {
             DecodedArguments::Metadata(digest) => {
                 match read_blob_metadata(&self.repository, digest).await {
@@ -220,18 +237,19 @@ impl ToolExecutor for BlobToolExecutor {
                 offset,
                 length,
             } => {
-                let _permit = Arc::clone(&self.read_budget)
-                    .try_acquire_owned()
-                    .map_err(|_| BlobToolExecutorError)?;
-                match read_blob_chunk(
-                    self.registry.as_deref(),
-                    &self.repository,
-                    digest,
-                    offset,
-                    length,
-                )
-                .await
-                {
+                let Ok(_permit) = Arc::clone(&self.read_budget).try_acquire_owned() else {
+                    return Ok(invocation.bind(failed(BlobReadError::Unavailable)?));
+                };
+                let traversal =
+                    relinquish_scheduler_capacity(tokio::time::timeout(BLOB_READ_TIMEOUT, async {
+                        let registry =
+                            self.registry.as_deref().ok_or(BlobReadError::Unavailable)?;
+                        let entry = read_blob_entry(&self.repository, digest).await?;
+                        read_blob_chunk(registry, &entry, offset, length).await
+                    }))
+                    .await
+                    .unwrap_or(Err(BlobReadError::Unavailable));
+                match traversal {
                     Ok(bytes) => completed(&ReadResult {
                         digest: digest.to_string(),
                         offset_bytes: offset.to_string(),
@@ -259,30 +277,31 @@ fn decode(
     read: bool,
 ) -> Result<DecodedArguments, BlobToolExecutorError> {
     if read {
-        let arguments: ReadArguments =
-            serde_json::from_str(arguments.as_str()).map_err(|_| BlobToolExecutorError)?;
+        let arguments: ReadArguments = serde_json::from_str(arguments.as_str())
+            .map_err(|_| BlobToolExecutorError::Infrastructure)?;
         let digest = arguments
             .digest
             .parse()
-            .map_err(|_| BlobToolExecutorError)?;
-        let offset = canonical_u64(&arguments.offset_bytes).ok_or(BlobToolExecutorError)?;
+            .map_err(|_| BlobToolExecutorError::Infrastructure)?;
+        let offset =
+            canonical_u64(&arguments.offset_bytes).ok_or(BlobToolExecutorError::Infrastructure)?;
         let length = canonical_u64(&arguments.length_bytes)
             .filter(|length| (1..=MAX_READ_BYTES).contains(length))
             .and_then(NonZeroU64::new)
-            .ok_or(BlobToolExecutorError)?;
+            .ok_or(BlobToolExecutorError::Infrastructure)?;
         Ok(DecodedArguments::Read {
             digest,
             offset,
             length,
         })
     } else {
-        let arguments: MetadataArguments =
-            serde_json::from_str(arguments.as_str()).map_err(|_| BlobToolExecutorError)?;
+        let arguments: MetadataArguments = serde_json::from_str(arguments.as_str())
+            .map_err(|_| BlobToolExecutorError::Infrastructure)?;
         Ok(DecodedArguments::Metadata(
             arguments
                 .digest
                 .parse()
-                .map_err(|_| BlobToolExecutorError)?,
+                .map_err(|_| BlobToolExecutorError::Infrastructure)?,
         ))
     }
 }
@@ -309,7 +328,7 @@ struct ReadResult {
 fn completed(value: &impl Serialize) -> Result<ToolExecutorEvidence, BlobToolExecutorError> {
     serde_json::to_string(value)
         .map(ToolExecutorEvidence::CompletedText)
-        .map_err(|_| BlobToolExecutorError)
+        .map_err(|_| BlobToolExecutorError::Infrastructure)
 }
 
 fn failed(error: BlobReadError) -> Result<ToolExecutorEvidence, BlobToolExecutorError> {
@@ -318,8 +337,8 @@ fn failed(error: BlobReadError) -> Result<ToolExecutorEvidence, BlobToolExecutor
         BlobReadError::RangeOutOfBounds { .. } => "range_out_of_bounds",
         BlobReadError::Missing => "blob_missing",
         BlobReadError::Corrupt => "blob_corrupt",
-        BlobReadError::Unavailable => return Err(BlobToolExecutorError),
-        BlobReadError::Integrity => "blob_integrity_failure",
+        BlobReadError::Unavailable => "blob_unavailable",
+        BlobReadError::Integrity => return Err(BlobToolExecutorError::Integrity),
     };
     Ok(ToolExecutorEvidence::KnownFailed {
         detail: ToolExecutionErrorDetail::try_new(String::from(detail)).ok(),
@@ -399,7 +418,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blob_tool_catalog_exposes_two_exact_auto_effect_free_declarations() {
+    async fn blob_tool_catalog_exposes_exact_effect_classes() {
         let tools = BlobTools::try_new(
             BlobCatalogRepository::new(
                 sqlx::PgPool::connect_lazy("postgres://localhost/test")
@@ -416,7 +435,8 @@ mod tests {
         assert_eq!(metadata.name().as_str(), BLOB_METADATA_NAME);
         assert_eq!(read.name().as_str(), BLOB_READ_NAME);
         assert_eq!(metadata.permission_default(), ToolPermissionDefault::Auto);
-        assert_eq!(read.effect_class(), ToolEffectClass::EffectFree);
+        assert_eq!(metadata.effect_class(), ToolEffectClass::EffectFree);
+        assert_eq!(read.effect_class(), ToolEffectClass::ExternalEffect);
         assert!(matches!(
             tools
                 .catalog

@@ -23,6 +23,7 @@ mod imported_session;
 mod model_call;
 mod model_execution;
 mod model_settings;
+mod program_journal;
 mod provider_evidence;
 mod queue_order;
 mod replace_session_defaults;
@@ -127,8 +128,9 @@ pub use model_call::{
 };
 pub use model_execution::{
     AmbiguousModelCallTurn, AmbiguousModelCallTurnIdentities, AuthorizedModelCall,
-    CancelledModelCallTurn, CancelledModelCallTurnIdentities, CancelledToolRoundModelCallTurn,
-    CompletedModelCallIdentities, CompletedModelCallTurn, CorrelatedModelCallTerminalObservation,
+    AvailabilitySuccessorModelCallTurn, CancelledModelCallTurn, CancelledModelCallTurnIdentities,
+    CancelledToolRoundModelCallTurn, CompletedModelCallIdentities, CompletedModelCallTurn,
+    CorrelatedModelCallTerminalObservation, CredentialPoolExhaustedModelCallTurn,
     FailedModelCallTurn, FailedModelCallTurnIdentities, IssuedModelCallCorrelation,
     ModelCallAuthorizationError, ModelCallAuthorizationFailure, ModelCallClosureError,
     ModelCallExecution, ModelCallExecutionReconstitutionError,
@@ -153,6 +155,13 @@ pub use model_settings::{
     OpenAiServiceTier, ReasoningLevel, ResolvedModelSettings, ServiceTier,
     SessionModelSettingsChanged, SettingOverlay, TurnModelSettingsResolved,
     UnsupportedModelSetting, ValidatedModelSettings,
+};
+pub use program_journal::{
+    DeliveryFrame, DeliveryKind, DeliveryOrdinal, EffectRequest, FaultCause, FaultEvidenceRef,
+    InlineFramePayload, JournalEntry, JournalFrame, JournalPosition, NondeterminismError,
+    ProgramCapability, ProgramFault, ProgramJournal, ProgramJournalError, RejectReason,
+    ReplayCursor, ReplayInstruction, ReplayedRequest, RequestFrame, RequestKind, RequestOrdinal,
+    ScopeOperation, ScopeOrdinal, ScopeRequest,
 };
 pub use provider_evidence::{
     ProviderTargetEvidence, ProviderTargetEvidenceLog, ProviderTargetMismatchInvalidation,
@@ -180,10 +189,10 @@ pub use repo_watch::{
     RepoWatchEventKindNameV1, RepoWatchEventKindV1, RepoWatchEventTarget, RepoWatchLabelMatcher,
     RepoWatchLabelMatcherInput, RepoWatchMatcherV1, RepoWatchMatcherV1Input, RepoWatchPattern,
     RepoWatchRule, RepoWatchRuleActionV1, RepoWatchRuleContentDigest, RepoWatchRuleId,
-    RepoWatchRuleValidationError, RepoWatchRuleVersion, RepoWatchSingletonScope,
-    RepoWatchTemplateContextDeclaration, RepoWatchTemplateContextDeclarationError,
-    RepoWatchTextError, RepoWatchWorkflowRunAttempt, RepositorySlug, ReviewState, ReviewThreadId,
-    WorkflowName,
+    RepoWatchRuleIdentityField, RepoWatchRuleIdentityFieldDigest, RepoWatchRuleValidationError,
+    RepoWatchRuleVersion, RepoWatchSingletonScope, RepoWatchTemplateContextDeclaration,
+    RepoWatchTemplateContextDeclarationError, RepoWatchTextError, RepoWatchWorkflowRunAttempt,
+    RepositorySlug, ReviewState, ReviewThreadId, WorkflowName,
 };
 pub use review_workflow::{
     ReviewChangeRequestNumber, ReviewConfidence, ReviewConfidenceError, ReviewEventOrdinal,
@@ -293,6 +302,7 @@ pub use submit_input::{
     SubmitInputAppliedPendingSteeringReconstitutionInput, SubmitInputAppliedResult,
     SubmitInputAppliedTurnOriginReconstitutionInput, SubmitInputDirectTurnOriginConstructionInput,
     SubmitInputInterruptedModelCallReconciliationConstructionInput,
+    SubmitInputInterruptedToolReconciliationConstructionInput,
     SubmitInputPendingSteeringAppliedResult, SubmitInputPreparationError,
     SubmitInputPreparationFailure, SubmitInputReclassifiedTurnOriginConstructionInput,
     SubmitInputReconstitutionError, SubmitInputReconstitutionFailure,
@@ -383,7 +393,7 @@ pub use user_content::{
     AttachmentBlobFact, AttachmentDisplayFilename, AttachmentDisplayFilenameError,
     AttachmentDisplayFilenameFailure, AttachmentKind, DeclaredMediaType, DeclaredMediaTypeError,
     DeclaredMediaTypeFailure, NonEmptyUnicodeText, NonEmptyUnicodeTextError,
-    NonEmptyUnicodeTextFailure, UserContent, UserContentError, UserContentPart,
+    NonEmptyUnicodeTextFailure, UserContent, UserContentError, UserContentFailure, UserContentPart,
 };
 pub use workspace::{WorkspaceOrigin, WorkspaceRecord, WorkspaceRootPath, WorkspaceRootPathError};
 
@@ -502,6 +512,11 @@ define_identity!(
 );
 
 define_identity!(
+    /// Identifies one durable execution of a registered program.
+    ProgramRunId
+);
+
+define_identity!(
     /// Identifies one immutable review-target snapshot.
     ReviewTargetId
 );
@@ -534,6 +549,11 @@ define_identity!(
 define_identity!(
     /// Identifies one durable repository-watch dispatch audit record.
     RepoWatchDispatchId
+);
+
+define_identity!(
+    /// Identifies one durable operator-commissioned dispatch audit record.
+    CommissionedDispatchId
 );
 
 define_identity!(
@@ -604,11 +624,12 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::{
-        AcceptedInputId, ContextFrontierId, DurableCommandId, GitRemoteMintId,
-        GitRemoteWithdrawalId, ImportedConversationId, ImportedTranscriptEntryId, ModelCallId,
-        ProviderTargetEvidenceId, RepoWatchDispatchId, RepoWatchEventId, RunnerAuthenticationId,
-        RunnerEnrollmentId, RunnerId, RunnerLeaseId, SemanticTranscriptEntryId, SessionId,
-        ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId, WorkspaceId, WorkspaceManifestId,
+        AcceptedInputId, CommissionedDispatchId, ContextFrontierId, DurableCommandId,
+        GitRemoteMintId, GitRemoteWithdrawalId, ImportedConversationId, ImportedTranscriptEntryId,
+        ModelCallId, ProviderTargetEvidenceId, RepoWatchDispatchId, RepoWatchEventId,
+        RunnerAuthenticationId, RunnerEnrollmentId, RunnerId, RunnerLeaseId,
+        SemanticTranscriptEntryId, SessionId, ToolAttemptId, ToolRequestId, TurnAttemptId, TurnId,
+        WorkspaceId, WorkspaceManifestId,
     };
     use uuid::Uuid;
 
@@ -649,6 +670,7 @@ mod tests {
         assert_uuid_contract!(WorkspaceManifestId);
         assert_uuid_contract!(RepoWatchEventId);
         assert_uuid_contract!(RepoWatchDispatchId);
+        assert_uuid_contract!(CommissionedDispatchId);
         assert_uuid_contract!(WorkspaceId);
         assert_uuid_contract!(GitRemoteMintId);
         assert_uuid_contract!(GitRemoteWithdrawalId);

@@ -1,0 +1,14 @@
+[Unit]
+Description=Signalbox dogfood lifecycle watchdog
+
+[Service]
+Type=simple
+ExecStart=/home/wkg/signalbox-dogfood/supervise-lifecycle.sh /home/wkg/signalbox-dogfood/lifecycle.sh signalboxd 5
+Restart=always
+RestartSec=5
+# The lifecycle helper detaches signalboxd. Stopping or restarting this
+# observer must not become an alternate daemon stop path.
+KillMode=process
+
+[Install]
+WantedBy=default.target

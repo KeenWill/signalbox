@@ -255,6 +255,16 @@ itself made, while media type and filename are caller-supplied strings, and a
 caller-supplied string must not select which infrastructure gains authority over
 bytes.
 
+**Committed unimplemented functionality.** No present surface stores program
+frame payloads. The closed routing-class vocabulary gains one `program_journal`
+class for over-threshold journal payloads written by the
+[program substrate](program-substrate.md)'s host: derived by the daemon from the
+writing surface exactly as every class is, never operation-selected, and added
+to the routes table's required set when the substrate lands. This constrains
+present change: the class vocabulary and route-validation surface must stay
+extensible to that addition without loosening the closed-set rejection of
+unknown classes.
+
 Blobs are large: the substrate supports multi-gigabyte objects, so every daemon
 path — ingest, verification, replica copy, read — streams and none materializes
 a whole blob in memory. Bounded in-memory materialization exists only at
@@ -307,8 +317,11 @@ per-session dispatch gate remain in flight. It reacquires scheduler capacity
 before committing either the correlated result evidence or a crash-loss
 classification. A request that cannot acquire a direct-read permit returns the
 ordinary unavailable result without relinquishing its pass. At most 16 such
-tasks can wait to reacquire scheduler capacity, so slow reads cannot occupy all
-16 scheduler-pass slots and the handoff creates no unbounded waiter inventory.
+tasks can wait to reacquire scheduler capacity, independent of the configured
+scheduler-pass capacity. Because each task relinquishes its scheduler slot
+during store traversal, slow reads cannot occupy every configured scheduler-pass
+slot, and the fixed direct-read bound keeps the handoff's waiter inventory
+bounded.
 
 Attachment-preparation store traversal is bounded independently from scheduler
 passes: at most eight such traversals are active process-wide. A model-call pass

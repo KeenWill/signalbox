@@ -20,17 +20,17 @@ use signalbox_domain::{
     RunnerAdvertisement, RunnerAuthenticationId, RunnerCapabilityClass, RunnerCatalog,
     RunnerDomainError, RunnerEnrollment, RunnerEnrollmentId, RunnerGeneration, RunnerId,
     RunnerLease, RunnerLeaseCorrelation, RunnerLeaseId, RunnerLeaseOfferRequest,
-    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation,
+    RunnerLeaseReconstitutionInput, RunnerLeaseRetryPreparation, RunnerLostBeforePin,
     RunnerPlacementReconstitutionHistory, RunnerRepositoryEntry, RunnerSandboxProfile,
     RunnerSelector, RunnerToolAttemptAuthorization, RunnerToolDeclaration, RunnerToolEffectClass,
     RunnerToolModelDefinition, RunnerToolPermissionOverride, RunnerToolPermissionOverrides,
     RunnerWorkingDirectory, SemanticTranscriptEntryId, SessionConfigurationDefaults,
     SessionConfigurationDefaultsVersion, SessionCreationCause, SessionCreationProvenance,
     SessionId, SessionRunnerPin, SessionRunnerPlacement, SessionRunnerPlacementReconstitutionInput,
-    SessionRunnerPlacementRequest, SubmitInput, ToolAdmissibleLoci, ToolApprovalDecision,
-    ToolApprovalResolutionReconstitutionInput, ToolAttemptDispatchCorrelation,
-    ToolAttemptDispatchCorrelationReconstitutionInput, ToolAttemptId,
-    ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
+    SessionRunnerPlacementRequest, SessionRunnerPlacementState, SubmitInput, ToolAdmissibleLoci,
+    ToolApprovalDecision, ToolApprovalResolutionReconstitutionInput,
+    ToolAttemptDispatchCorrelation, ToolAttemptDispatchCorrelationReconstitutionInput,
+    ToolAttemptId, ToolAttemptReconstitutionInput, ToolAttemptReconstitutionState, ToolBatch,
     ToolBatchPhaseReconstitutionInput, ToolBatchReconstitutionInput, ToolDispatchGeneration,
     ToolEffectClass, ToolName, ToolPermissionDefault, ToolRequestId, ToolRequestOrdinal,
     ToolRequestReconstitutionInput, TranscriptAncestry, TurnAttemptId, TurnId, UserContent,
@@ -41,6 +41,7 @@ use signalbox_domain::{
 use signalbox_persistence::{
     MIGRATOR,
     create_session::CreateSessionRepository,
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels, local_test_connection_options, migrate,
     outbox::{
         DispatchedOutboxEvent, DispatchedOutboxEventKind, DispatchedRunnerState, OutboxCorruption,
@@ -52,9 +53,9 @@ use signalbox_persistence::{
         ProcessReadRepository, ProcessRunnerConnectionHealth, ProcessRunnerProjectionState,
     },
     runner_protocol::{
-        RunnerConnectionCause, RunnerConnectionEpoch, RunnerConnectionState,
-        RunnerConnectionTransition, RunnerProtocolCorruption, RunnerProtocolStore,
-        RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
+        RunnerConnectionCause, RunnerConnectionEpoch, RunnerConnectionLossSessionDisposition,
+        RunnerConnectionState, RunnerConnectionTransition, RunnerProtocolCorruption,
+        RunnerProtocolStore, RunnerProtocolStoreError, StoredValidatedRunnerRegistration,
     },
     session_credentials::{SessionCredentialPin, SessionModelCredential},
     start_eligible_turn::StartEligibleTurnRepository,
@@ -98,6 +99,7 @@ const PRE_RUNNER_WIRE_MIGRATION: i64 = 202608020002;
 const PRE_PLACEMENT_LOSS_MIGRATION: i64 = 202608030004;
 const PRE_RUNNER_LOSS_EPOCH_MIGRATION: i64 = 202608110003;
 const PRE_PLACEMENT_LOSS_FENCE_MIGRATION: i64 = 202608110004;
+const PRE_RUNNER_LOSS_CURSOR_MIGRATION: i64 = 202608110005;
 const LEGACY_PLACEMENT_REFUSAL: &str =
     "runner wire contract requires empty legacy placement history";
 const LEGACY_PLACEMENT_LOSS_REFUSAL: &str =
@@ -155,7 +157,8 @@ async fn unmigrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
         .with_db_name(DATABASE_NAME)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -855,6 +858,136 @@ async fn stored_pin_fixture(
     .await
 }
 
+enum ActivePinEffectCase {
+    EffectFree,
+    IdempotentExternalEffect,
+    SideEffectingExternalEffect,
+}
+
+async fn stored_active_pin_fixture_with_authorization(
+    pool: &PgPool,
+    effect_case: ActivePinEffectCase,
+) -> Result<
+    (
+        RunnerProtocolStore,
+        RunnerEnrollment,
+        StoredValidatedRunnerRegistration,
+        SessionRunnerPin,
+        RunnerConnectionEpoch,
+    ),
+    Box<dyn Error>,
+> {
+    let (authorize, fixture_catalog, fixture_overrides, fixture_effect_kind): (
+        fn(PhysicalAttemptFacts) -> RunnerToolAttemptAuthorization,
+        RunnerCatalog,
+        RunnerToolPermissionOverrides,
+        &'static str,
+    ) = match effect_case {
+        ActivePinEffectCase::EffectFree => (
+            authorized,
+            catalog(),
+            no_permission_overrides(),
+            "effect_free",
+        ),
+        ActivePinEffectCase::IdempotentExternalEffect => (
+            idempotent_authorized,
+            idempotent_catalog(),
+            permission_overrides(RunnerToolPermissionOverride::Auto),
+            "external_effect",
+        ),
+        ActivePinEffectCase::SideEffectingExternalEffect => (
+            external_authorized,
+            side_effecting_catalog(),
+            permission_overrides(RunnerToolPermissionOverride::Auto),
+            "external_effect",
+        ),
+    };
+    let (session, turn, turn_attempt) = insert_running_turn(pool).await?;
+    let producing_call = ModelCallId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.turn + (RELATED_IDENTITY_OFFSET * 2),
+    ));
+    let boundary = ContextFrontierId::from_uuid(uuid(
+        INITIAL_PHYSICAL_ATTEMPT.turn + (RELATED_IDENTITY_OFFSET * 3),
+    ));
+    sqlx::query(
+        "UPDATE turn_attempt
+            SET state_kind = 'running'
+          WHERE turn_attempt_id = $1 AND state_kind = 'prepared'",
+    )
+    .bind(turn_attempt.into_uuid())
+    .execute(pool)
+    .await?;
+    attach_continuing_tool_round_projection(
+        pool,
+        session,
+        turn,
+        turn_attempt,
+        producing_call,
+        ToolRequestId::from_uuid(uuid(INITIAL_PHYSICAL_ATTEMPT.request)),
+        boundary,
+    )
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle DISABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    sqlx::query(
+        "UPDATE turn_lifecycle
+            SET active_tool_round_call_id = $1
+          WHERE session_id = $2 AND turn_id = $3",
+    )
+    .bind(producing_call.into_uuid())
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .execute(pool)
+    .await?;
+    sqlx::query("ALTER TABLE turn_lifecycle ENABLE TRIGGER ALL")
+        .execute(pool)
+        .await?;
+    insert_physical_attempt(pool, INITIAL_PHYSICAL_ATTEMPT).await?;
+    set_fixture_physical_attempt_effect(pool, INITIAL_PHYSICAL_ATTEMPT, fixture_effect_kind)
+        .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), fixture_catalog);
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let registration = store
+        .register(&expected_enrollment, advertisement())
+        .await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        session,
+        SessionRunnerPlacementRequest {
+            selector: RunnerSelector::CapabilityClass(class()),
+            working_directory: WorkingDirectorySelection::RunnerDefault,
+            credential_profile: Some(profile()),
+            workspace: WorkspaceRequirement::None,
+            sandbox: RunnerSandboxProfile::Ambient,
+            permission_overrides: fixture_overrides,
+        },
+    );
+    store.store_placement(&placement, None, None).await?;
+    let pin = placement
+        .pin_and_offer_lease(
+            &expected_enrollment,
+            registration.registration(),
+            RunnerWorkingDirectory::try_new("/workspace/session".to_owned())
+                .expect("the active fixture working directory is valid"),
+            None,
+            authorize(INITIAL_PHYSICAL_ATTEMPT),
+            offer_request(),
+        )
+        .expect("the active fixture registration pins the placement");
+    store.store_pin(&pin, &registration).await?;
+    Ok((
+        store,
+        expected_enrollment,
+        registration,
+        pin,
+        connection.epoch(),
+    ))
+}
+
 async fn stored_side_effecting_pin_fixture(
     pool: &PgPool,
 ) -> Result<
@@ -1192,6 +1325,7 @@ async fn migrated_unconnected_later_lease_fixture(
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(pool).await?;
+    install_pre_loss_identity_compatibility_function(pool).await?;
     let (store, expected_enrollment, registration, pin) = prepared_pin_fixture_with_authorization(
         pool,
         authorized,
@@ -1300,6 +1434,36 @@ async fn install_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<()
     Ok(())
 }
 
+async fn install_pre_loss_identity_compatibility_function(
+    pool: &PgPool,
+) -> Result<(), sqlx::Error> {
+    sqlx::raw_sql(
+        "CREATE FUNCTION lock_runner_loss_identity(checked_runner uuid)
+         RETURNS void
+         LANGUAGE plpgsql
+         AS $$
+         BEGIN
+             PERFORM pg_advisory_xact_lock(
+                 hashtextextended(
+                     'signalbox.runner-loss-identity.' || checked_runner::text,
+                     0
+                 )
+             );
+         END;
+         $$;",
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn drop_pre_loss_identity_compatibility_function(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query("DROP FUNCTION lock_runner_loss_identity(uuid)")
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 async fn drop_pre_loss_fence_compatibility_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
     sqlx::query("DROP TABLE runner_current_connection_loss")
         .execute(pool)
@@ -1356,6 +1520,203 @@ async fn insert_session_for_with_creation_cause(
 
 async fn insert_session(pool: &PgPool) -> Result<(), sqlx::Error> {
     insert_session_for(pool, uuid(SESSION)).await
+}
+
+async fn insert_terminal_connection_loss_before_cursor_migration(
+    pool: &PgPool,
+    enrollment: RunnerEnrollmentId,
+    connection: RunnerConnectionEpoch,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_event
+            (enrollment_id, connection_epoch, event_ordinal,
+             state_kind, cause_kind)
+         VALUES ($1, $2, 2, 'lost', 'transport_closed')",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(connection.get()))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_connection_loss_epoch
+            (enrollment_id, loss_epoch, connection_epoch,
+             connection_event_ordinal)
+         VALUES ($1, 1, $2, 2)",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(connection.get()))
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_connection_loss (enrollment_id, loss_epoch)
+         VALUES ($1, 1)",
+    )
+    .bind(enrollment.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_connection_authority_head
+            SET connection_event_ordinal = 2, latest_loss_epoch = 1
+          WHERE enrollment_id = $1 AND connection_epoch = $2",
+    )
+    .bind(enrollment.into_uuid())
+    .bind(Decimal::from(connection.get()))
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
+}
+
+fn propagation_session(ordinal: u128) -> SessionId {
+    SessionId::from_uuid(Uuid::from_u128(
+        0xa200_0000_0000_0000_0000_0000_0000_0000 + ordinal,
+    ))
+}
+
+async fn insert_uncommitted_exact_placement(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session: SessionId,
+    runner: RunnerId,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, directory_selection_kind,
+             workspace_requirement_kind, requested_sandbox_profile,
+             permission_override_count, state_kind, pinned_tool_count)
+         VALUES ($1, 1, 1, 'created', 'identity', $2, 'runner_default',
+                 'none', 'workspace_restricted', 0, 'unpinned', 0)",
+    )
+    .bind(session.into_uuid())
+    .bind(runner.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_session_placement
+            (session_id, event_ordinal)
+         VALUES ($1, 1)",
+    )
+    .bind(session.into_uuid())
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+async fn insert_bounded_propagation_session_fixture(
+    pool: &PgPool,
+    runner: RunnerId,
+) -> Result<Vec<SessionId>, sqlx::Error> {
+    let sessions: Vec<_> = (1..=65).map(propagation_session).collect();
+    let session_uuids: Vec<_> = sessions.iter().copied().map(SessionId::into_uuid).collect();
+    let mut transaction = pool.begin().await?;
+    sqlx::query("ALTER TABLE session DISABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session (session_id, creation_cause, ancestry_kind)
+         SELECT session_id, 'user_initiated', 'none'
+           FROM unnest($1::uuid[]) AS fixture(session_id)",
+    )
+    .bind(&session_uuids)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query("ALTER TABLE session ENABLE TRIGGER ALL")
+        .execute(&mut *transaction)
+        .await?;
+    sqlx::query(
+        "INSERT INTO session_scheduler (session_id)
+         SELECT session_id FROM unnest($1::uuid[]) AS fixture(session_id)",
+    )
+    .bind(&session_uuids)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, directory_selection_kind,
+             workspace_requirement_kind, requested_sandbox_profile,
+             permission_override_count, state_kind, pinned_tool_count)
+         SELECT session_id, 1, 1, 'created', 'identity', $2,
+                'runner_default', 'none', 'workspace_restricted', 0,
+                'unpinned', 0
+           FROM unnest($1::uuid[]) AS fixture(session_id)",
+    )
+    .bind(&session_uuids)
+    .bind(runner.into_uuid())
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO runner_current_session_placement
+            (session_id, event_ordinal)
+         SELECT session_id, 1
+           FROM unnest($1::uuid[]) AS fixture(session_id)",
+    )
+    .bind(&session_uuids)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await?;
+    Ok(sessions)
+}
+
+async fn project_bounded_propagation_sessions(
+    pool: &PgPool,
+    sessions: &[SessionId],
+) -> Result<(), sqlx::Error> {
+    let session_uuids: Vec<_> = sessions.iter().copied().map(SessionId::into_uuid).collect();
+    let mut transaction = pool.begin().await?;
+    sqlx::query(
+        "INSERT INTO runner_session_placement_record
+            (session_id, event_ordinal, placement_revision, event_kind,
+             selector_kind, selector_runner_id, selector_capability_class,
+             directory_selection_kind, requested_working_directory,
+             requested_credential_profile_name, workspace_requirement_kind,
+             requested_repository_key, requested_sandbox_profile,
+             permission_override_count, state_kind, lost_runner_id,
+             loss_source_kind, pinned_runner_id,
+             pinned_working_directory, pinned_credential_profile_name,
+             registration_enrollment_id, registration_revision,
+             pinned_tool_count, workspace_repository_key,
+             workspace_working_directory, workspace_manifest_id,
+             workspace_placement_revision,
+             workspace_clone_url_digest, workspace_credential_profile_name,
+             workspace_sandbox_profile, workspace_relative_path,
+             workspace_recovery_kind, workspace_branch_name, workspace_revision,
+             credential_grant_runner_id,
+             credential_grant_lineage_origin_ordinal,
+             credential_grant_revision)
+         SELECT placement.session_id, placement.event_ordinal + 1,
+                placement.placement_revision, 'runner_lost_before_pin',
+                placement.selector_kind, placement.selector_runner_id,
+                placement.selector_capability_class,
+                placement.directory_selection_kind,
+                placement.requested_working_directory,
+                placement.requested_credential_profile_name,
+                placement.workspace_requirement_kind,
+                placement.requested_repository_key,
+                placement.requested_sandbox_profile,
+                placement.permission_override_count,
+                'runner_lost_before_pin', placement.selector_runner_id,
+                NULL, NULL, NULL, NULL, NULL, NULL, 0, NULL, NULL, NULL,
+                NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+                NULL
+           FROM runner_session_placement_record AS placement
+           JOIN runner_current_session_placement AS current_placement
+             ON current_placement.session_id = placement.session_id
+            AND current_placement.event_ordinal = placement.event_ordinal
+          WHERE placement.session_id = ANY($1::uuid[])",
+    )
+    .bind(&session_uuids)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "UPDATE runner_current_session_placement
+            SET event_ordinal = event_ordinal + 1
+          WHERE session_id = ANY($1::uuid[])",
+    )
+    .bind(&session_uuids)
+    .execute(&mut *transaction)
+    .await?;
+    transaction.commit().await
 }
 
 async fn dispatch_next_outbox_event(
@@ -3364,6 +3725,7 @@ async fn s32_inv044_runner_loss_epoch_migration_backfills_terminal_connection()
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(&pool).await?;
+    install_pre_loss_identity_compatibility_function(&pool).await?;
     insert_session(&pool).await?;
     insert_physical_attempt(&pool, INITIAL_PHYSICAL_ATTEMPT).await?;
     let store = RunnerProtocolStore::new(pool.clone(), catalog());
@@ -3486,7 +3848,318 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
     MIGRATOR
         .run_to(PRE_PLACEMENT_LOSS_FENCE_MIGRATION, &pool)
         .await?;
+    install_pre_loss_identity_compatibility_function(&pool).await?;
     let (store, expected_enrollment, _, _) = stored_pin_fixture(&pool).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    insert_terminal_connection_loss_before_cursor_migration(
+        &pool,
+        expected_enrollment.enrollment(),
+        connection.epoch(),
+    )
+    .await?;
+    drop_pre_loss_identity_compatibility_function(&pool).await?;
+    let refusal = migrate(&pool)
+        .await
+        .expect_err("legacy placement history has no exact loss baseline");
+
+    assert!(
+        refusal
+            .to_string()
+            .contains(LEGACY_PLACEMENT_LOSS_FENCE_REFUSAL)
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: losses predating bounded propagation migrate to an exact completed
+/// cursor because their placements received the compatibility loss baseline.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_migration_backfills_completed_state()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_CURSOR_MIGRATION, &pool)
+        .await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    insert_terminal_connection_loss_before_cursor_migration(
+        &pool,
+        expected_enrollment.enrollment(),
+        connection.epoch(),
+    )
+    .await?;
+    migrate(&pool).await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the migrated terminal connection retains its loss");
+    let page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(page.loss(), loss);
+    assert_eq!(page.propagated_through(), None);
+    assert!(page.sessions().is_empty());
+    assert!(page.is_complete());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a pre-enrollment exact selection remains in the affected set when
+/// its runner enrolls and is lost before the cursor migration.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_migration_preserves_pending_placement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = unmigrated_postgres().await?;
+    MIGRATOR
+        .run_to(PRE_RUNNER_LOSS_CURSOR_MIGRATION, &pool)
+        .await?;
+    install_pre_loss_identity_compatibility_function(&pool).await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    store.store_placement(&placement, None, None).await?;
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    insert_terminal_connection_loss_before_cursor_migration(
+        &pool,
+        expected_enrollment.enrollment(),
+        connection.epoch(),
+    )
+    .await?;
+    drop_pre_loss_identity_compatibility_function(&pool).await?;
+    migrate(&pool).await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the post-baseline terminal connection retains its loss");
+    let page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(page.loss(), loss);
+    assert_eq!(page.propagated_through(), None);
+    assert_eq!(page.sessions(), &[placement.session()]);
+    assert!(!page.is_complete());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a new loss owns a pending cursor whose ordered read page is capped
+/// at 64 sessions and resumes strictly after its durable session identity.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_pages_sixty_four_sessions() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let expected_sessions =
+        insert_bounded_propagation_session_fixture(&pool, expected_enrollment.runner()).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+    let first_page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(first_page.loss(), loss);
+    assert_eq!(first_page.propagated_through(), None);
+    assert_eq!(first_page.sessions(), &expected_sessions[..64]);
+    assert!(!first_page.is_complete());
+
+    project_bounded_propagation_sessions(&pool, &expected_sessions[..64]).await?;
+    sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET propagated_through_session_id = $3
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .bind(expected_sessions[63].into_uuid())
+    .execute(&pool)
+    .await?;
+    let second_page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(second_page.loss(), loss);
+    assert_eq!(
+        second_page.propagated_through(),
+        Some(expected_sessions[63])
+    );
+    assert_eq!(second_page.sessions(), &expected_sessions[64..]);
+    assert!(!second_page.is_complete());
+
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: bounded propagation pages have indexes for both enrollment-fenced
+/// and pre-enrollment exact-runner placement branches.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_page_has_affected_set_indexes() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+
+    let definition: String = sqlx::query_scalar(
+        "SELECT indexdef
+           FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname = 'runner_session_placement_loss_propagation_page'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    let exact_definition: String = sqlx::query_scalar(
+        "SELECT indexdef
+           FROM pg_indexes
+          WHERE schemaname = current_schema()
+            AND indexname = 'runner_session_placement_exact_loss_propagation_page'",
+    )
+    .fetch_one(&pool)
+    .await?;
+
+    assert!(
+        definition.contains("(loss_fence_enrollment_id, session_id, event_ordinal)"),
+        "the loss page index must lead with enrollment and preserve session order"
+    );
+    assert!(
+        exact_definition.contains("(selector_runner_id, session_id, event_ordinal)"),
+        "the exact-selection page index must lead with runner and preserve session order"
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a propagation cursor cannot advance past an affected session that
+/// has not received the loss projection.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_rejects_skipped_session() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let expected_sessions =
+        insert_bounded_propagation_session_fixture(&pool, expected_enrollment.runner()).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+
+    let skipped = sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET propagated_through_session_id = $3
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .bind(expected_sessions[63].into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a durable cursor cannot skip an affected session");
+
+    assert_check_violation(skipped);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a propagation cursor cannot rewind behind its durable session.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_rejects_rewind() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let expected_sessions =
+        insert_bounded_propagation_session_fixture(&pool, expected_enrollment.runner()).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+    project_bounded_propagation_sessions(&pool, &expected_sessions[..64]).await?;
+    sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET propagated_through_session_id = $3
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .bind(expected_sessions[63].into_uuid())
+    .execute(&pool)
+    .await?;
+
+    let rewound = sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET propagated_through_session_id = $3
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .bind(expected_sessions[62].into_uuid())
+    .execute(&pool)
+    .await
+    .expect_err("a durable cursor cannot rewind its session identity");
+
+    assert_check_violation(rewound);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a propagation cursor cannot complete while an affected session
+/// still retains an older loss baseline.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_rejects_premature_completion() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    store.store_placement(&placement, None, None).await?;
+    store.insert_enrollment(&expected_enrollment).await?;
     let connection = store
         .open_connection(expected_enrollment.enrollment())
         .await?;
@@ -3497,15 +4170,866 @@ async fn s31_inv043_inv044_placement_loss_fence_migration_rejects_legacy_history
             RunnerConnectionTransition::TransportClosed,
         )
         .await?;
-    let refusal = migrate(&pool)
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+
+    let premature_completion = sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET state_kind = 'completed'
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .execute(&pool)
+    .await
+    .expect_err("a durable cursor cannot complete before its final session");
+
+    assert_check_violation(premature_completion);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: an exact-identity placement that observes enrollment absence
+/// commits before the matching enrollment can create or complete a loss cursor.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv044_pre_enrollment_placement_serializes_loss_cursor_creation()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    let expected_session = SessionId::from_uuid(uuid(SESSION));
+    let mut placement = pool.begin().await?;
+    insert_uncommitted_exact_placement(
+        &mut placement,
+        expected_session,
+        expected_enrollment.runner(),
+    )
+    .await?;
+    let mut enrollment_insert = Box::pin(store.insert_enrollment(&expected_enrollment));
+
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut enrollment_insert)
         .await
-        .expect_err("legacy placement history has no exact loss baseline");
+        .expect_err("enrollment must wait for the absent-baseline placement");
+    placement.commit().await?;
+    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, enrollment_insert).await??;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the serialized terminal connection owns its loss cursor");
+    let page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(page.sessions(), &[expected_session]);
+    assert!(!page.is_complete());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: exact-identity placement takes the runner-identity fence before
+/// enrollment authority, so cursor completion cannot form an opposing edge.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires Docker"]
+async fn s32_inv044_loss_cursor_completion_serializes_on_runner_identity()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let mut enrollment_authority = pool.begin().await?;
+    sqlx::query(
+        "SELECT enrollment_id
+           FROM runner_enrollment
+          WHERE enrollment_id = $1
+          FOR UPDATE",
+    )
+    .bind(expected_enrollment.enrollment().into_uuid())
+    .fetch_one(&mut *enrollment_authority)
+    .await?;
+    let placement_store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let placement_insert = tokio::spawn(async move {
+        tokio::time::timeout(
+            LOCK_COMPLETION_TIMEOUT,
+            placement_store.store_placement(&placement, None, None),
+        )
+        .await
+    });
+    let placement_blocked =
+        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1))
+            .await
+            .expect("placement enrollment-lock observation must remain bounded")?;
+    let mut completion = Box::pin(store.complete_connection_loss_propagation(loss));
+
+    tokio::time::timeout(LOCK_WAIT_PROBE, &mut completion)
+        .await
+        .expect_err("cursor completion must wait for placement's identity fence");
+    enrollment_authority.commit().await?;
+    placement_insert
+        .await
+        .expect("the placement task remains joinable")
+        .expect("the placement insert must finish within its operation timeout")?;
+    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, completion).await??;
+    let page = store.load_connection_loss_propagation_page(loss).await?;
 
     assert!(
-        refusal
-            .to_string()
-            .contains(LEGACY_PLACEMENT_LOSS_FENCE_REFUSAL)
+        placement_blocked,
+        "placement must reach enrollment authority after taking identity"
     );
+    assert_eq!(page.sessions(), &[]);
+    assert!(page.is_complete());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a fully projected loss cursor may transition once to completed.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_cursor_completes_after_final_session() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let expected_sessions =
+        insert_bounded_propagation_session_fixture(&pool, expected_enrollment.runner()).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its pending propagation cursor");
+    project_bounded_propagation_sessions(&pool, &expected_sessions).await?;
+
+    sqlx::query(
+        "UPDATE runner_connection_loss_propagation
+            SET state_kind = 'completed'
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .execute(&pool)
+    .await?;
+    let completed = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(completed.loss(), loss);
+    assert_eq!(completed.propagated_through(), None);
+    assert!(completed.sessions().is_empty());
+    assert!(completed.is_complete());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: the bounded loss transaction projects an exact unpinned
+/// identity loss, its follower event, and its cursor advancement atomically.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_loss_transaction_projects_exact_unpinned_session()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let session = placement.session();
+    let expected_revision = placement.revision();
+    store.store_placement(&placement, None, None).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the exact runner loss owns its propagation cursor");
+    let disposition = store
+        .propagate_connection_loss_session(loss, session)
+        .await?;
+    let replay = store
+        .propagate_connection_loss_session(loss, session)
+        .await?;
+    store.complete_connection_loss_propagation(loss).await?;
+    let loaded = store
+        .load_placement(session)
+        .await?
+        .expect("the transaction installs the exact loss-before-pin record");
+    let completed = store.load_connection_loss_propagation_page(loss).await?;
+    let event = dispatch_next_outbox_event(&pool).await?;
+
+    assert_eq!(
+        disposition,
+        RunnerConnectionLossSessionDisposition::Applied {
+            state: DispatchedRunnerState::RunnerLostBeforePin,
+            interrupted_tool_attempt: None,
+        }
+    );
+    assert_eq!(replay, RunnerConnectionLossSessionDisposition::Replayed);
+    assert_eq!(
+        loaded.placement().state(),
+        &SessionRunnerPlacementState::RunnerLostBeforePin(RunnerLostBeforePin::from_stored(
+            expected_enrollment.runner(),
+        ))
+    );
+    assert_eq!(loaded.interrupted_tool_attempt(), None);
+    assert_eq!(completed.propagated_through(), Some(session));
+    assert!(completed.is_complete());
+    assert_eq!(event.session(), session);
+    assert_eq!(
+        event.kind(),
+        &DispatchedOutboxEventKind::RunnerStateTransition {
+            runner: expected_enrollment.runner(),
+            placement_revision: expected_revision,
+            sandbox: RunnerSandboxProfile::WorkspaceRestricted,
+            working_directory: Some(exact_runner_directory()),
+            state: DispatchedRunnerState::RunnerLostBeforePin,
+        }
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-032 / INV-044: an exact-runner placement stored before enrollment uses
+/// the same runner-identity fallback during projection that selected its page.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv032_inv044_runner_loss_transaction_projects_pre_enrollment_session()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let session = placement.session();
+    store.store_placement(&placement, None, None).await?;
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the exact runner loss owns its propagation cursor");
+
+    assert_eq!(
+        store
+            .propagate_connection_loss_session(loss, session)
+            .await?,
+        RunnerConnectionLossSessionDisposition::Applied {
+            state: DispatchedRunnerState::RunnerLostBeforePin,
+            interrupted_tool_attempt: None,
+        }
+    );
+    assert_eq!(
+        store
+            .load_placement(session)
+            .await?
+            .expect("the loss projection remains readable")
+            .placement()
+            .state(),
+        &SessionRunnerPlacementState::RunnerLostBeforePin(RunnerLostBeforePin::from_stored(
+            expected_enrollment.runner(),
+        ))
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a placement change serialized after paging makes the old loss
+/// subject superseded and advances the cursor without a second projection.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_transaction_advances_a_superseded_session()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let session = placement.session();
+    store.store_placement(&placement, None, None).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the exact runner loss owns its propagation cursor");
+    append_runner_lost_before_pin_projection(&pool, session).await?;
+    let disposition = store
+        .propagate_connection_loss_session(loss, session)
+        .await?;
+    let page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_eq!(
+        disposition,
+        RunnerConnectionLossSessionDisposition::Superseded
+    );
+    assert_eq!(page.propagated_through(), Some(session));
+    assert!(page.sessions().is_empty());
+    assert!(!page.is_complete());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: cursor completion rechecks the affected placement set and cannot
+/// hide a session that has not crossed the atomic propagation boundary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_transaction_rejects_premature_completion()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    insert_session(&pool).await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    let placement = SessionRunnerPlacement::new(
+        SessionId::from_uuid(uuid(SESSION)),
+        exact_runner_request(expected_enrollment.runner()),
+    );
+    let session = placement.session();
+    store.store_placement(&placement, None, None).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the exact runner loss owns its propagation cursor");
+    let rejected = store
+        .complete_connection_loss_propagation(loss)
+        .await
+        .expect_err("completion cannot skip the affected placement");
+    let page = store.load_connection_loss_propagation_page(loss).await?;
+
+    assert_store_check_violation(rejected);
+    assert_eq!(page.propagated_through(), None);
+    assert_eq!(page.sessions(), &[session]);
+    assert!(!page.is_complete());
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-043 / INV-044: an offered lease becomes exact
+/// no-execution loss while its physical attempt and yielded turn wait remain
+/// correlated to the same placement boundary.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv009_inv043_inv044_runner_loss_transaction_retires_offered_lease()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin, connection_epoch) =
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
+            .await?;
+    let session = pin.placement.session();
+    let attempt = pin.lease.attempt();
+    let lease_id = pin.lease.correlation().lease;
+    let lease_generation = pin.lease.generation();
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the offered lease loss owns its exact cursor");
+    let disposition = store
+        .propagate_connection_loss_session(loss, session)
+        .await?;
+    let loaded_loss = store
+        .load_lease_loss(lease_id, lease_generation)
+        .await?
+        .expect("the offered lease is durably classified as lost");
+    let wait = store
+        .load_runner_recovery_wait(session)
+        .await?
+        .expect("the issuing turn yields to runner recovery");
+    let attempt_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(attempt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(
+        disposition,
+        RunnerConnectionLossSessionDisposition::Applied {
+            state: DispatchedRunnerState::RunnerLost,
+            interrupted_tool_attempt: Some(attempt),
+        }
+    );
+    assert_eq!(
+        loaded_loss.lost().state(),
+        signalbox_domain::RunnerLeaseState::LostUnclaimed
+    );
+    assert_eq!(
+        loaded_loss
+            .no_execution_proof()
+            .map(|proof| proof.correlation()),
+        Some(&loaded_loss.lost().correlation())
+    );
+    assert_eq!(wait.interrupted_tool_attempt(), Some(attempt));
+    assert_eq!(attempt_state, "in_flight");
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-043 / INV-044: profile replacement does not hide the live
+/// lease offered against its pinned predecessor from later loss propagation.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv009_inv043_inv044_runner_loss_finds_lease_before_profile_replacement()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, registration, pin, connection_epoch) =
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
+            .await?;
+    let original_grant = pin
+        .grant
+        .as_ref()
+        .expect("the fixture pin carries a credential grant");
+    let replacement = duplicate_placement(&pin.placement, Some(registration.registration()))
+        .replace_credential_profile(
+            duplicate_grant(original_grant, registration.registration()),
+            registration.registration(),
+            replacement_profile(),
+            [tool("inspect")],
+        )
+        .expect("the active predecessor permits profile replacement");
+    let replacement_grant = duplicate_grant(&replacement.grant.grant, registration.registration());
+    store
+        .store_placement(
+            &replacement.placement,
+            Some(&registration),
+            Some(&replacement_grant),
+        )
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the offered lease loss owns its exact cursor");
+    let attempt = pin.lease.attempt();
+
+    assert_eq!(
+        store
+            .propagate_connection_loss_session(loss, pin.placement.session())
+            .await?,
+        RunnerConnectionLossSessionDisposition::Applied {
+            state: DispatchedRunnerState::RunnerLost,
+            interrupted_tool_attempt: Some(attempt),
+        }
+    );
+    assert_eq!(
+        store
+            .load_lease_loss(pin.lease.correlation().lease, pin.lease.generation())
+            .await?
+            .expect("the predecessor lease is classified by the loss")
+            .lost()
+            .state(),
+        signalbox_domain::RunnerLeaseState::LostUnclaimed
+    );
+    assert_eq!(
+        store
+            .load_runner_recovery_wait(pin.placement.session())
+            .await?
+            .expect("the active turn moves to runner recovery")
+            .interrupted_tool_attempt(),
+        Some(attempt)
+    );
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-032 / INV-043 / INV-044: refusing the follower event rolls
+/// placement, lease, turn wait, and propagation-cursor mutation back together.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv009_inv032_inv043_inv044_runner_loss_transaction_rolls_back_as_one_boundary()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin, connection_epoch) =
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
+            .await?;
+    let session = pin.placement.session();
+    let expected_placement_state = pin.placement.state().clone();
+    let lease_id = pin.lease.correlation().lease;
+    let lease_generation = pin.lease.generation();
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the rollback fixture owns its exact loss cursor");
+    sqlx::raw_sql(
+        "CREATE FUNCTION reject_runner_loss_outbox_for_test()
+         RETURNS trigger LANGUAGE plpgsql AS $$
+         BEGIN
+             RAISE EXCEPTION 'synthetic runner outbox refusal'
+                 USING ERRCODE = '23514';
+         END;
+         $$;
+         CREATE TRIGGER reject_runner_loss_outbox_for_test
+         BEFORE INSERT ON runner_state_transition_outbox_event
+         FOR EACH ROW EXECUTE FUNCTION reject_runner_loss_outbox_for_test();",
+    )
+    .execute(&pool)
+    .await?;
+    let rejected = store
+        .propagate_connection_loss_session(loss, session)
+        .await
+        .expect_err("the injected follower-event refusal aborts propagation");
+    let loaded_placement = store
+        .load_placement(session)
+        .await?
+        .expect("the original pinned placement remains current");
+    let loaded_lease = store
+        .load_lease(lease_id, lease_generation)
+        .await?
+        .expect("the original offered lease remains current");
+    let page = store.load_connection_loss_propagation_page(loss).await?;
+    let wait = store.load_runner_recovery_wait(session).await?;
+
+    assert_store_check_violation(rejected);
+    assert_eq!(
+        loaded_placement.placement().state(),
+        &expected_placement_state
+    );
+    assert_eq!(
+        loaded_lease.state(),
+        signalbox_domain::RunnerLeaseState::Offered
+    );
+    assert_eq!(page.propagated_through(), None);
+    assert_eq!(page.sessions(), &[session]);
+    assert_eq!(wait, None);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-043 / INV-044: claimed pure work remains retryable and
+/// in-flight while the turn yields to the exact runner-recovery wait.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv009_inv043_inv044_runner_loss_transaction_retains_claimed_pure_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin, connection_epoch) =
+        stored_active_pin_fixture_with_authorization(&pool, ActivePinEffectCase::EffectFree)
+            .await?;
+    let session = pin.placement.session();
+    let correlation = pin.lease.correlation();
+    let attempt = correlation.dispatch.attempt();
+    let claimed = pin
+        .lease
+        .claim(correlation.clone())
+        .expect("the offered pure lease accepts its exact claim");
+    store.store_lease(&claimed).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the claimed pure lease loss owns its exact cursor");
+    store
+        .propagate_connection_loss_session(loss, session)
+        .await?;
+    let loaded_loss = store
+        .load_lease_loss(correlation.lease, correlation.generation)
+        .await?
+        .expect("the claimed pure lease is durably lost");
+    let attempt_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(attempt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(
+        loaded_loss.lost().state(),
+        signalbox_domain::RunnerLeaseState::LostClaimed
+    );
+    assert!(loaded_loss.retry().is_some());
+    assert_eq!(loaded_loss.crash_attempt(), None);
+    assert_eq!(attempt_state, "in_flight");
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-026 / INV-043 / INV-044: claimed idempotent work retains
+/// retry authority without erasing the fact that execution may have occurred.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv009_inv026_inv043_inv044_runner_loss_transaction_retains_idempotent_attempt()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin, connection_epoch) =
+        stored_active_pin_fixture_with_authorization(
+            &pool,
+            ActivePinEffectCase::IdempotentExternalEffect,
+        )
+        .await?;
+    let session = pin.placement.session();
+    let correlation = pin.lease.correlation();
+    let attempt = correlation.dispatch.attempt();
+    let claimed = pin
+        .lease
+        .claim(correlation.clone())
+        .expect("the idempotent lease accepts its exact claim");
+    store.store_lease(&claimed).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the idempotent lease loss owns its exact cursor");
+    store
+        .propagate_connection_loss_session(loss, session)
+        .await?;
+    let loaded_loss = store
+        .load_lease_loss(correlation.lease, correlation.generation)
+        .await?
+        .expect("the idempotent lease is durably lost");
+    let attempt_state: String =
+        sqlx::query_scalar("SELECT state_kind FROM tool_attempt WHERE attempt_id = $1")
+            .bind(attempt.into_uuid())
+            .fetch_one(&pool)
+            .await?;
+
+    assert_eq!(
+        loaded_loss.lost().state(),
+        signalbox_domain::RunnerLeaseState::LostClaimed
+    );
+    assert!(loaded_loss.retry().is_some());
+    assert_eq!(loaded_loss.crash_attempt(), None);
+    assert_eq!(attempt_state, "in_flight");
+    drop(pool);
+    Ok(())
+}
+
+/// INV-009 / INV-026 / INV-043 / INV-044: claimed side-effecting work keeps
+/// execution ambiguity instead of being rewritten as known failure.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s31_inv009_inv026_inv043_inv044_runner_loss_transaction_preserves_side_effect_ambiguity()
+-> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let (store, expected_enrollment, _, pin, connection_epoch) =
+        stored_active_pin_fixture_with_authorization(
+            &pool,
+            ActivePinEffectCase::SideEffectingExternalEffect,
+        )
+        .await?;
+    let session = pin.placement.session();
+    let correlation = pin.lease.correlation();
+    let attempt = correlation.dispatch.attempt();
+    let claimed = pin
+        .lease
+        .claim(correlation.clone())
+        .expect("the side-effecting lease accepts its exact claim");
+    store.store_lease(&claimed).await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection_epoch,
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the side-effecting loss owns its exact cursor");
+    store
+        .propagate_connection_loss_session(loss, session)
+        .await?;
+    let loaded_loss = store
+        .load_lease_loss(correlation.lease, correlation.generation)
+        .await?
+        .expect("the side-effecting lease is durably lost");
+    let (attempt_state, disposition): (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM tool_attempt WHERE attempt_id = $1",
+    )
+    .bind(attempt.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    let wait = store
+        .load_runner_recovery_wait(session)
+        .await?
+        .expect("the ambiguous attempt remains named by runner recovery");
+
+    assert_eq!(
+        loaded_loss.lost().state(),
+        signalbox_domain::RunnerLeaseState::LostClaimed
+    );
+    assert_eq!(loaded_loss.retry(), None);
+    assert_eq!(loaded_loss.crash_attempt(), Some(attempt));
+    assert_eq!(attempt_state, "terminal");
+    assert_eq!(disposition.as_deref(), Some("ambiguous"));
+    assert_eq!(wait.interrupted_tool_attempt(), Some(attempt));
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: a runner-loss propagation cursor is durable evidence and cannot be
+/// deleted independently of its exact loss epoch.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_propagation_cursor_rejects_delete() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let loss = store
+        .load_current_connection_loss(expected_enrollment.enrollment())
+        .await?
+        .expect("the terminal connection owns its durable cursor");
+    let deleted = sqlx::query(
+        "DELETE FROM runner_connection_loss_propagation
+          WHERE enrollment_id = $1 AND loss_epoch = $2",
+    )
+    .bind(loss.enrollment().into_uuid())
+    .bind(Decimal::from(loss.loss_epoch().get()))
+    .execute(&pool)
+    .await
+    .expect_err("a durable runner-loss cursor cannot be deleted");
+
+    assert_check_violation(deleted);
+    drop(pool);
+    Ok(())
+}
+
+/// INV-044: bulk truncation cannot bypass runner-loss cursor durability.
+#[tokio::test]
+#[ignore = "requires Docker"]
+async fn s32_inv044_runner_loss_propagation_cursor_rejects_truncate() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let store = RunnerProtocolStore::new(pool.clone(), catalog());
+    let expected_enrollment = enrollment();
+    store.insert_enrollment(&expected_enrollment).await?;
+    let connection = store
+        .open_connection(expected_enrollment.enrollment())
+        .await?;
+    store
+        .transition_connection(
+            expected_enrollment.enrollment(),
+            connection.epoch(),
+            RunnerConnectionTransition::TransportClosed,
+        )
+        .await?;
+    let truncated = sqlx::query("TRUNCATE runner_connection_loss_propagation")
+        .execute(&pool)
+        .await
+        .expect_err("durable runner-loss cursors cannot be truncated");
+
+    assert_check_violation(truncated);
     drop(pool);
     Ok(())
 }
@@ -3521,6 +5045,7 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
         .run_to(PRE_RUNNER_LOSS_EPOCH_MIGRATION, &pool)
         .await?;
     install_pre_loss_fence_compatibility_tables(&pool).await?;
+    install_pre_loss_identity_compatibility_function(&pool).await?;
     let (store, _, registration, pin) = prepared_pin_fixture_with_authorization(
         &pool,
         authorized,
@@ -3531,6 +5056,7 @@ async fn s31_inv043_inv044_runner_loss_epoch_migration_rejects_ambiguous_offer()
     .await?;
     store.store_pin(&pin, &registration).await?;
     drop_pre_loss_fence_compatibility_tables(&pool).await?;
+    drop_pre_loss_identity_compatibility_function(&pool).await?;
     let refusal = migrate(&pool)
         .await
         .expect_err("an outstanding legacy offer has no reconstructible issue baseline");
@@ -4646,47 +6172,100 @@ async fn s31_inv042_current_registration_preserves_workspace() -> Result<(), Box
 #[ignore = "requires Docker"]
 async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
 -> Result<(), Box<dyn Error>> {
+    struct SerializationOutcome {
+        replacement_result: Result<
+            Result<StoredValidatedRunnerRegistration, RunnerProtocolStoreError>,
+            tokio::time::error::Elapsed,
+        >,
+        replacement_observation: Result<Result<bool, sqlx::Error>, tokio::time::error::Elapsed>,
+        lease_observation: Result<Result<bool, sqlx::Error>, tokio::time::error::Elapsed>,
+        blocker_commit: Result<Result<(), sqlx::Error>, tokio::time::error::Elapsed>,
+        lease_result: Result<Result<(), RunnerProtocolStoreError>, tokio::time::error::Elapsed>,
+    }
+
+    struct LeaseAdmissionOutcome {
+        replacement_observation: Result<Result<bool, sqlx::Error>, tokio::time::error::Elapsed>,
+        lease_observation: Result<Result<bool, sqlx::Error>, tokio::time::error::Elapsed>,
+        blocker_commit: Result<Result<(), sqlx::Error>, tokio::time::error::Elapsed>,
+        lease_result: Result<Result<(), RunnerProtocolStoreError>, tokio::time::error::Elapsed>,
+    }
+
     let (_container, pool) = migrated_postgres().await?;
-    let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
-    let mut blocker = pool.begin().await?;
-    sqlx::query(
-        "SELECT enrollment_id
-           FROM runner_current_registration
-          WHERE enrollment_id = $1
-          FOR UPDATE",
-    )
-    .bind(expected_enrollment.enrollment().into_uuid())
-    .fetch_one(&mut *blocker)
-    .await?;
-    let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
-    let replacement = tokio::spawn(async move {
-        tokio::time::timeout(
-            LOCK_COMPLETION_TIMEOUT,
-            replacement_store.register(&expected_enrollment, narrowed_advertisement()),
+    let serialization = tokio::time::timeout(SERIALIZATION_TEST_TIMEOUT, async {
+        let (store, expected_enrollment, _, _, lease) = stored_later_lease_fixture(&pool).await?;
+        let mut blocker = pool.begin().await?;
+        sqlx::query(
+            "SELECT enrollment_id
+               FROM runner_current_registration
+              WHERE enrollment_id = $1
+              FOR UPDATE",
         )
-        .await
-    });
-    let replacement_observation =
-        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1)).await;
-    let lease_store = tokio::spawn(async move {
-        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, store.store_lease(&lease)).await
-    });
-    let lease_observation =
-        tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 2)).await;
-    let blocker_commit = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocker.commit()).await;
-    let replacement_result = replacement.await;
-    let lease_result = lease_store.await;
-    let replacement_blocked = replacement_observation
+        .bind(expected_enrollment.enrollment().into_uuid())
+        .fetch_one(&mut *blocker)
+        .await?;
+        let replacement_store = RunnerProtocolStore::new(pool.clone(), catalog());
+        let replacement = async move {
+            tokio::time::timeout(
+                LOCK_COMPLETION_TIMEOUT,
+                replacement_store.register(&expected_enrollment, narrowed_advertisement()),
+            )
+            .await
+        };
+        let lease_admission = async {
+            let replacement_observation =
+                tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocked_backends_reached(&pool, 1))
+                    .await;
+            let lease_store = async move {
+                tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, store.store_lease(&lease)).await
+            };
+            let release_blocker = async {
+                let lease_observation = tokio::time::timeout(
+                    LOCK_COMPLETION_TIMEOUT,
+                    blocked_backends_reached(&pool, 2),
+                )
+                .await;
+                let blocker_commit =
+                    tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, blocker.commit()).await;
+                (lease_observation, blocker_commit)
+            };
+            let (lease_result, (lease_observation, blocker_commit)) =
+                tokio::join!(lease_store, release_blocker);
+            LeaseAdmissionOutcome {
+                replacement_observation,
+                lease_observation,
+                blocker_commit,
+                lease_result,
+            }
+        };
+        let (replacement_result, lease_admission) = tokio::join!(replacement, lease_admission);
+        Ok::<_, Box<dyn Error>>(SerializationOutcome {
+            replacement_result,
+            replacement_observation: lease_admission.replacement_observation,
+            lease_observation: lease_admission.lease_observation,
+            blocker_commit: lease_admission.blocker_commit,
+            lease_result: lease_admission.lease_result,
+        })
+    })
+    .await;
+    let pool_close = tokio::time::timeout(LOCK_COMPLETION_TIMEOUT, pool.close()).await;
+    let outcome = serialization
+        .expect("registration replacement serialization must finish within its test deadline")?;
+    pool_close.expect("registration replacement pool cleanup must remain bounded");
+    let replacement_blocked = outcome
+        .replacement_observation
         .expect("registration replacement lock observation must remain bounded")?;
-    let lease_blocked =
-        lease_observation.expect("lease admission lock observation must remain bounded")?;
-    blocker_commit.expect("registration-head blocker commit must remain bounded")?;
-    replacement_result
-        .expect("registration replacement task must remain joinable")
-        .expect("registration replacement must finish within its task-owned timeout")?;
-    let rejected = lease_result
-        .expect("lease admission task must remain joinable")
-        .expect("lease admission must finish within its task-owned timeout")
+    let lease_blocked = outcome
+        .lease_observation
+        .expect("lease admission lock observation must remain bounded")?;
+    outcome
+        .blocker_commit
+        .expect("registration-head blocker commit must remain bounded")?;
+    outcome
+        .replacement_result
+        .expect("registration replacement must finish within its operation timeout")?;
+    let rejected = outcome
+        .lease_result
+        .expect("lease admission must finish within its operation timeout")
         .expect_err("withdrawn current availability cannot authorize the later lease");
 
     assert!(
@@ -4698,7 +6277,6 @@ async fn s30_inv042_registration_replacement_serializes_later_lease_admission()
         "lease admission must wait behind registration replacement"
     );
     assert_store_check_violation(rejected);
-    drop(pool);
     Ok(())
 }
 

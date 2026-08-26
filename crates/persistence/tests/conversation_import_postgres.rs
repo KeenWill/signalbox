@@ -37,6 +37,7 @@ use signalbox_persistence::{
         ImportedConversationRepository, ImportedConversationRepositoryError,
         corrupt_integration_imported_blob,
     },
+    disposable_postgres_server_args, disposable_postgres_state_tmpfs,
     disposable_test_container_labels, local_test_connection_options, migrate,
 };
 use sqlx::{PgPool, Transaction, migrate::Migrate, postgres::PgPoolOptions, types::Uuid};
@@ -155,7 +156,8 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool, String
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -178,7 +180,8 @@ async fn postgres_before_codex_format()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -211,7 +214,8 @@ async fn postgres_before_frontier_prefixes()
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -744,12 +748,12 @@ async fn inv015_frontier_prefix_migration_preserves_existing_complete_snapshots(
     Ok(())
 }
 
-/// INV-064: the pre-production import convergence migration resets existing
+/// INV-090: the pre-production import convergence migration resets existing
 /// imported aggregates, removes the byte column, and installs only the final
 /// blob-reference schema.
 #[tokio::test]
 #[ignore = "requires ephemeral PostgreSQL"]
-async fn inv064_one_time_import_migration_installs_only_the_final_schema()
+async fn inv090_one_time_import_migration_installs_only_the_final_schema()
 -> Result<(), Box<dyn Error>> {
     let (container, pool) = postgres_before_import_blob_migration().await?;
     let mut transaction = pool.begin().await?;

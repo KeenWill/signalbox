@@ -35,7 +35,9 @@ context-compaction command lifecycle was verified through PR #314
 boundary and path-scoped placement command family were verified through PR #400
 (`agent/scoped-visibility-wiring`). The runner recovery command families are the
 foundation proposal at the bottom of their implementing stack and become
-verified only with those child pull requests.
+verified only with those child pull requests. The commissioned-session command
+construction boundary is verified against this PR
+(`agent/commissioned-dispatch-fence`).
 
 ## Identity model
 
@@ -93,14 +95,14 @@ records (INV-001, INV-004).
 The nil and max UUIDs are rejected as `DurableCommandId` values at two
 boundaries: checked command/request construction (`try_new` on
 `CreateSessionRequest`, `CreateSessionFromImportedFrontierRequest`,
-`ReplaceSessionDefaultsRequest`, `ReplaceSessionMetadataRequest`, and
-`SubmitInputRequest` and `UpdateSessionPlacementRequest` in
-`crates/application`, plus `DecideToolRequest` in `crates/domain`) and
-persistence decoding (`durable_command_id_from_uuid` in
-`crates/persistence/src/mapping.rs`). Rejection occurs before a canonical
-command can reach a transaction and claims no identifier. Why: sentinel-like
-values are common accidental defaults and would otherwise become permanent
-user-global claims.
+`ReplaceSessionDefaultsRequest`, `ReplaceSessionMetadataRequest`,
+`CommissionDispatchRequest`, and `SubmitInputRequest` and
+`UpdateSessionPlacementRequest` in `crates/application`, plus
+`DecideToolRequest` in `crates/domain`) and persistence decoding
+(`durable_command_id_from_uuid` in `crates/persistence/src/mapping.rs`).
+Rejection occurs before a canonical command can reach a transaction and claims
+no identifier. Why: sentinel-like values are common accidental defaults and
+would otherwise become permanent user-global claims.
 
 ## Generation and minting boundary
 
@@ -110,16 +112,17 @@ crate cannot mint an identity. `crates/application` enables the `v7` feature and
 defines one generator trait per orchestration slice, each with a production
 UUIDv7 implementation:
 
-| Generator                                            | Mints                                                                                                                        |
-| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `UuidV7SessionIdGenerator`                           | `SessionId`                                                                                                                  |
-| `UuidV7ImportedConversationIdGenerator`              | `ImportedConversationId`, `ImportedTranscriptEntryId`                                                                        |
-| `UuidV7CreateSessionFromImportedFrontierIdGenerator` | `SessionId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                                                |
-| `UuidV7SubmitInputIdGenerator`                       | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                                |
-| `UuidV7StartEligibleTurnIdGenerator`                 | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                                            |
-| `UuidV7StartupScanIdGenerator`                       | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                                         |
-| `UuidV7ModelCallExecutionIdGenerator`                | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                          |
-| `UuidV7ToolLoopIdGenerator`                          | `ToolRequestId`, `ToolAttemptId`, `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`, `TurnId` |
+| Generator                                            | Mints                                                                                                                                    |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `UuidV7SessionIdGenerator`                           | `SessionId`                                                                                                                              |
+| `UuidV7ImportedConversationIdGenerator`              | `ImportedConversationId`, `ImportedTranscriptEntryId`                                                                                    |
+| `UuidV7CreateSessionFromImportedFrontierIdGenerator` | `SessionId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                                                            |
+| `UuidV7SubmitInputIdGenerator`                       | `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId`                                                            |
+| `UuidV7StartEligibleTurnIdGenerator`                 | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`                                                                        |
+| `UuidV7StartupScanIdGenerator`                       | `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                                                     |
+| `UuidV7ModelCallExecutionIdGenerator`                | `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnId` (reclassified successors)                                      |
+| `UuidV7ToolLoopIdGenerator`                          | `ToolRequestId`, `ToolAttemptId`, `ModelCallId`, `SemanticTranscriptEntryId`, `ContextFrontierId`, `TurnAttemptId`, `TurnId`             |
+| `UuidV7CommissionedDispatchIdGenerator`              | `CommissionedDispatchId`, `DurableCommandId`, `SessionId`, `AcceptedInputId`, `TurnId`, `SemanticTranscriptEntryId`, `ContextFrontierId` |
 
 `ProviderTargetEvidenceId` exists as a domain type but has no production minting
 seam yet; its generator lands with its owning slice. `WorkspaceId`,
@@ -438,6 +441,18 @@ terminalizations) has adopted an attribution field. See Open edges. Actor
 answers who issued one command; `SessionCreationCause` answers why a session
 exists — they are independent facts, and neither substitutes for the other (see
 [sessions-and-transcript](sessions-and-transcript.md)).
+
+**Committed unimplemented functionality.** No present surface constructs a
+program actor. The closed actor algebra gains a program-issuance arm — a
+verified reference to the issuing program run, constructible only by the
+[program substrate](program-substrate.md)'s host-side session capability, with
+the same validated-reference, no-conferred-authority semantics as every other
+arm — and `SubmitInput` gains a program admissibility path fixing that actor, so
+a program-driven turn is never recorded as user-issued. This constrains present
+change: the actor storage convention (closed `actor_kind` discriminator,
+variant-shaped reference columns, replay-equality inclusion) must remain
+extensible to that arm, and nothing may assume the `SubmitInput` actor is always
+`user`.
 
 ## Durable-command telemetry correlation
 

@@ -34,7 +34,7 @@ use signalbox_blob_store::{
 use signalbox_domain::BlobDigest;
 use tokio::{
     io::AsyncReadExt,
-    sync::{Mutex as AsyncMutex, mpsc},
+    sync::{Mutex as AsyncMutex, mpsc, watch},
     task::JoinHandle,
 };
 use tokio_util::io::StreamReader;
@@ -51,6 +51,7 @@ const STREAM_CHANNEL_CHUNKS: usize = 4;
 const MIN_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024;
 const MAX_MULTIPART_PART_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const MAX_MULTIPART_PARTS: u64 = 10_000;
+const MAX_S3_OBJECT_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 const MAX_CREATE_RESPONSE_BYTES: usize = 65_536;
 const MAX_COMPLETE_RESPONSE_BYTES: usize = 65_536;
 const MAX_UPLOAD_ID_BYTES: usize = 1_024;
@@ -80,6 +81,11 @@ struct PutReconciliation {
 struct MultipartAbortGuard {
     client: Client,
     signed_abort: Option<Url>,
+}
+
+enum CompletionFailure {
+    Definite(BlobStoreError),
+    PossiblyAccepted,
 }
 
 impl MultipartAbortGuard {
@@ -236,13 +242,20 @@ impl S3BlobStore {
         }
     }
 
-    async fn ensure_namespace_ready(&self) -> Result<(), BlobStoreError> {
+    async fn ensure_namespace_ready(
+        &self,
+        credentials: &Credentials,
+    ) -> Result<(), BlobStoreError> {
         let Some(marker) = &self.namespace_marker else {
             return Ok(());
         };
         let result = marker
             .verified
-            .get_or_init(|| async { self.verify_namespace_marker(marker).await.map_err(|_| ()) })
+            .get_or_init(|| async {
+                self.verify_namespace_marker_with(credentials, marker)
+                    .await
+                    .map_err(|_| ())
+            })
             .await;
         match result {
             Ok(()) => Ok(()),
@@ -327,11 +340,11 @@ impl S3BlobStore {
         source: BlobReader,
         reconciliation: &StdMutex<PutReconciliation>,
     ) -> Result<BlobPutOutcome, BlobStoreError> {
-        self.ensure_namespace_ready().await?;
+        let credentials = self.credentials().await?;
+        self.ensure_namespace_ready(&credentials).await?;
         let key = BlobObjectKey::for_digest(expected.digest());
         let stripe = usize::from(expected.digest().as_bytes()[0]) % PUBLICATION_LOCK_STRIPES;
         let _publication = self.publication_locks[stripe].lock().await;
-        let credentials = self.credentials().await?;
         reconciliation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -356,7 +369,14 @@ impl S3BlobStore {
 
         self.multipart_publish(&credentials, &key, expected, source)
             .await?;
-        self.verify_object(&credentials, &key, expected).await?;
+        if let Err(error) = self.verify_object(&credentials, &key, expected).await {
+            if error.kind() == signalbox_blob_store::BlobStoreFailureKind::Unavailable {
+                return Err(BlobStoreError::publication_ambiguous(
+                    "reconcile S3 post-publication verification",
+                ));
+            }
+            return Err(error);
+        }
         if replacing {
             Ok(BlobPutOutcome::Repaired { key })
         } else {
@@ -371,6 +391,9 @@ impl S3BlobStore {
         expected: ExpectedBlob,
         source: BlobReader,
     ) -> Result<(), BlobStoreError> {
+        if multipart_part_bytes(expected.byte_length()).is_none() {
+            return Err(BlobStoreError::unavailable("bound S3 multipart object"));
+        }
         let create = self
             .bucket
             .create_multipart_upload(Some(credentials), key.as_str());
@@ -431,27 +454,27 @@ impl S3BlobStore {
 
         while offset < expected.byte_length() {
             let length = part_bytes.min(expected.byte_length() - offset);
-            let body = ExactUploadBody::new(Arc::clone(&stream_state), length);
+            let (progress, observed_progress) = watch::channel(0_u64);
+            let body = ExactUploadBody::new(Arc::clone(&stream_state), length, progress);
             let action =
                 self.bucket
                     .upload_part(Some(credentials), key.as_str(), part_number, upload_id);
-            let response = match self
+            let request = self
                 .client
                 .put(action.sign(SIGNED_URL_LIFETIME))
                 .header(reqwest::header::CONTENT_LENGTH, length)
-                .body(reqwest::Body::wrap(body))
-                .send()
-                .await
-            {
-                Ok(response) => response,
-                Err(_) => {
-                    return source_or_transport_failure(
-                        producer.take(),
-                        "upload S3 multipart part",
-                    )
-                    .await;
-                }
-            };
+                .body(reqwest::Body::wrap(body));
+            let response =
+                match send_with_upload_idle_timeout(request, observed_progress, length).await {
+                    Ok(response) => response,
+                    Err(_) => {
+                        return source_or_transport_failure(
+                            producer.take(),
+                            "upload S3 multipart part",
+                        )
+                        .await;
+                    }
+                };
             let response = require_success(response, "upload S3 multipart part").await?;
             let etag = response
                 .headers()
@@ -498,25 +521,32 @@ impl S3BlobStore {
                 .body(body)
                 .send()
                 .await
-                .map_err(|_| {
-                    BlobStoreError::io("complete S3 multipart upload", SanitizedS3Failure)
-                })?;
-            let response = require_success(response, "complete S3 multipart upload").await?;
-            let _ = bounded_response(
+                .map_err(|_| CompletionFailure::PossiblyAccepted)?;
+            let response = require_success(response, "complete S3 multipart upload")
+                .await
+                .map_err(CompletionFailure::Definite)?;
+            let body = bounded_response(
                 response,
                 MAX_COMPLETE_RESPONSE_BYTES,
                 "read S3 completion response",
             )
-            .await?;
+            .await
+            .map_err(|_| CompletionFailure::PossiblyAccepted)?;
+            validate_completion_response(&body).map_err(|_| CompletionFailure::PossiblyAccepted)?;
             Ok(())
         }
         .await;
         match completion {
             Ok(()) => Ok(()),
-            Err(completion_error) => match self.verify_object(credentials, key, expected).await {
-                Ok(()) => Ok(()),
-                Err(_) => Err(completion_error),
-            },
+            Err(CompletionFailure::Definite(error)) => Err(error),
+            Err(CompletionFailure::PossiblyAccepted) => {
+                match self.verify_object(credentials, key, expected).await {
+                    Ok(()) => Ok(()),
+                    Err(_) => Err(BlobStoreError::publication_ambiguous(
+                        "reconcile S3 multipart completion",
+                    )),
+                }
+            }
         }
     }
 
@@ -571,8 +601,8 @@ impl S3BlobStore {
     }
 
     async fn open_inner(&self, key: &BlobObjectKey) -> Result<OpenedBlob, BlobStoreError> {
-        self.ensure_namespace_ready().await?;
         let credentials = self.credentials().await?;
+        self.ensure_namespace_ready(&credentials).await?;
         let response = self.open_response(&credentials, key).await?;
         let length = response
             .content_length()
@@ -587,7 +617,6 @@ impl S3BlobStore {
         offset: u64,
         length: u64,
     ) -> Result<OpenedBlob, BlobStoreError> {
-        self.ensure_namespace_ready().await?;
         if length == 0 || length > MAX_BLOB_RANGE_BYTES {
             return Err(BlobStoreError::unavailable("validate S3 object range"));
         }
@@ -598,6 +627,7 @@ impl S3BlobStore {
         let capacity = usize::try_from(length)
             .map_err(|_| BlobStoreError::unavailable("allocate S3 object range"))?;
         let credentials = self.credentials().await?;
+        self.ensure_namespace_ready(&credentials).await?;
         let response = self.open_response(&credentials, key).await?;
         let mut reader = response_reader(response);
         let mut hasher = Sha256::new();
@@ -768,11 +798,35 @@ async fn require_success(
 ) -> Result<Response, BlobStoreError> {
     if response.status().is_success() {
         Ok(response)
-    } else if response.status() == StatusCode::NOT_FOUND {
-        Err(BlobStoreError::not_found(operation))
     } else {
         Err(BlobStoreError::unavailable(operation))
     }
+}
+
+async fn send_with_upload_idle_timeout(
+    request: reqwest::RequestBuilder,
+    mut progress: watch::Receiver<u64>,
+    length: u64,
+) -> Result<Response, ()> {
+    let send = request.send();
+    tokio::pin!(send);
+    loop {
+        if *progress.borrow() >= length {
+            return send.await.map_err(|_| ());
+        }
+        tokio::select! {
+            response = &mut send => return response.map_err(|_| ()),
+            changed = tokio::time::timeout(IDLE_TIMEOUT, progress.changed()) =>
+                changed.map_err(|_| ())?.map_err(|_| ())?,
+        }
+    }
+}
+
+fn validate_completion_response(body: &[u8]) -> Result<(), ()> {
+    let body = std::str::from_utf8(body).map_err(|_| ())?;
+    instant_xml::from_str::<CompleteMultipartUploadResult>(body)
+        .map(|_| ())
+        .map_err(|_| ())
 }
 
 async fn bounded_response(
@@ -796,6 +850,9 @@ async fn bounded_response(
 }
 
 fn multipart_part_bytes(length: u64) -> Option<u64> {
+    if length > MAX_S3_OBJECT_BYTES {
+        return None;
+    }
     let ceiling = length.div_ceil(MAX_MULTIPART_PARTS);
     let part_bytes = ceiling.max(MIN_MULTIPART_PART_BYTES);
     if part_bytes > MAX_MULTIPART_PART_BYTES {
@@ -902,6 +959,8 @@ impl LifecycleRule {
             (Some(filter), _) => {
                 filter.tag.is_none()
                     && filter.and.is_none()
+                    && filter.object_size_greater_than.is_none()
+                    && filter.object_size_less_than.is_none()
                     && matches!(filter.prefix.as_deref(), None | Some("") | Some("sha256/"))
             }
             (None, Some(prefix)) => matches!(prefix, "" | "sha256/"),
@@ -922,6 +981,10 @@ struct LifecycleFilter {
     tag: Option<LifecycleTag>,
     #[xml(rename = "And")]
     and: Option<LifecycleAnd>,
+    #[xml(rename = "ObjectSizeGreaterThan")]
+    object_size_greater_than: Option<u64>,
+    #[xml(rename = "ObjectSizeLessThan")]
+    object_size_less_than: Option<u64>,
 }
 
 #[derive(Debug, FromXml)]
@@ -949,14 +1012,38 @@ struct AbortIncompleteMultipartUpload {
     days: u16,
 }
 
+#[derive(Debug, FromXml)]
+#[xml(rename = "CompleteMultipartUploadResult", ns(S3_XML_NAMESPACE))]
+struct CompleteMultipartUploadResult {
+    #[xml(rename = "Location")]
+    _location: Option<String>,
+    #[xml(rename = "Bucket")]
+    _bucket: Option<String>,
+    #[xml(rename = "Key")]
+    _key: Option<String>,
+    #[xml(rename = "ETag")]
+    _etag: Option<String>,
+}
+
 struct ExactUploadBody {
     state: Arc<StdMutex<UploadStreamState>>,
     remaining: u64,
+    emitted: u64,
+    progress: watch::Sender<u64>,
 }
 
 impl ExactUploadBody {
-    fn new(state: Arc<StdMutex<UploadStreamState>>, remaining: u64) -> Self {
-        Self { state, remaining }
+    fn new(
+        state: Arc<StdMutex<UploadStreamState>>,
+        remaining: u64,
+        progress: watch::Sender<u64>,
+    ) -> Self {
+        Self {
+            state,
+            remaining,
+            emitted: 0,
+            progress,
+        }
     }
 }
 
@@ -997,6 +1084,8 @@ impl Body for ExactUploadBody {
         }
         drop(state);
         self.remaining -= take as u64;
+        self.emitted += take as u64;
+        self.progress.send_replace(self.emitted);
         Poll::Ready(Some(Ok(Frame::data(emitted))))
     }
 
@@ -1044,7 +1133,7 @@ fn read_credentials(path: &Path) -> Result<CredentialDocument, CredentialFileErr
     let descriptor = openat(
         rustix::fs::CWD,
         path,
-        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK,
         Mode::empty(),
     )
     .map_err(|_| CredentialFileError)?;
@@ -1140,9 +1229,9 @@ mod tests {
     use url::Url;
 
     use super::{
-        CredentialFileError, LifecycleConfiguration, LifecycleRule, MAX_MULTIPART_PART_BYTES,
-        MAX_MULTIPART_PARTS, MIN_MULTIPART_PART_BYTES, S3BlobStore, multipart_part_bytes,
-        read_credentials,
+        CredentialFileError, LifecycleConfiguration, LifecycleRule, MAX_MULTIPART_PARTS,
+        MAX_S3_OBJECT_BYTES, MIN_MULTIPART_PART_BYTES, S3BlobStore, multipart_part_bytes,
+        read_credentials, validate_completion_response,
     };
 
     const ACCESS_KEY: &str = "fixture-access-key";
@@ -1222,6 +1311,9 @@ mod tests {
         let tagged = parsed_lifecycle(
             r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><Tag><Key>kind</Key><Value>blob</Value></Tag></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
         )?;
+        let size_filtered = parsed_lifecycle(
+            r#"<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Rule><Status>Enabled</Status><Filter><ObjectSizeGreaterThan>1024</ObjectSizeGreaterThan></Filter><AbortIncompleteMultipartUpload><DaysAfterInitiation>1</DaysAfterInitiation></AbortIncompleteMultipartUpload></Rule></LifecycleConfiguration>"#,
+        )?;
         let late_rule = late.rules.first().ok_or("late fixture rule is absent")?;
         let narrow_rule = narrow
             .rules
@@ -1231,11 +1323,26 @@ mod tests {
             .rules
             .first()
             .ok_or("tagged fixture rule is absent")?;
+        let size_filtered_rule = size_filtered
+            .rules
+            .first()
+            .ok_or("size-filtered fixture rule is absent")?;
 
         assert!(!LifecycleRule::covers_blobs(late_rule));
         assert!(!LifecycleRule::covers_blobs(narrow_rule));
         assert!(!LifecycleRule::covers_blobs(tagged_rule));
+        assert!(!LifecycleRule::covers_blobs(size_filtered_rule));
         Ok(())
+    }
+
+    #[test]
+    fn completion_response_rejects_an_http_success_error_document() {
+        let success = br#"<CompleteMultipartUploadResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Location>fixture</Location><Bucket>bucket</Bucket><Key>key</Key><ETag>etag</ETag></CompleteMultipartUploadResult>"#;
+        let embedded_error =
+            br#"<Error><Code>InternalError</Code><Message>retry</Message></Error>"#;
+
+        assert!(validate_completion_response(success).is_ok());
+        assert!(validate_completion_response(embedded_error).is_err());
     }
 
     #[test]
@@ -1245,14 +1352,8 @@ mod tests {
             multipart_part_bytes(MIN_MULTIPART_PART_BYTES * MAX_MULTIPART_PARTS),
             Some(MIN_MULTIPART_PART_BYTES)
         );
-        assert_eq!(
-            multipart_part_bytes(MAX_MULTIPART_PART_BYTES * MAX_MULTIPART_PARTS),
-            Some(MAX_MULTIPART_PART_BYTES)
-        );
-        assert_eq!(
-            multipart_part_bytes(MAX_MULTIPART_PART_BYTES * MAX_MULTIPART_PARTS + 1),
-            None
-        );
+        assert!(multipart_part_bytes(MAX_S3_OBJECT_BYTES).is_some());
+        assert_eq!(multipart_part_bytes(MAX_S3_OBJECT_BYTES + 1), None);
     }
 
     #[test]

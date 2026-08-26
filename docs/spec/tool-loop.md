@@ -8,6 +8,9 @@ verified against PR #433 (`agent/web-search-wiring`). The durable-command
 version cross-link was re-verified through this PR
 (`agent/model-settings-persistence`).
 
+The executor-failure containment contract is verified against this PR
+(`agent/executor-failure-turn-containment`).
+
 The session-delegation scheduling executor and daemon catalog composition are
 verified against PR #462 (`agent/delegation-runtime-daemon-v2`).
 
@@ -19,8 +22,15 @@ The `AlwaysConfirm` interaction with an explicitly configured approval posture �
 `Delegated` admitted, `Auto` refused — is verified through this PR
 (`agent/approval-posture-alwaysconfirm`).
 
+The immutable repository-watch authority supplied to a dispatched approval judge
+and the unattended-escalation terminal path are verified against this PR
+(`agent/headless-approval-escalation`).
+
 The per-session workspace root the workspace, local Git, and execution families
 bind is verified against this PR (`agent/per-session-workspaces`).
+
+The change-request-scoped thread mutation contracts and their pre-dispatch
+ownership confirmation are verified through this PR (`agent/thread-ownership`).
 
 The daemon blob-read declarations below are the foundation proposal from PR #553
 (`agent/blob-storage-foundation`) and become verified with its implementing
@@ -207,19 +217,60 @@ in model-call history with its selection, resolved provider target, credential
 reference, state, disposition, and reported token usage. Its closed result is
 `Approve`, `Deny`, or `EscalateToHuman`, always with rationale.
 
-The judge may approve or deny only a request frozen as `Delegated`. An
-`EscalateToHuman` result stores the completed call but no approval decision and
-leaves the same request parked. A `KnownFailed`, `Refused`, `Cancelled`, or
-`Ambiguous` terminal judge call likewise retains that park while immediately
-admitting a user decision, so a terminal judge failure cannot strand the
-approval wait. A request frozen as `Human` admits only that escalation result
-from a delegate; a delegate approval or denial is rejected by both domain
-reconstruction and relational provenance constraints (INV-049). Thus delegation
-can narrow authority but never widen it. A completed approve or deny atomically
-records the decision and advances the same proposal-ordered batch transition
-used by a user decision. Each explicit user or delegate decision emits one
-ordered `ToolApprovalDecided` event carrying the decision, decider kind and
-identity, and delegate rationale when present.
+For a turn recorded in the generation a repository-watch dispatch commissioned,
+preparation also reads the immutable dispatch authority linked to that dispatch.
+Pull-request authority contains the dispatch identity, watched repository,
+pull-request number, exact head commit, head repository and branch, and base
+branch; branch authority contains the dispatch identity, repository, and branch.
+The judge receives this structured authority beside the commissioned goal,
+template, and frozen system prompt. A judged turn in any other generation of
+that session — an unrelated successor goal it later accepted — resolves no such
+authority, as does a turn no generation recorded: the dispatch described
+neither. Those turns are prepared, judged, and escalated exactly as in a session
+no dispatch created, which [repository watch](repo-watch.md) states from the
+dispatch side. Every session-derived field is separately delimited and quoted as
+untrusted evidence, and the judge prompt treats it as scope to compare with the
+proposed request rather than as instruction. The context comes from the
+append-only dispatch action and triggering event, not from mutable provider
+state or text reconstructed from the goal.
+
+The judge may approve or deny only a request frozen as `Delegated`. In a session
+without repository-watch dispatch authority, an `EscalateToHuman` result stores
+the completed call but no approval decision and leaves the same request parked.
+A `KnownFailed`, `Refused`, `Cancelled`, or `Ambiguous` terminal judge call
+likewise retains that attended park while immediately admitting a user decision,
+so a terminal judge failure cannot prevent that decision. In a session judged
+under dispatch authority, no user attends the approval wait — unless steering
+accepted while the judge was outstanding still names the judged turn, which is a
+user attending it, or the session has already recorded an escalation while the
+commissioned goal's authority still stands, which means an operator resumed this
+work by hand — nothing else can, because the block an escalation writes is
+exempt from automatic resumption. Either turn keeps the attended park described
+above: its completed `EscalateToHuman` leaves the turn active and the request
+parked for that user, exactly as in a session no dispatch created, and no steer
+is reclassified or stranded by a terminalization it did not expect. Otherwise a
+completed `EscalateToHuman` closes every unresolved request in the active batch
+as `ToolClosed`, appends `TurnFailed`, terminalizes the turn with the completed
+judge escalation as its typed cause, and blocks the commissioned goal for
+execution failure while that goal's authority still stands. A generation
+stopped, achieved, or superseded during the provider round-trip is failed but
+not blocked: [goal mode](goal-mode.md) fixes that the authority the block would
+record has already ended, and a released batch whose authority ended this way is
+the stale work [repository watch](repo-watch.md) terminalizes rather than parks.
+The same transaction records an append-only audit row linking the judge call and
+rationale, request, dispatch action, terminal attempt, failure entry, and
+terminal frontier. The blocked goal then participates in the ordinary
+repository-watch release and re-arm rules instead of leaving the active turn
+parked.
+
+A request frozen as `Human` admits only an escalation result from a delegate; a
+delegate approval or denial is rejected by both domain reconstruction and
+relational provenance constraints (INV-049). Thus delegation can narrow
+authority but never widen it. A completed approve or deny atomically records the
+decision and advances the same proposal-ordered batch transition used by a user
+decision. Each explicit user or delegate decision emits one ordered
+`ToolApprovalDecided` event carrying the decision, decider kind and identity,
+and delegate rationale when present.
 
 The consume-and-proceed transaction locks the owning session, validates that the
 request is the turn's earliest undecided request, records the command and
@@ -500,14 +551,21 @@ cannot strand an issued request or roll back its command.
 
 If the executor returns an operator failure without trustworthy evidence after
 authorization, the service retains the dispatch gate and applies the attempt's
-effect-class crash-loss transition before surfacing that failure. A failed
+effect-class crash-loss transition. A committed classification contains an
+infrastructure or identity-collision failure as the ordinary `CrashClassified`
+outcome, so the affected turn either fails or parks for reconciliation without
+failing unrelated session execution. A fail-closed corruption or caller-or-hub
+bug remains an error after that same classification closes the attempt, so the
+daemon's fatal execution supervisor still stops scheduling. A failed
 classification retains the exact attempt identity and permit for another
-classification pass, and the returned combined error preserves both the executor
-failure and the classification failure. Evidence carrying a different dispatch
-correlation follows the same classification-before-release path, surfacing the
-correlation mismatch only after closure or together with a failed
-classification. The durable attempt therefore cannot remain `InFlight` after the
-gate becomes available to an interrupt.
+classification pass. It also retains whether closure belongs to prior-process
+loss, an executor failure, or a correlation mismatch. An executor failure keeps
+its safe class and cause token, so a later successful classification emits the
+same nonfatal diagnostic or returns the same fatal class; a correlation mismatch
+likewise resurfaces only after closure. The initial combined error preserves
+both the executor failure or mismatch and the classification failure. The
+durable attempt therefore cannot remain `InFlight` after the gate becomes
+available to an interrupt.
 
 If trustworthy executor evidence returns but its commit fails, the service
 retains that exact correlated observation as an opaque linear same-incarnation
@@ -1013,10 +1071,35 @@ The declarations and compact result objects are:
   the first 100 threads and, within each, the first 100 comments. A thread
   carries opaque id, resolution and outdated posture, path, optional line,
   comments, and `comments_truncated`; the outer result carries `truncated`.
-- `change_request_thread_reply` accepts an opaque `thread_id` and nonempty
-  `body`; it returns the created comment node id and URL.
-- `change_request_thread_resolve` accepts one opaque `thread_id`; it returns
-  that identity and the acknowledged resolution posture.
+- `change_request_thread_reply` accepts `repository`, `number`, an opaque
+  `thread_id`, and nonempty `body`; it returns the created comment node id and
+  URL. The named change request is the mutation's authority target: an opaque
+  thread identity alone is globally scoped, so without these coordinates neither
+  an approval decision over the arguments nor the executor could tell a thread
+  in the granted change request from one anywhere else the credential reaches.
+  Before dispatching the mutation, the GitHub adapter resolves the thread node
+  and confirms the code host places it inside exactly that change request. A
+  thread the code host does not place there — including an identity that
+  resolves to no node or to a node of another type — fails closed with the fixed
+  semantic detail
+  `requested review thread was not found in the named change request`, and no
+  mutation request is dispatched. Node absence is definitive only when every
+  error beside the evaluated null carries the code host's typed not-found
+  classification, or none accompanies it; any other field error proves nothing
+  about the thread and reports the undispatched mutation instead. The repository
+  comparison follows the code host's case-insensitive repository addressing; the
+  number must match exactly. Ownership-check failures keep read classification:
+  an infrastructure failure during the confirmation reports that the mutation
+  was never dispatched and is never commit-ambiguous. A review thread never
+  moves between change requests, so the confirmation cannot be invalidated
+  between the two requests. The confirmation and the mutation share the
+  transport's single 30-second exchange budget: the mutation receives only the
+  time the confirmation left, and exhaustion before dispatch reports the
+  undispatched mutation.
+- `change_request_thread_resolve` accepts `repository`, `number`, and one opaque
+  `thread_id` under the same pre-dispatch ownership confirmation as
+  `change_request_thread_reply`; it returns that thread identity and the
+  acknowledged resolution posture.
 - `change_request_ci_job_log` accepts `repository` and a positive `job_id`; it
   returns that id, at most 64 KiB of lossy UTF-8 log text, and `truncated`.
 - `change_request_rerun_failed_jobs` accepts `repository` and a positive
@@ -1205,6 +1288,9 @@ rather than applying one global version constant.
 
 ## Open edges
 
+- Replacing direct approval-judge recommendations with graded risk and brief
+  alignment remains recorded under
+  [Graded approval judging](../open-questions.md#graded-approval-judging).
 - Dynamic execution-strategy policy beyond the two named runner profiles,
   model-declared approval expiry and additional high-risk guardrails are
   recorded in [Tool safety](../open-questions.md#tool-safety).

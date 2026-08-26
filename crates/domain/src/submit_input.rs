@@ -121,6 +121,7 @@ impl SubmitInput {
     pub fn prepare_attachment_bytes_too_large(
         self,
         maximum_bytes: NonZeroU64,
+        observed_bytes: NonZeroU64,
     ) -> PreparedSubmitInput {
         let session = self.session;
         PreparedSubmitInput {
@@ -129,6 +130,7 @@ impl SubmitInput {
                 SubmitInputRejectedResult::AttachmentBytesTooLarge {
                     session,
                     maximum_bytes,
+                    observed_bytes,
                 },
             ),
         }
@@ -1343,6 +1345,8 @@ pub enum SubmitInputRejectedResult {
         session: SessionId,
         /// The deployment-owned maximum admitted byte count.
         maximum_bytes: NonZeroU64,
+        /// The immutable distinct attachment aggregate observed at admission.
+        observed_bytes: NonZeroU64,
     },
     /// The target session did not exist.
     SessionNotFound {
@@ -1597,6 +1601,19 @@ pub struct SubmitInputInterruptedModelCallReconciliationConstructionInput {
     pub interrupt: crate::AppliedInterruptProof,
 }
 
+/// Named facts for an interrupted ambiguous tool-attempt reconciliation source.
+#[derive(Clone, Debug)]
+pub struct SubmitInputInterruptedToolReconciliationConstructionInput {
+    /// The canonical origin facts owned by the terminal source turn.
+    pub origin: SubmitInputTurnOriginReconstitutionInput,
+    /// The terminal source turn identity.
+    pub turn: TurnId,
+    /// The unresolved tool attempt requiring reconciliation.
+    pub ambiguous_attempt: crate::ToolAttemptId,
+    /// The applied interrupt proof that stopped the turn.
+    pub interrupt: crate::AppliedInterruptProof,
+}
+
 impl SubmitInputTerminalSourceReconstitutionInput {
     /// Supplies the source turn canonical origin facts, terminal-record owner,
     /// and disposition.
@@ -1626,6 +1643,32 @@ impl SubmitInputTerminalSourceReconstitutionInput {
         } = input;
         let ambiguous_operations = crate::NonEmptyIssuedOperationRefs::singleton(
             crate::IssuedOperationRef::ModelCall(ambiguous_call),
+        );
+        Self::new(SubmitInputTerminalSourceConstructionInput {
+            origin,
+            turn,
+            disposition: TurnDisposition::ReconciliationRequired {
+                marker: crate::ReconciliationMarker::from_interrupt_ambiguity(
+                    ambiguous_operations,
+                    interrupt,
+                ),
+            },
+        })
+    }
+
+    /// Supplies a terminal source whose exact ambiguous tool attempt remained
+    /// unresolved after an applied interrupt.
+    pub fn interrupted_tool_reconciliation(
+        input: SubmitInputInterruptedToolReconciliationConstructionInput,
+    ) -> Self {
+        let SubmitInputInterruptedToolReconciliationConstructionInput {
+            origin,
+            turn,
+            ambiguous_attempt,
+            interrupt,
+        } = input;
+        let ambiguous_operations = crate::NonEmptyIssuedOperationRefs::singleton(
+            crate::IssuedOperationRef::ToolAttempt(ambiguous_attempt),
         );
         Self::new(SubmitInputTerminalSourceConstructionInput {
             origin,
@@ -1864,6 +1907,7 @@ enum SubmitInputReconstitutionFacts {
     RejectedAttachmentBytesTooLarge {
         result_session: SessionId,
         result_maximum_bytes: NonZeroU64,
+        result_observed_bytes: NonZeroU64,
     },
     RejectedSessionNotFound {
         result_session: SessionId,
@@ -2040,6 +2084,8 @@ pub struct SubmitInputRejectedAttachmentBytesTooLargeReconstitutionInput {
     pub result_session: SessionId,
     /// The deployment maximum stored in the result.
     pub result_maximum_bytes: NonZeroU64,
+    /// The immutable distinct attachment aggregate stored in the result.
+    pub result_observed_bytes: NonZeroU64,
 }
 
 /// Named facts for reconstructing a no-active-turn rejection.
@@ -2338,6 +2384,7 @@ impl SubmitInputReconstitutionInput {
             stored_actor,
             result_session,
             result_maximum_bytes,
+            result_observed_bytes,
         } = input;
         Self {
             command,
@@ -2345,6 +2392,7 @@ impl SubmitInputReconstitutionInput {
             facts: SubmitInputReconstitutionFacts::RejectedAttachmentBytesTooLarge {
                 result_session,
                 result_maximum_bytes,
+                result_observed_bytes,
             },
         }
     }
@@ -2944,26 +2992,22 @@ impl SubmitInputReconstitutionInput {
             SubmitInputReconstitutionFacts::RejectedAttachmentBytesTooLarge {
                 result_session,
                 result_maximum_bytes,
+                result_observed_bytes,
             } => {
                 if result_session != self.command.session {
                     return Err(fail(
                         SubmitInputReconstitutionFailure::ResultSessionMismatch,
                     ));
                 }
-                if !self
-                    .command
-                    .content
-                    .parts()
-                    .iter()
-                    .any(|part| matches!(part, crate::UserContentPart::Attachment { .. }))
-                {
+                if result_observed_bytes <= result_maximum_bytes {
                     return Err(fail(
-                        SubmitInputReconstitutionFailure::RejectedAttachmentBoundWithoutAttachment,
+                        SubmitInputReconstitutionFailure::RejectedAttachmentAggregateWithinBound,
                     ));
                 }
                 SubmitInputResult::Rejected(SubmitInputRejectedResult::AttachmentBytesTooLarge {
                     session: result_session,
                     maximum_bytes: result_maximum_bytes,
+                    observed_bytes: result_observed_bytes,
                 })
             }
             SubmitInputReconstitutionFacts::RejectedSessionNotFound { result_session } => {
@@ -3694,8 +3738,8 @@ pub enum SubmitInputReconstitutionFailure {
     ResultSessionMismatch,
     /// An absent-blob rejection names a digest not present in the command.
     RejectedBlobDigestNotReferenced,
-    /// An attachment-bound rejection belongs to attachment-free content.
-    RejectedAttachmentBoundWithoutAttachment,
+    /// An attachment-bound rejection records an aggregate within its maximum.
+    RejectedAttachmentAggregateWithinBound,
     /// The accepted-input effect names another command.
     AcceptedCommandMismatch,
     /// The result and accepted-input effect name different inputs.
@@ -4108,6 +4152,7 @@ mod tests {
                 crate::RunnerId::from_uuid(uuid::Uuid::from_u128(0x81)),
                 crate::RunnerGeneration::try_from_u64(2)
                     .expect("the fixture placement revision is positive"),
+                None,
                 None,
             ),
         )
@@ -7070,10 +7115,10 @@ mod tests {
         );
     }
 
-    /// INV-012 / INV-061: attachment admission reconstitutes only from a
-    /// referenced missing digest or attachment-bearing bounded payload.
+    /// INV-012 / INV-071: attachment admission reconstitutes only from
+    /// durable rejection evidence.
     #[test]
-    fn inv012_inv061_attachment_rejection_reconstitution_is_checked() {
+    fn inv012_inv071_attachment_rejection_reconstitution_is_checked() {
         let digest = BlobDigest::digest(b"attachment fixture");
         let other_digest = BlobDigest::digest(b"other attachment fixture");
         let attachment_command = SubmitInput::new(
@@ -7113,12 +7158,14 @@ mod tests {
             SubmitInputReconstitutionFailure::RejectedBlobDigestNotReferenced,
         );
         let maximum = NonZeroU64::new(64).expect("the fixture maximum is positive");
+        let observed = NonZeroU64::new(65).expect("the fixture aggregate is positive");
         SubmitInputReconstitutionInput::rejected_attachment_bytes_too_large(
             SubmitInputRejectedAttachmentBytesTooLargeReconstitutionInput {
                 command: attachment_command.clone(),
                 stored_actor: Actor::User,
                 result_session: session_id(1),
                 result_maximum_bytes: maximum,
+                result_observed_bytes: observed,
             },
         )
         .reconstitute()
@@ -7126,10 +7173,11 @@ mod tests {
         assert_rejection_reconstitution_fails(
             SubmitInputReconstitutionInput::rejected_attachment_bytes_too_large(
                 SubmitInputRejectedAttachmentBytesTooLargeReconstitutionInput {
-                    command: attachment_command,
+                    command: attachment_command.clone(),
                     stored_actor: Actor::User,
                     result_session: session_id(2),
                     result_maximum_bytes: maximum,
+                    result_observed_bytes: observed,
                 },
             ),
             SubmitInputReconstitutionFailure::ResultSessionMismatch,
@@ -7137,13 +7185,14 @@ mod tests {
         assert_rejection_reconstitution_fails(
             SubmitInputReconstitutionInput::rejected_attachment_bytes_too_large(
                 SubmitInputRejectedAttachmentBytesTooLargeReconstitutionInput {
-                    command: start_command(2, "text only", 1),
+                    command: attachment_command,
                     stored_actor: Actor::User,
                     result_session: session_id(1),
                     result_maximum_bytes: maximum,
+                    result_observed_bytes: maximum,
                 },
             ),
-            SubmitInputReconstitutionFailure::RejectedAttachmentBoundWithoutAttachment,
+            SubmitInputReconstitutionFailure::RejectedAttachmentAggregateWithinBound,
         );
     }
 

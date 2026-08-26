@@ -22,9 +22,58 @@ env:
   RUSTFLAGS: "-D warnings"
 
 jobs:
-  validate-checks:
+  # Keep the required `validate` and `postgres-integration` checks present on
+  # every pull-request head. Their aggregate jobs below accept skipped heavy
+  # work only when this job proves every changed path is Markdown or under
+  # `docs/`; pushes to main always run the complete workflow.
+  rust-change-scope:
+    name: Rust change scope
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    outputs:
+      docs_only: ${{ steps.paths.outputs.docs_only }}
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify changed paths
+        id: paths
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          docs_only=false
+          if [ "$EVENT_NAME" = pull_request ]; then
+            docs_only=true
+            changed_paths="$RUNNER_TEMP/rust-changed-files"
+            git diff --no-renames --name-only -z \
+              "$BASE_SHA...$HEAD_SHA" > "$changed_paths"
+            while IFS= read -r -d '' path; do
+              case "$path" in
+                # Binding process/specification prose and generated indexes
+                # run the complete bar even though they are Markdown.
+                AGENTS.md | */AGENTS.md | docs/agents/* | docs/spec/* \
+                  | docs/domain-spine.md | docs/invariants.md \
+                  | docs/scenarios.md | docs/style.md)
+                  docs_only=false
+                  break
+                  ;;
+                docs/* | *.md)
+                  ;;
+                *)
+                  docs_only=false
+                  break
+                  ;;
+              esac
+            done < "$changed_paths"
+          fi
+          echo "docs_only=$docs_only" >> "$GITHUB_OUTPUT"
+
+  contract-checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       # Full history also fetches `refs/remotes/origin/*`, which the docs
       # checker reads verification provenance from: the first-parent history of
@@ -42,6 +91,8 @@ jobs:
         run: python3 scripts/check_docs_consistency.py
       - name: Check migration version uniqueness
         run: python3 scripts/check_migration_versions.py
+      - name: Check numeric bound declarations
+        run: python3 scripts/check_numeric_bounds.py
       - name: Check user vocabulary
         run: python3 scripts/check_user_vocabulary.py
       # Gates normally: the tree satisfies this today, so the step can only
@@ -80,12 +131,22 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$status"
+  checker-and-format-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Test user vocabulary checker
         run: python3 scripts/test_check_user_vocabulary.py
       - name: Test domain-spine checker
         run: python3 scripts/test_check_domain_spine.py
       - name: Test migration version checker
         run: python3 scripts/test_check_migration_versions.py
+      - name: Test numeric bound checker
+        run: python3 scripts/test_check_numeric_bounds.py
       - name: Test panic-gate checker
         run: python3 scripts/test_check_panic_gate.py
       # The checker's own tests gate normally: report-only describes what the
@@ -98,6 +159,8 @@ jobs:
         run: python3 scripts/test_postgres_integration_suites.py
       - name: Test the built-executable resolver
         run: python3 tooling/test_resolve_cargo_bin.py
+      - name: Test the lifecycle watchdog
+        run: python3 tooling/test_supervise_lifecycle.py
       # Drives the sweep against a fake `docker` it puts first on PATH, so it
       # neither needs nor touches the runner's daemon: what is under test is the
       # selection and the failure classification, and a real daemon could not be
@@ -132,7 +195,7 @@ jobs:
           inventory_hash="$(sha256sum \
             crates/persistence/src/lock_inventory.rs | cut -d ' ' -f 1)"
           test "$inventory_hash" = \
-            4320763c2083a2238494e2f206a4c71fa166039e1c60a4fecb3ceb95cfbe6f9e
+            b06959f36036e230c03336ab06eaae6003a9e295e26390d88145694120b97781
           unexpected="$(git ls-files -z 'crates/persistence/src/*.rs' \
             | xargs -0 perl -0777 -ne '
               next if $ARGV =~ m{/lock_inventory[.]rs$};
@@ -145,13 +208,25 @@ jobs:
             printf 'explicit row lock outside inventory:\n%s\n' "$unexpected"
             exit 1
           }
-      # Must run after the non-compiling checks above: a failure before any
-      # compilation would otherwise save a dependency-less cache under the
-      # exact key, which rust-cache never replaces on later exact-key hits.
+  rust-checks:
+    needs: rust-change-scope
+    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    runs-on: signalbox
+    # The self-hosted pool starts with cold caches; give the workspace check
+    # headroom until they warm.
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
+          shared-key: rust
+          save-if: false
       - name: Check workspace
         run: cargo check --workspace --all-targets --all-features
       - name: Run Clippy
@@ -159,11 +234,39 @@ jobs:
       - name: Build documentation
         run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 
+  # Preserve the existing implementation-check name while its independent
+  # repository contracts, checker tests, formatting, and Rust compilation run
+  # concurrently. This aggregate keeps the required `validate` check bound to
+  # every command it covered before the split.
+  validate-checks:
+    if: ${{ always() }}
+    needs:
+      [rust-change-scope, contract-checks, checker-and-format-tests, rust-checks]
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    steps:
+      - name: Confirm every implementation check passed
+        env:
+          CONTRACT_RESULT: ${{ needs.contract-checks.result }}
+          CHECKER_RESULT: ${{ needs.checker-and-format-tests.result }}
+          RUST_RESULT: ${{ needs.rust-checks.result }}
+          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
+        run: |
+          test "$CONTRACT_RESULT" = success
+          test "$CHECKER_RESULT" = success
+          if [ "$DOCS_ONLY" = true ]; then
+            test "$RUST_RESULT" = skipped
+          else
+            test "$RUST_RESULT" = success
+          fi
+
   # The workspace test binaries build and run here rather than at the end of
   # `validate-checks`, so the two compilations overlap instead of queueing. The
   # duplicated dependency build is the accepted cost; separate jobs cannot
   # share a target directory, so this job carries its own rust-cache entry.
   workspace-tests:
+    needs: rust-change-scope
+    if: needs.rust-change-scope.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -179,11 +282,14 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: workspace-tests
+          shared-key: rust
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run tests
         env:
           SIGNALBOX_RUN_BWRAP_INTEGRATION: "1"
         run: cargo test --no-fail-fast --workspace --all-targets --all-features
+      - name: Test generated browser contract runtime
+        run: node --test crates/web-contract/tests/generated_roundtrip.mjs
       # `--all-targets` excludes doctests, so the domain's compile_fail
       # sealing proofs need this separate run.
       - name: Run doctests
@@ -196,7 +302,7 @@ jobs:
   validate:
     name: validate
     if: ${{ always() }}
-    needs: [validate-checks, workspace-tests]
+    needs: [rust-change-scope, validate-checks, workspace-tests]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
@@ -204,31 +310,38 @@ jobs:
         env:
           CHECKS_RESULT: ${{ needs.validate-checks.result }}
           TESTS_RESULT: ${{ needs.workspace-tests.result }}
+          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
         run: |
           test "$CHECKS_RESULT" = success
-          test "$TESTS_RESULT" = success
+          if [ "$DOCS_ONLY" = true ]; then
+            test "$TESTS_RESULT" = skipped
+          else
+            test "$TESTS_RESULT" = success
+          fi
 
   # Report-only by owner decision: this job publishes deterministic counts
   # for human comparison but can never fail the workflow or gate a merge.
   domain-instruction-counts:
     name: Domain instruction counts (report only)
     continue-on-error: true
-    runs-on: ubuntu-latest
+    needs: rust-change-scope
+    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    runs-on: signalbox
     timeout-minutes: 20
     steps:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
-      - name: Install Valgrind
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes valgrind
+      # The pinned Signalbox runner image includes Valgrind, so this public-repo
+      # job needs neither root access nor an unpinned package installation.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: domain-instruction-counts
+          shared-key: rust
+          save-if: false
       - name: Install Gungraun runner
         run: cargo install --locked --version '=0.19.4' gungraun-runner
       - name: Report domain instruction counts and simulated cache behavior
@@ -265,8 +378,10 @@ jobs:
   # checks the sources out and passes `--workspace-remap`.
   postgres-integration-build:
     name: postgres-integration (build)
-    runs-on: ubuntu-latest
-    # Generous by design: this job now absorbs all four suites' compilation,
+    needs: rust-change-scope
+    if: needs.rust-change-scope.outputs.docs_only != 'true'
+    runs-on: signalbox-docker
+    # Generous by design: this job now absorbs all five suites' compilation,
     # which a cold cache serializes into one runner instead of spreading it
     # across three.
     timeout-minutes: 35
@@ -276,6 +391,7 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
       # First, so a malformed manifest fails before any compilation. The run
       # job expands this into its shard matrix, which is why adding a shard is
@@ -290,9 +406,10 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
-          key: postgres-integration
+          shared-key: rust
+          save-if: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: cargo-nextest@0.9.143
       # One archive per suite, each built with exactly the package selection
@@ -331,6 +448,13 @@ jobs:
           path: ${{ runner.temp }}/persistence.tar.zst
           if-no-files-found: error
           retention-days: 1
+      - name: Upload the program-runtime archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: postgres-integration-archive-program-runtime
+          path: ${{ runner.temp }}/program-runtime.tar.zst
+          if-no-files-found: error
+          retention-days: 1
       - name: Upload the signalboxd archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -353,33 +477,37 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  # GitHub-hosted Ubuntu runners provide Docker. Each test below starts its own
-  # pinned PostgreSQL container through testcontainers, so the four runner CPUs
-  # can execute isolated tests concurrently without sharing database state.
+  # The dedicated Docker fleet gives each shard an isolated DinD daemon. The
+  # build and run jobs share the same runner image and absolute work-path shape,
+  # which keeps paths embedded in nextest archives valid across their pods.
+  # Each test starts its own pinned PostgreSQL container through testcontainers,
+  # so four test processes can run without sharing database state.
   #
   # The matrix is generated from `.github/postgres-integration-suites.toml`:
   # one runner per shard, so a suite declaring one shard costs one runner and
   # still travels the same archive-and-partition path a sharded suite does.
-  # Only persistence is sharded today — 695 of the 1,112 ignored tests, and
-  # 22m22s as a single job against roughly 7m at three ways.
+  # Persistence, runner, and signalboxd are sharded according to their measured
+  # test-execution cost. Program-runtime and terminal-client remain whole
+  # because each finishes in about a minute.
   #
   # Runner cost, stated plainly: this asks for more runners than the matrix it
-  # replaces. That was three jobs at its widest; this is six shards plus the
-  # build ahead of them, so seven jobs and a peak of six. The trade is that each
-  # of the three used to compile its own suite, where the six compile nothing
-  # and run for minutes. Wall clock falls even so, and the build's single cache
-  # key replaces three that evicted one another.
+  # replaces. The run matrix currently expands to twelve shards after the one
+  # shared build. The shards compile nothing and run for minutes; the build's
+  # single cache key replaces the old per-suite keys that evicted one another.
   postgres-integration-run:
     name: >-
       postgres-integration
       (${{ matrix.suite }} ${{ matrix.partition }}/${{ matrix.partitions }})
     needs: postgres-integration-build
-    runs-on: ubuntu-latest
-    # Measured against the shards rather than guessed. Over 29-30 samples each,
-    # the three persistence shards take 7.35 / 7.43 / 7.33 minutes at the median
-    # and 7.72 at the p90 — balanced to within 1.4%, with the slowest of the
-    # three rotating run to run. There is no hot shard to rebalance away, so the
-    # only lever on headroom is this cap.
+    runs-on: signalbox-docker
+    # Keep security-sensitive sockets and filesystem fixtures off the NFS
+    # workspace: their permission and atomicity contracts require local /tmp.
+    env:
+      TMPDIR: /tmp
+    # Measured against the shards rather than guessed. The former three
+    # persistence partitions were balanced but had grown to roughly 8m15s each;
+    # runner took about eight minutes whole, and signalboxd about five. The
+    # manifest splits those suites more finely without changing test selection.
     #
     # Ten minutes did not leave room for the slow path. A shard whose tests
     # actually fail runs about two minutes longer than a clean one (9.68m
@@ -399,9 +527,10 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 1
           persist-credentials: false
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026 # v2.85.11
+        uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
         with:
           tool: cargo-nextest@0.9.143
       - name: Download the ${{ matrix.suite }} archive
@@ -410,11 +539,12 @@ jobs:
           name: postgres-integration-archive-${{ matrix.suite }}
           path: ${{ runner.temp }}/archive
       # Flag for flag against the `cargo test` invocation this replaces:
-      # `--run-ignored only` is `-- --ignored`, `--test-threads 4` is
-      # `--test-threads=4`, `--no-fail-fast` is unchanged, and the archive
-      # fixes the package and feature selection at build time. nextest runs
-      # each test in its own process rather than on a shared thread pool, so
-      # four concurrent tests remains the cap.
+      # `--run-ignored only` is `-- --ignored`, `--no-fail-fast` is unchanged,
+      # and the archive fixes the package and feature selection at build time.
+      # nextest runs each test in its own process rather than on a shared
+      # thread pool; eight concurrent tests is the cap. One per-test retry
+      # absorbs a transient container-start failure without rerunning a whole
+      # shard, while a repeat failure still fails the gate.
       - name: Run the ${{ matrix.suite }} partition
         env:
           SUITE: ${{ matrix.suite }}
@@ -428,7 +558,8 @@ jobs:
           --partition "count:$PARTITION/$PARTITIONS"
           --run-ignored only
           --no-fail-fast
-          --test-threads 4
+          --retries 1
+          --test-threads 8
           -E "$FILTER"
 
   # Preserve the existing required-check name while the suites build once and
@@ -436,7 +567,8 @@ jobs:
   postgres-integration:
     name: postgres-integration
     if: ${{ always() }}
-    needs: [postgres-integration-build, postgres-integration-run]
+    needs:
+      [rust-change-scope, postgres-integration-build, postgres-integration-run]
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
@@ -444,6 +576,12 @@ jobs:
         env:
           BUILD_RESULT: ${{ needs.postgres-integration-build.result }}
           RUN_RESULT: ${{ needs.postgres-integration-run.result }}
+          DOCS_ONLY: ${{ needs.rust-change-scope.outputs.docs_only }}
         run: |
-          test "$BUILD_RESULT" = success
-          test "$RUN_RESULT" = success
+          if [ "$DOCS_ONLY" = true ]; then
+            test "$BUILD_RESULT" = skipped
+            test "$RUN_RESULT" = skipped
+          else
+            test "$BUILD_RESULT" = success
+            test "$RUN_RESULT" = success
+          fi

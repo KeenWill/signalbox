@@ -12,6 +12,7 @@ use std::{
     future::{Future, ready},
     num::NonZeroUsize,
     pin::Pin,
+    sync::Arc,
     time::Duration,
 };
 
@@ -39,9 +40,21 @@ use crate::{
 ///
 /// The composition root may supply another nonzero interval after validating
 /// deployment configuration through [`ReconciliationSweepInterval::try_new`].
+// numeric-bound: tunable - controls the baseline reconciliation cadence
 const BASELINE_RECONCILIATION_SWEEP_INTERVAL: Duration = Duration::from_secs(1);
+// numeric-bound: tunable - controls baseline scheduler nudge backpressure
 const BASELINE_NUDGE_BUFFER_CAPACITY: usize = 1_024;
-const BASELINE_MAX_IN_FLIGHT_PASSES: usize = 16;
+/// Shared product cap for concurrent authoritative scheduler passes.
+///
+/// This controls simultaneous provider, tool, and database pressure. Deployment
+/// configuration may lower or pause admission but cannot raise this cap.
+// numeric-bound: tunable - controls concurrent authoritative scheduler passes
+const SCHEDULER_PASS_ADMISSION_CAP: usize = 16;
+
+/// Returns the shared product cap for concurrent authoritative passes.
+pub const fn scheduler_pass_admission_cap() -> usize {
+    SCHEDULER_PASS_ADMISSION_CAP
+}
 
 tokio::task_local! {
     static ACTIVE_SCHEDULER_CAPACITY: SchedulerPassCapacity;
@@ -49,15 +62,15 @@ tokio::task_local! {
 
 #[derive(Clone, Debug)]
 struct SchedulerPassCapacity {
-    semaphore: std::sync::Arc<Semaphore>,
-    held: std::sync::Arc<AsyncMutex<Option<OwnedSemaphorePermit>>>,
+    semaphore: Arc<Semaphore>,
+    held: Arc<AsyncMutex<Option<OwnedSemaphorePermit>>>,
 }
 
 impl SchedulerPassCapacity {
-    fn new(semaphore: std::sync::Arc<Semaphore>, permit: OwnedSemaphorePermit) -> Self {
+    fn new(semaphore: Arc<Semaphore>, permit: OwnedSemaphorePermit) -> Self {
         Self {
             semaphore,
-            held: std::sync::Arc::new(AsyncMutex::new(Some(permit))),
+            held: Arc::new(AsyncMutex::new(Some(permit))),
         }
     }
 
@@ -71,7 +84,7 @@ impl SchedulerPassCapacity {
         };
         drop(released);
         let output = work.await;
-        if let Ok(permit) = std::sync::Arc::clone(&self.semaphore).acquire_owned().await {
+        if let Ok(permit) = Arc::clone(&self.semaphore).acquire_owned().await {
             *self.held.lock().await = Some(permit);
         }
         output
@@ -680,20 +693,36 @@ impl<WorkSource, Pass> SchedulerLoop<WorkSource, Pass> {
         Self {
             work_source,
             pass,
-            max_in_flight_passes: BASELINE_MAX_IN_FLIGHT_PASSES,
+            max_in_flight_passes: SCHEDULER_PASS_ADMISSION_CAP,
         }
     }
 
-    /// Composes the ports with an explicit nonzero in-flight pass bound.
+    /// Composes the ports with an explicit nonzero in-flight pass bound capped
+    /// at the shared admission cap.
     pub const fn with_max_in_flight(
         work_source: WorkSource,
         pass: Pass,
         max_in_flight_passes: NonZeroUsize,
     ) -> Self {
+        let requested = max_in_flight_passes.get();
+        let max_in_flight_passes = if requested > SCHEDULER_PASS_ADMISSION_CAP {
+            SCHEDULER_PASS_ADMISSION_CAP
+        } else {
+            requested
+        };
         Self {
             work_source,
             pass,
-            max_in_flight_passes: max_in_flight_passes.get(),
+            max_in_flight_passes,
+        }
+    }
+
+    /// Composes the ports without admitting authoritative passes.
+    pub const fn paused(work_source: WorkSource, pass: Pass) -> Self {
+        Self {
+            work_source,
+            pass,
+            max_in_flight_passes: 0,
         }
     }
 
@@ -720,16 +749,20 @@ where
         Shutdown: Future<Output = ()> + Send,
     {
         pin!(shutdown);
+        if self.max_in_flight_passes == 0 {
+            shutdown.await;
+            return SchedulerLoopExit::Shutdown;
+        }
         let mut passes = JoinSet::new();
         let mut task_sessions = HashMap::new();
         let mut in_flight_sessions = HashSet::new();
         let mut pending_hints = VecDeque::new();
         let mut pending_reruns = HashSet::new();
-        let capacity = std::sync::Arc::new(Semaphore::new(self.max_in_flight_passes));
+        let capacity = Arc::new(Semaphore::new(self.max_in_flight_passes));
 
         'scheduler: loop {
             if let Some(session) = pending_hints.front().copied() {
-                let available = std::sync::Arc::clone(&capacity).acquire_owned();
+                let available = Arc::clone(&capacity).acquire_owned();
                 pin!(available);
                 select! {
                     biased;
@@ -758,7 +791,7 @@ where
                                 .run(session)
                                 .instrument(session_work_span(session));
                             let pass_capacity = SchedulerPassCapacity::new(
-                                std::sync::Arc::clone(&capacity),
+                                Arc::clone(&capacity),
                                 permit,
                             );
                             let task = passes.spawn(
@@ -950,8 +983,9 @@ mod tests {
         ClassifyOperatorFailure, EligibilityNudge, EligibilityNudgeOutcome, EligibilityPass,
         EligibilitySweep, EligibilitySweepBatch, EligibilityWorkSource, GoalAwareEligibilityPass,
         GoalAwareEligibilityPassError, GoalPassDisposition, InProcessEligibilityWorkSource,
-        InvalidReconciliationSweepInterval, ReconciliationSweepInterval, SchedulerLoop,
-        SchedulerLoopExit, relinquish_scheduler_capacity,
+        InvalidReconciliationSweepInterval, ReconciliationSweepInterval,
+        SCHEDULER_PASS_ADMISSION_CAP, SchedulerLoop, SchedulerLoopExit,
+        relinquish_scheduler_capacity,
     };
     use crate::{
         OperatorFailureClass, StartEligibleTurnIdGenerator, StartEligibleTurnOutcome,
@@ -1614,6 +1648,47 @@ mod tests {
         assert_eq!(observed.len(), 2);
         assert!(observed.contains(&first));
         assert!(observed.contains(&second));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inv007_paused_scheduler_admits_no_authoritative_passes() {
+        let selected = session(50);
+        let (unused_pass_shutdown, pass_shutdown_receiver) = oneshot::channel();
+        let pass = FakePass::failing_once(selected, 1, unused_pass_shutdown);
+        let observed = Arc::clone(&pass.state);
+        let mut scheduler = SchedulerLoop::paused(
+            FakeWorkSource {
+                hints: VecDeque::from([Ok(selected)]),
+            },
+            pass,
+        );
+        let outcome = timeout(
+            Duration::from_secs(1),
+            scheduler.run_until(async {
+                pass_shutdown_receiver
+                    .await
+                    .expect("an admitted fake pass signals shutdown");
+            }),
+        )
+        .await;
+
+        assert!(outcome.is_err());
+        assert!(
+            observed
+                .lock()
+                .expect("fake-pass state is not poisoned")
+                .observed
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn inv007_explicit_scheduler_bound_is_capped_at_admission_cap() {
+        let requested = NonZeroUsize::new(SCHEDULER_PASS_ADMISSION_CAP + 1)
+            .expect("the fixture exceeds a positive admission cap");
+        let scheduler = SchedulerLoop::with_max_in_flight((), (), requested);
+
+        assert_eq!(scheduler.max_in_flight_passes, SCHEDULER_PASS_ADMISSION_CAP);
     }
 
     #[tokio::test]

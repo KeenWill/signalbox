@@ -1,6 +1,266 @@
 //! Model call execution transactions, startup scan classification, and steering reclassification after restart.
 
+use std::{collections::HashMap, num::NonZeroU32};
+
 use crate::*;
+
+/// Binds a fixture membership priority under the non-zero schema constraint.
+fn nonzero_priority(value: u32) -> NonZeroU32 {
+    NonZeroU32::new(value).expect("fixture membership priority is non-zero")
+}
+
+/// Reproduces #771: a quota failure on member A with `switch_now` must commit
+/// a distinct successor on member B; exhausting B is a typed pool cause.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn quota_switch_now_rotates_and_pool_exhaustion_stays_distinct() -> Result<(), Box<dyn Error>>
+{
+    let (container, pool, _database_url) = migrated_postgres().await?;
+    let seed = 0x7710_u128;
+    let session = SessionId::from_uuid(Uuid::from_u128(seed + 1));
+    let turn = TurnId::from_uuid(Uuid::from_u128(seed + 2));
+    let first_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 3));
+    let selection = DirectModelSelection::from_uuid(Uuid::from_u128(seed + 4));
+    let target =
+        ResolvedProviderTarget::naming(ProviderModelIdentity::from_uuid(Uuid::from_u128(seed + 5)));
+    let pool_name_fixture = "codex-main";
+    let first_member_fixture = "codex-a";
+    let second_member_fixture = "codex-b";
+    CreateSessionRepository::new(pool.clone(), test_session_credential_pin())
+        .handle(prepared(
+            seed + 6,
+            seed + 1,
+            ModelSelectionRequest::Direct(selection),
+        ))
+        .await?;
+    SubmitInputRepository::new(pool.clone())
+        .handle(
+            start_input(
+                seed + 7,
+                seed + 1,
+                "rotate credentials",
+                1,
+                ModelSelectionOverride::UseSessionDefault,
+            ),
+            AcceptedInputId::from_uuid(Uuid::from_u128(seed + 8)),
+            Some(turn),
+        )
+        .await?;
+    activate_earliest_queued_turn(
+        &pool,
+        EarliestQueuedTurnActivation {
+            session: session.into_uuid(),
+            origin_entry: Uuid::from_u128(seed + 9),
+            starting_frontier: Uuid::from_u128(seed + 10),
+            initial_attempt: first_attempt.into_uuid(),
+        },
+    )
+    .await?;
+    let targets =
+        ModelTargetCatalog::try_from_definitions([ModelTargetDefinition::new(selection, target)])
+            .expect("one pool fixture target forms a catalog");
+    let policy = CredentialPoolRuntimePolicy::new(
+        pool_name_fixture,
+        vec![
+            CredentialPoolRuntimeMember::new(first_member_fixture, nonzero_priority(1)),
+            CredentialPoolRuntimeMember::new(second_member_fixture, nonzero_priority(2)),
+        ],
+        signalbox_persistence::model_execution::CredentialPoolRuntimeExhaustion::Fail,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::SwitchNow,
+        CredentialPoolRuntimeAction::Quarantine,
+    );
+    let mut repository = PostgresModelCallRepository::new(
+        pool.clone(),
+        targets,
+        ModelCallCredentialReference::new("unused-default"),
+    )
+    .with_credential_pools(HashMap::from([(target, policy)]));
+    let first_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 11));
+    let PrepareInitialModelCallOutcome::Checkpointed(first_checkpoint) = repository
+        .prepare_initial_call(
+            session,
+            first_call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 12)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 13)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 14)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 15)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 16)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("member A must checkpoint")
+    };
+    assert_eq!(first_checkpoint, first_call);
+    let PrepareInitialModelCallOutcome::Ready {
+        request: first_request,
+        credential_reference: first_reference,
+        ..
+    } = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 17)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 18)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 19)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 20)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 21)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 22)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("member A must reload")
+    };
+    assert_eq!(first_reference.as_str(), first_member_fixture);
+    let AuthorizeModelCallOutcome::Authorized(first_authorized) = repository
+        .authorize_send(session, first_request.call().id())
+        .await?
+    else {
+        panic!("member A must authorize")
+    };
+    let successor_attempt = TurnAttemptId::from_uuid(Uuid::from_u128(seed + 23));
+    let first_commit = repository
+        .commit_observation(
+            session,
+            first_authorized
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::QuotaExhausted,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    true,
+                ),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 24)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 25)),
+                ),
+                successor_attempt,
+            },
+            |_| TurnId::from_uuid(Uuid::from_u128(seed + 26)),
+        )
+        .await?;
+    let Some(ModelCallObservationCommitOutcome::AvailabilitySuccessor(successor)) = first_commit
+    else {
+        panic!("quota on A must create a successor")
+    };
+    assert_eq!(
+        successor.successor().successor_attempt().id(),
+        successor_attempt
+    );
+    assert_eq!(successor.backoff(), std::time::Duration::ZERO);
+    let second_call = ModelCallId::from_uuid(Uuid::from_u128(seed + 27));
+    let PrepareInitialModelCallOutcome::Checkpointed(second_checkpoint) = repository
+        .prepare_initial_call(
+            session,
+            second_call,
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 28)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 29)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 30)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 31)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 32)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("member B must checkpoint")
+    };
+    assert_eq!(second_checkpoint, second_call);
+    let PrepareInitialModelCallOutcome::Ready {
+        request: second_request,
+        credential_reference: second_reference,
+        ..
+    } = repository
+        .prepare_initial_call(
+            session,
+            ModelCallId::from_uuid(Uuid::from_u128(seed + 33)),
+            FailedModelCallTurnIdentities::new(
+                SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 34)),
+                ContextFrontierId::from_uuid(Uuid::from_u128(seed + 35)),
+            ),
+            ContextFrontierId::from_uuid(Uuid::from_u128(seed + 36)),
+            |_| {
+                (
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 37)),
+                    TurnId::from_uuid(Uuid::from_u128(seed + 38)),
+                )
+            },
+        )
+        .await?
+    else {
+        panic!("member B must reload")
+    };
+    assert_eq!(second_reference.as_str(), second_member_fixture);
+    let AuthorizeModelCallOutcome::Authorized(second_authorized) = repository
+        .authorize_send(session, second_request.call().id())
+        .await?
+    else {
+        panic!("member B must authorize")
+    };
+    let second_commit = repository
+        .commit_observation(
+            session,
+            second_authorized
+                .observation_correlation()
+                .bind_provider_failure_observation_with_retry_after(
+                    ProviderModelCallFailureCause::QuotaExhausted,
+                    ProviderReportedTokenUsage::unreported(),
+                    None,
+                    true,
+                ),
+            signalbox_application::ModelCallTerminalIdentityCandidates::Availability {
+                failed: FailedModelCallTurnIdentities::new(
+                    SemanticTranscriptEntryId::from_uuid(Uuid::from_u128(seed + 39)),
+                    ContextFrontierId::from_uuid(Uuid::from_u128(seed + 40)),
+                ),
+                successor_attempt: TurnAttemptId::from_uuid(Uuid::from_u128(seed + 41)),
+            },
+            |_| TurnId::from_uuid(Uuid::from_u128(seed + 42)),
+        )
+        .await?;
+    let Some(ModelCallObservationCommitOutcome::PoolExhausted(
+        signalbox_application::CredentialPoolExhaustedOutcome::AfterCall {
+            pool_name,
+            terminal: _,
+        },
+    )) = second_commit
+    else {
+        panic!("the last unavailable member must exhaust the pool")
+    };
+    assert_eq!(pool_name.as_ref(), pool_name_fixture);
+    let durable_rotation: (i64, i64) = sqlx::query_as(
+        "SELECT
+             (SELECT count(*) FROM credential_pool_chain_exclusion
+               WHERE session_id = $1 AND turn_id = $2),
+             (SELECT count(*) FROM credential_pool_terminal_exhaustion
+               WHERE session_id = $1 AND turn_id = $2)",
+    )
+    .bind(session.into_uuid())
+    .bind(turn.into_uuid())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(durable_rotation, (2, 1));
+    pool.close().await;
+    drop(container);
+    Ok(())
+}
 
 /// S01 / S20 / S21 / INV-014 / INV-015 / INV-032 / INV-035: the production
 /// persistence chain checkpoints Prepared with its credential and input-token
@@ -1899,7 +2159,10 @@ async fn s04_s08_s09_inv016_inv053_terminal_call_reclassifies_and_schedules_pend
             },
         )
         .await?;
-    let Some(ModelCallTerminalOutcome::Completed(completed)) = outcome else {
+    let Some(ModelCallObservationCommitOutcome::Terminal(terminal)) = outcome else {
+        panic!("the source call must complete");
+    };
+    let ModelCallTerminalOutcome::Completed(completed) = *terminal else {
         panic!("the source call must complete");
     };
     assert_eq!(completed.reclassified_pending_steering().len(), 1);

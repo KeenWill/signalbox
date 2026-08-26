@@ -2,6 +2,7 @@
 
 use std::{error::Error, fmt};
 
+use crate::repo_watch_webhook::RepoWatchWebhookDisposition;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -10,22 +11,240 @@ use signalbox_domain::{
     AcceptedInputId, AnthropicServiceTier, BoundChildAction, CheckConclusion, ChecksOutcome,
     CodexCliServiceTier, DangerousToolAutoApproval, DelegateApprovalRecommendation,
     DelegationMessageDirection, DelegationOutcomeKind, DelegationOutcomeReason,
-    DelegationTransitionFailure, DelegationWaitMode, DescendantTerminationScope,
+    DelegationTransitionFailure, DelegationWaitMode, DeliveryKind, DescendantTerminationScope,
     DirectModelSelection, DurableCommandId, EffectiveModelSettings, FastMode, FastModeOverlay,
-    GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind, GoalModelBlockedReasonKind,
-    GoalUserAction, MergeableState, ModelChangeAdjustment, ModelSettingSource,
-    ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier, ReactionChange,
-    ReactionSubject, ReasoningLevel, RepoWatchEventKindNameV1, ReviewState,
-    RunnerPlacementLossSource, RunnerSandboxProfile, ServiceTier,
-    SessionConfigurationDefaultsVersion, SessionCreationCause, SessionId, SessionInputPosition,
-    SessionPlacementEventKind, SettingOverlay, ToolApprovalPosture, ToolAttemptId,
-    ToolPermissionDefault, ToolRequestId, TurnId, UpdateSessionPlacementRejectionKind,
-    ValidatedModelSettings, WorkspaceOrigin,
+    FaultCause, GoalBlockedReasonKind, GoalCommandRejection, GoalEventKind,
+    GoalModelBlockedReasonKind, GoalUserAction, MergeableState, ModelChangeAdjustment,
+    ModelSettingSource, ModelSettingsOverlay, ModelSettingsPrecedence, OpenAiServiceTier,
+    ProgramCapability, ReactionChange, ReactionSubject, ReasoningLevel, RejectReason,
+    RepoWatchEventKindNameV1, RequestKind, ReviewState, RunnerPlacementLossSource,
+    RunnerSandboxProfile, ScopeOperation, ServiceTier, SessionConfigurationDefaultsVersion,
+    SessionCreationCause, SessionId, SessionInputPosition, SessionPlacementEventKind,
+    SettingOverlay, ToolApprovalPosture, ToolAttemptId, ToolPermissionDefault, ToolRequestId,
+    TurnId, UpdateSessionPlacementRejectionKind, ValidatedModelSettings, WorkspaceOrigin,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProgramRequestStorageKind {
+    Now,
+    Random,
+    Sleep,
+    AwaitEvent,
+    Effect,
+    Scope,
+    Terminal,
+}
+
+pub(crate) fn program_request_kind_from_str(value: &str) -> Option<ProgramRequestStorageKind> {
+    match value {
+        "now" => Some(ProgramRequestStorageKind::Now),
+        "random" => Some(ProgramRequestStorageKind::Random),
+        "sleep" => Some(ProgramRequestStorageKind::Sleep),
+        "await_event" => Some(ProgramRequestStorageKind::AwaitEvent),
+        "effect" => Some(ProgramRequestStorageKind::Effect),
+        "scope" => Some(ProgramRequestStorageKind::Scope),
+        "terminal" => Some(ProgramRequestStorageKind::Terminal),
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProgramDeliveryStorageKind {
+    Answer,
+    Wake,
+    Reject,
+    Cancel,
+    RunCancel,
+    Fault,
+}
+
+pub(crate) const fn program_delivery_kind_to_str(value: &DeliveryKind) -> &'static str {
+    match value {
+        DeliveryKind::Answer { .. } => "answer",
+        DeliveryKind::Wake { .. } => "wake",
+        DeliveryKind::Reject { .. } => "reject",
+        DeliveryKind::Cancel { .. } => "cancel",
+        DeliveryKind::RunCancel(_) => "run_cancel",
+        DeliveryKind::Fault(_) => "fault",
+    }
+}
+
+pub(crate) fn program_delivery_kind_from_str(value: &str) -> Option<ProgramDeliveryStorageKind> {
+    match value {
+        "answer" => Some(ProgramDeliveryStorageKind::Answer),
+        "wake" => Some(ProgramDeliveryStorageKind::Wake),
+        "reject" => Some(ProgramDeliveryStorageKind::Reject),
+        "cancel" => Some(ProgramDeliveryStorageKind::Cancel),
+        "run_cancel" => Some(ProgramDeliveryStorageKind::RunCancel),
+        "fault" => Some(ProgramDeliveryStorageKind::Fault),
+        _ => None,
+    }
+}
+
+pub(crate) const fn program_fault_cause_to_str(value: FaultCause) -> &'static str {
+    match value {
+        FaultCause::Timeout => "timeout",
+        FaultCause::Memory => "memory",
+        FaultCause::Nondeterminism => "nondeterminism",
+        FaultCause::ProgramError => "program_error",
+        FaultCause::ContractRetired => "contract_retired",
+        FaultCause::JournalBound => "journal_bound",
+        FaultCause::PayloadTooLarge => "payload_too_large",
+    }
+}
+
+pub(crate) fn program_fault_cause_from_str(value: &str) -> Option<FaultCause> {
+    match value {
+        "timeout" => Some(FaultCause::Timeout),
+        "memory" => Some(FaultCause::Memory),
+        "nondeterminism" => Some(FaultCause::Nondeterminism),
+        "program_error" => Some(FaultCause::ProgramError),
+        "contract_retired" => Some(FaultCause::ContractRetired),
+        "journal_bound" => Some(FaultCause::JournalBound),
+        "payload_too_large" => Some(FaultCause::PayloadTooLarge),
+        _ => None,
+    }
+}
+
+pub(crate) const fn program_request_kind_to_str(value: &RequestKind) -> &'static str {
+    match value {
+        RequestKind::Now(_) => "now",
+        RequestKind::Random(_) => "random",
+        RequestKind::Sleep(_) => "sleep",
+        RequestKind::AwaitEvent(_) => "await_event",
+        RequestKind::Effect(_) => "effect",
+        RequestKind::Scope(_) => "scope",
+        RequestKind::Terminal(_) => "terminal",
+    }
+}
+
+pub(crate) const fn program_capability_to_str(value: ProgramCapability) -> &'static str {
+    match value {
+        ProgramCapability::Time => "time",
+        ProgramCapability::Random => "random",
+        ProgramCapability::Sleep => "sleep",
+        ProgramCapability::Subscribe => "subscribe",
+        ProgramCapability::Session => "session",
+        ProgramCapability::Judge => "judge",
+        ProgramCapability::ExecStage => "exec-stage",
+        ProgramCapability::Corpus => "corpus",
+        ProgramCapability::EvalRecord => "eval-record",
+        ProgramCapability::Blob => "blob",
+        ProgramCapability::Register => "register",
+    }
+}
+
+pub(crate) fn program_capability_from_str(value: &str) -> Option<ProgramCapability> {
+    match value {
+        "time" => Some(ProgramCapability::Time),
+        "random" => Some(ProgramCapability::Random),
+        "sleep" => Some(ProgramCapability::Sleep),
+        "subscribe" => Some(ProgramCapability::Subscribe),
+        "session" => Some(ProgramCapability::Session),
+        "judge" => Some(ProgramCapability::Judge),
+        "exec-stage" => Some(ProgramCapability::ExecStage),
+        "corpus" => Some(ProgramCapability::Corpus),
+        "eval-record" => Some(ProgramCapability::EvalRecord),
+        "blob" => Some(ProgramCapability::Blob),
+        "register" => Some(ProgramCapability::Register),
+        _ => None,
+    }
+}
+
+pub(crate) const fn program_scope_operation_to_str(value: ScopeOperation) -> &'static str {
+    match value {
+        ScopeOperation::Open => "open",
+        ScopeOperation::Close => "close",
+    }
+}
+
+pub(crate) fn program_scope_operation_from_str(value: &str) -> Option<ScopeOperation> {
+    match value {
+        "open" => Some(ScopeOperation::Open),
+        "close" => Some(ScopeOperation::Close),
+        _ => None,
+    }
+}
+
+pub(crate) const fn program_reject_reason_to_str(value: RejectReason) -> &'static str {
+    match value {
+        RejectReason::OutstandingRequests => "outstanding_requests",
+    }
+}
+
+pub(crate) fn program_reject_reason_from_str(value: &str) -> Option<RejectReason> {
+    match value {
+        "outstanding_requests" => Some(RejectReason::OutstandingRequests),
+        _ => None,
+    }
+}
 use signalbox_tools_plan::PlanStatus;
 use sqlx::types::Uuid;
 
 use crate::{approval_judge::FailedApprovalJudgeDisposition, outbox::DispatchedRunnerState};
+
+/// Closed active-turn phase discriminators stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ActiveTurnPhaseStorageKind {
+    Running,
+    AwaitingToolApproval,
+    AwaitingChild,
+    AwaitingModelCallRecovery,
+    AwaitingToolRecovery,
+    AwaitingRunnerRecovery,
+}
+
+#[cfg(test)]
+pub(crate) const fn active_turn_phase_to_str(value: ActiveTurnPhaseStorageKind) -> &'static str {
+    match value {
+        ActiveTurnPhaseStorageKind::Running => "running",
+        ActiveTurnPhaseStorageKind::AwaitingToolApproval => "awaiting_tool_approval",
+        ActiveTurnPhaseStorageKind::AwaitingChild => "awaiting_child",
+        ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery => "awaiting_model_call_recovery",
+        ActiveTurnPhaseStorageKind::AwaitingToolRecovery => "awaiting_tool_recovery",
+        ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery => "awaiting_runner_recovery",
+    }
+}
+
+pub(crate) fn active_turn_phase_from_str(value: &str) -> Option<ActiveTurnPhaseStorageKind> {
+    match value {
+        "running" => Some(ActiveTurnPhaseStorageKind::Running),
+        "awaiting_tool_approval" => Some(ActiveTurnPhaseStorageKind::AwaitingToolApproval),
+        "awaiting_child" => Some(ActiveTurnPhaseStorageKind::AwaitingChild),
+        "awaiting_model_call_recovery" => {
+            Some(ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery)
+        }
+        "awaiting_tool_recovery" => Some(ActiveTurnPhaseStorageKind::AwaitingToolRecovery),
+        "awaiting_runner_recovery" => Some(ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery),
+        _ => None,
+    }
+}
+
+/// Closed stored states for one durable runner-loss propagation cursor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RunnerLossPropagationStateStorageKind {
+    Pending,
+    Completed,
+}
+
+pub(crate) const fn runner_loss_propagation_state_to_str(
+    value: RunnerLossPropagationStateStorageKind,
+) -> &'static str {
+    match value {
+        RunnerLossPropagationStateStorageKind::Pending => "pending",
+        RunnerLossPropagationStateStorageKind::Completed => "completed",
+    }
+}
+
+pub(crate) fn runner_loss_propagation_state_from_str(
+    value: &str,
+) -> Option<RunnerLossPropagationStateStorageKind> {
+    match value {
+        "pending" => Some(RunnerLossPropagationStateStorageKind::Pending),
+        "completed" => Some(RunnerLossPropagationStateStorageKind::Completed),
+        _ => None,
+    }
+}
 
 /// Closed delegated-session relationship policy discriminators in PostgreSQL.
 ///
@@ -156,6 +375,34 @@ pub fn delegation_wake_subject_from_str(value: &str) -> Option<DelegationWakeSto
     match value {
         "result" => Some(DelegationWakeStorageKind::Result),
         "message" => Some(DelegationWakeStorageKind::Message),
+        _ => None,
+    }
+}
+
+pub(crate) const fn repo_watch_webhook_disposition_to_str(
+    value: RepoWatchWebhookDisposition,
+) -> &'static str {
+    match value {
+        RepoWatchWebhookDisposition::Projected => "projected",
+        RepoWatchWebhookDisposition::DuplicateState => "duplicate_state",
+        RepoWatchWebhookDisposition::Superseded => "superseded",
+        RepoWatchWebhookDisposition::Ignored => "ignored",
+        RepoWatchWebhookDisposition::Quarantined => "quarantined",
+    }
+}
+
+/// Paired with the encoder above so a renamed or added disposition cannot
+/// update the writer while leaving a reader interpreting the old spelling.
+#[cfg(feature = "test-support")]
+pub(crate) fn repo_watch_webhook_disposition_from_str(
+    value: &str,
+) -> Option<RepoWatchWebhookDisposition> {
+    match value {
+        "projected" => Some(RepoWatchWebhookDisposition::Projected),
+        "duplicate_state" => Some(RepoWatchWebhookDisposition::DuplicateState),
+        "superseded" => Some(RepoWatchWebhookDisposition::Superseded),
+        "ignored" => Some(RepoWatchWebhookDisposition::Ignored),
+        "quarantined" => Some(RepoWatchWebhookDisposition::Quarantined),
         _ => None,
     }
 }
@@ -811,6 +1058,131 @@ pub(crate) fn goal_command_rejection_from_str(value: &str) -> Option<GoalCommand
     }
 }
 
+/// Closed repository-watch singleton scopes stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchSingletonScopeStorageKind {
+    PullRequest,
+    Stack,
+    Rule,
+    Repository,
+}
+
+pub(crate) const fn repo_watch_singleton_scope_to_str(
+    value: RepoWatchSingletonScopeStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchSingletonScopeStorageKind::PullRequest => "pull_request",
+        RepoWatchSingletonScopeStorageKind::Stack => "stack",
+        RepoWatchSingletonScopeStorageKind::Rule => "rule",
+        RepoWatchSingletonScopeStorageKind::Repository => "repo",
+    }
+}
+
+pub(crate) fn repo_watch_singleton_scope_from_str(
+    value: &str,
+) -> Option<RepoWatchSingletonScopeStorageKind> {
+    match value {
+        "pull_request" => Some(RepoWatchSingletonScopeStorageKind::PullRequest),
+        "stack" => Some(RepoWatchSingletonScopeStorageKind::Stack),
+        "rule" => Some(RepoWatchSingletonScopeStorageKind::Rule),
+        "repo" => Some(RepoWatchSingletonScopeStorageKind::Repository),
+        _ => None,
+    }
+}
+
+/// Closed lifecycle-cutoff dispositions stored by PostgreSQL.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchLifecycleCutoffDispositionStorageKind {
+    Terminal,
+    Reopened,
+}
+
+pub(crate) const fn repo_watch_lifecycle_cutoff_disposition_to_str(
+    value: RepoWatchLifecycleCutoffDispositionStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchLifecycleCutoffDispositionStorageKind::Terminal => "terminal",
+        RepoWatchLifecycleCutoffDispositionStorageKind::Reopened => "reopened",
+    }
+}
+
+pub(crate) fn repo_watch_lifecycle_cutoff_disposition_from_str(
+    value: &str,
+) -> Option<RepoWatchLifecycleCutoffDispositionStorageKind> {
+    match value {
+        "terminal" => Some(RepoWatchLifecycleCutoffDispositionStorageKind::Terminal),
+        "reopened" => Some(RepoWatchLifecycleCutoffDispositionStorageKind::Reopened),
+        _ => None,
+    }
+}
+
+/// Closed outcomes stored for one repository-watch rule evaluation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchEvaluationOutcomeStorageKind {
+    NotMatched,
+    TargetClosed,
+    Occupied,
+    Coalesced,
+    Cooldown,
+    Dispatched,
+}
+
+pub(crate) const fn repo_watch_evaluation_outcome_to_str(
+    value: RepoWatchEvaluationOutcomeStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchEvaluationOutcomeStorageKind::NotMatched => "not_matched",
+        RepoWatchEvaluationOutcomeStorageKind::TargetClosed => "target_closed",
+        RepoWatchEvaluationOutcomeStorageKind::Occupied => "occupied",
+        RepoWatchEvaluationOutcomeStorageKind::Coalesced => "coalesced",
+        RepoWatchEvaluationOutcomeStorageKind::Cooldown => "cooldown",
+        RepoWatchEvaluationOutcomeStorageKind::Dispatched => "dispatched",
+    }
+}
+
+pub(crate) fn repo_watch_evaluation_outcome_from_str(
+    value: &str,
+) -> Option<RepoWatchEvaluationOutcomeStorageKind> {
+    match value {
+        "not_matched" => Some(RepoWatchEvaluationOutcomeStorageKind::NotMatched),
+        "target_closed" => Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed),
+        "occupied" => Some(RepoWatchEvaluationOutcomeStorageKind::Occupied),
+        "coalesced" => Some(RepoWatchEvaluationOutcomeStorageKind::Coalesced),
+        "cooldown" => Some(RepoWatchEvaluationOutcomeStorageKind::Cooldown),
+        "dispatched" => Some(RepoWatchEvaluationOutcomeStorageKind::Dispatched),
+        _ => None,
+    }
+}
+
+/// Closed settlement kinds stored for one repository-watch dispatch obligation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchObligationSettlementStorageKind {
+    Deactivated,
+    TargetClosed,
+    Dispatched,
+}
+
+pub(crate) const fn repo_watch_obligation_settlement_to_str(
+    value: RepoWatchObligationSettlementStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchObligationSettlementStorageKind::Deactivated => "deactivated",
+        RepoWatchObligationSettlementStorageKind::TargetClosed => "target_closed",
+        RepoWatchObligationSettlementStorageKind::Dispatched => "dispatched",
+    }
+}
+
+pub(crate) fn repo_watch_obligation_settlement_from_str(
+    value: &str,
+) -> Option<RepoWatchObligationSettlementStorageKind> {
+    match value {
+        "deactivated" => Some(RepoWatchObligationSettlementStorageKind::Deactivated),
+        "target_closed" => Some(RepoWatchObligationSettlementStorageKind::TargetClosed),
+        "dispatched" => Some(RepoWatchObligationSettlementStorageKind::Dispatched),
+        _ => None,
+    }
+}
+
 /// Stored target shape for one repository-watch event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RepoWatchEventTargetStorageKind {
@@ -824,6 +1196,29 @@ pub(crate) const fn repo_watch_event_target_to_str(
     match value {
         RepoWatchEventTargetStorageKind::PullRequest => "pull_request",
         RepoWatchEventTargetStorageKind::Branch => "branch",
+    }
+}
+
+/// Which producer recorded one repository-watch event.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RepoWatchEventProducerStorageKind {
+    Poll,
+}
+
+pub(crate) const fn repo_watch_event_producer_to_str(
+    value: RepoWatchEventProducerStorageKind,
+) -> &'static str {
+    match value {
+        RepoWatchEventProducerStorageKind::Poll => "poll",
+    }
+}
+
+pub(crate) fn repo_watch_event_producer_from_str(
+    value: &str,
+) -> Option<RepoWatchEventProducerStorageKind> {
+    match value {
+        "poll" => Some(RepoWatchEventProducerStorageKind::Poll),
+        _ => None,
     }
 }
 
@@ -1902,13 +2297,17 @@ mod tests {
     use crate::outbox::DispatchedRunnerState;
 
     use super::{
-        ApprovalJudgeStateStorageKind, ApprovalJudgeTerminalDispositionStorageKind,
-        DelegationPolicyStorageKind, DelegationRejectionStorageKind, DelegationUpdateStorageKind,
-        DelegationWakeStorageKind, DurableCommandIdMappingError, DurableCommandKind,
-        PlanEventStorageKind, PositiveOrdinalMappingError, SessionCreationCauseStorageKind,
+        ActiveTurnPhaseStorageKind, ApprovalJudgeStateStorageKind,
+        ApprovalJudgeTerminalDispositionStorageKind, DelegationPolicyStorageKind,
+        DelegationRejectionStorageKind, DelegationUpdateStorageKind, DelegationWakeStorageKind,
+        DurableCommandIdMappingError, DurableCommandKind, PlanEventStorageKind,
+        PositiveOrdinalMappingError, RepoWatchEvaluationOutcomeStorageKind,
+        RepoWatchLifecycleCutoffDispositionStorageKind, RepoWatchObligationSettlementStorageKind,
+        RunnerLossPropagationStateStorageKind, SessionCreationCauseStorageKind,
         SessionPlacementRejectionStorageKind, SessionPlacementResultStorageKind,
         StoredModelSettingsError, ToolApprovalDecisionSourceStorageKind,
         ToolAttemptDispositionStorageKind, accepted_input_id_from_uuid, accepted_input_id_to_uuid,
+        active_turn_phase_from_str, active_turn_phase_to_str,
         approval_judge_recommendation_from_str, approval_judge_recommendation_to_str,
         approval_judge_state_from_str, approval_judge_state_to_str,
         approval_judge_terminal_disposition_from_str, approval_judge_terminal_disposition_to_str,
@@ -1929,13 +2328,17 @@ mod tests {
         model_settings_from_json, model_settings_overlay_from_json, model_settings_to_json,
         plan_event_kind_from_str, plan_event_kind_to_str, repo_watch_check_conclusion_from_str,
         repo_watch_check_conclusion_to_str, repo_watch_checks_outcome_from_str,
-        repo_watch_checks_outcome_to_str, repo_watch_event_kind_from_str,
-        repo_watch_event_kind_to_str, repo_watch_mergeable_state_from_str,
-        repo_watch_mergeable_state_to_str, repo_watch_pull_request_lifecycle_from_str,
+        repo_watch_checks_outcome_to_str, repo_watch_evaluation_outcome_from_str,
+        repo_watch_evaluation_outcome_to_str, repo_watch_event_kind_from_str,
+        repo_watch_event_kind_to_str, repo_watch_lifecycle_cutoff_disposition_from_str,
+        repo_watch_lifecycle_cutoff_disposition_to_str, repo_watch_mergeable_state_from_str,
+        repo_watch_mergeable_state_to_str, repo_watch_obligation_settlement_from_str,
+        repo_watch_obligation_settlement_to_str, repo_watch_pull_request_lifecycle_from_str,
         repo_watch_pull_request_lifecycle_to_str, repo_watch_reaction_change_from_str,
         repo_watch_reaction_change_to_str, repo_watch_review_state_from_str,
         repo_watch_review_state_to_str, repo_watch_thread_state_from_str,
-        repo_watch_thread_state_to_str, runner_placement_loss_source_from_str,
+        repo_watch_thread_state_to_str, runner_loss_propagation_state_from_str,
+        runner_loss_propagation_state_to_str, runner_placement_loss_source_from_str,
         runner_placement_loss_source_to_str, runner_sandbox_from_str, runner_sandbox_to_str,
         session_creation_cause_from_str, session_creation_cause_to_str, session_id_from_uuid,
         session_id_to_uuid, session_placement_event_kind_from_str,
@@ -1947,6 +2350,102 @@ mod tests {
         tool_permission_default_from_str, tool_permission_default_to_str, turn_id_from_uuid,
         turn_id_to_uuid,
     };
+
+    #[test]
+    fn active_turn_phase_mapping_is_closed() {
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::Running,
+            )),
+            Some(ActiveTurnPhaseStorageKind::Running)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingToolApproval,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingToolApproval)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingChild,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingChild)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingModelCallRecovery)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingToolRecovery,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingToolRecovery)
+        );
+        assert_eq!(
+            active_turn_phase_from_str(active_turn_phase_to_str(
+                ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery,
+            )),
+            Some(ActiveTurnPhaseStorageKind::AwaitingRunnerRecovery)
+        );
+        assert_eq!(active_turn_phase_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn runner_loss_propagation_state_mapping_is_closed() {
+        assert_eq!(
+            runner_loss_propagation_state_from_str(runner_loss_propagation_state_to_str(
+                RunnerLossPropagationStateStorageKind::Pending,
+            )),
+            Some(RunnerLossPropagationStateStorageKind::Pending)
+        );
+        assert_eq!(
+            runner_loss_propagation_state_from_str(runner_loss_propagation_state_to_str(
+                RunnerLossPropagationStateStorageKind::Completed,
+            )),
+            Some(RunnerLossPropagationStateStorageKind::Completed)
+        );
+        assert_eq!(runner_loss_propagation_state_from_str("unknown"), None);
+    }
+
+    #[test]
+    fn repository_watch_target_closed_mappings_are_closed() {
+        assert_eq!(
+            repo_watch_evaluation_outcome_from_str(repo_watch_evaluation_outcome_to_str(
+                RepoWatchEvaluationOutcomeStorageKind::TargetClosed,
+            )),
+            Some(RepoWatchEvaluationOutcomeStorageKind::TargetClosed)
+        );
+        assert_eq!(repo_watch_evaluation_outcome_from_str("unknown"), None);
+        assert_eq!(
+            repo_watch_obligation_settlement_from_str(repo_watch_obligation_settlement_to_str(
+                RepoWatchObligationSettlementStorageKind::TargetClosed,
+            )),
+            Some(RepoWatchObligationSettlementStorageKind::TargetClosed)
+        );
+        assert_eq!(repo_watch_obligation_settlement_from_str("unknown"), None);
+        assert_eq!(
+            repo_watch_lifecycle_cutoff_disposition_from_str(
+                repo_watch_lifecycle_cutoff_disposition_to_str(
+                    RepoWatchLifecycleCutoffDispositionStorageKind::Terminal,
+                ),
+            ),
+            Some(RepoWatchLifecycleCutoffDispositionStorageKind::Terminal)
+        );
+        assert_eq!(
+            repo_watch_lifecycle_cutoff_disposition_from_str(
+                repo_watch_lifecycle_cutoff_disposition_to_str(
+                    RepoWatchLifecycleCutoffDispositionStorageKind::Reopened,
+                ),
+            ),
+            Some(RepoWatchLifecycleCutoffDispositionStorageKind::Reopened)
+        );
+        assert_eq!(
+            repo_watch_lifecycle_cutoff_disposition_from_str("unknown"),
+            None
+        );
+    }
 
     #[test]
     fn tool_attempt_dispositions_pin_each_storage_spelling() {

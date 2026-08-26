@@ -13,7 +13,10 @@ use signalbox_blob_store::conformance::{
     assert_verification_failure, corrupt_fixture_content, expected_fixture,
 };
 use signalbox_blob_store_s3::S3BlobStore;
+use tokio::sync::Mutex;
 use url::Url;
+
+static LIVE_FIXTURE: Mutex<()> = Mutex::const_new(());
 
 fn required(name: &'static str) -> Result<String, io::Error> {
     env::var(name).map_err(|_| io::Error::new(io::ErrorKind::NotFound, name))
@@ -35,6 +38,7 @@ fn live_store() -> Result<S3BlobStore, Box<dyn Error>> {
 #[tokio::test]
 #[ignore = "requires an explicit live S3-compatible test bucket"]
 async fn inv059_live_s3_rejects_publication_verification_failure() -> Result<(), Box<dyn Error>> {
+    let _fixture = LIVE_FIXTURE.lock().await;
     let store = live_store()?;
     let expected = expected_fixture();
 
@@ -46,6 +50,7 @@ async fn inv059_live_s3_rejects_publication_verification_failure() -> Result<(),
 #[tokio::test]
 #[ignore = "requires an explicit live S3-compatible test bucket"]
 async fn inv059_live_s3_puts_and_reads_exact_bytes() -> Result<(), Box<dyn Error>> {
+    let _fixture = LIVE_FIXTURE.lock().await;
     let store = live_store()?;
     let expected = expected_fixture();
 
@@ -58,6 +63,7 @@ async fn inv059_live_s3_puts_and_reads_exact_bytes() -> Result<(), Box<dyn Error
 #[tokio::test]
 #[ignore = "requires an explicit live S3-compatible test bucket"]
 async fn inv059_live_s3_reads_exact_bounded_ranges() -> Result<(), Box<dyn Error>> {
+    let _fixture = LIVE_FIXTURE.lock().await;
     let store = live_store()?;
     let expected = expected_fixture();
 
@@ -70,6 +76,7 @@ async fn inv059_live_s3_reads_exact_bounded_ranges() -> Result<(), Box<dyn Error
 #[tokio::test]
 #[ignore = "requires an explicit live S3-compatible test bucket"]
 async fn inv059_live_s3_rejects_oversized_ranges() -> Result<(), Box<dyn Error>> {
+    let _fixture = LIVE_FIXTURE.lock().await;
     let store = live_store()?;
     let expected = expected_fixture();
 
@@ -82,6 +89,7 @@ async fn inv059_live_s3_rejects_oversized_ranges() -> Result<(), Box<dyn Error>>
 #[tokio::test]
 #[ignore = "requires an explicit live S3-compatible test bucket"]
 async fn inv059_live_s3_deduplicates_an_existing_destination() -> Result<(), Box<dyn Error>> {
+    let _fixture = LIVE_FIXTURE.lock().await;
     let store = live_store()?;
     let expected = expected_fixture();
 
@@ -94,6 +102,7 @@ async fn inv059_live_s3_deduplicates_an_existing_destination() -> Result<(), Box
 #[tokio::test]
 #[ignore = "requires an explicit live S3-compatible test bucket"]
 async fn inv059_live_s3_concurrent_publication_is_no_clobber() -> Result<(), Box<dyn Error>> {
+    let _fixture = LIVE_FIXTURE.lock().await;
     let store = live_store()?;
     let expected = expected_fixture();
 
@@ -106,6 +115,7 @@ async fn inv059_live_s3_concurrent_publication_is_no_clobber() -> Result<(), Box
 #[tokio::test]
 #[ignore = "requires an explicit live S3-compatible test bucket"]
 async fn inv059_live_s3_repairs_a_corrupt_existing_destination() -> Result<(), Box<dyn Error>> {
+    let _fixture = LIVE_FIXTURE.lock().await;
     let store = live_store()?;
     let expected = expected_fixture();
 

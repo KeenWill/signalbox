@@ -47,7 +47,8 @@ use signalbox_model_runtime::{
     ToolCallProposal as RuntimeToolCallProposal, ToolName as RuntimeToolName, ToolResultRecord,
 };
 use signalbox_persistence::{
-    create_session::CreateSessionRepository, disposable_test_container_labels,
+    create_session::CreateSessionRepository, disposable_postgres_server_args,
+    disposable_postgres_state_tmpfs, disposable_test_container_labels,
     local_test_connection_options, migrate, model_execution::PostgresModelCallRepository,
     process_read::ProcessReadRepository, scheduler::PostgresEligibilitySweep,
     start_eligible_turn::StartEligibleTurnRepository, startup::PostgresStartupScanRepository,
@@ -612,7 +613,8 @@ async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<d
         .with_db_name(DATABASE_NAME)
         .with_user(DATABASE_USER)
         .with_password(DATABASE_PASSWORD)
-        .with_fsync_enabled()
+        .with_cmd(disposable_postgres_server_args())
+        .with_mount(disposable_postgres_state_tmpfs())
         .with_tag(POSTGRES_IMAGE_TAG)
         .with_labels(disposable_test_container_labels())
         .start()
@@ -750,6 +752,7 @@ fn provider_error_script() -> Script {
         exchange: ExchangeFacts::default(),
         reported_model: Some(ProviderReportedModel::new("scripted-tool-loop")),
         kind: ProviderErrorKind::ProviderInternal,
+        non_acceptance_proven: false,
         native: NativeErrorFacts::default(),
         usage: TokenUsage::unreported(),
     }))
@@ -1471,10 +1474,14 @@ enum ExpectedCodeHostOperation {
         purpose: ReviewGatePurpose,
     },
     ThreadReply {
+        repository: &'static str,
+        number: u32,
         thread_id: &'static str,
         body: &'static str,
     },
     ThreadResolve {
+        repository: &'static str,
+        number: u32,
         thread_id: &'static str,
     },
     CiJobLog {
@@ -1590,15 +1597,28 @@ fn assert_code_host_operation(actual: &CodeHostOperation, expected: ExpectedCode
         }
         (
             CodeHostOperation::ThreadReply(arguments),
-            ExpectedCodeHostOperation::ThreadReply { thread_id, body },
+            ExpectedCodeHostOperation::ThreadReply {
+                repository,
+                number,
+                thread_id,
+                body,
+            },
         ) => {
+            assert_eq!(arguments.repository().as_str(), repository);
+            assert_eq!(arguments.number().get(), number);
             assert_eq!(arguments.thread_id().as_str(), thread_id);
             assert_eq!(arguments.body().as_str(), body);
         }
         (
             CodeHostOperation::ThreadResolve(arguments),
-            ExpectedCodeHostOperation::ThreadResolve { thread_id },
+            ExpectedCodeHostOperation::ThreadResolve {
+                repository,
+                number,
+                thread_id,
+            },
         ) => {
+            assert_eq!(arguments.repository().as_str(), repository);
+            assert_eq!(arguments.number().get(), number);
             assert_eq!(arguments.thread_id().as_str(), thread_id);
         }
         (
@@ -2810,6 +2830,10 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
         "max_bytes": 131072
     })
     .to_string();
+    let expected_user_content = format!(
+        r#"[{{"type":"text","text":{}}}]"#,
+        serde_json::to_string(FIXTURE_USER_CONTENT)?
+    );
     let expected_tool_use_content = format!(
         "{}\n{arguments}",
         signalbox_tools_conversations::READ_OWN_CONVERSATION_NAME
@@ -2836,10 +2860,7 @@ async fn s10_composed_introspection_returns_real_own_transcript() -> Result<(), 
             "entries": [{
                 "position": 1,
                 "kind": "user",
-                "content": format!(
-                    r#"[{{"type":"text","text":{}}}]"#,
-                    serde_json::to_string(FIXTURE_USER_CONTENT)?
-                ),
+                "content": expected_user_content,
                 "content_truncated": false
             }, {
                 "position": 2,
@@ -3155,10 +3176,18 @@ async fn tier_one_change_request_thread_reply_completes_offline_tool_loop()
 -> Result<(), Box<dyn Error>> {
     code_host_tool_completes_offline(
         CHANGE_REQUEST_THREAD_REPLY_NAME,
-        serde_json::json!({"body": "fixed offline", "thread_id": "PRRT_thread"}).to_string(),
+        serde_json::json!({
+            "body": "fixed offline",
+            "number": 17,
+            "repository": "owner/repository",
+            "thread_id": "PRRT_thread",
+        })
+        .to_string(),
         thread_reply_result(),
         serde_json::json!({"id": "PRRC_reply", "url": "https://github.example/comment/7002"}),
         ExpectedCodeHostOperation::ThreadReply {
+            repository: "owner/repository",
+            number: 17,
             thread_id: "PRRT_thread",
             body: "fixed offline",
         },
@@ -3175,10 +3204,17 @@ async fn tier_one_change_request_thread_resolve_completes_offline_tool_loop()
 -> Result<(), Box<dyn Error>> {
     code_host_tool_completes_offline(
         CHANGE_REQUEST_THREAD_RESOLVE_NAME,
-        serde_json::json!({"thread_id": "PRRT_thread"}).to_string(),
+        serde_json::json!({
+            "number": 17,
+            "repository": "owner/repository",
+            "thread_id": "PRRT_thread",
+        })
+        .to_string(),
         thread_resolve_result(),
         serde_json::json!({"resolved": true, "thread_id": "PRRT_thread"}),
         ExpectedCodeHostOperation::ThreadResolve {
+            repository: "owner/repository",
+            number: 17,
             thread_id: "PRRT_thread",
         },
         ExpectedCodeHostApproval::Confirm,
@@ -3941,9 +3977,10 @@ async fn s10_inv020_inv021_blanket_posture_runs_confirm_tool_unattended()
 }
 
 /// S05 / INV-005 / INV-006 / INV-024: losing a dispatched effect-free attempt
-/// never retries it; the dispatch path classifies it `known_failed` with
-/// `crash_lost` evidence before releasing its gate, startup preserves that
-/// terminal state idempotently, and a later submit activates and runs.
+/// never retries it; the dispatch path contains the executor failure by
+/// classifying it `known_failed` with `crash_lost` evidence before releasing
+/// its gate, startup preserves that terminal state idempotently, and a later
+/// submit activates and runs.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL"]
 async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
@@ -3960,13 +3997,9 @@ async fn s05_inv005_inv006_inv024_failed_tool_round_admits_and_runs_later_turn()
         tool_catalog,
         crashing.clone(),
     );
-    let first = first_execution
+    first_execution
         .execute(Box::new(fixture.activated.clone()))
-        .await;
-    assert!(
-        first.is_err(),
-        "fixture process loss must escape orchestration"
-    );
+        .await?;
     assert_eq!(crashing.events(), vec![String::from("effect_free")]);
 
     let mut startup = StartupScanService::new(
