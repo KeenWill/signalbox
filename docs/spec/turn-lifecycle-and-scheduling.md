@@ -36,8 +36,8 @@ verified against this PR (`agent/turn-liveness-watchdog`).
 The user-vocabulary surface on this page was re-verified through PR #378
 (`agent/user-vocabulary`).
 
-Prepared-call sweep eligibility and scheduler-capacity relinquishment are
-verified against this implementing change
+Prepared-call sweep eligibility and startup resumption of an unsent prepared
+call are verified against this implementing change
 (`agent/blob-storage-attachment-preparation`).
 
 This page specifies the implemented behavior of turns, turn attempts,

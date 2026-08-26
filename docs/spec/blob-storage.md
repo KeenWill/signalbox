@@ -53,9 +53,8 @@ projection are verified against this implementing change
 (`agent/blob-storage-attachment-rendering`).
 
 Distinct attachment sizing and streamed replica verification, typed
-missing/corrupt closure before send authorization, typed unavailable retry, and
-bounded verification admission, scheduler-capacity handoff, and deadline are
-verified against this implementing change
+missing/corrupt closure before send authorization, and typed unavailable retry
+are verified against this implementing change
 (`agent/blob-storage-attachment-preparation`).
 
 The text-only blob-read family, frontier-derived digest authorization, and

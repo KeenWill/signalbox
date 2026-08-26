@@ -11,8 +11,8 @@ The durable usage-provenance column and read projection are verified against PR
 
 Multipart attachment rendering remains part of the foundation proposal from PR
 #553 (`agent/blob-storage-foundation`). Distinct attachment sizing, streamed
-replica verification, typed pre-authorization failure, retryable unavailability,
-and scheduler-capacity handoff are verified against this implementing change
+replica verification, typed pre-authorization failure, and retryable
+unavailability are verified against this implementing change
 (`agent/blob-storage-attachment-preparation`).
 
 This page describes the implemented model-call orchestration chain as verified
