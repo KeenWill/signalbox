@@ -7394,9 +7394,12 @@ impl<Reader: SessionReader> LoadSessionService<Reader> {
 ## application: search
 
 ```rust
+pub const MAX_SEARCH_HIGHLIGHTS_PER_RESULT: usize;
+
 pub const fn max_search_query_bytes() -> usize;
 pub const fn max_search_page_items() -> u16;
 pub const fn max_search_snippet_bytes() -> usize;
+pub const fn max_search_highlights_per_result() -> usize;
 pub const fn max_search_projection_text_bytes() -> usize;
 
 pub enum SearchTextError { Empty, TooLong, ContainsNul }
@@ -13091,7 +13094,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: create_session_from_imported_frontier | 6 (incl. 2 traits)               |
 | application: list_conversations                    | 8 (incl. 2 traits)               |
 | application: load_session                          | 2 (incl. 1 trait)                |
-| application: search                                | 21 (+4 free fn) (incl. 2 traits) |
+| application: search                                | 22 (+5 free fn) (incl. 2 traits) |
 | application: usage                                 | 37 (+4 free fn) (incl. 1 trait)  |
 | application: session_timeline                      | 14 (+3 free fn) (incl. 1 trait)  |
 | application: session_live                          | 9 (+1 free fn) (incl. 1 trait)   |
@@ -13115,4 +13118,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **478 (+29 free fn)**            |
+| **signalbox-application total**                    | **479 (+30 free fn)**            |

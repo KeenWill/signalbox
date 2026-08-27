@@ -3,9 +3,10 @@
 The bounded browser session descriptor and historical timeline foundation are
 verified against this PR (`agent/web-session-timeline`). The bounded
 lexical-search projection and query boundary are verified against this PR
-(`agent/web-search-usage`). The bounded browser session catalog is verified
-against this PR (`agent/web-session-catalog-follow`). The bounded live snapshot
-and follow projection are verified against this PR
+(`agent/web-product-surface-search`), which carries the `agent/web-search-usage`
+boundary it extends. The bounded browser session catalog is verified against
+this PR (`agent/web-session-catalog-follow`). The bounded live snapshot and
+follow projection are verified against this PR
 (`agent/web-session-catalog-follow-live`).
 
 Dedicated-compaction usage as the next queued-turn headroom baseline is verified
@@ -828,25 +829,27 @@ functionality: no present producer calls it. The compatibility constraint is
 that a producer adopting the port publishes only text its durable contract
 explicitly supplies, and only after its own source exists.
 
-Every result carries its session, stable timeline address, typed owning
-session/input/turn transcript entry/tool request/tool attempt/attachment/derived
-artifact identity, closed content class, and a plain-text snippet with UTF-8
-byte highlight ranges. The address is directly usable with the timeline `around`
-read even when the matching region is not loaded. Each returned source is
-correlated with both its canonical record and the exact durable event that
-supplies its reveal address — an input's acceptance event, an assistant entry's
-terminal call transition, a summary's compaction event, a tool item's batch
-transition, the session's creation event — and a transcript-entry source must
-carry the payload kind its content class asserts. An unknown stored source or
-content class, malformed identity, invalid address, mismatched reveal event, or
-contradictory source shape fails closed, including when the offending row is
-only the unreturned lookahead item fetched to decide a continuation.
+Every result carries its session, stable timeline address, positive projection
+identity, typed owning session/input/turn transcript entry/tool request/tool
+attempt/attachment/derived artifact identity, closed content class, and a
+plain-text snippet with UTF-8 byte highlight ranges. The address is directly
+usable with the timeline `around` read even when the matching region is not
+loaded. Each returned source is correlated with both its canonical record and
+the exact durable event that supplies its reveal address — an input's acceptance
+event, an assistant entry's terminal call transition, a summary's compaction
+event, a tool item's batch transition, the session's creation event — and a
+transcript-entry source must carry the payload kind its content class asserts.
+An unknown stored source or content class, malformed identity, invalid address,
+mismatched reveal event, or contradictory source shape fails closed, including
+when the offending row is only the unreturned lookahead item fetched to decide a
+continuation.
 
 Requests accept 1 through 100 results and at most 512 UTF-8 query bytes. Each
-returned snippet is at most 512 UTF-8 bytes. Results have a stable strict
-newest-address-first keyset order by `(event_sequence, projection_id)`; the
-adapter fetches at most one item beyond the requested page to decide whether to
-return a continuation. A bounded per-term GIN probe runs first: a query
+returned snippet is at most 512 UTF-8 bytes and carries at most 64 ordered,
+non-overlapping highlight ranges on UTF-8 boundaries. Results have a stable
+strict newest-address-first keyset order by `(event_sequence, projection_id)`;
+the adapter fetches at most one item beyond the requested page to decide whether
+to return a continuation. A bounded per-term GIN probe runs first: a query
 containing a term with no match returns an empty page immediately, a query whose
 rarest term stays under a fixed candidate cap is served from that term's
 index-driven candidate set, and only queries in which every term is common use

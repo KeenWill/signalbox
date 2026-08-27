@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeSet, HashSet},
     error::Error,
     num::{NonZeroU16, NonZeroU64},
+    time::Duration,
 };
 
 use signalbox_application::{
@@ -1156,6 +1157,207 @@ async fn cursor_events_assessment_and_seal_commit_atomically() -> Result<(), Box
     assert_eq!(event_count, expected_event_count);
     assert_eq!(assessment_count, 1);
     assert_eq!(seal_count, 1);
+    Ok(())
+}
+
+/// A restarting daemon measures what is left of its poll cadence from this
+/// record, so only the complete provider sweep may write it. The cursor cannot
+/// stand in: a targeted webhook refresh commits generations of its own, and a
+/// sweep that finds the repository unchanged commits none at all, so neither the
+/// newest generation's age nor its existence measures the sweep cadence.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn only_a_complete_sweep_records_the_poll_cadence() -> Result<(), Box<dyn Error>> {
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let first_generation = committed_generation(
+        store
+            .commit(
+                &repository,
+                RepoWatchCommitRequest::new(None, baseline.clone(), Vec::new()),
+            )
+            .await?,
+    );
+
+    let after_webhook_commit = store.load_complete_poll_age(&repository).await?;
+
+    let current_observation = observation(Some(INITIAL_HEAD))?;
+    let mut current_frontier = baseline.event_identity_frontier().clone();
+    let events = derive_repo_watch_events(
+        &repository,
+        Some(baseline.observation()),
+        &current_observation,
+        &mut current_frontier,
+        &mut FixedEventIds::default(),
+    )?;
+    let current = RepoWatchCursorCandidate::with_event_identity_frontier(
+        current_observation,
+        current_frontier,
+    );
+    let swept_generation = committed_generation(
+        store
+            .commit_with_convergence(
+                &repository,
+                RepoWatchCommitRequest::new(Some(first_generation), current.clone(), events),
+                &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+            )
+            .await?,
+    );
+    let after_sweep = store.load_complete_poll_age(&repository).await?;
+    let swept_at = recorded_complete_poll(&pool).await?;
+
+    // A sweep whose commit conflicts never observed the repository completely,
+    // so it must leave the previous deadline in force.
+    let conflicted = store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(
+                Some(first_generation),
+                candidate(Some(CHANGED_HEAD))?,
+                Vec::new(),
+            ),
+            &[merge_ready_assessment(CHANGED_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let after_conflict = recorded_complete_poll(&pool).await?;
+
+    // A sweep that finds the repository unchanged writes no cursor generation
+    // and is still the completed sweep the cadence measures.
+    let unchanged = store
+        .commit_with_convergence(
+            &repository,
+            RepoWatchCommitRequest::new(Some(swept_generation), current, Vec::new()),
+            &[merge_ready_assessment(INITIAL_HEAD, BASE_REVISION)?],
+        )
+        .await?;
+    let after_unchanged = recorded_complete_poll(&pool).await?;
+
+    assert_eq!(
+        after_webhook_commit, None,
+        "a cursor generation is not evidence that a sweep completed"
+    );
+    assert!(
+        after_sweep.is_some(),
+        "the completed sweep records the cadence the next restart reads"
+    );
+    assert!(matches!(
+        conflicted,
+        RepoWatchCommitOutcome::Conflict { .. }
+    ));
+    assert_eq!(
+        after_conflict, swept_at,
+        "a rolled-back sweep leaves the previous deadline in force"
+    );
+    assert!(matches!(unchanged, RepoWatchCommitOutcome::Unchanged(_)));
+    assert_ne!(
+        after_unchanged, swept_at,
+        "an unchanged sweep still completed, and commits no generation to measure"
+    );
+    Ok(())
+}
+
+async fn recorded_complete_poll(pool: &PgPool) -> Result<Option<String>, Box<dyn Error>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT completed_at::text FROM repo_watch_complete_poll WHERE repository = $1",
+    )
+    .bind(REPOSITORY)
+    .fetch_optional(pool)
+    .await?)
+}
+
+/// Waits until a backend other than this test's is queued behind an advisory
+/// lock in this database.
+///
+/// The observation has to be positive for the caller to be a classifier at all:
+/// a fixed delay before marking the clock passes against a transaction-start
+/// stamp whenever the spawned sweep is slower to reach the lock than the delay,
+/// which is exactly what a loaded runner produces. Waiting on the contention
+/// itself makes the marker provably later than the sweep's transaction start.
+async fn await_repository_lock_contention(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    const PROBE_INTERVAL: Duration = Duration::from_millis(10);
+    // Only reached when the sweep never queues at all, and failing is then the
+    // correct outcome, so this buys patience rather than encoding a latency.
+    const PROBE_ATTEMPTS: u32 = 3_000;
+
+    for _ in 0..PROBE_ATTEMPTS {
+        let contended: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                  FROM pg_locks
+                 WHERE locktype = 'advisory'
+                   AND NOT granted
+                   AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+             )",
+        )
+        .fetch_one(pool)
+        .await?;
+        if contended {
+            return Ok(());
+        }
+        tokio::time::sleep(PROBE_INTERVAL).await;
+    }
+    Err("no backend ever queued behind the repository's advisory lock".into())
+}
+
+/// The cadence stamp measures when the sweep committed, not when its
+/// transaction opened. Those differ by the wait for the per-repository advisory
+/// lock — a sweep can queue behind a targeted webhook commit — and a stamp taken
+/// from the transaction's start hands that wait to the next restart as elapsed
+/// cadence, bringing the following sweep forward by it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL"]
+async fn the_cadence_stamp_excludes_the_wait_for_the_repository_lock() -> Result<(), Box<dyn Error>>
+{
+    let (_container, pool) = migrated_postgres().await?;
+    let repository = repository()?;
+    let store = PostgresRepoWatchStore::new(pool.clone());
+    let baseline = candidate(None)?;
+    let mut blocker = pool.acquire().await?;
+    sqlx::query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(REPOSITORY)
+        .execute(&mut *blocker)
+        .await?;
+
+    let sweeping = tokio::spawn({
+        let store = store.clone();
+        let repository = repository.clone();
+        async move {
+            store
+                .commit_with_convergence(
+                    &repository,
+                    RepoWatchCommitRequest::new(None, baseline, Vec::new()),
+                    &[],
+                )
+                .await
+        }
+    });
+    await_repository_lock_contention(&pool).await?;
+    let held_until: String = sqlx::query_scalar("SELECT clock_timestamp()::text")
+        .fetch_one(&mut *blocker)
+        .await?;
+    let released: bool = sqlx::query_scalar("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+        .bind(REPOSITORY)
+        .fetch_one(&mut *blocker)
+        .await?;
+    let swept = sweeping.await??;
+
+    assert!(released, "the fixture releases its deliberate lock");
+    assert!(matches!(swept, RepoWatchCommitOutcome::Committed(_)));
+    let stamped_after_the_wait: bool = sqlx::query_scalar(
+        "SELECT completed_at > $2::timestamptz
+           FROM repo_watch_complete_poll
+          WHERE repository = $1",
+    )
+    .bind(REPOSITORY)
+    .bind(&held_until)
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        stamped_after_the_wait,
+        "the stamp is taken once the lock is held, not when the transaction opened"
+    );
     Ok(())
 }
 
