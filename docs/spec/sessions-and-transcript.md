@@ -805,6 +805,7 @@ and process messages. Text already masked before durable storage remains masked:
 the read path neither consults credentials nor reconstructs provider-native
 material. Blob facts are references with identity, length, and optional media
 type only; detail reads do not fetch blob bytes.
+
 ## Bounded browser lexical search
 
 Version-one browser search is lexical. `GET /api/search` accepts natural product

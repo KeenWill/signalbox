@@ -18,9 +18,9 @@ generated DTOs are verified against this PR (`agent/web-search-usage`). The
 dedicated browser usage/cost routes and generated DTOs are verified against this
 PR (`agent/web-usage-http`). The repository-watch browser projection and
 Activity surface are verified against this PR
-(`agent/web-attention-activity-surfaces`).
-The typed item, turn, and contiguous-region detail routes and their bootstrap
-advertisement are verified against this PR (`agent/web-timeline-detail`).
+(`agent/web-attention-activity-surfaces`). The typed item, turn, and
+contiguous-region detail routes and their bootstrap advertisement are verified
+against this PR (`agent/web-timeline-detail`).
 
 The daemon model-settings configuration surface is verified against the
 implementing stack through this PR (`agent/model-settings-execution`).
@@ -232,11 +232,11 @@ start image derivation work.
 exact contract family `signalbox.web-http`, version `2`, the `bounded_json`,
 `same_origin_json_mutations`, `ndjson_streaming`, `import_discovery`,
 `imported_continuations`, and `bounded_session_timeline` capabilities, the
-`bounded_session_timeline_detail` capability, the
-`immutable_blob_content`, `blob_derivations`, and `image_derivatives`
-capabilities, the `bounded_lexical_search` and `bounded_usage_cost`
-capabilities, the effective 65,536-byte JSON-body and NDJSON-item hard ceilings,
-the 256-item and 65,536-projected-byte timeline ceilings, the 128-item and
+`bounded_session_timeline_detail` capability, the `immutable_blob_content`,
+`blob_derivations`, and `image_derivatives` capabilities, the
+`bounded_lexical_search` and `bounded_usage_cost` capabilities, the effective
+65,536-byte JSON-body and NDJSON-item hard ceilings, the 256-item and
+65,536-projected-byte timeline ceilings, the 128-item and
 65,536-projected-body-byte timeline-detail ceilings, and the 512-byte query,
 100-item page, and 512-byte snippet search ceilings. It also advertises the
 256-group usage summary and 100-call usage-detail ceilings. Version two adds the
