@@ -56,6 +56,7 @@ use signalbox_persistence::{
         ApprovalJudgeCorruption, ApprovalJudgeRepositoryError, CompleteApprovalJudgeOutcome,
         PrepareApprovalJudgeOutcome, PreparedApprovalJudge,
     },
+    attention::AutomaticResumeAttemptBounds,
     commissioned_dispatch::{CommissionDispatchOutcome, PostgresCommissionedDispatchStore},
     convergence_sweep::{
         ConvergenceSweepFailureDisposition, ConvergenceSweepObservation,
@@ -214,7 +215,8 @@ const CLOSED_RESULT_ID_OFFSET: u128 = 0x2_000_000;
 /// never on how many automatic resumptions a deployment still owes, so they
 /// state the unbounded automatic-resume budget instead of a number their story
 /// never uses.
-const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
+const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
+    AutomaticResumeAttemptBounds::unbounded();
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -4079,7 +4081,7 @@ async fn operator_repository_status_reads_the_latest_achieved_settlement_project
     declare_dispatched_goal_achieved(&fixture, 0, 0x50_410).await?;
 
     let statuses =
-        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS)
             .repository_statuses(None)
             .await?;
 
@@ -4101,7 +4103,7 @@ async fn operator_pull_request_reads_the_latest_achieved_settlement_projection()
     declare_dispatched_goal_achieved(&fixture, 0, 0x50_420).await?;
 
     let pull_requests =
-        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS)
             .pull_requests(fixture.repository.clone(), None)
             .await?;
 
@@ -6293,7 +6295,7 @@ async fn occupied_operations_fixture()
     let fixture = dispatch_fixture().await?;
     let occupied = evaluate_second_conflict(&fixture).await?;
     let reader =
-        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
 
     assert_eq!(occupied, RepoWatchRuleEvaluationOutcome::Occupied);
     Ok((fixture, reader))
@@ -8537,7 +8539,7 @@ async fn repository_watch_observes_operator_commission_target_ownership()
     // readiness recomputed without that term would announce work as ready that
     // admission refuses.
     let blocked_work =
-        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+        PostgresRepoWatchOperations::new(fixture.pool.clone(), UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS)
             .work(
                 repository.clone(),
                 RepoWatchPagePosition::Exhausted,
