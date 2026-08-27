@@ -121,7 +121,9 @@ pub use repo_watch::{
     RepoWatchDispatchServiceError, RepoWatchDispatchTransaction, RepoWatchEventContentIdentityV1,
     RepoWatchEventIdGenerator, RepoWatchEventIdentityFrontierEntryV1,
     RepoWatchEventIdentityFrontierError, RepoWatchEventIdentityFrontierV1,
-    RepoWatchEventOccurrenceV1, RepoWatchObservation, RepoWatchPreparedDispatchAction,
+    RepoWatchEventOccurrenceV1, RepoWatchMergedCheckRunBaselineV1,
+    RepoWatchMergedCheckSuiteBaselineV1, RepoWatchMergedPullRequestBaselineInputV1,
+    RepoWatchMergedPullRequestBaselineV1, RepoWatchObservation, RepoWatchPreparedDispatchAction,
     RepoWatchPullRequestLifecycle, RepoWatchPullRequestState, RepoWatchPullRequestStateInput,
     RepoWatchReactionObservation, RepoWatchRepositoryState, RepoWatchRepositoryStateError,
     RepoWatchRepositoryStateInput, RepoWatchResolvedTemplate, RepoWatchReviewDecision,
@@ -130,6 +132,7 @@ pub use repo_watch::{
     RepoWatchStaleReviewClearanceCandidateError, RepoWatchTemplateResolver,
     RepoWatchThreadObservation, RepoWatchThreadState, RepoWatchWorkflowRunObservation,
     UuidV7RepoWatchDispatchIdGenerator, UuidV7RepoWatchEventIdGenerator, derive_repo_watch_events,
+    derive_repo_watch_events_with_merged_baselines,
     repo_watch_events_have_equal_identified_content,
 };
 pub use repo_watch_operations::{

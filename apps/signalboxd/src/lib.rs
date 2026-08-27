@@ -60,6 +60,7 @@ mod credential_pools;
 mod daemon_tools;
 mod fenced_database;
 mod goal_mode;
+mod imported_source_blobs;
 mod local_socket;
 pub mod model_adapter;
 mod process_runtime;
@@ -76,6 +77,7 @@ pub mod usage_limits;
 mod web_blob_runtime;
 pub mod web_http;
 mod web_imports;
+mod web_repo_watch;
 mod workspace_instruction_runtime;
 
 pub use attachment_preparation_runtime::AttachmentPreparingModelCallProvider;
@@ -121,7 +123,8 @@ pub use fenced_database::{
     reconcile_fenced_pool_floor,
 };
 pub use goal_mode::{
-    GoalModeNumericBounds, PostgresGoalPassDisposition, PostgresGoalPassDispositionError,
+    CONTEXT_COMPACTION_INPUT_DOES_NOT_FIT_NEED, GoalModeNumericBounds, PostgresGoalPassDisposition,
+    PostgresGoalPassDispositionError,
 };
 pub use local_socket::{LocalProcessListener, LocalSocketError};
 pub use process_runtime::{
@@ -1120,8 +1123,36 @@ struct SchedulerPassOccupancyRecovery {
     eligibility_nudge: signalbox_application::InProcessEligibilityNudge,
     execution_expiry: Option<std::sync::Arc<dyn SchedulerPassExpiryHandler>>,
     active_turns: std::sync::Arc<std::sync::Mutex<HashMap<SessionId, TurnId>>>,
+    /// Sessions whose pass is inside its pre-activation compaction window.
+    ///
+    /// That window runs before activation, so there is no active turn for the
+    /// pass's turn observer to have recorded — and yet the window owns a
+    /// durable dedicated compaction call and its pending command. Nothing else
+    /// in-process reconciles that shape: the session's compaction boundary
+    /// answers busy while it stands, which closes every queued turn before
+    /// dispatch until the daemon restarts.
+    /// Each entry holds the compaction call that window has staked, which stays
+    /// `None` only while the read-only preflight is still choosing a boundary
+    /// and no identity has been committed to yet. The identity is recorded
+    /// before its preparation is awaited, so a prepare that commits and is then
+    /// dropped mid-acknowledgement is still named.
+    compacting_sessions: std::sync::Arc<std::sync::Mutex<HashMap<SessionId, Option<ModelCallId>>>>,
     policy: ExpiredPassRecoveryPolicy,
     persistence_bounds: TurnLivenessPersistenceBounds,
+}
+
+/// What durable work an expired pass owned, as far as the pass reported it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExpiredPassSubject {
+    /// The pass reported the exact active turn it was driving.
+    ActiveTurn(TurnId),
+    /// The pass expired inside its pre-activation compaction window, which
+    /// reports no turn and owns the named durable compaction instead. `None`
+    /// means the window had not yet staked an identity, so nothing durable can
+    /// exist for it to owe.
+    PreActivationCompaction(Option<ModelCallId>),
+    /// Nothing durable this pass owns can be named here.
+    Uncorrelated,
 }
 
 #[derive(Debug)]
@@ -1133,6 +1164,21 @@ struct SchedulerPassActiveTurnGuard {
 impl Drop for SchedulerPassActiveTurnGuard {
     fn drop(&mut self) {
         self.active_turns
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.session);
+    }
+}
+
+#[derive(Debug)]
+struct SchedulerPassCompactionGuard {
+    compacting_sessions: std::sync::Arc<std::sync::Mutex<HashMap<SessionId, Option<ModelCallId>>>>,
+    session: SessionId,
+}
+
+impl Drop for SchedulerPassCompactionGuard {
+    fn drop(&mut self) {
+        self.compacting_sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&self.session);
@@ -1171,6 +1217,72 @@ impl SchedulerPassOccupancyRecovery {
         )
     }
 
+    /// Marks the session for the length of its pre-activation compaction, and
+    /// returns the observer that stakes the call it is about to prepare.
+    ///
+    /// The observer is what makes a stranded compaction recoverable by
+    /// identity. It fires before preparation is awaited rather than after it
+    /// returns, because that await is itself droppable: a prepare can commit
+    /// and lose its acknowledgement to the occupancy bound, and an identity
+    /// recorded only on success would leave that row unnamed. Recovery names
+    /// the exact call, so staking one that never becomes durable costs
+    /// nothing — it is simply found absent. Until the observer fires no
+    /// identity is in play, so an expiry inside the read-only preflight
+    /// correctly hands over no recovery at all.
+    fn compaction_window(
+        &self,
+        session: SessionId,
+    ) -> (
+        SchedulerPassCompactionGuard,
+        std::sync::Arc<dyn Fn(ModelCallId) + Send + Sync>,
+    ) {
+        self.compacting_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session, None);
+        let compacting_sessions = std::sync::Arc::clone(&self.compacting_sessions);
+        let observer = std::sync::Arc::new(move |call| {
+            compacting_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(session, Some(call));
+        });
+        (
+            SchedulerPassCompactionGuard {
+                compacting_sessions: std::sync::Arc::clone(&self.compacting_sessions),
+                session,
+            },
+            observer,
+        )
+    }
+
+    /// Names the durable work an expiring pass owns.
+    ///
+    /// An open compaction window wins over a reported turn, because the two
+    /// marks have different lifetimes: the window stands only while that
+    /// compaction is actually in flight, whereas a turn the pass reported stays
+    /// named for the rest of the pass even once it has ended. A pass that
+    /// resumed a turn, finished it, and then expired inside its compaction
+    /// would otherwise hand the finished turn to recovery — which finds it
+    /// superseded — and leave the compaction stranded. Nothing is lost by the
+    /// precedence: the window closes before activation, so no turn work is ever
+    /// in flight while it stands.
+    fn expired_pass_subject(&self, session: SessionId) -> ExpiredPassSubject {
+        if let Some(prepared) = self
+            .compacting_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&session)
+            .copied()
+        {
+            return ExpiredPassSubject::PreActivationCompaction(prepared);
+        }
+        if let Some(turn) = self.active_turn(session) {
+            return ExpiredPassSubject::ActiveTurn(turn);
+        }
+        ExpiredPassSubject::Uncorrelated
+    }
+
     fn nudge(&self, session: SessionId) {
         let _ = self.eligibility_nudge.nudge(session);
     }
@@ -1181,19 +1293,37 @@ impl SchedulerPassExpiryHandler for SchedulerPassOccupancyRecovery {
         if let Some(execution_expiry) = &self.execution_expiry {
             execution_expiry.occupancy_expired(session);
         }
-        if let Some(expected_turn) = self.active_turn(session) {
-            drop(tokio::spawn(recover_expired_scheduler_pass(
-                self.clone(),
-                session,
-                expected_turn,
-            )));
-        } else {
-            self.nudge(session);
-            tracing::warn!(
-                cause_code = "scheduler_pass_occupancy_recovery_uncorrelated",
-                session_id = %session.as_uuid(),
-                "scheduler pass expired before an exact active turn could be captured; the turn-liveness watchdog remains responsible"
-            );
+        match self.expired_pass_subject(session) {
+            ExpiredPassSubject::ActiveTurn(expected_turn) => {
+                drop(tokio::spawn(recover_expired_scheduler_pass(
+                    self.clone(),
+                    session,
+                    expected_turn,
+                )));
+            }
+            ExpiredPassSubject::PreActivationCompaction(Some(abandoned_call)) => {
+                drop(tokio::spawn(recover_expired_pre_activation_compaction(
+                    self.clone(),
+                    session,
+                    abandoned_call,
+                )));
+            }
+            ExpiredPassSubject::PreActivationCompaction(None) => {
+                self.nudge(session);
+                tracing::warn!(
+                    cause_code = "scheduler_pass_compaction_preflight_owed_nothing",
+                    session_id = %session.as_uuid(),
+                    "scheduler pass expired while its pre-activation compaction was still choosing a boundary; no durable compaction was prepared, so nothing is owed recovery"
+                );
+            }
+            ExpiredPassSubject::Uncorrelated => {
+                self.nudge(session);
+                tracing::warn!(
+                    cause_code = "scheduler_pass_occupancy_recovery_uncorrelated",
+                    session_id = %session.as_uuid(),
+                    "scheduler pass expired before an exact active turn could be captured; the turn-liveness watchdog remains responsible"
+                );
+            }
         }
     }
 }
@@ -1237,6 +1367,7 @@ impl<Generator, Transaction, Execution> ActivatedTurnPass<Generator, Transaction
             eligibility_nudge,
             execution_expiry: self.execution.occupancy_expiry_handler(),
             active_turns: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            compacting_sessions: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             policy,
             persistence_bounds,
         });
@@ -1314,10 +1445,24 @@ where
                     source,
                 });
             }
-            if let Some(compaction) = reported_usage_compaction
-                && let Err(error) = compaction.compact_if_needed(session).await
-            {
-                return Err(reported_usage_compaction_failure(&execution, error));
+            if let Some(compaction) = reported_usage_compaction {
+                // The window is marked for exactly as long as it can strand a
+                // dedicated compaction call: the pass has no active turn to
+                // report here, so without the mark an occupancy expiry inside
+                // it names nothing and launches no recovery.
+                let compaction_window = occupancy_recovery
+                    .as_ref()
+                    .map(|recovery| recovery.compaction_window(session));
+                let observe_prepared = compaction_window
+                    .as_ref()
+                    .map(|(_, observer)| std::sync::Arc::clone(observer));
+                let compacted = compaction
+                    .compact_if_needed(session, observe_prepared.as_deref())
+                    .await;
+                drop(compaction_window);
+                if let Err(error) = compacted {
+                    return Err(reported_usage_compaction_failure(&execution, error));
+                }
             }
             let outcome = match activation.await {
                 Ok(outcome) => outcome,
@@ -1581,48 +1726,12 @@ async fn recover_expired_scheduler_pass(
     let repository =
         PostgresTurnLivenessRepository::new(recovery.pool.clone(), recovery.persistence_bounds);
     let resumption = PostgresToolLoopRepository::new(recovery.pool.clone());
-    // The first observation only proposes a turn. Expiry means the pass ran out
-    // of tenure, which is not the same as the turn standing still: one admitted
-    // pass drives a whole model/tools loop, so a healthy turn with several
-    // exchanges, or one riding out provider backoff, can reach the ceiling while
-    // making continuous durable progress. The under-lock revalidation refuses to
-    // terminalize such a turn, and each refusal it explains re-baselines this
-    // candidate on the later evidence.
-    let mut candidate = match optional_timeout(
-        policy.attempt_bound,
-        repository.observed_slot_held_turn(session),
-    )
-    .await
-    {
-        Ok(Ok(Some(candidate))) if candidate.turn() == expected_turn => candidate,
-        Ok(Ok(_)) => {
-            recovery.nudge(session);
-            tracing::info!(
-                cause_code = "scheduler_pass_occupancy_recovery_superseded",
-                session_id = %session.as_uuid(),
-                turn_id = %expected_turn.as_uuid(),
-                "expired scheduler pass no longer owns the exact active turn and was left alone"
-            );
-            return;
-        }
-        Ok(Err(error)) => {
-            report_scheduler_pass_recovery_failure(session, expected_turn, 0, &error);
-            recovery.nudge(session);
-            return;
-        }
-        Err(_) => {
-            tracing::error!(
-                cause_code = "scheduler_pass_occupancy_observation_timed_out",
-                session_id = %session.as_uuid(),
-                turn_id = %expected_turn.as_uuid(),
-                attempt_bound_seconds = ?policy.attempt_bound.map(|bound| bound.as_secs()),
-                "scheduler pass expiry observation exceeded its bound; the turn-liveness watchdog remains responsible"
-            );
-            recovery.nudge(session);
-            return;
-        }
+    let Some((mut candidate, mut attempt)) =
+        correlate_expired_scheduler_pass(&recovery, &repository, session, expected_turn).await
+    else {
+        return;
     };
-    let mut attempt = 1_u32;
+    attempt = attempt.saturating_add(1);
     while policy.attempts.is_none_or(|limit| attempt <= limit) {
         let mut ids = UuidV7StartupScanIdGenerator;
         let identities = signalbox_domain::AcceptedInputTurnFailureIdentities::new(
@@ -1794,6 +1903,216 @@ async fn recover_expired_scheduler_pass(
         "scheduler pass expiry recovery exhausted; the turn-liveness watchdog remains responsible"
     );
     recovery.nudge(session);
+}
+
+/// Reconciles the durable compaction an expired pre-activation window
+/// abandoned.
+///
+/// The window's dedicated compaction call and its pending command are the only
+/// durable work that window owns, and abandoning them leaves the session's
+/// compaction boundary busy: every queued turn is then closed before dispatch
+/// until a daemon restart runs the startup scan. This spends the same bounded
+/// attempts the turn handoff does on the scan's own compaction classification,
+/// which reconstitutes the exact durable shape under the session scheduler lock
+/// and classifies a prepared call `known_failed` and an issued one `ambiguous`,
+/// carrying the same layered database budgets the turn handoff installs.
+///
+/// The pass future is dropped the moment its bound expires, but that is not on
+/// its own authority to recover the session: the pass released its admission
+/// slot at expiry and this handoff waits between attempts, so a later
+/// eligibility sweep can have activated a healthy successor turn, or begun a
+/// compaction of its own, by the time a transaction opens. Recovery is
+/// therefore correlated with the exact call the expired window made durable:
+/// naming the session alone would reach a live successor's compaction just as
+/// readily as the abandoned one. A session where that call no longer holds the
+/// boundary is left exactly as found, whatever else it is running.
+async fn recover_expired_pre_activation_compaction(
+    recovery: SchedulerPassOccupancyRecovery,
+    session: SessionId,
+    abandoned_call: ModelCallId,
+) {
+    let policy = recovery.policy;
+    let repository =
+        PostgresTurnLivenessRepository::new(recovery.pool.clone(), recovery.persistence_bounds);
+    let mut attempt = 1_u32;
+    while policy.attempts.is_none_or(|limit| attempt <= limit) {
+        let retry_delay = match optional_timeout(
+            policy.attempt_bound,
+            repository.recover_abandoned_compaction(session, abandoned_call),
+        )
+        .await
+        {
+            Ok(Ok(None)) => {
+                recovery.nudge(session);
+                tracing::warn!(
+                    cause_code = "scheduler_pass_compaction_already_settled",
+                    session_id = %session.as_uuid(),
+                    model_call_id = %abandoned_call.as_uuid(),
+                    attempt,
+                    "scheduler pass expired around its pre-activation compaction, which left no unterminalized durable work; the session was not otherwise recovered"
+                );
+                return;
+            }
+            Ok(Ok(Some(outcome))) => {
+                recovery.nudge(session);
+                tracing::warn!(
+                    cause_code = "scheduler_pass_compaction_recovered",
+                    session_id = %session.as_uuid(),
+                    model_call_id = %abandoned_call.as_uuid(),
+                    attempt,
+                    recovery_outcome = ?outcome,
+                    "scheduler pass expired inside its pre-activation compaction; that compaction was terminalized under the scheduler lock"
+                );
+                return;
+            }
+            Ok(Err(error)) => {
+                tracing::error!(
+                    failure_class = ?error.operator_failure_class(),
+                    cause_code = "scheduler_pass_compaction_recovery_failed",
+                    session_id = %session.as_uuid(),
+                    model_call_id = %abandoned_call.as_uuid(),
+                    attempt,
+                    "expired pre-activation compaction recovery failed; unchanged durable evidence remains"
+                );
+                expired_pass_recovery_retry_delay(policy, &error)
+            }
+            Err(_) => {
+                tracing::error!(
+                    failure_class = ?signalbox_application::OperatorFailureClass::Infrastructure { commit_ambiguous: true },
+                    cause_code = "scheduler_pass_compaction_recovery_timed_out",
+                    session_id = %session.as_uuid(),
+                    model_call_id = %abandoned_call.as_uuid(),
+                    attempt,
+                    attempt_bound_seconds = ?policy.attempt_bound.map(|bound| bound.as_secs()),
+                    "expired pre-activation compaction recovery exceeded its bound"
+                );
+                policy.conservative_retry_delay
+            }
+        };
+        if policy.attempts.is_none_or(|limit| attempt < limit) {
+            sleep_for_policy(retry_delay).await;
+        }
+        attempt = attempt.saturating_add(1);
+    }
+    tracing::error!(
+        cause_code = "scheduler_pass_compaction_recovery_exhausted",
+        session_id = %session.as_uuid(),
+        model_call_id = %abandoned_call.as_uuid(),
+        attempts = ?policy.attempts,
+        "expired pre-activation compaction recovery exhausted; the session stays busy until the startup scan"
+    );
+    recovery.nudge(session);
+}
+
+/// Reads the exact slot-held observation an expired pass proposes.
+///
+/// Named as a trait so the handoff's shared correlate-and-recover budget can be
+/// exercised without a database: the defect it repairs was in the retry, not in
+/// the read.
+trait ExpiredPassObservationSource {
+    fn observed_slot_held_turn(
+        &self,
+        session: SessionId,
+    ) -> impl Future<
+        Output = Result<
+            Option<signalbox_application::StaleTurnCandidate>,
+            TurnLivenessRepositoryError,
+        >,
+    > + Send;
+}
+
+impl ExpiredPassObservationSource for PostgresTurnLivenessRepository {
+    async fn observed_slot_held_turn(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<signalbox_application::StaleTurnCandidate>, TurnLivenessRepositoryError>
+    {
+        Self::observed_slot_held_turn(self, session).await
+    }
+}
+
+/// Correlates the expired pass with the exact active turn it proposed,
+/// spending the same bounded attempts recovery does.
+///
+/// The observation only proposes a turn. Expiry means the pass ran out of
+/// tenure, which is not the same as the turn standing still: one admitted pass
+/// drives a whole model/tools loop, so a healthy turn with several exchanges,
+/// or one riding out provider backoff, can reach the ceiling while making
+/// continuous durable progress. The under-lock revalidation refuses to
+/// terminalize such a turn, and each refusal it explains re-baselines the
+/// candidate on the later evidence.
+///
+/// The handoff spends its bounded attempts across correlating the turn and
+/// recovering it, so a transient failure of this read-only observation retries
+/// on the configured cadence and reports the attempt it spent. Abandoning
+/// immediate recovery on the first such failure would leave a slot-held turn to
+/// the thirty-minute watchdog, since the nudge re-drives only a turn a fresh
+/// pass can resume.
+///
+/// Returns the correlated candidate and the attempt that reached it, or nothing
+/// having already reported and nudged.
+async fn correlate_expired_scheduler_pass<Source>(
+    recovery: &SchedulerPassOccupancyRecovery,
+    repository: &Source,
+    session: SessionId,
+    expected_turn: TurnId,
+) -> Option<(signalbox_application::StaleTurnCandidate, u32)>
+where
+    Source: ExpiredPassObservationSource,
+{
+    let policy = recovery.policy;
+    let mut attempt = 1_u32;
+    while policy.attempts.is_none_or(|limit| attempt <= limit) {
+        let retry_delay = match optional_timeout(
+            policy.attempt_bound,
+            repository.observed_slot_held_turn(session),
+        )
+        .await
+        {
+            Ok(Ok(Some(candidate))) if candidate.turn() == expected_turn => {
+                return Some((candidate, attempt));
+            }
+            Ok(Ok(_)) => {
+                recovery.nudge(session);
+                tracing::info!(
+                    cause_code = "scheduler_pass_occupancy_recovery_superseded",
+                    session_id = %session.as_uuid(),
+                    turn_id = %expected_turn.as_uuid(),
+                    attempt,
+                    "expired scheduler pass no longer owns the exact active turn and was left alone"
+                );
+                return None;
+            }
+            Ok(Err(error)) => {
+                report_scheduler_pass_recovery_failure(session, expected_turn, attempt, &error);
+                expired_pass_recovery_retry_delay(policy, &error)
+            }
+            Err(_) => {
+                tracing::error!(
+                    cause_code = "scheduler_pass_occupancy_observation_timed_out",
+                    session_id = %session.as_uuid(),
+                    turn_id = %expected_turn.as_uuid(),
+                    attempt,
+                    attempt_bound_seconds = ?policy.attempt_bound.map(|bound| bound.as_secs()),
+                    "scheduler pass expiry observation exceeded its bound"
+                );
+                policy.conservative_retry_delay
+            }
+        };
+        if policy.attempts.is_none_or(|limit| attempt < limit) {
+            sleep_for_policy(retry_delay).await;
+        }
+        attempt = attempt.saturating_add(1);
+    }
+    tracing::error!(
+        cause_code = "scheduler_pass_occupancy_correlation_exhausted",
+        session_id = %session.as_uuid(),
+        turn_id = %expected_turn.as_uuid(),
+        attempts = ?policy.attempts,
+        "scheduler pass expiry observation exhausted its attempts; the turn-liveness watchdog remains responsible"
+    );
+    recovery.nudge(session);
+    None
 }
 
 async fn expired_pass_exact_operation_is_live(
@@ -2809,10 +3128,17 @@ where
             );
             let mut run_tools = true;
             let mut return_if_tools_absent = false;
-            let mut checkpoint_safe = true;
 
+            // Every stage this loop completes ends at a committed durable
+            // boundary a successor pass resumes from: a checkpointed attempt or
+            // prepared call waits for another pass by construction, a preflight
+            // closure and a crash classification are committed evidence, and an
+            // observation is the operation's own authoritative result. So a
+            // shutdown observed here is always observed between operations, and
+            // returning issues neither another tool operation nor another paid
+            // provider round.
             loop {
-                if checkpoint_safe && shutdown_checkpoint_requested(&shutdown_checkpoint) {
+                if shutdown_checkpoint_requested(&shutdown_checkpoint) {
                     return Ok(());
                 }
                 if run_tools {
@@ -2835,26 +3161,19 @@ where
                         ToolExecutionServiceOutcome::AttemptCheckpointed(_)
                         | ToolExecutionServiceOutcome::ChildWaitResumed(_)
                         | ToolExecutionServiceOutcome::PreflightFailed(_)
-                        | ToolExecutionServiceOutcome::CrashClassified(_) => {
-                            checkpoint_safe = false;
-                            return_if_tools_absent = true;
-                            continue;
-                        }
-                        ToolExecutionServiceOutcome::ObservationCommitted(_)
+                        | ToolExecutionServiceOutcome::CrashClassified(_)
+                        | ToolExecutionServiceOutcome::ObservationCommitted(_)
                         | ToolExecutionServiceOutcome::ObservationAlreadyCommitted(_) => {
-                            checkpoint_safe = true;
                             return_if_tools_absent = true;
                             continue;
                         }
                         ToolExecutionServiceOutcome::ContinuationCheckpointed(_) => {
-                            checkpoint_safe = false;
                             run_tools = false;
                         }
                         ToolExecutionServiceOutcome::NoWork => {
                             if return_if_tools_absent {
                                 return Ok(());
                             }
-                            checkpoint_safe = true;
                             run_tools = false;
                         }
                         ToolExecutionServiceOutcome::AwaitingApproval(_) => {
@@ -2877,10 +3196,7 @@ where
                             .await
                             .map_err(PostgresProviderToolLoopExecutionError::ApprovalJudge)?
                             {
-                                ApprovalJudgeLoopOutcome::Continue => {
-                                    checkpoint_safe = true;
-                                    continue;
-                                }
+                                ApprovalJudgeLoopOutcome::Continue => continue,
                                 ApprovalJudgeLoopOutcome::Parked => return Ok(()),
                             }
                         }
@@ -2894,7 +3210,7 @@ where
                     }
                 }
 
-                if checkpoint_safe && shutdown_checkpoint_requested(&shutdown_checkpoint) {
+                if shutdown_checkpoint_requested(&shutdown_checkpoint) {
                     return Ok(());
                 }
                 let model_outcome = match model.execute(session).await {
@@ -2921,10 +3237,8 @@ where
                     ModelCallExecutionOutcome::Checkpointed(_) if return_on_model_checkpoint => {
                         return Ok(());
                     }
-                    ModelCallExecutionOutcome::Checkpointed(_) => checkpoint_safe = false,
-                    ModelCallExecutionOutcome::AvailabilitySuccessor(_) => {
-                        checkpoint_safe = true;
-                    }
+                    ModelCallExecutionOutcome::Checkpointed(_)
+                    | ModelCallExecutionOutcome::AvailabilitySuccessor(_) => {}
                     ModelCallExecutionOutcome::TargetUnavailable(_)
                     | ModelCallExecutionOutcome::PoolExhausted(_)
                     | ModelCallExecutionOutcome::CapabilityKnownFailure(_)
@@ -2937,7 +3251,6 @@ where
                     | ModelCallExecutionOutcome::AttachmentUnavailable => return Ok(()),
                     ModelCallExecutionOutcome::ObservationCommitted(_)
                     | ModelCallExecutionOutcome::ObservationAlreadyCommitted(_) => {
-                        checkpoint_safe = true;
                         run_tools = true;
                         return_if_tools_absent = true;
                     }
@@ -3232,7 +3545,7 @@ mod tests {
         StartEligibleTurnService, StartEligibleTurnTransaction, TurnLivenessEvidence,
     };
     use signalbox_domain::{
-        AcceptedInputTurnActivationIdentities, ActivatedTurn, ContextFrontierId,
+        AcceptedInputTurnActivationIdentities, ActivatedTurn, ContextFrontierId, ModelCallId,
         SemanticTranscriptEntryId, SessionId, TurnAttemptId, TurnId,
     };
     use signalbox_persistence::{
@@ -3245,16 +3558,16 @@ mod tests {
     use super::{
         APPROVAL_JUDGE_SYSTEM_PROMPT, ActivatedTurnExecution, ActivatedTurnPass,
         ActivatedTurnPassError, ApprovalJudgeModelError, ExpiredPassObservation,
-        ExpiredPassRecoveryPolicy, FailedApprovalJudgeDisposition, FatalExecutionGuardState,
-        FatalExecutionOccupancyExpiry, FatalExecutionSignal, FatalExecutionSupervisor,
-        FreshPassAdmission, JudgeRequestFields, MAX_QUOTED_CONTEXT_BYTES,
-        ReportedUsageCompactionError, SchedulerPassOccupancyRecovery, SessionAuthorityContext,
-        TokenUsage, TurnLivenessRepositoryError, TurnPassExecutionStage,
+        ExpiredPassObservationSource, ExpiredPassRecoveryPolicy, ExpiredPassSubject,
+        FailedApprovalJudgeDisposition, FatalExecutionGuardState, FatalExecutionOccupancyExpiry,
+        FatalExecutionSignal, FatalExecutionSupervisor, FreshPassAdmission, JudgeRequestFields,
+        MAX_QUOTED_CONTEXT_BYTES, ReportedUsageCompactionError, SchedulerPassOccupancyRecovery,
+        SessionAuthorityContext, TokenUsage, TurnLivenessRepositoryError, TurnPassExecutionStage,
         WorkspaceInstructionPreparedExecution, WorkspaceInstructionRuntime,
         activation_session_matches, classify_expired_pass_observation,
-        expired_pass_recovery_retry_delay, matches_exact_slot_held_turn,
-        progressing_turn_is_handed_off, reconcile_retained_once, render_dispatch_authority,
-        render_judge_request_payload, render_session_authority_context,
+        correlate_expired_scheduler_pass, expired_pass_recovery_retry_delay,
+        matches_exact_slot_held_turn, progressing_turn_is_handed_off, reconcile_retained_once,
+        render_dispatch_authority, render_judge_request_payload, render_session_authority_context,
         reported_usage_compaction_failure, supervise_execution, supervise_execution_for_session,
     };
 
@@ -3825,6 +4138,206 @@ mod tests {
         );
     }
 
+    /// Answers one scripted slot-held observation per call.
+    #[derive(Debug)]
+    struct ScriptedObservations {
+        outcomes: Mutex<
+            std::collections::VecDeque<
+                Result<Option<StaleTurnCandidate>, TurnLivenessRepositoryError>,
+            >,
+        >,
+        reads: Mutex<usize>,
+    }
+
+    impl ScriptedObservations {
+        fn new<const OUTCOMES: usize>(
+            outcomes: [Result<Option<StaleTurnCandidate>, TurnLivenessRepositoryError>; OUTCOMES],
+        ) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into_iter().collect()),
+                reads: Mutex::new(0),
+            }
+        }
+
+        fn reads(&self) -> usize {
+            *self.reads.lock().expect("fixture read count is available")
+        }
+    }
+
+    impl ExpiredPassObservationSource for ScriptedObservations {
+        async fn observed_slot_held_turn(
+            &self,
+            _session: SessionId,
+        ) -> Result<Option<StaleTurnCandidate>, TurnLivenessRepositoryError> {
+            *self.reads.lock().expect("fixture read count is available") += 1;
+            self.outcomes
+                .lock()
+                .expect("fixture outcome queue is available")
+                .pop_front()
+                .expect("the fixture scripts every observation the handoff makes")
+        }
+    }
+
+    fn expiry_recovery_fixture() -> (
+        SchedulerPassOccupancyRecovery,
+        InProcessEligibilityWorkSource<EmptyEligibilitySweep>,
+    ) {
+        let (nudge, work_source) = InProcessEligibilityWorkSource::new(EmptyEligibilitySweep);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/signalbox")
+            .expect("test database URL is valid");
+        (
+            SchedulerPassOccupancyRecovery {
+                pool,
+                eligibility_nudge: nudge,
+                execution_expiry: None,
+                active_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                compacting_sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                policy: example_expired_pass_policy(),
+                persistence_bounds: test_turn_liveness_persistence_bounds(),
+            },
+            work_source,
+        )
+    }
+
+    /// A transient inventory failure in the expiry window spends one of the
+    /// handoff's bounded attempts and retries, instead of abandoning immediate
+    /// recovery to the thirty-minute watchdog.
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_expiry_observation_retries_within_the_handoff_budget() {
+        let session = SessionId::from_uuid(Uuid::from_u128(0x64_00));
+        let turn = TurnId::from_uuid(Uuid::from_u128(0x64_02));
+        let candidate = StaleTurnCandidate::new(
+            session,
+            turn,
+            TurnLivenessEvidence::new(TurnAttemptId::from_uuid(Uuid::from_u128(0x64_01)), Some(11)),
+        );
+        let source = ScriptedObservations::new([
+            Err(TurnLivenessRepositoryError::Inventory(
+                sqlx::Error::PoolTimedOut,
+            )),
+            Ok(Some(candidate)),
+        ]);
+        let (recovery, _work_source) = expiry_recovery_fixture();
+
+        let correlated = correlate_expired_scheduler_pass(&recovery, &source, session, turn).await;
+
+        assert_eq!(correlated, Some((candidate, 2)));
+        assert_eq!(source.reads(), 2);
+    }
+
+    /// Only an exhausted budget hands the turn on, and it re-admits the session
+    /// on the way out.
+    #[tokio::test(start_paused = true)]
+    async fn an_exhausted_expiry_observation_readmits_the_session() {
+        let session = SessionId::from_uuid(Uuid::from_u128(0x65_00));
+        let turn = TurnId::from_uuid(Uuid::from_u128(0x65_02));
+        let source = ScriptedObservations::new([
+            Err(TurnLivenessRepositoryError::Inventory(
+                sqlx::Error::PoolTimedOut,
+            )),
+            Err(TurnLivenessRepositoryError::Inventory(
+                sqlx::Error::PoolTimedOut,
+            )),
+            Err(TurnLivenessRepositoryError::Inventory(
+                sqlx::Error::PoolTimedOut,
+            )),
+            Err(TurnLivenessRepositoryError::Inventory(
+                sqlx::Error::PoolTimedOut,
+            )),
+        ]);
+        let (recovery, mut work_source) = expiry_recovery_fixture();
+        let attempts = recovery
+            .policy
+            .attempts
+            .expect("the checked-in example bounds the handoff");
+
+        let correlated = correlate_expired_scheduler_pass(&recovery, &source, session, turn).await;
+
+        assert_eq!(correlated, None);
+        assert_eq!(u32::try_from(source.reads()), Ok(attempts));
+        assert_eq!(
+            tokio::time::timeout(std::time::Duration::from_secs(1), work_source.next())
+                .await
+                .expect("re-admission is prompt")
+                .expect("the empty sweep cannot fail"),
+            session
+        );
+    }
+
+    /// An expiry inside the pre-activation compaction window names the
+    /// compaction it stranded rather than reporting nothing.
+    ///
+    /// That window runs before activation, so the pass's turn observer has
+    /// recorded nothing and the expiry used to fall straight through to the
+    /// uncorrelated warning — leaving the dedicated compaction call in flight,
+    /// its command pending, and the session's compaction boundary busy until
+    /// the daemon restarted.
+    #[tokio::test]
+    async fn an_expiry_inside_the_compaction_window_names_the_stranded_compaction() {
+        let session = SessionId::from_uuid(Uuid::from_u128(0x66_00));
+        let (recovery, _work_source) = expiry_recovery_fixture();
+
+        let call = ModelCallId::from_uuid(Uuid::from_u128(0x66_01));
+        let (window, observe_prepared) = recovery.compaction_window(session);
+        observe_prepared(call);
+
+        assert_eq!(
+            recovery.expired_pass_subject(session),
+            ExpiredPassSubject::PreActivationCompaction(Some(call))
+        );
+        drop(window);
+        assert_eq!(
+            recovery.expired_pass_subject(session),
+            ExpiredPassSubject::Uncorrelated
+        );
+    }
+
+    /// A window that expires while its read-only preflight is still choosing a
+    /// boundary owes nothing: no compaction call exists yet to strand.
+    ///
+    /// Naming the session alone here would hand recovery a session whose only
+    /// nonterminal compaction can belong to a later admitted pass, which the
+    /// handoff would then terminalize mid-flight.
+    #[tokio::test]
+    async fn an_expiry_before_the_compaction_is_prepared_owes_no_recovery() {
+        let session = SessionId::from_uuid(Uuid::from_u128(0x68_00));
+        let (recovery, _work_source) = expiry_recovery_fixture();
+
+        let (_window, _observe_prepared) = recovery.compaction_window(session);
+
+        assert_eq!(
+            recovery.expired_pass_subject(session),
+            ExpiredPassSubject::PreActivationCompaction(None)
+        );
+    }
+
+    /// A pass that resumed a turn, finished it, and then expired inside its
+    /// compaction names the compaction: the turn mark outlives the turn, and
+    /// handing that finished turn to recovery would strand the compaction.
+    #[tokio::test]
+    async fn an_open_compaction_window_outranks_a_turn_the_pass_already_reported() {
+        let session = SessionId::from_uuid(Uuid::from_u128(0x67_00));
+        let turn = TurnId::from_uuid(Uuid::from_u128(0x67_01));
+        let (recovery, _work_source) = expiry_recovery_fixture();
+        let (_turn_guard, observe) = recovery.resume_turn_observer(session);
+        observe(turn);
+
+        let call = ModelCallId::from_uuid(Uuid::from_u128(0x67_02));
+        let (window, observe_prepared) = recovery.compaction_window(session);
+        observe_prepared(call);
+
+        assert_eq!(
+            recovery.expired_pass_subject(session),
+            ExpiredPassSubject::PreActivationCompaction(Some(call))
+        );
+        drop(window);
+        assert_eq!(
+            recovery.expired_pass_subject(session),
+            ExpiredPassSubject::ActiveTurn(turn)
+        );
+    }
+
     #[tokio::test]
     async fn uncorrelated_expiry_readmits_the_session() {
         let session = SessionId::from_uuid(Uuid::from_u128(0x63));
@@ -3837,6 +4350,7 @@ mod tests {
             eligibility_nudge: nudge,
             execution_expiry: None,
             active_turns: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            compacting_sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             policy: example_expired_pass_policy(),
             persistence_bounds: test_turn_liveness_persistence_bounds(),
         };

@@ -15,7 +15,13 @@ occupancy deadlines during that bounded drain is verified against this PR
 (`agent/daemon-live-shutdown-pass-drain`). The sixty-minute occupancy ceiling
 and model-exchange-derived shutdown drain are verified against this PR
 (`agent/daemon-live-runtime-bounds`). Operation-boundary shutdown checkpointing
-is verified against this PR (`agent/daemon-live-shutdown-checkpoint`).
+is verified against this PR (`agent/daemon-live-shutdown-checkpoint`) and
+re-verified, for every committed stage boundary the tool loop reaches, against
+this PR (`agent/fix-liveness-shutdown-recovery`). Shutdown preemption of the
+ambiguous-operation batch, the separated slot-held and reconciliation attempt
+ceilings, the recovery transaction's write-lock budget, the handoff's bounded
+attempts across correlating and recovering, and expiry recovery for the
+pre-activation compaction window are verified against the same PR.
 
 The expired-pass recovery lock classification and retry budgets were re-verified
 against this PR (`agent/daemon-live-reconciliation-lock-cadence`). Exact
@@ -508,18 +514,39 @@ the sweep (INV-007).
   Active-turn execution reports the exact turn after its resumable-work lookup
   and before driving that work, so a pass that begins between operations still
   gives the handoff the identity of any model call or tool attempt it later
-  starts. The handoff marks the correlated cancellation so fatal supervision
-  does not mistake the scheduler's bounded drop for an unrelated failure, then
-  spends four bounded database attempts, the first immediate and the rest at the
-  configured cadence, across correlating the turn and recovering it. Each
-  operation has a three-second ceiling, which is wider than the repository's
-  ordered connection, scheduler-row, and write-lock budgets so those can return
-  typed failures instead of being masked by the wrapper. A lock refusal is
-  preserved as its typed turn-liveness cause even when the shared startup
-  transition raises it from its nested session or turn work. Other lock refusals
-  retry after six seconds, spacing the four attempts across tens-of-seconds
-  commit handoffs under outbox contention. Any other database, ambiguous, or
-  non-infrastructure failure retains the two-minute cadence.
+  starts. A pass inside its pre-activation compaction reports that window
+  instead: it has no turn to name, and its dedicated compaction call is durable
+  work no other in-process path reconciles, so expiry there terminalizes that
+  compaction rather than reporting nothing. Recovery stays correlated with the
+  evidence that justifies it, named exactly: the window reports the compaction
+  call it is about to prepare, and only that call is recovered. It reports that
+  identity before awaiting the preparation rather than after, because the await
+  is itself droppable — a preparation can commit and lose its acknowledgement to
+  the occupancy bound, and an identity recorded only on success would leave that
+  durable compaction unnamed and so unrecovered. Reporting early costs nothing
+  in the other direction: recovery names the exact call, so one that never
+  became durable is found absent and nothing is touched. Until the window has
+  staked an identity it reports none, so expiry inside the read-only boundary
+  preflight owes no recovery at all. Naming the session alone would not be
+  enough. The handoff runs detached after its slot is released and waits between
+  attempts, so by the time it reaches the database a later eligibility sweep may
+  already have activated a healthy successor turn, or begun a compaction of its
+  own; session-wide recovery would terminalize either. A session where the named
+  call no longer holds the boundary is therefore left exactly as it stands,
+  whatever else it is running, rather than recovered as a startup scan recovers
+  a session no other process can be inside. The handoff marks the correlated
+  cancellation so fatal supervision does not mistake the scheduler's bounded
+  drop for an unrelated failure, then spends four bounded database attempts, the
+  first immediate and the rest at the configured cadence, across correlating the
+  turn and recovering it. Each operation has a three-second ceiling, which is
+  wider than the repository's ordered connection, scheduler-row, and write-lock
+  budgets so those can return typed failures instead of being masked by the
+  wrapper. A lock refusal is preserved as its typed turn-liveness cause even
+  when the shared startup transition raises it from its nested session or turn
+  work. Other lock refusals retry after six seconds, spacing the four attempts
+  across tens-of-seconds commit handoffs under outbox contention. Any other
+  database, ambiguous, or non-infrastructure failure retains the two-minute
+  cadence.
 
   Expiry bounds a pass's tenure, which is not the claim that its turn stopped
   progressing: one admitted pass drives a whole model/tools loop, including
@@ -636,18 +663,21 @@ ledger and lap.
 
 A slot-held turn whose evidence remains unchanged for thirty minutes is handed
 to the existing startup-recovery transaction under the session scheduler lock.
-Each detached database attempt has a ten-second wall-clock bound. That admits
+Each detached database attempt has its own ten-second wall-clock bound, which is
+not the wider ceiling automatic reconciliation spends below. That admits
 ordinary serialization through the shared outbox frontier after the session lock
 while the sixty-four-turn fair window still bounds how long a fully stalled
-database can delay the next watchdog wake. A timeout is commit-ambiguous and
-leaves the unchanged durable evidence due for a later observation. That
-transaction reconstitutes and classifies the exact current durable shape; the
-watchdog invents no parallel terminal transition. This is the outer backstop for
-pass-expiry recovery whose bounded database attempts all failed and for a
-prior-process running turn that survives startup classification. The
-sixty-minute scheduler-pass ceiling is a final same-process safety bound; the
-liveness watchdog remains responsible for reclaiming a wedged pass from
-unchanged durable evidence before that ceiling.
+database can delay the next watchdog wake — one ceiling shared between the two
+would multiply the wider of them across that window and carry the delay past the
+sixty-minute scheduler-pass ceiling this watchdog backstops. A timeout is
+commit-ambiguous and leaves the unchanged durable evidence due for a later
+observation. That transaction reconstitutes and classifies the exact current
+durable shape; the watchdog invents no parallel terminal transition. This is the
+outer backstop for pass-expiry recovery whose bounded database attempts all
+failed and for a prior-process running turn that survives startup
+classification. The sixty-minute scheduler-pass ceiling is a final same-process
+safety bound; the liveness watchdog remains responsible for reclaiming a wedged
+pass from unchanged durable evidence before that ceiling.
 
 **Staleness.** No lifecycle table stores an activity timestamp, and this page
 introduces none: a stored clock would be one more thing to keep true. Staleness
@@ -797,7 +827,10 @@ traffic, and refusing on it would make the pass fail whenever the daemon was
 busy. What that second buys is that one indefinite holder of that row cannot
 stall the phase, which an unbounded wait would allow — the same stall the first
 budget exists to prevent, one statement later. A wait refused after the row is
-held is an ordinary failed attempt, never contention on this session.
+held is an ordinary failed attempt, never contention on this session. The
+recovery transaction the slot-held watchdog and the expiry handoff share
+installs the same pair, in the same order and for the same reasons, because it
+reaches the same outbox row.
 
 Neither budget can leave a commit's outcome unknown, which is what rules out
 bounding the attempt by a statement timeout or by cancelling its future instead.
@@ -878,11 +911,14 @@ writes nothing. The attempt's configured wall-clock bound applies as the
 reconciliation deadline outside the uncancellable `BEGIN` stretch, as the last
 resort for a backend that has stopped answering at all; it is raised to a floor
 above the acquisition and lock budgets so it can never undercut them, and
-`COMMIT` is never interrupted. A claimed attempt whose transaction is abandoned
-remains durably `attempting` until its recorded deadline makes it classifiable.
-An explicitly recorded fifth failure becomes exhausted on the next watchdog scan
-without waiting out that final ambiguity deadline; the deadline remains
-necessary when the daemon cannot tell whether the fifth attempt committed.
+`COMMIT` is never interrupted. That ceiling is the reconciliation path's own,
+wide enough for the shared outbox and deferred-validation convoy this
+transaction crosses, and separate from the slot-held watchdog's narrower
+recovery bound. A claimed attempt whose transaction is abandoned remains durably
+`attempting` until its recorded deadline makes it classifiable. An explicitly
+recorded fifth failure becomes exhausted on the next watchdog scan without
+waiting out that final ambiguity deadline; the deadline remains necessary when
+the daemon cannot tell whether the fifth attempt committed.
 
 Each inventory, reconciliation, and failure-record stage observes daemon
 shutdown ahead of its deadline. A requested stop therefore ends the batch

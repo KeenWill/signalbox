@@ -8,7 +8,10 @@ user-content part-array vocabulary is verified against this PR
 The bounded automatic model-call recovery status projected on active turns is
 verified against this PR (`agent/turn-lifecycle-hardening`). Its tool-attempt
 counterpart is verified against this PR
-(`agent/daemon-live-tool-recovery-reconcile`).
+(`agent/daemon-live-tool-recovery-reconcile`); the terminal client's following
+of an unexhausted tool recovery wait, and the native client's decoding of both
+recovery turn states, are verified against this PR
+(`agent/fix-client-tools-judge`).
 
 The typed runner-state session event, daemon outbox projection, authoritative
 session-summary and transcript-snapshot runner projections, and the runner

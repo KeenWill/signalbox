@@ -1747,7 +1747,7 @@ extension SignalboxTranscriptTurnState {
     case .delegationTerminated: return .permitted
     case .unknown: return .permitted
     case .activeAwaitingChild: return .permitted
-    case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID):
+    case .activeAwaitingModelCallRecovery(_, let recoveryModelCallID, _, _):
       return .required(.identity(recoveryModelCallID))
     case .failed(_, _, let terminalModelCall):
       guard let terminalModelCall else {

@@ -5,6 +5,7 @@
 //! authentication.
 
 use std::{
+    collections::BTreeSet,
     env,
     error::Error,
     ffi::OsString,
@@ -52,7 +53,9 @@ use signalbox_domain::{
     BlobDerivation, BlobDerivationProducer, BlobDigest, ModelCallId, ProviderModelIdentity,
     ResolvedProviderTarget, SessionId, TurnId,
 };
-use signalbox_persistence::attention::{AttentionRepository, AttentionRepositoryError};
+use signalbox_persistence::attention::{
+    AttentionRepository, AttentionRepositoryError, AutomaticResumeAttemptBounds,
+};
 use signalbox_persistence::process_read::ProcessModelCallInputTokenSemantics;
 use signalbox_persistence::search::{SearchRepository, SearchRepositoryError};
 use signalbox_persistence::session_timeline::{
@@ -88,7 +91,7 @@ use tower_http::services::{ServeDir, ServeFile};
 use url::Url;
 
 use crate::{
-    BillingKind, HubModelConfiguration, WebBlobRuntime, WebImageDerivativeKind,
+    BillingKind, BlobStoreRegistry, HubModelConfiguration, WebBlobRuntime, WebImageDerivativeKind,
     blob_read_runtime::{open_recorded_blob_range, open_recorded_blob_verified},
     configuration::ModelCallInputUsage,
     web_blob_runtime::WebBlobRuntimeError,
@@ -280,6 +283,7 @@ impl WebHttpRuntime {
         pool: PgPool,
         blobs: Option<WebBlobRuntime>,
         model_configuration: HubModelConfiguration,
+        blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     ) -> Result<Self, WebHttpRuntimeError> {
         let snapshot_reader_budget = super::process_runtime::shared_snapshot_reader_budget(
             pool.options().get_max_connections(),
@@ -291,6 +295,7 @@ impl WebHttpRuntime {
             pool,
             blobs,
             model_configuration,
+            blob_store_registry,
             snapshot_reader_budget,
         )
         .await
@@ -302,6 +307,7 @@ impl WebHttpRuntime {
         pool: PgPool,
         blobs: Option<WebBlobRuntime>,
         model_configuration: HubModelConfiguration,
+        blob_store_registry: Option<Arc<BlobStoreRegistry>>,
         snapshot_reader_budget: Arc<Semaphore>,
     ) -> Result<Self, WebHttpRuntimeError> {
         Self::bind_production(
@@ -309,6 +315,7 @@ impl WebHttpRuntime {
             pool,
             blobs,
             model_configuration,
+            blob_store_registry,
             Some(snapshot_reader_budget),
         )
         .await
@@ -319,6 +326,7 @@ impl WebHttpRuntime {
         pool: PgPool,
         blobs: Option<WebBlobRuntime>,
         model_configuration: HubModelConfiguration,
+        blob_store_registry: Option<Arc<BlobStoreRegistry>>,
         snapshot_reader_budget: Option<Arc<Semaphore>>,
     ) -> Result<Self, WebHttpRuntimeError> {
         let (follow_shutdown, follow_shutdown_receiver) = watch::channel(false);
@@ -327,6 +335,7 @@ impl WebHttpRuntime {
             Some(pool),
             blobs,
             Some(model_configuration),
+            blob_store_registry,
             snapshot_reader_budget,
             Some(follow_shutdown_receiver),
         );
@@ -400,6 +409,7 @@ pub fn production_router(
     pool: Option<PgPool>,
     blobs: Option<WebBlobRuntime>,
     model_configuration: Option<HubModelConfiguration>,
+    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
 ) -> Router {
     let snapshot_reader_budget = pool.as_ref().and_then(|pool| {
         super::process_runtime::shared_snapshot_reader_budget(
@@ -412,6 +422,7 @@ pub fn production_router(
         pool,
         blobs,
         model_configuration,
+        blob_store_registry,
         snapshot_reader_budget,
         None,
     )
@@ -422,6 +433,7 @@ fn production_router_with_budget(
     pool: Option<PgPool>,
     blobs: Option<WebBlobRuntime>,
     model_configuration: Option<HubModelConfiguration>,
+    blob_store_registry: Option<Arc<BlobStoreRegistry>>,
     snapshot_reader_budget: Option<Arc<Semaphore>>,
     shutdown: Option<watch::Receiver<bool>>,
 ) -> Router {
@@ -429,17 +441,17 @@ fn production_router_with_budget(
         blobs,
         blob_read_budget: Arc::new(Semaphore::new(MAX_CONCURRENT_WEB_BLOB_READS)),
     };
-    let automatic_resume_attempt_budget =
-        configured_automatic_resume_attempt_budget(model_configuration.as_ref());
+    let automatic_resume_attempts =
+        configured_automatic_resume_attempts(model_configuration.as_ref());
     let state = WebApiState {
         attention: pool
             .clone()
-            .map(|pool| AttentionRepository::new(pool, automatic_resume_attempt_budget)),
+            .map(|pool| AttentionRepository::new(pool, automatic_resume_attempts)),
         timeline: pool.clone().map(SessionTimelineRepository::new),
         search: pool.clone().map(SearchRepository::new),
         usage: pool.clone().map(UsageRepository::new),
         model_configuration: model_configuration.clone().map(Arc::new),
-        snapshot_reader_budget,
+        snapshot_reader_budget: snapshot_reader_budget.clone(),
         shutdown,
     };
     // Every route that reads session data sits behind the loopback authority
@@ -462,6 +474,15 @@ fn production_router_with_budget(
         .route("/attention/follow", get(attention_follow))
         .route_layer(middleware::from_fn(validate_loopback_host))
         .with_state(state);
+    // Repository-watch operator projections carry session identities, dispatch
+    // state, and webhook activity, so they sit behind the same inner gate for
+    // the same reason the session reads do.
+    let repository_watch_reads = crate::web_repo_watch::router(
+        pool.clone(),
+        snapshot_reader_budget,
+        automatic_resume_attempts,
+    )
+    .route_layer(middleware::from_fn(validate_loopback_host));
     // Every route that reads session-attached content sits behind the
     // loopback authority gate. Blob descriptors and bytes are reachable by
     // digest alone and a descriptor read can start isolated derivation work,
@@ -487,37 +508,45 @@ fn production_router_with_budget(
         .route("/bootstrap", get(contract_bootstrap))
         .with_state(http_state)
         .merge(session_reads)
-        .merge(blob_reads);
+        .merge(blob_reads)
+        .merge(repository_watch_reads);
     // Imported-conversation reads need both a pool and hub model settings; the
     // bootstrap and session surfaces stay routable without either.
     let api = match (pool, model_configuration) {
-        (Some(pool), Some(model_configuration)) => {
-            api.nest("/imports", web_imports::router(pool, model_configuration))
-        }
+        (Some(pool), Some(model_configuration)) => api.nest(
+            "/imports",
+            web_imports::router(pool, model_configuration, blob_store_registry),
+        ),
         _ => api,
     };
     let api = api.fallback(api_not_found);
     same_origin_router(asset_root, api)
 }
 
-/// Reads the deployment's automatic-resume attempt budget for the attention
+/// Reads the deployment's automatic-resume attempt limits for the attention
 /// projection.
 ///
 /// The projection reports a blocked goal as still owed automatic resumption
-/// until this budget is spent, so it must read the same configured number the
-/// daemon's resume planner reads (`goal_mode::GoalModeNumericBounds`). An
-/// absent or unbounded setting leaves the budget unbounded there as well.
-fn configured_automatic_resume_attempt_budget(
+/// until one of these limits ends its run, so both must be the configured
+/// numbers the daemon's resume planner reads
+/// (`goal_mode::GoalModeNumericBounds`). An absent or unbounded setting leaves
+/// that limit unbounded there as well.
+fn configured_automatic_resume_attempts(
     model_configuration: Option<&HubModelConfiguration>,
+) -> AutomaticResumeAttemptBounds {
+    AutomaticResumeAttemptBounds::new(
+        configured_automatic_resume_limit(model_configuration, "automatic_resume_attempt_budget"),
+        configured_automatic_resume_limit(model_configuration, "automatic_resume_attempt_ceiling"),
+    )
+}
+
+fn configured_automatic_resume_limit(
+    model_configuration: Option<&HubModelConfiguration>,
+    field: &'static str,
 ) -> Option<u32> {
     model_configuration
-        .and_then(|configuration| {
-            configuration
-                .numeric_bounds()
-                .integer("automatic_resume_attempt_budget")
-                .flatten()
-        })
-        .and_then(|budget| u32::try_from(budget).ok())
+        .and_then(|configuration| configuration.numeric_bounds().integer(field).flatten())
+        .and_then(|limit| u32::try_from(limit).ok())
 }
 
 fn same_origin_router(asset_root: Option<PathBuf>, api: Router) -> Router {
@@ -627,6 +656,12 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
     };
     drop(snapshot_permit);
     let cursor = snapshot.cursor;
+    let live_page_has_capacity = snapshot.continuation_after.is_none();
+    let visible_sessions = snapshot
+        .summaries
+        .iter()
+        .map(|summary| summary.session)
+        .collect::<BTreeSet<_>>();
     let snapshot = match attention_snapshot_dto(snapshot) {
         Ok(snapshot) => snapshot,
         Err(()) => return attention_projection_error(None),
@@ -636,11 +671,22 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
             repository,
             Some(WebAttentionStreamEvent::Snapshot { snapshot }),
             cursor,
+            visible_sessions,
+            live_page_has_capacity,
             budget,
             shutdown,
             AttentionFollowDisposition::Continue,
         ),
-        |(repository, pending, cursor, budget, mut shutdown, disposition)| async move {
+        |(
+            repository,
+            pending,
+            cursor,
+            visible_sessions,
+            live_page_has_capacity,
+            budget,
+            mut shutdown,
+            disposition,
+        )| async move {
             if shutdown.as_ref().is_some_and(|shutdown| *shutdown.borrow()) {
                 return None;
             }
@@ -651,6 +697,8 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                         repository,
                         None,
                         cursor,
+                        visible_sessions,
+                        live_page_has_capacity,
                         budget,
                         shutdown,
                         AttentionFollowDisposition::Continue,
@@ -690,11 +738,37 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                         cursor: next,
                         summaries,
                     }) => {
-                        let summaries = summaries
-                            .into_iter()
-                            .map(attention_summary_dto)
-                            .collect::<Result<Vec<_>, _>>()
-                            .ok()?;
+                        if attention_changes_require_resync(
+                            &summaries,
+                            &visible_sessions,
+                            live_page_has_capacity,
+                        ) {
+                            return Some((
+                                WebAttentionStreamEvent::ResyncRequired {
+                                    cursor: next.value().to_string(),
+                                },
+                                (
+                                    repository,
+                                    None,
+                                    next,
+                                    visible_sessions,
+                                    live_page_has_capacity,
+                                    budget,
+                                    shutdown,
+                                    AttentionFollowDisposition::End,
+                                ),
+                            ));
+                        }
+                        let summaries =
+                            page_scoped_attention_summaries(summaries, &visible_sessions)
+                                .into_iter()
+                                .map(attention_summary_dto)
+                                .collect::<Result<Vec<_>, _>>()
+                                .ok()?;
+                        if summaries.is_empty() {
+                            cursor = next;
+                            continue;
+                        }
                         return Some((
                             WebAttentionStreamEvent::Update {
                                 cursor: next.value().to_string(),
@@ -704,6 +778,8 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                                 repository,
                                 None,
                                 next,
+                                visible_sessions,
+                                live_page_has_capacity,
                                 budget,
                                 shutdown,
                                 AttentionFollowDisposition::Continue,
@@ -719,6 +795,8 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
                                 repository,
                                 None,
                                 next,
+                                visible_sessions,
+                                live_page_has_capacity,
                                 budget,
                                 shutdown,
                                 AttentionFollowDisposition::End,
@@ -734,6 +812,29 @@ async fn attention_follow(State(state): State<WebApiState>) -> Response {
         },
     );
     ndjson_response(source)
+}
+
+fn page_scoped_attention_summaries(
+    summaries: Vec<AttentionSummary>,
+    visible_sessions: &BTreeSet<SessionId>,
+) -> Vec<AttentionSummary> {
+    summaries
+        .into_iter()
+        .filter(|summary| visible_sessions.contains(&summary.session))
+        .collect()
+}
+
+fn attention_changes_require_resync(
+    summaries: &[AttentionSummary],
+    visible_sessions: &BTreeSet<SessionId>,
+    live_page_has_capacity: bool,
+) -> bool {
+    let page_boundary = visible_sessions.last();
+    summaries.iter().any(|summary| {
+        !visible_sessions.contains(&summary.session)
+            && (live_page_has_capacity
+                || page_boundary.is_some_and(|boundary| summary.session < *boundary))
+    })
 }
 
 fn empty_ndjson_response() -> Response {
@@ -772,7 +873,7 @@ fn attention_snapshot_dto(snapshot: AttentionSnapshot) -> Result<WebAttentionSna
     })
 }
 
-fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummary, ()> {
+pub(crate) fn attention_summary_dto(summary: AttentionSummary) -> Result<WebAttentionSummary, ()> {
     let unix_milliseconds = summary
         .last_activity
         .recorded_at
@@ -2956,6 +3057,7 @@ async fn static_assets_not_configured() -> Response {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         ffi::OsString,
         io::{self, Write as _},
         net::SocketAddr,
@@ -3343,6 +3445,7 @@ mod tests {
             pool,
             None,
             models,
+            None,
         )
         .await
         .expect("the production test server binds");
@@ -3406,6 +3509,7 @@ mod tests {
             pool,
             None,
             models,
+            None,
         )
         .await;
         let error = outcome
@@ -3421,7 +3525,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3442,7 +3546,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3652,7 +3756,7 @@ mod tests {
             .header(header::HOST, "127.0.0.1")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(Some(assets.path().to_path_buf()), None, None, None)
+        let response = production_router(Some(assets.path().to_path_buf()), None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3670,7 +3774,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3708,7 +3812,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3726,7 +3830,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3745,7 +3849,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3774,28 +3878,141 @@ mod tests {
             .expect("the follower wait task completes cleanly");
     }
 
-    /// The projection reports a blocked goal as still owed automatic
-    /// resumption until the deployment's attempt budget is spent, so it must
-    /// read the budget the daemon's resume planner spends
-    /// (`goal_mode::GoalModeNumericBounds`) rather than a compiled-in number.
     #[test]
-    fn the_attention_projection_reads_the_configured_automatic_resume_budget() {
+    fn attention_follow_filters_changes_to_the_visible_snapshot_page() {
+        let visible = SessionId::from_uuid(Uuid::from_u128(1));
+        let off_page = SessionId::from_uuid(Uuid::from_u128(2));
+        let summary = |session| AttentionSummary {
+            session,
+            current_turn: None,
+            state: AttentionState::Idle,
+            action: None,
+            goal_block: None,
+            judge: AttentionJudgeFacts {
+                actionable: 0,
+                completed: 0,
+                escalated: 0,
+                failed: 0,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH,
+                kind: AttentionActivityKind::Session,
+            },
+        };
+        let visible_sessions = BTreeSet::from([visible]);
+
+        let scoped = super::page_scoped_attention_summaries(
+            vec![summary(off_page), summary(visible)],
+            &visible_sessions,
+        );
+
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].session, visible);
+    }
+
+    #[test]
+    fn attention_follow_resyncs_for_a_new_identity_on_a_partial_live_page() {
+        let visible = SessionId::from_uuid(Uuid::from_u128(1));
+        let new_session = SessionId::from_uuid(Uuid::from_u128(2));
+        let summary = AttentionSummary {
+            session: new_session,
+            current_turn: None,
+            state: AttentionState::Idle,
+            action: None,
+            goal_block: None,
+            judge: AttentionJudgeFacts {
+                actionable: 0,
+                completed: 0,
+                escalated: 0,
+                failed: 0,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH,
+                kind: AttentionActivityKind::Session,
+            },
+        };
+        let visible_sessions = BTreeSet::from([visible]);
+
+        assert!(super::attention_changes_require_resync(
+            std::slice::from_ref(&summary),
+            &visible_sessions,
+            true,
+        ));
+        assert!(!super::attention_changes_require_resync(
+            &[summary],
+            &visible_sessions,
+            false,
+        ));
+    }
+
+    #[test]
+    fn attention_follow_resyncs_when_a_new_identity_enters_a_full_live_page() {
+        let first = SessionId::from_uuid(Uuid::from_u128(2));
+        let boundary = SessionId::from_uuid(Uuid::from_u128(3));
+        let entering = SessionId::from_uuid(Uuid::from_u128(1));
+        let off_page = SessionId::from_uuid(Uuid::from_u128(4));
+        let summary = |session| AttentionSummary {
+            session,
+            current_turn: None,
+            state: AttentionState::Idle,
+            action: None,
+            goal_block: None,
+            judge: AttentionJudgeFacts {
+                actionable: 0,
+                completed: 0,
+                escalated: 0,
+                failed: 0,
+            },
+            last_activity: AttentionActivity {
+                recorded_at: UNIX_EPOCH,
+                kind: AttentionActivityKind::Session,
+            },
+        };
+        let visible_sessions = BTreeSet::from([first, boundary]);
+
+        assert!(super::attention_changes_require_resync(
+            &[summary(entering)],
+            &visible_sessions,
+            false,
+        ));
+        assert!(!super::attention_changes_require_resync(
+            &[summary(off_page)],
+            &visible_sessions,
+            false,
+        ));
+    }
+
+    /// The projection reports a blocked goal as still owed automatic
+    /// resumption until one of the deployment's two attempt limits ends its
+    /// run, so it must read both numbers the daemon's resume planner applies
+    /// (`goal_mode::GoalModeNumericBounds`) rather than compiled-in ones.
+    #[test]
+    fn the_attention_projection_reads_both_configured_automatic_resume_limits() {
         let configuration = crate::configuration::checked_in_example_configuration()
             .expect("checked-in example parses");
-        let configured = configuration
+        let configured_budget = configuration
             .numeric_bounds()
             .integer("automatic_resume_attempt_budget")
             .flatten()
             .and_then(|budget| u32::try_from(budget).ok())
             .expect("the example configures an automatic-resume attempt budget");
+        let configured_ceiling = configuration
+            .numeric_bounds()
+            .integer("automatic_resume_attempt_ceiling")
+            .flatten()
+            .and_then(|ceiling| u32::try_from(ceiling).ok())
+            .expect("the example configures an automatic-resume attempt ceiling");
 
         assert_eq!(
-            super::configured_automatic_resume_attempt_budget(Some(&configuration)),
-            Some(configured)
+            super::configured_automatic_resume_attempts(Some(&configuration)),
+            super::AutomaticResumeAttemptBounds::new(
+                Some(configured_budget),
+                Some(configured_ceiling),
+            )
         );
         assert_eq!(
-            super::configured_automatic_resume_attempt_budget(None),
-            None
+            super::configured_automatic_resume_attempts(None),
+            super::AutomaticResumeAttemptBounds::unbounded()
         );
     }
 
@@ -3893,7 +4110,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3914,7 +4131,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -3932,7 +4149,7 @@ mod tests {
             .header(header::HOST, "localhost")
             .body(Body::empty())
             .expect("the request is valid");
-        let unsupported = production_router(None, None, None, None)
+        let unsupported = production_router(None, None, None, None, None)
             .oneshot(unsupported)
             .await
             .expect("the production router responds");
@@ -3952,7 +4169,7 @@ mod tests {
                 .header(header::HOST, "localhost")
                 .body(Body::empty())
                 .expect("the request is valid");
-        let partial = production_router(None, None, None, None)
+        let partial = production_router(None, None, None, None, None)
             .oneshot(partial)
             .await
             .expect("the production router responds");
@@ -3972,7 +4189,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let oversized = production_router(None, None, None, None)
+        let oversized = production_router(None, None, None, None, None)
             .oneshot(oversized)
             .await
             .expect("the production router responds");
@@ -3989,7 +4206,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4009,7 +4226,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4029,7 +4246,7 @@ mod tests {
         .header(header::HOST, "localhost")
         .body(Body::empty())
         .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4048,7 +4265,7 @@ mod tests {
                 .header(header::HOST, "localhost")
                 .body(Body::empty())
                 .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4274,7 +4491,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4298,7 +4515,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4324,7 +4541,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4350,7 +4567,7 @@ mod tests {
             .header(header::HOST, "attacker.example")
             .body(Body::empty())
             .expect("the request is valid");
-        let response = production_router(None, None, None, None)
+        let response = production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds");
@@ -4411,7 +4628,7 @@ mod tests {
         .header(header::HOST, host)
         .body(Body::empty())
         .expect("the request is valid");
-        production_router(None, None, None, None)
+        production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds")
@@ -4492,7 +4709,7 @@ mod tests {
             .header(header::HOST, host)
             .body(Body::empty())
             .expect("the request is valid");
-        production_router(None, None, None, None)
+        production_router(None, None, None, None, None)
             .oneshot(request)
             .await
             .expect("the production router responds")

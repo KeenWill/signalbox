@@ -22,10 +22,13 @@ import {
   useRef,
   useState,
 } from 'react'
+import { ActivitySurface } from './ActivitySurface'
 import { ArtifactInspector, emptyArtifactInspectorState } from './ArtifactInspector'
 import { AttentionSurface } from './AttentionSurface'
 import type { CommandContext, CommandId } from './commands'
 import { invokeCommand } from './commands'
+import { ArtifactRenderer } from './features/artifacts/ArtifactRenderer'
+import type { ArtifactItem } from './features/artifacts/artifactTypes'
 import { HttpImportApi } from './imports/api'
 import { ImportsWorkspace } from './imports/ImportsWorkspace'
 import {
@@ -332,6 +335,33 @@ function DeferredSurface({ surface }: { surface: ProductRouteId }) {
   return (
     <div className="surface-body">
       <SurfaceUnavailable surface={surface} />
+    </div>
+  )
+}
+
+const reviewEvidenceUnavailable: ArtifactItem = {
+  id: 'review-evidence-unavailable',
+  displayName: 'Review evidence',
+  kind: 'blocked',
+  attemptedKind: 'review evidence artifact',
+  reason: 'Review evidence is not exposed by the current daemon contract.',
+}
+
+function ReviewsArtifactSurface({ commandContext }: { commandContext: CommandContext }) {
+  return (
+    <div className="surface-body reviews-artifact-surface">
+      <SurfaceUnavailable surface="reviews" />
+      <section aria-labelledby="review-artifact-heading">
+        <header>
+          <span className="eyebrow">Typed artifact view</span>
+          <h2 id="review-artifact-heading">Review evidence</h2>
+          <p>
+            Review facts and their artifact identities are not exposed by this daemon contract. The
+            client preserves that missing typed boundary instead of fabricating a preview.
+          </p>
+        </header>
+        <ArtifactRenderer artifact={reviewEvidenceUnavailable} commandContext={commandContext} />
+      </section>
     </div>
   )
 }
@@ -747,6 +777,35 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           </div>
         </section>
       </div>
+    ) : surface === 'activity' && bootstrap.isSuccess ? (
+      <ActivitySurface />
+    ) : surface === 'activity' ? (
+      <div className="surface-body">
+        <section className="surface-empty" role={bootstrap.isError ? 'alert' : 'status'}>
+          <div>
+            <h2>
+              {bootstrap.isError ? 'Activity contract unavailable' : 'Checking Activity contract'}
+            </h2>
+            <p>
+              {bootstrap.isError
+                ? 'Repository activity reads remain disabled until the generated bootstrap contract validates.'
+                : 'Repository activity reads will begin after the generated bootstrap contract validates.'}
+            </p>
+            {bootstrap.isError && (
+              <button
+                type="button"
+                className="bootstrap-retry"
+                onClick={() => {
+                  setFocusAfterBootstrapRecovery(true)
+                  void bootstrap.refetch()
+                }}
+              >
+                Retry contract check
+              </button>
+            )}
+          </div>
+        </section>
+      </div>
     ) : surface === 'sessions' ? (
       <SessionWorkspaceSurface
         onSelectionEvidence={updateSelectionEvidence}
@@ -783,6 +842,8 @@ export function ProductApp({ surface }: { surface: ProductRouteId }) {
           </div>
         </section>
       </div>
+    ) : surface === 'reviews' ? (
+      <ReviewsArtifactSurface commandContext={context} />
     ) : (
       <DeferredSurface surface={surface} />
     )

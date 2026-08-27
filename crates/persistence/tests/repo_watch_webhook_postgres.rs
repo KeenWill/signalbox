@@ -18,6 +18,7 @@ use signalbox_application::{
 };
 use signalbox_domain::{CommitSha, PullRequestNumber, RepoWatchEventKindNameV1, RepositorySlug};
 use signalbox_persistence::{
+    attention::AutomaticResumeAttemptBounds,
     disposable_postgres_server_args, disposable_postgres_state_tmpfs_from_example,
     disposable_test_container_labels, local_test_connection_options, migrate,
     repo_watch::{
@@ -73,7 +74,8 @@ const OPERATIONS_BURST_COUNT: usize = 101;
 /// how many automatic resumptions a deployment still owes, so they state the
 /// unbounded automatic-resume budget instead of a number their story never
 /// uses.
-const UNBOUNDED_AUTOMATIC_RESUME_BUDGET: Option<u32> = None;
+const UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS: AutomaticResumeAttemptBounds =
+    AutomaticResumeAttemptBounds::unbounded();
 
 async fn migrated_postgres() -> Result<(ContainerAsync<Postgres>, PgPool), Box<dyn Error>> {
     let container = Postgres::default()
@@ -239,13 +241,14 @@ async fn seed_poll_parity_events(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     sqlx::query(
         "INSERT INTO repo_watch_cursor (
             repository, generation, storage_version, cursor_payload
-         ) VALUES ($1, 1, 3, $2)",
+         ) VALUES ($1, 1, 4, $2)",
     )
     .bind(REPOSITORY)
     .bind(sqlx::types::Json(serde_json::json!({
-        "storage_version": 3,
+        "storage_version": 4,
         "signal_reviewers": [],
         "event_identity_frontier": [],
+        "merged_pull_request_baselines": [],
         "state": {
             "pull_requests": [],
             "workflow_runs": [],
@@ -311,13 +314,14 @@ async fn seed_promotion_boundary_events(
     sqlx::query(
         "INSERT INTO repo_watch_cursor (
             repository, generation, storage_version, cursor_payload
-         ) VALUES ($1, 1, 3, $2)",
+         ) VALUES ($1, 1, 4, $2)",
     )
     .bind(REPOSITORY)
     .bind(sqlx::types::Json(serde_json::json!({
-        "storage_version": 3,
+        "storage_version": 4,
         "signal_reviewers": [],
         "event_identity_frontier": [],
+        "merged_pull_request_baselines": [],
         "state": {
             "pull_requests": [],
             "workflow_runs": [],
@@ -434,13 +438,14 @@ async fn seed_poll_only_family_event(pool: &PgPool) -> Result<(), Box<dyn Error>
     sqlx::query(
         "INSERT INTO repo_watch_cursor (
             repository, generation, storage_version, cursor_payload
-         ) VALUES ($1, 1, 3, $2)",
+         ) VALUES ($1, 1, 4, $2)",
     )
     .bind(REPOSITORY)
     .bind(sqlx::types::Json(serde_json::json!({
-        "storage_version": 3,
+        "storage_version": 4,
         "signal_reviewers": [],
         "event_identity_frontier": [],
+        "merged_pull_request_baselines": [],
         "state": {
             "pull_requests": [],
             "workflow_runs": [],
@@ -946,7 +951,7 @@ async fn operations_webhook_fixture() -> Result<
         .await?;
     let webhook_store = PostgresRepoWatchWebhookStore::new(pool.clone());
     seed_operations_webhook_burst(&webhook_store).await?;
-    let reader = PostgresRepoWatchOperations::new(pool, UNBOUNDED_AUTOMATIC_RESUME_BUDGET);
+    let reader = PostgresRepoWatchOperations::new(pool, UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS);
     Ok((container, repository, reader))
 }
 
@@ -978,7 +983,7 @@ async fn repository_health_includes_webhook_intake_before_the_first_cursor()
     let key = delivery_key(OPERATIONS_BURST_BASE);
     admit_fixture(&webhook, key).await?;
 
-    let statuses = PostgresRepoWatchOperations::new(pool, UNBOUNDED_AUTOMATIC_RESUME_BUDGET)
+    let statuses = PostgresRepoWatchOperations::new(pool, UNBOUNDED_AUTOMATIC_RESUME_ATTEMPTS)
         .repository_statuses(None)
         .await?;
 

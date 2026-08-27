@@ -160,6 +160,67 @@ fn configured_usage_limit_excess(
         .then_some(ConfiguredUsageLimitExcess::Context)
 }
 
+/// Whether one call's stored input count already includes the cache axes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReportedInputCacheAxes {
+    /// The stored input already counts cache creation and cache reads.
+    Included,
+    /// The cache axes are reported beside the input and add to it.
+    Excluded,
+}
+
+impl ReportedInputCacheAxes {
+    /// Names the axis the durable usage read answers as a stored boolean.
+    pub(crate) const fn from_includes_cache_tokens(includes_cache_tokens: bool) -> Self {
+        if includes_cache_tokens {
+            Self::Included
+        } else {
+            Self::Excluded
+        }
+    }
+}
+
+/// Whether one call's reported input is still model-visible for the next call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReportedInputRetention {
+    /// The next request resends the transcript prefix this input counted.
+    Retained,
+    /// A summary replaced the source this input counted, so the next request
+    /// carries that summary instead of the counted material.
+    Replaced,
+}
+
+impl ReportedInputRetention {
+    /// Names the axis the durable usage read answers as a stored boolean.
+    pub(crate) const fn from_retained(retained: bool) -> Self {
+        if retained {
+            Self::Retained
+        } else {
+            Self::Replaced
+        }
+    }
+}
+
+/// Whether one call's reported output became model-visible assistant transcript.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReportedOutputRetention {
+    /// Completion kept the output as transcript the next request carries.
+    Retained,
+    /// Another terminal disposition left no assistant transcript behind.
+    Discarded,
+}
+
+impl ReportedOutputRetention {
+    /// Names the axis the durable usage read answers as a stored boolean.
+    pub(crate) const fn from_retained(retained: bool) -> Self {
+        if retained {
+            Self::Retained
+        } else {
+            Self::Discarded
+        }
+    }
+}
+
 /// Whether one terminal call's reported usage proves the next un-compacted
 /// call cannot retain the configured output reservation.
 ///
@@ -168,10 +229,16 @@ fn configured_usage_limit_excess(
 /// prospective request. A completed call's output also becomes part of that
 /// next input; output reported by another terminal disposition did not become
 /// assistant transcript and is excluded from the lower bound.
+///
+/// A dedicated compaction call's reported input is likewise excluded: it counts
+/// the source text the summary replaced, which the next request no longer
+/// carries. What that call retains is its summary output plus the unsummarized
+/// content the projected-content allowance measures.
 pub(crate) fn reported_usage_requires_compaction(
     usage: ProviderReportedTokenUsage,
-    input_includes_cache_tokens: bool,
-    output_is_retained: bool,
+    cache_axes: ReportedInputCacheAxes,
+    input: ReportedInputRetention,
+    output: ReportedOutputRetention,
     projected_unreported_content_bytes: u64,
     max_output_tokens: u64,
     context_window_tokens: u64,
@@ -179,18 +246,20 @@ pub(crate) fn reported_usage_requires_compaction(
     let Some(input_tokens) = usage.input_tokens() else {
         return false;
     };
-    let input_tokens = if input_includes_cache_tokens {
-        input_tokens
-    } else {
-        input_tokens
+    let input_tokens = match cache_axes {
+        ReportedInputCacheAxes::Included => input_tokens,
+        ReportedInputCacheAxes::Excluded => input_tokens
             .saturating_add(usage.cache_creation_input_tokens().unwrap_or(0))
-            .saturating_add(usage.cache_read_input_tokens().unwrap_or(0))
+            .saturating_add(usage.cache_read_input_tokens().unwrap_or(0)),
+    };
+    let input_tokens = match input {
+        ReportedInputRetention::Retained => input_tokens,
+        ReportedInputRetention::Replaced => 0,
     };
     input_tokens
-        .saturating_add(if output_is_retained {
-            usage.output_tokens().unwrap_or(0)
-        } else {
-            0
+        .saturating_add(match output {
+            ReportedOutputRetention::Retained => usage.output_tokens().unwrap_or(0),
+            ReportedOutputRetention::Discarded => 0,
         })
         // CLI-backed adapters expose no tokenizer-only operation. UTF-8
         // bytes for model-visible transcript additions after the reported
@@ -341,7 +410,8 @@ mod tests {
     use crate::configuration::ModelAdapter;
 
     use super::{
-        ConfiguredUsageLimitExcess, ConfiguredUsageLimits, UsageLimitedProviderError,
+        ConfiguredUsageLimitExcess, ConfiguredUsageLimits, ReportedInputCacheAxes,
+        ReportedInputRetention, ReportedOutputRetention, UsageLimitedProviderError,
         configured_usage_limit_excess, configured_usage_limits, reported_usage_requires_compaction,
     };
 
@@ -494,7 +564,13 @@ mod tests {
             .with_output_tokens(Some(5));
 
         assert!(reported_usage_requires_compaction(
-            usage, true, true, 0, 16, 100
+            usage,
+            ReportedInputCacheAxes::Included,
+            ReportedInputRetention::Retained,
+            ReportedOutputRetention::Retained,
+            0,
+            16,
+            100
         ));
     }
 
@@ -506,10 +582,22 @@ mod tests {
             .with_cache_read_input_tokens(Some(20));
 
         assert!(!reported_usage_requires_compaction(
-            usage, true, true, 0, 15, 100
+            usage,
+            ReportedInputCacheAxes::Included,
+            ReportedInputRetention::Retained,
+            ReportedOutputRetention::Retained,
+            0,
+            15,
+            100
         ));
         assert!(reported_usage_requires_compaction(
-            usage, false, true, 0, 16, 100
+            usage,
+            ReportedInputCacheAxes::Excluded,
+            ReportedInputRetention::Retained,
+            ReportedOutputRetention::Retained,
+            0,
+            16,
+            100
         ));
     }
 
@@ -518,7 +606,13 @@ mod tests {
         let usage = ProviderReportedTokenUsage::unreported().with_output_tokens(Some(100));
 
         assert!(!reported_usage_requires_compaction(
-            usage, true, true, 0, 100, 100
+            usage,
+            ReportedInputCacheAxes::Included,
+            ReportedInputRetention::Retained,
+            ReportedOutputRetention::Retained,
+            0,
+            100,
+            100
         ));
     }
 
@@ -529,10 +623,43 @@ mod tests {
             .with_output_tokens(Some(10));
 
         assert!(!reported_usage_requires_compaction(
-            usage, true, false, 0, 11, 100
+            usage,
+            ReportedInputCacheAxes::Included,
+            ReportedInputRetention::Retained,
+            ReportedOutputRetention::Discarded,
+            0,
+            11,
+            100
         ));
         assert!(reported_usage_requires_compaction(
-            usage, true, true, 0, 11, 100
+            usage,
+            ReportedInputCacheAxes::Included,
+            ReportedInputRetention::Retained,
+            ReportedOutputRetention::Retained,
+            0,
+            11,
+            100
+        ));
+    }
+
+    #[test]
+    fn post_compaction_baseline_excludes_the_summarized_away_source() {
+        // A dedicated compaction reports the pre-compaction source text it
+        // summarized as input and the retained summary as output. That source is
+        // exactly the material the summary removed from model visibility, so
+        // only the summary and the retained content bound the next call.
+        let compaction_usage = ProviderReportedTokenUsage::unreported()
+            .with_input_tokens(Some(90))
+            .with_output_tokens(Some(5));
+
+        assert!(!reported_usage_requires_compaction(
+            compaction_usage,
+            ReportedInputCacheAxes::Included,
+            ReportedInputRetention::Replaced,
+            ReportedOutputRetention::Retained,
+            4,
+            10,
+            100
         ));
     }
 
@@ -543,10 +670,22 @@ mod tests {
             .with_output_tokens(Some(5));
 
         assert!(!reported_usage_requires_compaction(
-            usage, true, true, 0, 10, 100
+            usage,
+            ReportedInputCacheAxes::Included,
+            ReportedInputRetention::Retained,
+            ReportedOutputRetention::Retained,
+            0,
+            10,
+            100
         ));
         assert!(reported_usage_requires_compaction(
-            usage, true, true, 26, 10, 100
+            usage,
+            ReportedInputCacheAxes::Included,
+            ReportedInputRetention::Retained,
+            ReportedOutputRetention::Retained,
+            26,
+            10,
+            100
         ));
     }
 

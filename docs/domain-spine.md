@@ -1789,6 +1789,43 @@ pub enum ImportedSessionReconstitutionFailure {
     Seed(ImportedSessionSeedReconstitutionFailure),
 }
 
+pub struct ImportedSessionNormalizedReconstitutionInput { /* private */ }
+impl ImportedSessionNormalizedReconstitutionInput {
+    pub fn new(
+        requested_session: SessionId,
+        stored_session: SessionId,
+        provenance: SessionCreationProvenance,
+        current_defaults_session: SessionId,
+        current_defaults_version: SessionConfigurationDefaultsVersion,
+        defaults_session: SessionId,
+        defaults_version: SessionConfigurationDefaultsVersion,
+        defaults: SessionConfigurationDefaults,
+        placement: SessionPlacementReconstitutionFacts,
+        imported_entries: Vec<ImportedTranscriptEntryInput>,
+        seed_records: Vec<ImportedSessionSeedReconstitutionInput>,
+        seed_snapshots: Vec<ResolvedContextFrontierReconstitutionInput>,
+        semantic_entries: Vec<SemanticTranscriptEntryReconstitutionInput>,
+    ) -> Self;
+    pub fn reconstitute(
+        self,
+    ) -> Result<
+        ReconstitutedImportedSession,
+        ImportedSessionNormalizedReconstitutionError,
+    >;
+}
+
+pub struct ImportedSessionNormalizedReconstitutionError { /* private */ }
+// sealed: Err of ImportedSessionNormalizedReconstitutionInput::reconstitute
+impl ImportedSessionNormalizedReconstitutionError {
+    pub fn into_parts(
+        self,
+    ) -> (
+        ImportedSessionNormalizedReconstitutionInput,
+        ImportedSessionReconstitutionFailure,
+    );
+    // accessors: failure(), input()
+}
+
 pub struct ImportedSessionReconstitutionError { /* private */ }
 // sealed: Err of ImportedSessionReconstitutionInput::reconstitute
 impl ImportedSessionReconstitutionError {
@@ -8891,6 +8928,51 @@ impl RepoWatchReactionObservation {
     // accessors: subject(), reactor(), content()
 }
 
+pub struct RepoWatchMergedCheckSuiteBaselineV1 { /* private */ }
+impl RepoWatchMergedCheckSuiteBaselineV1 {
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+    ) -> Self;
+    // accessors: id(), completion_generation()
+}
+
+pub struct RepoWatchMergedCheckRunBaselineV1 { /* private */ }
+impl RepoWatchMergedCheckRunBaselineV1 {
+    pub const fn new(
+        id: GitHubObjectId,
+        completion_generation: RepoWatchCheckCompletionGeneration,
+        conclusion: CheckConclusion,
+    ) -> Self;
+    // accessors: id(), completion_generation(), conclusion()
+}
+
+pub struct RepoWatchMergedPullRequestBaselineInputV1 {
+    pub number: PullRequestNumber,
+    pub head_sha: CommitSha,
+    pub signal_reviewers: Vec<RepoWatchAuthorLogin>,
+    pub labels: Vec<LabelName>,
+    pub mergeable_state: MergeableState,
+    pub completed_check_suites: Vec<RepoWatchMergedCheckSuiteBaselineV1>,
+    pub completed_check_runs: Vec<RepoWatchMergedCheckRunBaselineV1>,
+    pub review_ids: Vec<GitHubObjectId>,
+    pub threads: Vec<RepoWatchThreadObservation>,
+    pub reactions: Vec<RepoWatchReactionObservation>,
+}
+
+pub struct RepoWatchMergedPullRequestBaselineV1 { /* private */ }
+impl RepoWatchMergedPullRequestBaselineV1 {
+    pub fn try_new(
+        input: RepoWatchMergedPullRequestBaselineInputV1,
+    ) -> Result<Self, RepoWatchRepositoryStateError>;
+    pub fn from_merged_state(
+        state: &RepoWatchPullRequestState,
+        signal_reviewers: &[RepoWatchAuthorLogin],
+    ) -> Result<Option<Self>, RepoWatchRepositoryStateError>;
+    // accessors: number(), head_sha(), signal_reviewers(), labels(), mergeable_state(),
+    // completed_check_suites(), completed_check_runs(), review_ids(), threads(), reactions()
+}
+
 pub struct RepoWatchPullRequestStateInput {
     pub context: PullRequestEventContext,
     pub lifecycle: RepoWatchPullRequestLifecycle,
@@ -8955,6 +9037,7 @@ impl RepoWatchObservation {
 
 pub enum RepoWatchRepositoryStateError {
     DuplicatePullRequest(PullRequestNumber),
+    MergedPullRequestBaselineLimit,
     DuplicateCheckSuite(GitHubObjectId),
     DuplicateCheckRun(GitHubObjectId),
     DuplicateReview(GitHubObjectId),
@@ -8964,6 +9047,7 @@ pub enum RepoWatchRepositoryStateError {
 }
 
 pub enum RepoWatchDifferFailureKind {
+    BaselineCollection,
     EventConstruction,
     IdentityFrontier,
 }
@@ -8981,6 +9065,15 @@ pub fn repo_watch_events_have_equal_identified_content(
 pub fn derive_repo_watch_events(
     repository: &RepositorySlug,
     previous: Option<&RepoWatchObservation>,
+    current: &RepoWatchObservation,
+    identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
+    ids: &mut impl RepoWatchEventIdGenerator,
+) -> Result<Vec<RepoWatchEventOccurrenceV1>, RepoWatchDifferError>;
+
+pub fn derive_repo_watch_events_with_merged_baselines(
+    repository: &RepositorySlug,
+    previous: Option<&RepoWatchObservation>,
+    merged_baselines: &[RepoWatchMergedPullRequestBaselineV1],
     current: &RepoWatchObservation,
     identity_frontier: &mut RepoWatchEventIdentityFrontierV1,
     ids: &mut impl RepoWatchEventIdGenerator,
@@ -12849,7 +12942,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: git_remote                                 | 4 (+2 free fn)                   |
 | domain: session                                    | 22                               |
 | domain: session_delegation                         | 37 (+3 free fn)                  |
-| domain: imported_session                           | 18                               |
+| domain: imported_session                           | 20                               |
 | domain: configuration                              | 24                               |
 | domain: model_settings                             | 25                               |
 | domain: accepted_input                             | 5                                |
@@ -12880,7 +12973,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | domain: runner                                     | 70                               |
 | domain: workspace                                  | 4                                |
 | domain: workspace_instruction                      | 18                               |
-| **signalbox-domain total**                         | **857 (+12 free fn)**            |
+| **signalbox-domain total**                         | **859 (+12 free fn)**            |
 | application: repo_watch_operations                 | 33 (+2 free fn) (incl. 1 trait)  |
 | application: approval_judge                        | 8 (incl. 1 trait)                |
 | application: attention                             | 12 (+3 free fn) (incl. 1 trait)  |
@@ -12901,7 +12994,7 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: session_delegation                    | 1 (incl. 1 trait)                |
 | application: replace_session_defaults              | 5 (incl. 1 trait)                |
 | application: convergence_reconciliation            | 6 (+1 free fn)                   |
-| application: repo_watch                            | 45 (+2 free fn) (incl. 4 traits) |
+| application: repo_watch                            | 49 (+3 free fn) (incl. 4 traits) |
 | application: repo_watch_webhook                    | 18 (+2 free fn)                  |
 | application: review_orchestration                  | 37 (incl. 2 traits)              |
 | application: review_workflow                       | 9 (incl. 2 traits)               |
@@ -12915,4 +13008,4 @@ pub enum ReviewExternalLinkTransitionFailure {
 | application: tool_loop_ports                       | 10 (incl. 3 traits)              |
 | application: turn_liveness                         | 14                               |
 | application: workspace_instructions                | 5 (+1 free fn)                   |
-| **signalbox-application total**                    | **461 (+24 free fn)**            |
+| **signalbox-application total**                    | **465 (+25 free fn)**            |

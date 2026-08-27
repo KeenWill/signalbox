@@ -8,10 +8,13 @@ constant; the single spelling `"none"` makes that policy unbounded. A
 `not-a-bound` row is a fixed representation fact, and a `test` row exists only
 to bound or size a fixture.
 
-The live-line merge adds one model-exchange policy to the original audit. The
-119 rows partition as 35 guards, 8 derived bounds, 63 configuration policies, 9
-representation facts, and 4 test fixtures. Source locations are maintained with
-the implementation slices that move or delete declarations.
+The live-line merge adds one model-exchange policy to the original audit and the
+automatic-resume lifetime ceiling one goal policy; the liveness watchdog's
+single recovery-attempt constant now answers to two configured policies because
+its two consumers need different ceilings. The 121 rows partition as 35 guards,
+8 derived bounds, 65 configuration policies, 9 representation facts, and 4 test
+fixtures. Source locations are maintained with the implementation slices that
+move or delete declarations.
 
 The numeric-bound gate accepts only structural guards, values mechanically
 derived from guards, representation facts, and test fixtures from this
@@ -97,12 +100,14 @@ bound in either root fails closed.
 | `config/signalboxd.example.toml:70`  | `TERMINALIZATIONS_PER_SCAN`                       | config | `numeric_bounds.terminalizations_per_liveness_scan`                                  |
 | `config/signalboxd.example.toml:72`  | `RECOVERY_ATTEMPT_BOUND`                          | config | `numeric_bounds.turn_liveness_recovery_attempt_bound`                                |
 | `config/signalboxd.example.toml:74`  | `AUTOMATIC_RECONCILIATIONS_PER_SCAN`              | config | `numeric_bounds.automatic_reconciliations_per_liveness_scan`                         |
+| `config/signalboxd.example.toml:86`  | `RECOVERY_ATTEMPT_BOUND`                          | config | `numeric_bounds.automatic_reconciliation_attempt_bound`                              |
 | `config/signalboxd.example.toml:76`  | `MAX_CONVERGENCE_SWEEP_TARGETS`                   | config | `numeric_bounds.max_convergence_sweep_targets`                                       |
 | `config/signalboxd.example.toml:78`  | `MAX_CONVERGENCE_SWEEP_INTERVAL`                  | config | `numeric_bounds.max_convergence_sweep_interval`                                      |
 | `config/signalboxd.example.toml:80`  | `MAX_CONVERGENCE_SWEEP_COOL_OFF`                  | config | `numeric_bounds.max_convergence_sweep_cool_off`                                      |
 | `config/signalboxd.example.toml:82`  | `AUTOMATIC_RESUME_BASE_BACKOFF`                   | config | `numeric_bounds.automatic_resume_base_backoff`                                       |
 | `config/signalboxd.example.toml:84`  | `AUTOMATIC_RESUME_BACKOFF_CAP`                    | config | `numeric_bounds.automatic_resume_backoff_cap`                                        |
 | `config/signalboxd.example.toml:86`  | `AUTOMATIC_RESUME_ATTEMPT_BUDGET`                 | config | `numeric_bounds.automatic_resume_attempt_budget`                                     |
+| `config/signalboxd.example.toml:98`  | `AUTOMATIC_RESUME_ATTEMPT_CEILING`                | config | `numeric_bounds.automatic_resume_attempt_ceiling`                                    |
 | `config/signalboxd.example.toml:88`  | `AUTOMATIC_RESUME_STARTUP_RETRY_DELAY`            | config | `numeric_bounds.automatic_resume_startup_retry_delay`                                |
 | `config/signalboxd.example.toml:90`  | `POST_KILL_REAP_BOUND`                            | config | `numeric_bounds.post_kill_reap_bound`                                                |
 | `config/signalboxd.example.toml:92`  | `STALE_ACTIVE_TURN_BOUND`                         | config | `numeric_bounds.stale_active_turn_bound`                                             |

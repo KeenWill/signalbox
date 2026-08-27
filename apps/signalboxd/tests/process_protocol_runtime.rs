@@ -2815,6 +2815,9 @@ fn start_fleet_scheduler(
             .integer("automatic_reconciliations_per_liveness_scan")
             .flatten()
             .and_then(|value| usize::try_from(value).ok()),
+        bounds
+            .duration("automatic_reconciliation_attempt_bound")
+            .flatten(),
         turn_liveness_persistence_bounds,
     );
     let stale_active_turn_bound = bounds
@@ -8920,7 +8923,9 @@ async fn s01_s03_inv014_inv015_automatic_guard_compacts_before_ordinary_send()
 
 /// S01 / S03 / INV-014 / INV-015: provider-reported preflight rechecks the
 /// completed summary and closes the queued candidate call-free when reserved
-/// headroom is still unavailable.
+/// headroom is still unavailable. The compaction retains its summary output,
+/// not the source input that summary replaced, so a summary larger than the
+/// window is what leaves the queued turn unservable.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
 async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
@@ -8973,10 +8978,16 @@ async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
             ),
     )?;
     let runtime_models = configuration.runtime_model_catalog();
+    let saturated_summary_usage = TokenUsage {
+        input_tokens: Some(5000),
+        output_tokens: Some(5000),
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    };
     let summary_runtime = ScriptedModel::single(completed_script(
         "fixture-model",
         "reported usage summary remains saturated",
-        saturated_usage,
+        saturated_summary_usage,
     ));
     let summary_probe = summary_runtime.clone();
     let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
@@ -9001,7 +9012,7 @@ async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
 
     let failed_turn = reported_usage_still_exceeded_turn(
         compaction
-            .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()))
+            .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
             .await,
     );
 
@@ -9026,6 +9037,142 @@ async fn s01_s03_inv014_inv015_reported_usage_rechecks_compaction_headroom()
         lifecycle,
         (String::from("terminal"), Some(String::from("failed")), None)
     );
+
+    drop(connection);
+    runtime.stop().await
+}
+
+/// S01 / S03 / INV-014 / INV-015: the provider-reported preflight scores the
+/// queued turn's own input. Reported usage that fits on its own exhausts the
+/// reserved headroom once the waiting input is counted, and the daemon compacts
+/// that queued turn before activating it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires ephemeral PostgreSQL and a local Unix socket"]
+async fn s01_s03_inv014_inv015_reported_usage_preflight_counts_the_queued_input()
+-> Result<(), Box<dyn Error>> {
+    let mut runtime = RunningRuntime::start().await?;
+    let mut connection = Connection::connect(runtime.socket()).await?;
+    let session_id = create_alias_session(&mut connection).await?;
+    let (_, first_turn) = submit_first_input(
+        &mut connection,
+        session_id,
+        String::from("queued input preflight historical request"),
+    )
+    .await?;
+    // The declared window below is 4096 with a one-token output reservation, so
+    // this reported input leaves 95 tokens of headroom on its own.
+    let fitting_usage = TokenUsage {
+        input_tokens: Some(4000),
+        output_tokens: Some(0),
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+    };
+    let first_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        "queued input preflight historical reply",
+        fitting_usage,
+    ));
+    let first_probe =
+        execute_streamed_turn(&mut runtime, first_runtime, session_id, first_turn).await?;
+    assert_eq!(first_probe.received_operations().len(), 1);
+
+    // 103 ASCII characters: under the byte-per-token allowance the queued input
+    // alone exceeds the remaining headroom.
+    let queued_input = String::from(
+        "queued input preflight suffix long enough on its own to exhaust the remaining declared context headroom",
+    );
+    connection
+        .request_version(
+            ProtocolVersion::One,
+            40,
+            ClientRequest::SubmitInput {
+                command_id: command()?,
+                session_id,
+                content: UserInputContent::text(queued_input),
+                expected_defaults_version: Some(CanonicalU64::new(1)),
+                model_settings: ModelSettingsOverlay::inherit_all(),
+                delivery: None,
+            },
+        )
+        .await?;
+    let queued_turn = accepted_successor_turn(&mut connection, session_id, 2).await?;
+    let configuration = support::parse_model_configuration(
+        &MODEL_CONFIGURATION
+            .replace("max_output_tokens = 256", "max_output_tokens = 1")
+            .replace(
+                "context_window_tokens = 200000",
+                "context_window_tokens = 4096",
+            ),
+    )?;
+    let runtime_models = configuration.runtime_model_catalog();
+    let summary_text = String::from("queued input preflight summary");
+    let summary_runtime = ScriptedModel::single(completed_script(
+        "fixture-model",
+        &summary_text,
+        TokenUsage {
+            input_tokens: Some(4000),
+            output_tokens: Some(20),
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
+        },
+    ));
+    let summary_probe = summary_runtime.clone();
+    let compaction_model: Arc<dyn signalbox_model_provider_runtime::ContextCompactionModel> =
+        Arc::new(RuntimeContextCompactionModel::new(
+            summary_runtime,
+            runtime_models.clone(),
+        ));
+    let repository = PostgresModelCallRepository::new(
+        runtime.pool.clone(),
+        configuration.target_catalog(),
+        ModelCallCredentialReference::new("queued-input-preflight-fixture"),
+    )
+    .with_session_credentials(configuration.credential_family_catalog());
+    let compaction = ReportedUsageCompaction::new(
+        StartEligibleTurnRepository::new(runtime.pool.clone()),
+        repository,
+        NoToolCatalog,
+        runtime_models,
+        configuration,
+        compaction_model,
+    );
+
+    compaction
+        .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()))
+        .await?;
+
+    assert_eq!(summary_probe.received_operations().len(), 1);
+    let compaction_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM context_compaction
+          WHERE session_id = $1",
+    )
+    .bind(session_id.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(compaction_count, 1);
+    let summary_count: i64 = sqlx::query_scalar(
+        "SELECT count(*)
+           FROM semantic_transcript_entry
+          WHERE source_session_id = $1
+            AND payload_kind = 'context_summary'
+            AND context_summary_value = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(&summary_text)
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(summary_count, 1);
+    let lifecycle: (String, Option<String>) = sqlx::query_as(
+        "SELECT state_kind, terminal_disposition_kind
+           FROM turn_lifecycle
+          WHERE session_id = $1 AND turn_id = $2",
+    )
+    .bind(session_id.into_uuid())
+    .bind(queued_turn.into_uuid())
+    .fetch_one(&runtime.pool)
+    .await?;
+    assert_eq!(lifecycle, (String::from("queued"), None));
 
     drop(connection);
     runtime.stop().await
