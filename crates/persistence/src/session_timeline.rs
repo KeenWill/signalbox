@@ -800,6 +800,7 @@ SELECT event.turn_id,
            (accepted.disposition_kind = 'origin_of'
                AND command.result_turn_id = event.turn_id)
            OR (accepted.disposition_kind = 'reclassified_as_turn_origin'
+               AND command.command_id IS NOT NULL
                AND command.result_turn_id IS NULL
                AND accepted.expected_active_turn_id IS NOT NULL
                AND source.state_kind = 'terminal')
