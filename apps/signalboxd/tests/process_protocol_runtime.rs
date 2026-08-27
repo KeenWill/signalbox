@@ -9137,8 +9137,13 @@ async fn s01_s03_inv014_inv015_reported_usage_preflight_counts_the_queued_input(
         compaction_model,
     );
 
+    // No occupancy-recovery window surrounds this fixture's guard call, so
+    // preparation has no window to name its compaction to. That is the case the
+    // window's own contract states: a window that prepared nothing owes no
+    // recovery. What this fixture exercises is the queued-turn headroom
+    // arithmetic, not window-named recovery.
     compaction
-        .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()))
+        .compact_if_needed(SessionId::from_uuid(session_id.into_uuid()), None)
         .await?;
 
     assert_eq!(summary_probe.received_operations().len(), 1);
